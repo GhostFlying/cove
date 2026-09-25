@@ -19,12 +19,12 @@ export const requiredSuites = [
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/environment.test.mjs",
-    minimumTests: 2,
+    minimumTests: 3,
   },
   {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
-    minimumTests: 2,
+    minimumTests: 3,
   },
 ];
 

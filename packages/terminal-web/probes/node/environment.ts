@@ -172,6 +172,8 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
       executablePath: executable,
       timeout: remaining(8_000, "Chromium launch"),
     });
+    if (process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
+      throw new Error("Injected browser work failure");
     await injectedDelay(remaining, "launched Chromium delay");
     completedInjectedDelays++;
     browser = await chromium.connect(browserServer.wsEndpoint(), {
@@ -302,8 +304,17 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
       cleanupErrors.push(error);
     }
   }
+  if (process.env.COVE_PROBE_INJECT_CLEANUP_FAILURE === "1")
+    cleanupErrors.push(new Error("Injected browser cleanup failure"));
   if (primaryError) {
-    if (cleanupErrors.length) console.error("Browser probe cleanup failed:", cleanupErrors);
+    if (cleanupErrors.length)
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        "Browser probe work and cleanup failed",
+        {
+          cause: primaryError,
+        },
+      );
     throw primaryError;
   }
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Browser probe cleanup failed");
