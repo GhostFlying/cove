@@ -18,7 +18,6 @@ afterEach(async () => {
 function assertDependencyBoundary(
   engineManifest: { dependencies: Record<string, string>; exports: Record<string, unknown> },
   webManifest: { dependencies: Record<string, string>; exports: Record<string, unknown> },
-  browserSource: string,
 ) {
   if (Object.keys(engineManifest.exports).join() !== "./probes/environment")
     throw new Error("Engine exports more than its experiment");
@@ -31,32 +30,61 @@ function assertDependencyBoundary(
     throw new Error("Engine runtime dependency escaped Node boundary");
   if (Object.keys(webManifest.dependencies).join() !== "@xterm/xterm")
     throw new Error("Web runtime dependency escaped browser boundary");
-  if (/from\s+["'](?:node:|node-pty|@xterm\/headless)/.test(browserSource))
-    throw new Error("Browser source imports a Node or native module");
 }
 
-test("real package graphs and browser source stay within their execution environments", async () => {
+test("real package manifests stay within their execution environments", async () => {
   const engineManifest = JSON.parse(await readFile(join(engine, "package.json"), "utf8"));
   const webManifest = JSON.parse(await readFile(join(web, "package.json"), "utf8"));
-  const browserSource = await readFile(join(web, "probes/browser/main.ts"), "utf8");
-  assertDependencyBoundary(engineManifest, webManifest, browserSource);
+  assertDependencyBoundary(engineManifest, webManifest);
   expect(() =>
-    assertDependencyBoundary(
-      engineManifest,
-      { ...webManifest, dependencies: { ...webManifest.dependencies, "node-pty": "1.1.0" } },
-      browserSource,
-    ),
+    assertDependencyBoundary(engineManifest, {
+      ...webManifest,
+      dependencies: { ...webManifest.dependencies, "node-pty": "1.1.0" },
+    }),
   ).toThrow(/Web runtime dependency/);
-  expect(() =>
-    assertDependencyBoundary(
-      engineManifest,
-      webManifest,
-      `${browserSource}\nimport { readFile } from "node:fs";`,
-    ),
-  ).toThrow(/Browser source/);
   const browserAssets = await readdir(join(web, "dist/browser/assets"));
   expect(browserAssets.some((asset) => asset.endsWith(".js"))).toBe(true);
   expect(browserAssets.some((asset) => asset.endsWith(".css"))).toBe(true);
+});
+
+test("Vite rejects side-effect, dynamic, native, and transitive Node imports in isolated builds", async () => {
+  const variants = [
+    { name: "side-effect", main: 'import "node:fs";' },
+    { name: "dynamic", main: 'await import("node:child_process");' },
+    { name: "native", main: 'import "node-pty";' },
+    { name: "transitive", main: 'import "./nested.ts";', nested: 'import "node:fs";' },
+  ];
+  for (const variant of variants) {
+    const directory = await mkdtemp(join(tmpdir(), `cove-browser-${variant.name}-`));
+    directories.push(directory);
+    await writeFile(
+      join(directory, "index.html"),
+      '<script type="module" src="./main.ts"></script>',
+    );
+    await writeFile(join(directory, "main.ts"), variant.main);
+    if (variant.nested) await writeFile(join(directory, "nested.ts"), variant.nested);
+    const built = spawnSync(
+      process.execPath,
+      [
+        join(web, "node_modules/vite/bin/vite.js"),
+        "build",
+        "--config",
+        join(web, "probes/vite.config.mjs"),
+      ],
+      {
+        cwd: web,
+        env: {
+          ...process.env,
+          COVE_PROBE_BROWSER_ROOT: directory,
+          COVE_PROBE_BROWSER_OUT: join(directory, "dist"),
+        },
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+    expect(built.status).not.toBe(0);
+    expect(`${built.stdout}${built.stderr}`).toMatch(/Browser bundle rejects Node\/native import/);
+  }
 });
 
 test("isolated compiled consumer sees only experimental exports and emitted declarations", async () => {

@@ -88,6 +88,8 @@ node-pty `1.1.0` 发布包的 macOS `spawn-helper` 缺可执行位（[上游问�
 
 serialize 发布声明引用浏览器 xterm 类型但未声明其依赖；引擎探针只在运行时校验并使用 serializer 的公开构造器/方法，以保持 Node 编译配置没有 DOM。Web 的 Node runner 与浏览器 fixture 分开编译；Playwright 的 Node API 声明也引用 DOM，所以 runner 只描述所调用的公开运行时方法。浏览器测试必须先显式安装固定 Playwright 对应的 Chromium `1243`；缺浏览器、静态资源、native 文件或真实交互都会失败。以上探针不验证完整终端恢复、查询回复来源、远端运行、移动端或 100 PTY 容量。
 
+两个编译后探针各有整体工作期限和独立、有限的资源清理期限，测试进程上限高于两者之和。测试还用分阶段延迟迫使整体期限到期，核验 PTY 子进程、临时目录、Chromium 和本地 HTTP listener 的清理结果。PTY 尺寸探针在同一期限内轮询子进程报告的实际尺寸。Web fixture 的 Vite 构建同时拒绝直接、动态、间接引入的 Node 内置模块和原生包；独立负例构建覆盖这些导入形式。
+
 ## 兼容性边界
 
 - 最新 typescript-eslint 8.70.1 的 TypeScript peer 范围为 `>=4.8.4 <6.1.0`，因此本次采用 Oxlint + tsc，未强行忽略 peer 范围。
