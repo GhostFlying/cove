@@ -143,6 +143,7 @@ export function assertPinnedRecoveryPackages(): void {
 
 // A read-only, version-pinned surface. No private value is ever installed in another terminal.
 export function readPrivateRecoveryState(terminal: Terminal): PrivateRecoveryState {
+  assertPinnedRecoveryPackages();
   const core = object((terminal as unknown as Record<string, unknown>)._core, "core");
   const handler = object(core._inputHandler, "input handler");
   const parser = object(handler._parser, "parser");

@@ -1,4 +1,8 @@
 import { createRequire } from "node:module";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { afterAll, expect, test } from "vitest";
 import {
@@ -22,7 +26,7 @@ const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless");
 const { SerializeAddon } = require("@xterm/addon-serialize");
 const completed = [];
-afterAll(() => writeRecoverySuiteEvidence("recovery-boundaries", completed, 9));
+afterAll(() => writeRecoverySuiteEvidence("recovery-boundaries", completed, 10));
 
 function terminal(cols, rows = 3, scrollback = 3) {
   return new Terminal({ cols, rows, scrollback, allowProposedApi: true });
@@ -295,6 +299,54 @@ test("R8 pinned private shape fails closed and a stock saved-cursor omission is 
     receiver.dispose();
   }
   completed.push("R8-stock-serializer-private-shape");
+});
+
+test("R8 direct final-glyph path rejects changed installed version and entry hash", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-recovery-pin-"));
+  const headlessDirectory = join(directory, "node_modules", "@xterm", "headless");
+  const serializeDirectory = join(directory, "node_modules", "@xterm", "addon-serialize");
+  try {
+    await mkdir(headlessDirectory, { recursive: true });
+    await mkdir(serializeDirectory, { recursive: true });
+    await writeFile(join(directory, "package.json"), JSON.stringify({ type: "module" }));
+    for (const file of ["recovery-checkpoint.js", "xterm-recovery-state.js"]) {
+      const compiled = await readFile(resolve(import.meta.dirname, "../dist/probes", file), "utf8");
+      await writeFile(join(directory, file), compiled.replace(/^\/\/# sourceMappingURL=.*$/m, ""));
+    }
+    for (const packageDirectory of [headlessDirectory, serializeDirectory]) {
+      await writeFile(join(packageDirectory, "index.js"), "module.exports = {};\n");
+      await writeFile(
+        join(packageDirectory, "package.json"),
+        JSON.stringify({
+          version: packageDirectory === headlessDirectory ? "6.0.1" : "0.14.0",
+          main: "index.js",
+        }),
+      );
+    }
+    const { createFinalGlyphCheckpoint: direct } = await import(
+      pathToFileURL(join(directory, "recovery-checkpoint.js")).href
+    );
+    const candidate = () =>
+      direct({ cols: 12, rows: 4 }, { serialize: () => "" }, 0, {
+        bytes: bytes("A"),
+        startX: 0,
+        startY: 0,
+        cellWidth: 1,
+        preimage: "erase",
+      });
+    expect(candidate).toThrow(/version or entry changed/);
+    await writeFile(
+      join(headlessDirectory, "package.json"),
+      JSON.stringify({
+        version: "6.0.0",
+        main: "index.js",
+      }),
+    );
+    expect(candidate).toThrow(/entry hash changed/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+  completed.push("R8-direct-J-version-hash-guard");
 });
 
 test("R8 provisional pipe preserves split VT and rejects missing, duplicate or wrong correlation", () => {
