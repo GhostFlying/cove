@@ -13,3 +13,9 @@
 ## Entry checkpoint
 
 The 2026-09-26 approval removes the common M0-entry blocker from implementation Issues #9–#26 and #28. Their individual dependency blockers remain. C1 is dispatched; all other implementation tasks wait for their prerequisite main SHAs. Product/architecture/scope/acceptance changes go to the user with evidence/options while independent ready work continues.
+
+## C1 completion and B0 release
+
+C1 PR #29 merged at `72c15b30c20d8d8228c4988517786c109197a6c5`; final main CI run 36163798332 passed macOS/Linux. Independent local TraeX GPT-5.6 Sol high via warmpool proved the final 10-test gate and counterfactual failures; a separate GPT-6 Sol high reviewer approved the exact source head. Full evidence and rebase mappings are in Issue #9 / PR #29. Clean delivered implementation/verification worktrees were removed; no application or devbox workload was run.
+
+B0 #10 now starts from that baseline. Astra-high `/root/m0_b0_plan` owns only `docs/tasks/m0-package-plan.md` in `cove-worktrees/m0-package-plan`, branch `p/luchengxuan/m0-10-package-plan`. The coordinator owns this record and handoff on `p/luchengxuan/m0-10-package-integration`. Current allocation is coordinator plus one planner, two worktrees; recompute live counts before dispatch. Planning pins needed stable candidates and minimal executable probe boundaries; no code/config/install changes until the concrete scope is committed. The approved M0 DAG remains unchanged.
