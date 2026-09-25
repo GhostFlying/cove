@@ -1,4 +1,5 @@
 import { builtinModules } from "node:module";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
@@ -8,6 +9,9 @@ const browserRoot =
 const output =
   process.env.COVE_PROBE_BROWSER_OUT ?? fileURLToPath(new URL("../dist/browser/", import.meta.url));
 const nodeBuiltins = new Set(builtinModules.map((name) => name.replace(/^node:/, "")));
+const installedXterm = JSON.parse(
+  readFileSync(new URL("../node_modules/@xterm/xterm/package.json", import.meta.url), "utf8"),
+);
 
 function forbiddenModule(id) {
   const normalized = id.replaceAll("\\", "/");
@@ -47,6 +51,11 @@ function browserDependencyBoundary() {
 }
 
 export default defineConfig({
+  define: {
+    __COVE_BUNDLED_XTERM_VERSION__: JSON.stringify(
+      process.env.COVE_PROBE_TEST_BUNDLED_XTERM_VERSION ?? installedXterm.version,
+    ),
+  },
   root: resolve(browserRoot),
   base: "./",
   plugins: [browserDependencyBoundary()],

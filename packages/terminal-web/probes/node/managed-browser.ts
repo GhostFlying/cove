@@ -27,6 +27,7 @@ export interface ProbePage {
   };
   on(event: string, listener: (value: unknown) => void): void;
   setDefaultTimeout(milliseconds: number): void;
+  close(): Promise<void>;
 }
 
 interface ProbeBrowser {
@@ -50,7 +51,9 @@ interface BrowserLauncher {
   connect(endpoint: string, options: { timeout: number }): Promise<ProbeBrowser>;
 }
 
-const builtRoot = resolve(fileURLToPath(new URL("../../browser/", import.meta.url)));
+const builtRoot = resolve(
+  process.env.COVE_QUERY_BROWSER_ROOT ?? fileURLToPath(new URL("../../browser/", import.meta.url)),
+);
 const browsersPath = fileURLToPath(new URL("../../../.cache/playwright/", import.meta.url));
 
 export async function within<T>(
@@ -75,15 +78,22 @@ export interface ManagedBrowserContext {
   browser: ProbeBrowser;
   url: string;
   remaining(limit: number, label: string): number;
+  stage(label: string): Promise<void>;
+  trackPage(page: ProbePage): void;
   browserVersion: string;
   browserRevision: string;
+  browserExecutable: string;
   browserPid: number;
   listenerPort: number;
 }
 
 export async function withManagedBrowser<T>(
   work: (context: ManagedBrowserContext) => Promise<T>,
-): Promise<{ value: T; context: Omit<ManagedBrowserContext, "browser" | "remaining"> }> {
+  profile: "query" | "environment" = "query",
+): Promise<{
+  value: T;
+  context: Omit<ManagedBrowserContext, "browser" | "remaining" | "stage" | "trackPage">;
+}> {
   if (!(await stat(join(builtRoot, "index.html")).catch(() => null)))
     throw new Error("Built browser fixture is absent");
   process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
@@ -114,21 +124,42 @@ export async function withManagedBrowser<T>(
   if (typeof imported !== "object" || imported === null || !("chromium" in imported))
     throw new Error("Playwright Chromium launcher is absent");
   const chromium = imported.chromium as BrowserLauncher;
-  const executable = chromium.executablePath();
+  const executable =
+    (profile === "environment" ? process.env.COVE_PROBE_TEST_EXECUTABLE : undefined) ??
+    chromium.executablePath();
   if (!(await stat(executable).catch(() => null))) throw new Error("Managed Chromium is absent");
   const resolvedExecutable = await realpath(executable);
   const managedRevision = join(await realpath(browsersPath), `chromium-${chromiumEntry.revision}`);
   if (!resolvedExecutable.startsWith(`${managedRevision}${sep}`))
-    throw new Error("Chromium executable is outside managed revision");
+    throw new Error(`Chromium executable is outside managed revision ${chromiumEntry.revision}`);
 
-  const budget = Number(process.env.COVE_QUERY_WORK_BUDGET_MS);
-  const workDeadline =
-    performance.now() +
-    (Number.isFinite(budget) && budget >= 500 ? Math.min(budget, 32_000) : 32_000);
+  const maxBudget = profile === "environment" ? 24_000 : 32_000;
+  const budget = Number(
+    profile === "environment"
+      ? process.env.COVE_PROBE_WORK_BUDGET_MS
+      : process.env.COVE_QUERY_WORK_BUDGET_MS,
+  );
+  const workBudgetMs =
+    Number.isFinite(budget) && budget >= 500 ? Math.min(budget, maxBudget) : maxBudget;
+  const workStarted = performance.now();
+  const workDeadline = workStarted + workBudgetMs;
   const remaining = (limit: number, label: string) => {
     const left = Math.floor(workDeadline - performance.now());
     if (left <= 0) throw new Error(`Browser work deadline exceeded before ${label}`);
     return Math.min(limit, left);
+  };
+  let completedInjectedDelays = 0;
+  const stage = async (label: string) => {
+    if (profile !== "environment") return;
+    const requested = Number(process.env.COVE_PROBE_STAGE_DELAY_MS);
+    if (!Number.isFinite(requested) || requested <= 0) return;
+    const delay = Math.min(requested, 2_000);
+    await within(
+      new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay)),
+      remaining(delay + 1, label),
+      label,
+    );
+    completedInjectedDelays++;
   };
   const server = createServer(async (request, response) => {
     try {
@@ -152,7 +183,9 @@ export async function withManagedBrowser<T>(
   let browser: ProbeBrowser | undefined;
   let listenerPort: number | null = null;
   let result: T | undefined;
-  let contextRecord: Omit<ManagedBrowserContext, "browser" | "remaining"> | undefined;
+  let contextRecord:
+    Omit<ManagedBrowserContext, "browser" | "remaining" | "stage" | "trackPage"> | undefined;
+  const ownedPages: ProbePage[] = [];
   let primaryError: unknown;
   try {
     const listenAbort = new AbortController();
@@ -177,26 +210,48 @@ export async function withManagedBrowser<T>(
       executablePath: resolvedExecutable,
       timeout: remaining(8_000, "Chromium launch"),
     });
-    if (process.env.COVE_QUERY_INJECT_WORK_FAILURE === "1")
+    if (profile === "environment" && process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
+      throw new Error("Injected browser work failure");
+    if (profile === "query" && process.env.COVE_QUERY_INJECT_WORK_FAILURE === "1")
       throw new Error("Injected query work failure");
+    await stage("launched Chromium delay");
     browser = await chromium.connect(browserServer.wsEndpoint(), {
       timeout: remaining(5_000, "Chromium connect"),
     });
     const browserVersion = browser.version();
-    if (browserVersion !== chromiumEntry.browserVersion)
+    const reportedVersion =
+      profile === "environment"
+        ? (process.env.COVE_PROBE_TEST_REPORTED_VERSION ?? browserVersion)
+        : browserVersion;
+    if (
+      browserVersion !== chromiumEntry.browserVersion ||
+      reportedVersion !== chromiumEntry.browserVersion
+    )
       throw new Error(
-        `Chromium version ${browserVersion} does not match pinned ${chromiumEntry.browserVersion}`,
+        `Chromium version ${browserVersion !== chromiumEntry.browserVersion ? browserVersion : reportedVersion} does not match pinned ${chromiumEntry.browserVersion}`,
       );
+    await stage("connected Chromium delay");
     const browserPid = browserServer.process().pid;
     if (!browserPid) throw new Error("Browser process identity is unavailable");
     contextRecord = {
       url: `http://127.0.0.1:${address.port}/`,
       browserVersion,
       browserRevision: chromiumEntry.revision,
+      browserExecutable: resolvedExecutable,
       browserPid,
       listenerPort: address.port,
     };
-    result = await work({ ...contextRecord, browser, remaining });
+    result = await within(
+      work({
+        ...contextRecord,
+        browser,
+        remaining,
+        stage,
+        trackPage: (page) => ownedPages.push(page),
+      }),
+      remaining(workBudgetMs, "Browser work"),
+      "Browser work",
+    );
   } catch (error) {
     primaryError = error;
   }
@@ -204,6 +259,24 @@ export async function withManagedBrowser<T>(
   const cleanupDeadline = performance.now() + 7_000;
   const cleanupRemaining = (limit: number) =>
     Math.max(1, Math.min(limit, Math.floor(cleanupDeadline - performance.now())));
+  let disposedPages = 0;
+  for (const page of ownedPages.reverse()) {
+    try {
+      await within(
+        page.evaluate<void>("window.coveQuery?.dispose()"),
+        cleanupRemaining(500),
+        "Query fixture disposal",
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await within(page.close(), cleanupRemaining(500), "Browser page close");
+      disposedPages++;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
   if (browserServer) {
     try {
       await within(browserServer.close(), cleanupRemaining(3_000), "Browser close");
@@ -233,16 +306,28 @@ export async function withManagedBrowser<T>(
       cleanupErrors.push(error);
     }
   }
-  if (process.env.COVE_QUERY_CLEANUP_EVIDENCE) {
+  const evidencePath =
+    profile === "environment"
+      ? process.env.COVE_PROBE_CLEANUP_EVIDENCE
+      : process.env.COVE_QUERY_CLEANUP_EVIDENCE;
+  if (evidencePath) {
     try {
-      await writeFile(
-        process.env.COVE_QUERY_CLEANUP_EVIDENCE,
-        `${JSON.stringify({ browserPid: browserServer?.process().pid ?? null, browserExited: browserServer ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null : true, listenerPort, listenerClosed: !server.listening })}\n`,
+      await within(
+        writeFile(
+          evidencePath,
+          `${JSON.stringify({ browserPid: browserServer?.process().pid ?? null, browserExited: browserServer ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null : true, listenerPort, listenerClosed: !server.listening, disposedPages, workBudgetMs, completedInjectedDelays, elapsedMs: Math.round(performance.now() - workStarted) })}\n`,
+        ),
+        cleanupRemaining(1_000),
+        "Browser cleanup evidence",
       );
     } catch (error) {
       cleanupErrors.push(error);
     }
   }
+  if (profile === "environment" && process.env.COVE_PROBE_INJECT_CLEANUP_FAILURE === "1")
+    cleanupErrors.push(new Error("Injected browser cleanup failure"));
+  if (profile === "query" && process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE === "1")
+    cleanupErrors.push(new Error("Injected query cleanup failure"));
   if (primaryError && cleanupErrors.length)
     throw new AggregateError([primaryError, ...cleanupErrors], "Browser work and cleanup failed", {
       cause: primaryError,
@@ -263,6 +348,8 @@ export async function openQueryPage(
     context.remaining(5_000, "page creation"),
     "page creation",
   );
+  context.trackPage(page);
+  await context.stage("created browser page delay");
   page.setDefaultTimeout(context.remaining(5_000, "browser action"));
   const errors: string[] = [];
   for (const event of ["console", "pageerror", "requestfailed"])
@@ -288,6 +375,8 @@ export async function openQueryPage(
     { waitUntil: "networkidle", timeout: context.remaining(10_000, "navigation") },
   );
   if (!response?.ok()) throw new Error(`Fixture navigation failed: ${response?.status()}`);
+  await context.stage("loaded browser fixture delay");
+  if (errors.length) throw new Error(`Browser page errors: ${JSON.stringify(errors)}`);
   await page.waitForFunction("window.coveQuery?.ready === true", null, {
     timeout: context.remaining(5_000, "xterm ready"),
   });

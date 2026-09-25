@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 
@@ -23,20 +25,27 @@ async function run(scenario) {
   await expect(fetch(`http://127.0.0.1:${record.browser.listenerPort}/`)).rejects.toThrow(
     /fetch failed/,
   );
+  const evidenceDirectory = resolve(root, ".cache/ci/smoke");
+  await mkdir(evidenceDirectory, { recursive: true });
+  const evidencePath = join(evidenceDirectory, `query-input-${scenario}.json`);
+  await writeFile(evidencePath, `${JSON.stringify(record, null, 2)}\n`);
+  expect(JSON.parse(await readFile(evidencePath, "utf8"))).toEqual(record);
   return record.evidence;
 }
 
 test("query-only live, baseline and replay have exact unadapted replies and zero adapted input", async () => {
   const evidence = await run("queries");
-  expect(evidence).toHaveLength(33);
-  expect(new Set(evidence.map((item) => item.caseId)).size).toBe(11);
-  expect(new Set(evidence.map((item) => item.phase))).toEqual(
+  expect(evidence.cases).toHaveLength(42);
+  expect(new Set(evidence.cases.map((item) => item.caseId)).size).toBe(14);
+  expect(new Set(evidence.cases.map((item) => item.phase))).toEqual(
     new Set(["live", "baseline", "replay"]),
   );
-  for (const item of evidence) {
+  for (const item of evidence.cases) {
     expect(item.reference).toEqual(item.expected);
     expect(item.adapted).toEqual([]);
   }
+  expect(evidence.barriers.reference).toEqual(evidence.barriers.expected);
+  expect(evidence.barriers.adapted).toEqual([]);
 });
 
 test("real focused keyboard input survives a held parser and application cursor mode", async () => {
@@ -59,13 +68,14 @@ test("DOM paste preserves Unicode, reply-shaped data and bracketed mode across a
 
 test("real SGR and legacy mouse actions preserve high binary coordinate bytes", async () => {
   const evidence = await run("mouse");
-  expect(evidence.sgr).toEqual([
-    [27, 91, 60, 48, 59, 50, 59, 50, 77],
-    [27, 91, 60, 48, 59, 50, 59, 50, 109],
-  ]);
+  const sgr = ["\x1b[<0;100;4M", "\x1b[<0;100;4m", "\x1b[<64;100;4M"].map((value) =>
+    Array.from(new TextEncoder().encode(value)),
+  );
+  expect(evidence.sgr).toEqual(sgr);
+  expect(evidence.alternate).toEqual(sgr);
   expect(evidence.legacy).toEqual([
-    [27, 91, 77, 32, 132, 34],
-    [27, 91, 77, 35, 132, 34],
+    [27, 91, 77, 32, 132, 36],
+    [27, 91, 77, 35, 132, 36],
   ]);
 });
 
@@ -74,11 +84,133 @@ test("split queries and mixed OSC retain text and color while the public hook co
   expect(evidence.publicCounterexample.before).toEqual([1, 2, 3]);
   expect(evidence.publicCounterexample.after).toEqual([1, 2, 3]);
   expect(evidence.privatePalette).toEqual([170, 187, 204]);
-  expect(evidence.line).toBe("é");
+  expect(evidence.resetPalette).toEqual([1, 2, 3]);
+  expect(evidence.line).toBe("Aé€😀Z");
+  expect(Object.values(evidence.cuts).reduce((sum, count) => sum + count, 0)).toBeGreaterThan(50);
 });
 
 test("disposing a held parser releases its callback without outbound input", async () => {
   const evidence = await run("lifetime");
   expect(evidence.oldOutbound).toEqual([]);
   expect(evidence.oldWriteDone).toEqual([1]);
+  expect(evidence.replacementOutbound).toEqual([[114]]);
+  expect(evidence.conformance).toMatchObject({
+    duplicateRejected: true,
+    wrongVersionRejected: true,
+    missingSurfaceRejected: true,
+    oldWrapperDetached: true,
+    nestedBytes: ["x", "y", "z"],
+  });
+});
+
+test("focus reports remain separate from query hooks", async () => {
+  const evidence = await run("focus");
+  expect(evidence.automatic).toEqual([
+    [27, 91, 73],
+    [27, 91, 79],
+  ]);
+  expect(evidence.outbound).toEqual([]);
+});
+
+test("compiled protocol delivery rejects wrong identity and invalid baseline chunks before browser writes", async () => {
+  const evidence = await run("transport-rejection");
+  expect(evidence.rejected).toEqual([
+    "wrong-serverId",
+    "wrong-relayInstanceId",
+    "wrong-runId",
+    "missing-chunk",
+    "duplicate-chunk",
+    "reordered-chunk",
+    "wrong-baseline-id",
+    "wrong-at-seq",
+    "wrong-total",
+    "oversized-baseline",
+    "oversized-output",
+    "fatal-utf8",
+  ]);
+  expect(evidence.delivered).toBe(0);
+});
+
+test("held parser timeout and thrown work close the owned browser and listener", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-query-cleanup-"));
+  try {
+    for (const [scenario, extra, expected] of [
+      ["held-timeout", {}, /Intentional held parser timed out/],
+      [
+        "queries",
+        { COVE_QUERY_INJECT_WORK_FAILURE: "1", COVE_QUERY_INJECT_CLEANUP_FAILURE: "1" },
+        /Injected query work failure.*Injected query cleanup failure/s,
+      ],
+    ]) {
+      const evidence = join(directory, `${scenario}.json`);
+      const result = spawnSync(process.execPath, [entry, scenario], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 40_000,
+        env: { ...process.env, ...extra, COVE_QUERY_CLEANUP_EVIDENCE: evidence },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(expected);
+      const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+      expect(cleanup.browserPid).toBeGreaterThan(0);
+      expect(cleanup.browserExited).toBe(true);
+      expect(cleanup.listenerClosed).toBe(true);
+      expect(cleanup.disposedPages).toBe(scenario === "held-timeout" ? 1 : 0);
+      await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
+        /fetch failed/,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a changed bundled xterm manifest version fails before browser input admission", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-query-version-"));
+  const browserOut = join(directory, "browser");
+  const packageRoot = resolve(import.meta.dirname, "..");
+  try {
+    const built = spawnSync(
+      process.execPath,
+      [
+        join(packageRoot, "node_modules/vite/bin/vite.js"),
+        "build",
+        "--config",
+        join(packageRoot, "probes/vite.config.mjs"),
+      ],
+      {
+        cwd: packageRoot,
+        encoding: "utf8",
+        timeout: 20_000,
+        env: {
+          ...process.env,
+          COVE_PROBE_BROWSER_OUT: browserOut,
+          COVE_PROBE_TEST_BUNDLED_XTERM_VERSION: "0.0.0",
+        },
+      },
+    );
+    expect(built.error).toBeUndefined();
+    if (built.status !== 0)
+      throw new Error(built.stderr || `Isolated browser build exited ${built.status}`);
+    const evidence = join(directory, "cleanup.json");
+    const result = spawnSync(process.execPath, [entry, "queries"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        ...process.env,
+        COVE_QUERY_BROWSER_ROOT: browserOut,
+        COVE_QUERY_CLEANUP_EVIDENCE: evidence,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Unsupported xterm version: 0\.0\.0/);
+    const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+    expect(cleanup.browserExited).toBe(true);
+    expect(cleanup.listenerClosed).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

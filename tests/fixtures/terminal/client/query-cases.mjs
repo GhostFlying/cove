@@ -45,6 +45,13 @@ export const queryCases = [
     continuationBytes: bytes("F"),
   },
   {
+    caseId: "mode-report-reset",
+    setupBytes: bytes("\x1b[?2004l"),
+    queryBytes: bytes("\x1b[?2004$p"),
+    expectedLiveReplies: [bytes("\x1b[?2004;2$y")],
+    continuationBytes: bytes("L"),
+  },
+  {
     caseId: "color-fg",
     setupBytes: bytes("\x1b]10;#112233\x07"),
     queryBytes: bytes("\x1b]10;?\x07"),
@@ -66,11 +73,25 @@ export const queryCases = [
     continuationBytes: bytes("I"),
   },
   {
+    caseId: "color-cursor",
+    setupBytes: bytes("\x1b]12;#a1b2c3\x07"),
+    queryBytes: bytes("\x1b]12;?\x1b\\"),
+    expectedLiveReplies: [bytes("\x1b]12;rgb:a1a1/b2b2/c3c3\x1b\\")],
+    continuationBytes: bytes("N"),
+  },
+  {
     caseId: "dcs-status",
     setupBytes: bytes(""),
     queryBytes: bytes("\x1bP$qm\x1b\\"),
     expectedLiveReplies: [bytes("\x1bP1$r0m\x1b\\")],
     continuationBytes: bytes("J"),
+  },
+  {
+    caseId: "dcs-margins",
+    setupBytes: bytes("\x1b[2;8r"),
+    queryBytes: bytes("\x1bP$qr\x1b\\"),
+    expectedLiveReplies: [bytes("\x1bP1$r2;8r\x1b\\")],
+    continuationBytes: bytes("M"),
   },
   {
     caseId: "window-report",
