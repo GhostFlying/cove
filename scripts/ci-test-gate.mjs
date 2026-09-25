@@ -13,7 +13,7 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 4 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
 ];
 
 function repositoryPath(path) {
@@ -97,23 +97,19 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
   }));
 }
 
-async function testFiles(directory = root, prefix = "") {
-  const ignored = new Set([
-    ".git",
-    ".cache",
-    "node_modules",
-    "dist",
-    "coverage",
-    "docs/benchmarks",
-  ]);
+async function testFilesIn(directory, prefix) {
   const found = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const name = prefix ? `${prefix}/${entry.name}` : entry.name;
-    if (ignored.has(name) || ignored.has(entry.name)) continue;
-    if (entry.isDirectory()) found.push(...(await testFiles(join(directory, entry.name), name)));
+    if (["node_modules", "dist", ".cache"].includes(entry.name)) continue;
+    if (entry.isDirectory()) found.push(...(await testFilesIn(join(directory, entry.name), name)));
     else if (entry.isFile() && /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(name)) found.push(name);
   }
   return found.sort();
+}
+
+export function readVitestOwnedTestFiles(checkoutRoot = root) {
+  return testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling");
 }
 
 export async function recordedCommand(stage, binary, args, outputFile, timeoutMs = 120_000) {
@@ -218,7 +214,7 @@ async function main() {
       throw new Error(`vitest list --json exited ${discovery.status}: ${discovery.stderr}`);
     }
     const discovered = JSON.parse(discovery.stdout);
-    const sources = await testFiles();
+    const sources = await readVitestOwnedTestFiles();
     // Validate discovery before running, then validate actual execution from a fresh report.
     verifyDiscovery(discovered, sources);
     stage = "vitest";
@@ -236,7 +232,7 @@ async function main() {
       process.execPath,
       runArgs,
       join(evidenceDir, "execution.json"),
-      14 * 60_000,
+      8 * 60_000,
     );
     process.stdout.write(result.stdout);
     process.stderr.write(result.stderr);

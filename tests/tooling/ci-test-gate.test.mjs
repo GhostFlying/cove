@@ -1,15 +1,21 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { afterEach, expect, test } from "vitest";
-import { recordedCommand, verifyDiscovery, verifyInventory } from "../../scripts/ci-test-gate.mjs";
+import {
+  readVitestOwnedTestFiles,
+  recordedCommand,
+  requiredSuites,
+  verifyDiscovery,
+  verifyInventory,
+} from "../../scripts/ci-test-gate.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const first = "tests/tooling/project-references.test.ts";
 const second = "tests/tooling/ci-test-gate.test.mjs";
 const suites = [
   { project: "tooling", file: first, minimumTests: 2 },
-  { project: "tooling", file: second, minimumTests: 4 },
+  { project: "tooling", file: second, minimumTests: 8 },
 ];
 const discoveredCases = [
   ...Array.from({ length: 2 }, (_, index) => ({
@@ -17,7 +23,7 @@ const discoveredCases = [
     file: resolve(root, first),
     name: `project reference ${index}`,
   })),
-  ...Array.from({ length: 4 }, (_, index) => ({
+  ...Array.from({ length: 8 }, (_, index) => ({
     projectName: "tooling",
     file: resolve(root, second),
     name: `gate ${index}`,
@@ -40,8 +46,8 @@ async function isolatedEvidence() {
 function report() {
   return {
     success: true,
-    numTotalTests: 6,
-    numPassedTests: 6,
+    numTotalTests: 10,
+    numPassedTests: 10,
     numFailedTests: 0,
     numPendingTests: 0,
     numTodoTests: 0,
@@ -54,7 +60,7 @@ function report() {
       {
         name: resolve(root, second),
         status: "passed",
-        assertionResults: Array(4).fill({ status: "passed" }),
+        assertionResults: Array(8).fill({ status: "passed" }),
       },
     ],
   };
@@ -126,5 +132,25 @@ test("records spawn and timeout failures before propagating them", async () => {
   ).toEqual([
     { stage: "discovery", errorCode: "ENOENT", timedOut: false },
     { stage: "vitest", errorCode: "ETIMEDOUT", timedOut: true },
+  ]);
+});
+
+test("rejects removal of a gate test below the required floor", () => {
+  expect(() =>
+    verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredSuites),
+  ).toThrow(/needs 8/);
+});
+
+test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
+  const checkout = await mkdtemp(resolve(tmpdir(), "cove-ci-scan-"));
+  temporaryDirectories.push(checkout);
+  await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
+  await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
+  await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
+  await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
+  await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
+  expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "tests/tooling/excluded.spec.ts",
+    "tests/tooling/registered.test.ts",
   ]);
 });
