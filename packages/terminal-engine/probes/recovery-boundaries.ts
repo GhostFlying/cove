@@ -21,6 +21,9 @@ export interface RecoveryFixture {
     readonly background: string;
     readonly palette1: string;
   };
+  readonly resizeBeforeCheckpoint?: { readonly cols: number; readonly rows: number };
+  readonly resizeAfterRecovery?: { readonly cols: number; readonly rows: number };
+  readonly writeChunkSize?: number;
 }
 
 export interface RecoveryCaseResult {
@@ -32,6 +35,10 @@ export interface RecoveryCaseResult {
   readonly afterEqual: boolean;
   readonly sourceReplies: readonly string[];
   readonly receiverReplies: readonly string[];
+  readonly sourceBells: number;
+  readonly receiverBells: number;
+  readonly sourceTitles: readonly string[];
+  readonly receiverTitles: readonly string[];
   readonly sourceRepliesAtCheckpoint: number;
   readonly sourceRepliesAfterRecovery: number;
   readonly receiverRepliesAfterRecovery: number;
@@ -73,6 +80,17 @@ function newTerminal(fixture: RecoveryFixture): Terminal {
   });
 }
 
+async function writeFixtureBytes(
+  terminal: Terminal,
+  payload: Uint8Array,
+  chunkSize: number | undefined,
+): Promise<void> {
+  if (chunkSize === undefined) return writeParsed(terminal, payload);
+  if (!Number.isInteger(chunkSize) || chunkSize < 1) throw new Error("Invalid fixture chunk size");
+  for (let offset = 0; offset < payload.length; offset += chunkSize)
+    await writeParsed(terminal, payload.subarray(offset, offset + chunkSize));
+}
+
 // The live sink and receiver sink are deliberately separate; only the former could be wired to a PTY.
 export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<RecoveryCaseResult> {
   assertPinnedRecoveryPackages();
@@ -82,8 +100,18 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
   source.loadAddon(addon as never);
   const sourceReplies: string[] = [];
   const receiverReplies: string[] = [];
+  let sourceBells = 0;
+  let receiverBells = 0;
+  const sourceTitles: string[] = [];
+  const receiverTitles: string[] = [];
   const sourceListener = source.onData((data) => sourceReplies.push(data));
   const receiverListener = receiver.onData((data) => receiverReplies.push(data));
+  const sideEffectListeners = [
+    source.onBell(() => sourceBells++),
+    receiver.onBell(() => receiverBells++),
+    source.onTitleChange((title) => sourceTitles.push(title)),
+    receiver.onTitleChange((title) => receiverTitles.push(title)),
+  ];
   const appearanceListeners = fixture.appearance
     ? [
         ...installAppearance(source, fixture.appearance, sourceReplies),
@@ -91,7 +119,11 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
       ]
     : [];
   try {
-    await writeParsed(source, fixture.setupBytes);
+    await writeFixtureBytes(source, fixture.setupBytes, fixture.writeChunkSize);
+    if (fixture.resizeBeforeCheckpoint) {
+      source.resize(fixture.resizeBeforeCheckpoint.cols, fixture.resizeBeforeCheckpoint.rows);
+      receiver.resize(fixture.resizeBeforeCheckpoint.cols, fixture.resizeBeforeCheckpoint.rows);
+    }
     const sourceRepliesAtCheckpoint = sourceReplies.length;
     const sourceAtCheckpoint = observeRecovery(source);
     const privateAtCheckpoint = readPrivateRecoveryState(source);
@@ -104,16 +136,20 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
       sourceReplies.length === sourceRepliesAtCheckpoint;
     const tail = new BoundedRecoveryTail();
     tail.append(fixture.tailBytes);
-    await writeParsed(source, fixture.tailBytes);
-    await writeParsed(receiver, checkpoint.vt);
-    await writeParsed(receiver, tail.snapshot());
+    await writeFixtureBytes(source, fixture.tailBytes, fixture.writeChunkSize);
+    await writeFixtureBytes(receiver, checkpoint.vt, fixture.writeChunkSize);
+    await writeFixtureBytes(receiver, tail.snapshot(), fixture.writeChunkSize);
     const sourceRepliesAfterRecovery = sourceReplies.length;
     const receiverRepliesAfterRecovery = receiverReplies.length;
     const sourceBefore = observeRecovery(source);
     const receiverBefore = observeRecovery(receiver);
     const beforeEqual = isDeepStrictEqual(sourceBefore, receiverBefore);
-    await writeParsed(source, fixture.continuationBytes);
-    await writeParsed(receiver, fixture.continuationBytes);
+    await writeFixtureBytes(source, fixture.continuationBytes, fixture.writeChunkSize);
+    await writeFixtureBytes(receiver, fixture.continuationBytes, fixture.writeChunkSize);
+    if (fixture.resizeAfterRecovery) {
+      source.resize(fixture.resizeAfterRecovery.cols, fixture.resizeAfterRecovery.rows);
+      receiver.resize(fixture.resizeAfterRecovery.cols, fixture.resizeAfterRecovery.rows);
+    }
     const sourceAfter = observeRecovery(source);
     const receiverAfter = observeRecovery(receiver);
     return {
@@ -125,6 +161,10 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
       afterEqual: isDeepStrictEqual(sourceAfter, receiverAfter),
       sourceReplies,
       receiverReplies,
+      sourceBells,
+      receiverBells,
+      sourceTitles,
+      receiverTitles,
       sourceRepliesAtCheckpoint,
       sourceRepliesAfterRecovery,
       receiverRepliesAfterRecovery,
@@ -135,6 +175,7 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
       receiverAfter,
     };
   } finally {
+    for (const listener of sideEffectListeners) listener.dispose();
     for (const listener of appearanceListeners) listener.dispose();
     sourceListener.dispose();
     receiverListener.dispose();

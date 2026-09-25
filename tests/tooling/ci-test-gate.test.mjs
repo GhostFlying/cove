@@ -98,7 +98,31 @@ test("recovery state suite is mandatory with actual discovered cases", async () 
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-state.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 3 });
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 7 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+    /Required suite terminal-engine-probes:/,
+  );
+});
+
+test("recovery parser and query suites are mandatory", async () => {
+  for (const name of ["recovery-parser", "recovery-query"]) {
+    const suite = requiredSuites.find(
+      ({ file }) => file === `packages/terminal-engine/probes/${name}.test.mjs`,
+    );
+    expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 3 });
+    expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+    expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+      /Required suite terminal-engine-probes:/,
+    );
+  }
+});
+
+test("recovery boundary suite includes real diagnostic and transport cases", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/terminal-engine/probes/recovery-boundaries.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 8 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
     /Required suite terminal-engine-probes:/,
@@ -172,7 +196,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 11/);
+  ).toThrow(/needs 13/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {

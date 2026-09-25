@@ -69,9 +69,9 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 
 ## B0 实验环境
 
-Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行六项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
+Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行十项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
 
-`@cove/terminal-engine` 与 `@cove/terminal-web` 只公开 `./probes/environment` 编译入口，尚无生产 API。前者用稳定版 headless `6.0.0`、serialize `0.14.0` 和 node-pty `1.1.0`，启动一个自己的 Node PTY 子进程验证 nonce 回应、尺寸、退出与小型 VT 序列化往返；后者用 xterm `6.0.0`、Vite `8.3.1` 和 Playwright `1.63.0` 构建静态 fixture，在托管 Chromium 中验证缓冲区、几何与键盘输入。Zod `4.6.5` 仅为后续协议包保留 catalog 版本，B0 没有安装或验证协议实现。
+`@cove/terminal-engine` 公开 `./probes/environment` 与 `./probes/recovery-boundaries` 编译入口，`@cove/terminal-web` 公开 `./probes/environment` 与 `./probes/query-input`；这些均非生产 API。前者用稳定版 headless `6.0.0`、serialize `0.14.0` 和 node-pty `1.1.0`，启动一个自己的 Node PTY 子进程验证 nonce 回应、尺寸、退出与小型 VT 序列化往返；后者用 xterm `6.0.0`、Vite `8.3.1` 和 Playwright `1.63.0` 构建静态 fixture，在托管 Chromium 中验证缓冲区、几何与键盘输入。
 
 首次安装与复验使用以下命令。macOS 的浏览器下载只写入本 checkout 的 `packages/terminal-web/.cache/playwright`；Ubuntu CI 的 `browser:install` 在一次性 runner 中加 `--with-deps` 安装系统库，本地 macOS 不自动修改系统依赖。
 
@@ -110,7 +110,7 @@ Zod `4.6.5` 的自身声明在 `v4/core/schemas.d.cts` 的未使用 URL helper �
 
 ## 兼容性边界
 
-T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露编译后的探针入口；`recovery-state.test.mjs` 首先验证普通保存光标及双缓冲区的续写语义。其余 parser、查询和边界用例会与各自的实际 suite 同步注册到 CI inventory。探针保留原始反例和版本/形状检查；当前实验不构成生产恢复能力承诺。
+T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露编译后的探针入口；四个 recovery suite 检查保存光标/样式、双缓冲区、分段 UTF-8/控制序列、实时查询、资源上限与临时 pipe 分块。每个 suite 在 `.cache/ci/smoke/terminal-recovery/` 写入带当前 SHA、运行环境和完成的 fixture ID 的有界 JSON，并验证读回。`recovery-boundaries.test.mjs` 保存了 41→40 列时保留列经 DCH 进入可见区、以及普通连续打印超过 64 KiB 后无法刷新 checkpoint 的确切反例；诊断测试通过不表示 R5/R6 恢复验收通过。完整矩阵及候选几何边界见 [T1 实验记录](tasks/m0-terminal-spike.md)。
 
 - 最新 typescript-eslint 8.70.1 的 TypeScript peer 范围为 `>=4.8.4 <6.1.0`，因此本次采用 Oxlint + tsc，未强行忽略 peer 范围。
 - 最新 electron-vite 5.0.0 的 Vite peer 范围止于 7。Electron 尚未初始化，不在根安装该依赖，也不宣称与 Vite 8 已兼容。

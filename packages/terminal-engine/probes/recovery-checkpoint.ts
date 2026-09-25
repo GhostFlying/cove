@@ -1,5 +1,10 @@
 import type { Terminal } from "@xterm/headless";
-import { readPrivateRecoveryState, type PrivateBufferState } from "./xterm-recovery-state.js";
+import {
+  readPrivateRecoveryState,
+  type AttributeState,
+  type PrivateBufferState,
+  type PrivateRecoveryState,
+} from "./xterm-recovery-state.js";
 
 export interface RecoveryCheckpoint {
   readonly vt: Uint8Array;
@@ -13,11 +18,23 @@ interface Serializer {
 
 const ALT_MARKER = "\u001b[?1049h\u001b[H";
 
-function sgr(fg: number, bg: number): string {
+function sgr(attr: AttributeState): string {
   const codes = ["0"];
+  for (const [name, code] of [
+    ["bold", "1"],
+    ["dim", "2"],
+    ["italic", "3"],
+    ["underline", "4"],
+    ["blink", "5"],
+    ["inverse", "7"],
+    ["invisible", "8"],
+    ["strikethrough", "9"],
+    ["overline", "53"],
+  ] as const)
+    if (attr[name]) codes.push(code);
   for (const [packed, base] of [
-    [fg, 30],
-    [bg, 40],
+    [attr.fg, 30],
+    [attr.bg, 40],
   ] as const) {
     const mode = (packed >>> 24) & 3;
     const color = packed & 0xffffff;
@@ -25,8 +42,10 @@ function sgr(fg: number, bg: number): string {
     if (mode === 1) {
       if (color < 8) codes.push(String(base + color));
       else if (color < 16) codes.push(String(base + 60 + color - 8));
-      else codes.push(String(base === 30 ? 38 : 48), "5", String(color));
+      else throw new Error(`P16 color ${color} is out of range`);
     } else if (mode === 2) {
+      codes.push(String(base === 30 ? 38 : 48), "5", String(color));
+    } else if (mode === 3) {
       codes.push(
         String(base === 30 ? 38 : 48),
         "2",
@@ -47,13 +66,15 @@ function savedState(
   state: PrivateBufferState,
   cols: number,
   rows: number,
-  currentFg: number,
-  currentBg: number,
+  currentAttr: AttributeState,
   restoreOrigin: boolean,
+  charset: PrivateRecoveryState["charset"],
+  finalActive: boolean,
 ): string {
-  const savedY = state.savedY - state.ybase;
-  if (state.x >= cols || state.savedX >= cols || savedY < 0 || savedY >= rows)
-    throw new Error("VT saved-state candidate cannot address a pending-wrap or evicted cursor");
+  // A saved row evicted from scrollback is restored by stable headless at viewport row zero.
+  const savedY = Math.max(0, state.savedY - state.ybase);
+  if (state.x >= cols || state.savedX >= cols || savedY >= rows)
+    throw new Error("VT saved-state candidate cannot address a pending-wrap cursor");
   let vt = "\u001b[?6l";
   vt += `\u001b[${state.scrollTop + 1};${state.scrollBottom + 1}r`;
   vt += "\u001b[3g";
@@ -61,15 +82,24 @@ function savedState(
     if (tab >= 0 && tab < cols) vt += `${absolutePosition(tab, 0)}\u001bH`;
   }
   vt += absolutePosition(state.savedX, savedY);
-  vt += sgr(state.savedFg, state.savedBg);
+  vt += sgr(state.savedAttr);
+  vt += `\u001b(${state.savedCharset}\u000f`;
   vt += "\u001b7";
+  if (finalActive) {
+    vt += `\u001b(${charset.g0}\u001b)${charset.g1}${charset.glevel === 1 ? "\u000e" : "\u000f"}`;
+    if (charset.current !== (charset.glevel === 1 ? charset.g1 : charset.g0)) {
+      if (charset.current !== state.savedCharset)
+        throw new Error("Current charset is not reconstructible from saved or designated map");
+      vt += "\u001b8";
+    }
+  } else vt += "\u001b(B\u001b)B\u000f";
   if (restoreOrigin) {
     if (state.y < state.scrollTop || state.y > state.scrollBottom)
       throw new Error("Origin-mode cursor is outside scroll margins");
     vt += "\u001b[?6h";
     vt += absolutePosition(state.x, state.y - state.scrollTop);
   } else vt += absolutePosition(state.x, state.y);
-  vt += sgr(currentFg, currentBg);
+  vt += sgr(currentAttr);
   return vt;
 }
 
@@ -99,8 +129,9 @@ export function createRecoveryCheckpoint(
       state.normal,
       terminal.cols,
       terminal.rows,
-      state.currentFg,
-      state.currentBg,
+      state.currentAttr,
+      false,
+      state.charset,
       false,
     );
     vt += "\u001b[?47h\u001b[H";
@@ -109,9 +140,10 @@ export function createRecoveryCheckpoint(
       state.alternate,
       terminal.cols,
       terminal.rows,
-      state.currentFg,
-      state.currentBg,
+      state.currentAttr,
       terminal.modes.originMode,
+      state.charset,
+      true,
     );
   } else {
     vt =
@@ -120,9 +152,10 @@ export function createRecoveryCheckpoint(
         state.normal,
         terminal.cols,
         terminal.rows,
-        state.currentFg,
-        state.currentBg,
+        state.currentAttr,
         terminal.modes.originMode,
+        state.charset,
+        true,
       );
   }
   if (state.cursorHidden) vt += "\u001b[?25l";

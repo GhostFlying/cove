@@ -15,11 +15,25 @@ export interface PrivateBufferState {
   readonly ybase: number;
   readonly savedX: number;
   readonly savedY: number;
-  readonly savedFg: number;
-  readonly savedBg: number;
+  readonly savedAttr: AttributeState;
+  readonly savedCharset: "B" | "0";
   readonly scrollTop: number;
   readonly scrollBottom: number;
   readonly tabs: readonly number[];
+}
+
+export interface AttributeState {
+  readonly fg: number;
+  readonly bg: number;
+  readonly bold: boolean;
+  readonly dim: boolean;
+  readonly italic: boolean;
+  readonly underline: boolean;
+  readonly blink: boolean;
+  readonly inverse: boolean;
+  readonly invisible: boolean;
+  readonly strikethrough: boolean;
+  readonly overline: boolean;
 }
 
 export interface PrivateRecoveryState {
@@ -27,8 +41,13 @@ export interface PrivateRecoveryState {
   readonly initialParserState: number;
   readonly utf8Interim: readonly number[];
   readonly precedingJoinState: number;
-  readonly currentFg: number;
-  readonly currentBg: number;
+  readonly currentAttr: AttributeState;
+  readonly charset: {
+    readonly g0: "B" | "0";
+    readonly g1: "B" | "0";
+    readonly glevel: 0 | 1;
+    readonly current: "B" | "0";
+  };
   readonly cursorHidden: boolean;
   readonly normal: PrivateBufferState;
   readonly alternate: PrivateBufferState;
@@ -44,9 +63,42 @@ function number(value: unknown, label: string): number {
   return value;
 }
 
-function attr(value: unknown, label: string): { fg: number; bg: number } {
+function attr(value: unknown, label: string): AttributeState {
   const data = object(value, label);
-  return { fg: number(data.fg, `${label}.fg`), bg: number(data.bg, `${label}.bg`) };
+  const flag = (method: string): boolean => {
+    const read = data[method];
+    if (typeof read !== "function") throw new Error(`Missing ${label}.${method}`);
+    return !!read.call(data);
+  };
+  return {
+    fg: number(data.fg, `${label}.fg`),
+    bg: number(data.bg, `${label}.bg`),
+    bold: flag("isBold"),
+    dim: flag("isDim"),
+    italic: flag("isItalic"),
+    underline: flag("isUnderline"),
+    blink: flag("isBlink"),
+    inverse: flag("isInverse"),
+    invisible: flag("isInvisible"),
+    strikethrough: flag("isStrikethrough"),
+    overline: flag("isOverline"),
+  };
+}
+
+function charset(value: unknown, label: string): "B" | "0" {
+  if (value === undefined) return "B";
+  const map = object(value, label);
+  const signature = createHash("sha256")
+    .update(
+      JSON.stringify(
+        Object.keys(map)
+          .sort()
+          .map((key) => [key, map[key]]),
+      ),
+    )
+    .digest("hex");
+  if (signature === "381972b251921d73fd269485e9d391f00f8f14fb0502775ee081db0dbb498104") return "0";
+  throw new Error(`Unsupported pinned charset at ${label}: ${signature}`);
 }
 
 function buffer(value: unknown, label: string): PrivateBufferState {
@@ -59,8 +111,8 @@ function buffer(value: unknown, label: string): PrivateBufferState {
     ybase: number(data.ybase, `${label}.ybase`),
     savedX: number(data.savedX, `${label}.savedX`),
     savedY: number(data.savedY, `${label}.savedY`),
-    savedFg: saved.fg,
-    savedBg: saved.bg,
+    savedAttr: saved,
+    savedCharset: charset(data.savedCharset, `${label}.savedCharset`),
     scrollTop: number(data.scrollTop, `${label}.scrollTop`),
     scrollBottom: number(data.scrollBottom, `${label}.scrollBottom`),
     tabs: Object.keys(tabs)
@@ -101,6 +153,11 @@ export function readPrivateRecoveryState(terminal: Terminal): PrivateRecoverySta
   const service = object(core._bufferService, "buffer service");
   const buffers = object(service.buffers, "buffers");
   const current = attr(handler._curAttrData, "current attributes");
+  const charsetService = object(core._charsetService, "charset service");
+  const designations = charsetService._charsets;
+  if (!Array.isArray(designations)) throw new Error("Charset designation shape changed");
+  const glevel = number(charsetService.glevel, "charset glevel");
+  if (glevel !== 0 && glevel !== 1) throw new Error(`Unsupported charset glevel ${glevel}`);
   const coreService = object(core.coreService, "core service");
   if (typeof coreService.isCursorHidden !== "boolean")
     throw new Error("Cursor visibility shape changed");
@@ -109,8 +166,13 @@ export function readPrivateRecoveryState(terminal: Terminal): PrivateRecoverySta
     initialParserState: number(parser.initialState, "initial parser state"),
     utf8Interim: [...interim],
     precedingJoinState: number(parser.precedingJoinState, "preceding join state"),
-    currentFg: current.fg,
-    currentBg: current.bg,
+    currentAttr: current,
+    charset: {
+      g0: charset(designations[0], "G0"),
+      g1: charset(designations[1], "G1"),
+      glevel,
+      current: charset(charsetService.charset, "current charset"),
+    },
     cursorHidden: coreService.isCursorHidden,
     normal: buffer(buffers.normal, "normal buffer"),
     alternate: buffer(buffers.alt, "alternate buffer"),
