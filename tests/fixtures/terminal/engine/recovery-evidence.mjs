@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const checkout = resolve(import.meta.dirname, "../../../..");
 const evidenceDirectory = resolve(checkout, ".cache/ci/smoke/terminal-recovery");
 
-export async function writeRecoverySuiteEvidence(suite, caseIds, minimumCases) {
+export async function writeRecoverySuiteEvidence(suite, caseIds, minimumCases, metrics = {}) {
   if (caseIds.length < minimumCases || new Set(caseIds).size !== caseIds.length)
     throw new Error(`${suite} did not complete its expected distinct fixtures`);
   const sha = execFileSync("git", ["rev-parse", "HEAD"], {
@@ -18,6 +18,7 @@ export async function writeRecoverySuiteEvidence(suite, caseIds, minimumCases) {
     sha,
     runtime: { node: process.version, platform: platform(), arch: arch() },
     completedCaseIds: caseIds,
+    metrics,
   };
   const encoded = `${JSON.stringify(evidence, null, 2)}\n`;
   if (Buffer.byteLength(encoded) > 64 * 1024) throw new Error(`${suite} evidence exceeds cap`);
@@ -28,7 +29,8 @@ export async function writeRecoverySuiteEvidence(suite, caseIds, minimumCases) {
   if (
     readback.sha !== sha ||
     readback.completedCaseIds.length !== caseIds.length ||
-    readback.completedCaseIds.some((id, index) => id !== caseIds[index])
+    readback.completedCaseIds.some((id, index) => id !== caseIds[index]) ||
+    JSON.stringify(readback.metrics) !== JSON.stringify(metrics)
   )
     throw new Error(`${suite} evidence readback diverged`);
 }

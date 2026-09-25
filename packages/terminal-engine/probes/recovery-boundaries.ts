@@ -2,7 +2,11 @@ import { isDeepStrictEqual } from "node:util";
 import { createRequire } from "node:module";
 import type { Terminal } from "@xterm/headless";
 import { loadSerializeAddon } from "./serialize-loader.js";
-import { createRecoveryCheckpoint, BoundedRecoveryTail } from "./recovery-checkpoint.js";
+import {
+  createRecoveryCheckpoint,
+  createFinalGlyphCheckpoint,
+  BoundedRecoveryTail,
+} from "./recovery-checkpoint.js";
 import { observeRecovery, writeParsed, type RecoveryObservation } from "./recovery-observation.js";
 import { assertPinnedRecoveryPackages, readPrivateRecoveryState } from "./xterm-recovery-state.js";
 
@@ -188,6 +192,7 @@ export async function runRecoveryFixture(fixture: RecoveryFixture): Promise<Reco
 export {
   BoundedRecoveryTail,
   createRecoveryCheckpoint,
+  createFinalGlyphCheckpoint,
   observeRecovery,
   readPrivateRecoveryState,
   writeParsed,
