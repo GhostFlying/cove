@@ -717,7 +717,10 @@ export async function runQueryInputProbe(scenario: string): Promise<unknown> {
     } else if (scenario === "lifetime") value = await lifetime(adapted, context);
     else if (scenario === "focus") value = await focus(adapted);
     else if (scenario === "transport-rejection") value = await transportRejection(adapted);
-    else if (scenario === "late-page-error") {
+    else if (scenario === "cleanup-two-pages") {
+      await openQueryPage(context, "reference");
+      value = { pages: 2 };
+    } else if (scenario === "late-page-error") {
       const observed = new Promise<void>((resolveError) =>
         adapted.on("pageerror", () => resolveError()),
       );

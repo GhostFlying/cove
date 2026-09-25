@@ -274,22 +274,46 @@ export async function withManagedBrowser<T>(
     primaryError = error;
   }
   const cleanupErrors: unknown[] = [];
-  const cleanupDeadline = performance.now() + 7_000;
-  const cleanupRemaining = (limit: number) =>
-    Math.max(1, Math.min(limit, Math.floor(cleanupDeadline - performance.now())));
+  const cleanupStarted = performance.now();
+  const cleanupDeadline = cleanupStarted + 7_000;
+  const pageDeadline = cleanupDeadline - 3_500;
+  const browserDeadline = profile === "query" ? cleanupDeadline - 1_000 : cleanupDeadline;
+  const cleanupRemaining = (limit: number, phaseDeadline = cleanupDeadline) =>
+    Math.max(1, Math.min(limit, Math.floor(phaseDeadline - performance.now())));
+  const disposeDelay = Number(process.env.COVE_QUERY_TEST_DISPOSE_DELAY_MS ?? 0);
+  if (
+    profile === "query" &&
+    (!Number.isInteger(disposeDelay) || disposeDelay < 0 || disposeDelay > 1_500)
+  )
+    cleanupErrors.push(new Error("Invalid query disposal delay injection"));
   let disposedPages = 0;
-  for (const page of ownedPages.reverse()) {
+  const pages = ownedPages.reverse();
+  for (const [index, page] of pages.entries()) {
+    // Share the page phase while reserving browser reaping and listener closure.
+    const pageShare = Math.max(
+      1,
+      Math.floor((pageDeadline - performance.now()) / (pages.length - index)),
+    );
+    const pageEnd = Math.min(pageDeadline, performance.now() + pageShare);
+    const disposalBudget = cleanupRemaining(Math.min(1_500, Math.max(1, pageShare - 500)), pageEnd);
+    const injectedHang =
+      profile === "query" && process.env.COVE_QUERY_TEST_DISPOSE_HANG === "1" && index === 0;
+    const disposalExpression = injectedHang
+      ? "new Promise(() => {})"
+      : profile === "query" && disposeDelay > 0 && disposeDelay <= 1_500
+        ? `new Promise((resolve) => setTimeout(() => { window.coveQuery?.dispose(); resolve(); }, ${disposeDelay}))`
+        : "window.coveQuery?.dispose()";
     try {
       await within(
-        page.evaluate<void>("window.coveQuery?.dispose()"),
-        cleanupRemaining(500),
-        "Query fixture disposal",
+        page.evaluate<void>(disposalExpression),
+        disposalBudget,
+        `Query fixture disposal page ${index + 1}/${pages.length} (${disposalBudget} ms)`,
       );
     } catch (error) {
       cleanupErrors.push(error);
     }
     try {
-      await within(page.close(), cleanupRemaining(500), "Browser page close");
+      await within(page.close(), cleanupRemaining(500, pageEnd), "Browser page close");
       disposedPages++;
     } catch (error) {
       cleanupErrors.push(error);
@@ -297,11 +321,19 @@ export async function withManagedBrowser<T>(
   }
   if (browserServer) {
     try {
-      await within(browserServer.close(), cleanupRemaining(3_000), "Browser close");
+      await within(
+        browserServer.close(),
+        cleanupRemaining(profile === "query" ? 2_000 : 3_000, browserDeadline),
+        "Browser close",
+      );
     } catch (error) {
       cleanupErrors.push(error);
       try {
-        await within(browserServer.kill(), cleanupRemaining(2_000), "Browser kill");
+        await within(
+          browserServer.kill(),
+          cleanupRemaining(2_000, browserDeadline),
+          "Browser kill",
+        );
       } catch (killError) {
         cleanupErrors.push(killError);
       }
@@ -317,7 +349,7 @@ export async function withManagedBrowser<T>(
         new Promise<void>((resolveClose, reject) =>
           server.close((error) => (error ? reject(error) : resolveClose())),
         ),
-        cleanupRemaining(2_000),
+        cleanupRemaining(profile === "query" ? 750 : 2_000),
         "Fixture listener close",
       );
     } catch (error) {
@@ -333,9 +365,9 @@ export async function withManagedBrowser<T>(
       await within(
         writeFile(
           evidencePath,
-          `${JSON.stringify({ browserPid: browserServer?.process().pid ?? null, browserExited: browserServer ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null : true, listenerPort, listenerClosed: !server.listening, disposedPages, workBudgetMs, completedInjectedDelays, elapsedMs: Math.round(performance.now() - workStarted) })}\n`,
+          `${JSON.stringify({ browserPid: browserServer?.process().pid ?? null, browserExited: browserServer ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null : true, listenerPort, listenerClosed: !server.listening, disposedPages, workBudgetMs, completedInjectedDelays, cleanupElapsedMs: Math.round(performance.now() - cleanupStarted), elapsedMs: Math.round(performance.now() - workStarted) })}\n`,
         ),
-        cleanupRemaining(1_000),
+        cleanupRemaining(profile === "query" ? 250 : 1_000),
         "Browser cleanup evidence",
       );
     } catch (error) {
