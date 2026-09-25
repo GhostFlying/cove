@@ -28,6 +28,15 @@ decisions without concrete evidence or a user request.
   coordinator; ordinary implementation choices do not require repeated user approval.
 - Do not scaffold deferred features or introduce a generic framework solely for
   potential future use. Add packages only for real dependency or deployment boundaries.
+- During planning and decision analysis, inspect the relevant Orca implementation
+  where a counterpart exists. Record the source revision, paths and behavior,
+  then evaluate strengths, defects and fit against Cove's accepted design. Orca
+  is comparative evidence, not authority; do not copy it without justification.
+- Treat this as long-running work: design documents retain accepted decisions and
+  rationale; task plans retain dependencies and acceptance; handoffs retain exact
+  state and next actions. Start by reading `docs/handoff.md` and the applicable
+  design/task documents instead of relying on conversation history. Update the
+  handoff at ownership changes, blockers, integration and milestone review.
 
 ## Coordinate concurrent agents
 
