@@ -2,7 +2,7 @@
 
 Status: authored Q1 probe passed locally on macOS arm64, 2026-09-26. This is browser-adapter evidence for [Q1 #12](https://github.com/GhostFlying/cove/issues/12); independent verification, final cross-OS CI, production admission policy, and the server/PTY authority experiment remain separate gates.
 
-Source is branch `p/luchengxuan/m0-12-query-input`, base `1468a470eb4f963fd21f9a580f6bd1a804b285bb`, with implementation commits `1c7c65ee63a1b99a8d058e99be74366433d4634e` and `ff88490d1179c108713f719f84eb39c689f32d99`. The first commit registered the compiled `@cove/terminal-web/probes/query-input` export and six mandatory Q1 tests; the second expanded the suite to ten and made B0/Q1 share one managed-browser lifecycle. The CI inventory minimum still needs the separately owned update from 6 to 10; the ten tests already run through the registered project. No engine probe, real PTY, product controller, or remote service is part of this change.
+Source is branch `p/luchengxuan/m0-12-query-input`, base `1468a470eb4f963fd21f9a580f6bd1a804b285bb`, with implementation commits `1c7c65ee63a1b99a8d058e99be74366433d4634e` and `ff88490d1179c108713f719f84eb39c689f32d99`. The first commit registered the compiled `@cove/terminal-web/probes/query-input` export and six mandatory Q1 tests; the second expanded the suite to ten and made B0/Q1 share one managed-browser lifecycle. The separately owned integration commit `50e7137` raises the CI inventory minimum from 6 to 10; all ten tests run through the registered project. No engine probe, real PTY, product controller, or remote service is part of this change.
 
 ## Candidate and public-API counterexample
 
