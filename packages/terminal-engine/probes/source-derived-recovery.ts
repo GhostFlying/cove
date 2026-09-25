@@ -56,6 +56,13 @@ const DEFAULT_BASELINE_CAP = 8 * 1024 * 1024;
 const DEFAULT_CELL_CAP = 2 * 120 * 1040;
 const DEFAULT_OPERATION_CAP = 1040 * 2 + 3;
 
+function admittedLimit(value: number | undefined, name: string, ceiling: number): number {
+  if (value === undefined) return ceiling;
+  if (!Number.isSafeInteger(value) || value < 1 || value > ceiling)
+    throw new Error(`Invalid source-derived ${name} limit`);
+  return value;
+}
+
 type PublicLine = NonNullable<ReturnType<Terminal["buffer"]["normal"]["getLine"]>>;
 type PublicCell = NonNullable<ReturnType<PublicLine["getCell"]>>;
 
@@ -227,39 +234,64 @@ export function createSourceDerivedRecovery(
   terminal: Terminal,
   limits: SourceDerivedLimits = {},
 ): SourceDerivedRecovery {
+  const maxCols = admittedLimit(limits.maxCols, "maxCols", 120);
+  const maxRows = admittedLimit(limits.maxRows, "maxRows", 40);
+  const maxBaselineBytes = admittedLimit(
+    limits.maxBaselineBytes,
+    "maxBaselineBytes",
+    DEFAULT_BASELINE_CAP,
+  );
+  const maxScannedCells = admittedLimit(
+    limits.maxScannedCells,
+    "maxScannedCells",
+    DEFAULT_CELL_CAP,
+  );
+  const maxGeometryOperations = admittedLimit(
+    limits.maxGeometryOperations,
+    "maxGeometryOperations",
+    DEFAULT_OPERATION_CAP,
+  );
   const cols = terminal.cols;
   const rows = terminal.rows;
-  if (cols < 1 || cols > (limits.maxCols ?? 120) || rows < 1 || rows > (limits.maxRows ?? 40))
+  if (
+    !Number.isSafeInteger(cols) ||
+    !Number.isSafeInteger(rows) ||
+    cols < 1 ||
+    cols > maxCols ||
+    rows < 1 ||
+    rows > maxRows
+  )
     throw new Error("Source-derived logical geometry exceeds profile");
   const state = readPrivateRecoveryState(terminal);
   if (state.parserState !== state.initialParserState || state.utf8Interim.some(Boolean))
     throw new Error("Source-derived checkpoint is not at a parser boundary");
   const count = { cells: 0, textUnits: 0 };
-  const cap = limits.maxScannedCells ?? DEFAULT_CELL_CAP;
-  const textCap = limits.maxBaselineBytes ?? DEFAULT_BASELINE_CAP;
-  const normal = captureBuffer(terminal.buffer.normal, count, cap, textCap);
-  const alternate = captureBuffer(terminal.buffer.alternate, count, cap, textCap);
+  const normal = captureBuffer(terminal.buffer.normal, count, maxScannedCells, maxBaselineBytes);
+  const alternate = captureBuffer(
+    terminal.buffer.alternate,
+    count,
+    maxScannedCells,
+    maxBaselineBytes,
+  );
   const temporaryCols = Math.max(
     cols,
     ...normal.lines.map((line) => line.cells.length),
     ...alternate.lines.map((line) => line.cells.length),
   );
-  if (temporaryCols > (limits.maxCols ?? 120))
-    throw new Error("Source-derived retained extent exceeds profile");
+  if (temporaryCols > maxCols) throw new Error("Source-derived retained extent exceeds profile");
   const operations: RecoveryInstallOperation[] = [];
   let encodedBytes = 0;
   let geometryOperations = 0;
-  const maxBytes = limits.maxBaselineBytes ?? DEFAULT_BASELINE_CAP;
   const write = (vt: string): void => {
     if (!vt) return;
     const bytes = encoder.encode(vt);
-    if (bytes.length > maxBytes - encodedBytes)
+    if (bytes.length > maxBaselineBytes - encodedBytes)
       throw new Error("Source-derived baseline exceeds byte cap");
     encodedBytes += bytes.length;
     operations.push({ kind: "write", bytes });
   };
   const resize = (width: number): void => {
-    if (++geometryOperations > (limits.maxGeometryOperations ?? DEFAULT_OPERATION_CAP))
+    if (++geometryOperations > maxGeometryOperations)
       throw new Error("Source-derived geometry operation cap exceeded");
     operations.push({ kind: "resize", cols: width, rows });
   };
@@ -318,7 +350,7 @@ export function createSourceDerivedRecovery(
     for (const row of shortRows.reverse()) {
       write(absolutePosition(0, row) + "\u001b[M\u001b[L" + absolutePosition(0, row));
       geometryOperations += 2;
-      if (geometryOperations > (limits.maxGeometryOperations ?? DEFAULT_OPERATION_CAP))
+      if (geometryOperations > maxGeometryOperations)
         throw new Error("Source-derived geometry operation cap exceeded");
       write(
         alternatePreimage({

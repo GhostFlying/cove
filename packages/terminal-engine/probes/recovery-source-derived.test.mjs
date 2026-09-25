@@ -256,6 +256,35 @@ test("source-only combined geometry attempts both row orders, history and joined
 });
 
 test("source-only profile rejects excess geometry and caps output without a receiver", async () => {
+  const unreadableSource = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("source was accessed before limit validation");
+      },
+    },
+  );
+  for (const [name, ceiling] of [
+    ["maxCols", 120],
+    ["maxRows", 40],
+    ["maxBaselineBytes", 8 * 1024 * 1024],
+    ["maxScannedCells", 2 * 120 * 1040],
+    ["maxGeometryOperations", 1040 * 2 + 3],
+  ]) {
+    for (const value of [
+      NaN,
+      Infinity,
+      -Infinity,
+      -1,
+      0,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+      ceiling + 1,
+    ])
+      expect(() => createSourceDerivedRecovery(unreadableSource, { [name]: value })).toThrow(
+        `Invalid source-derived ${name} limit`,
+      );
+  }
   const source = terminal(12);
   try {
     await writeParsed(source, bytes("A".repeat(100)));
