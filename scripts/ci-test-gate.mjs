@@ -57,7 +57,7 @@ export const requiredSuites = [
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/recovery-source-derived.test.mjs",
-    minimumTests: 4,
+    minimumTests: 5,
   },
   {
     project: "terminal-web-probes",

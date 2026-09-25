@@ -264,6 +264,17 @@ export function createSourceDerivedRecovery(
     operations.push({ kind: "resize", cols: width, rows });
   };
   const normalImage = normalPreimage(normal, temporaryCols);
+  const earlyNormalSave = state.normal.savedY < state.normal.ybase;
+  if (earlyNormalSave) {
+    // A saved absolute row older than ybase must be set before replay scrolls it away.
+    if (state.normal.savedY >= rows || state.normal.savedX >= temporaryCols)
+      throw new Error("Source-derived evicted saved cursor lacks a bounded prehistory position");
+    write(
+      absolutePosition(state.normal.savedX, state.normal.savedY) +
+        sgr(state.normal.savedAttr) +
+        `\u001b(${state.normal.savedCharset}\u000f\u001b7\u001b(B\u001b[0m\u001b[H`,
+    );
+  }
   write(normalImage.vt);
   const activeAlternate = terminal.buffer.active.type === "alternate";
   write(
@@ -276,10 +287,14 @@ export function createSourceDerivedRecovery(
       state.charset,
       !activeAlternate,
       true,
+      earlyNormalSave,
     ),
   );
   if (activeAlternate) {
-    write("\u001b[?47h\u001b[H" + alternatePreimage(alternate));
+    const alternateImage = alternate.lines[0]?.wrapped
+      ? normalPreimage(alternate, temporaryCols)
+      : { vt: alternatePreimage(alternate), disposable: 0 };
+    write("\u001b[?47h\u001b[H" + alternateImage.vt);
     write(
       savedState(
         state.alternate,
@@ -334,7 +349,8 @@ export function createSourceDerivedRecovery(
       accountedPayloadBytes: encodedBytes * 3 + count.textUnits * 2,
       geometryOperations,
       temporaryCols,
-      disposableRows: normalImage.disposable,
+      disposableRows:
+        normalImage.disposable + (activeAlternate && alternate.lines[0]?.wrapped ? 1 : 0),
     },
   };
 }

@@ -155,7 +155,7 @@ test("source-derived recovery diagnostic suite is mandatory", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-source-derived.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 4 });
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 5 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
     /Required suite terminal-engine-probes:/,
