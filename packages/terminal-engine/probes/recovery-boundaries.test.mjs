@@ -22,7 +22,7 @@ const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless");
 const { SerializeAddon } = require("@xterm/addon-serialize");
 const completed = [];
-afterAll(() => writeRecoverySuiteEvidence("recovery-boundaries", completed, 8));
+afterAll(() => writeRecoverySuiteEvidence("recovery-boundaries", completed, 9));
 
 function terminal(cols, rows = 3, scrollback = 3) {
   return new Terminal({ cols, rows, scrollback, allowProposedApi: true });
@@ -218,6 +218,34 @@ test("R8 cap boundaries release invalid retention while live parsing and a later
     receiver.dispose();
   }
   completed.push("R8-tail-cap-overflow-recovery");
+});
+
+test("R8 empty and byte-sized appends have fixed physical tail storage", () => {
+  const tail = new BoundedRecoveryTail();
+  const empty = new Uint8Array();
+  for (let index = 0; index < 100_000; index++) tail.append(empty);
+  expect(tail.retainedBytes).toBe(0);
+  expect(tail.allocatedBytes).toBe(0);
+  for (let index = 0; index < 65_536; index++) tail.append(Uint8Array.of(index & 255));
+  expect(tail.available).toBe(true);
+  expect(tail.retainedBytes).toBe(65_536);
+  expect(tail.allocatedBytes).toBe(65_536);
+  const copy = tail.snapshot();
+  expect(copy).toHaveLength(65_536);
+  expect(copy[0]).toBe(0);
+  expect(copy[255]).toBe(255);
+  expect(copy[256]).toBe(0);
+  copy[0] = 99;
+  expect(tail.snapshot()[0]).toBe(0);
+  tail.append(Uint8Array.of(1));
+  expect(tail.available).toBe(false);
+  expect(tail.allocatedBytes).toBe(0);
+  tail.resetAfterProvedCheckpoint();
+  expect(tail.allocatedBytes).toBe(0);
+  tail.append(Uint8Array.of(7));
+  expect(tail.snapshot()).toEqual(Uint8Array.of(7));
+  expect(() => new BoundedRecoveryTail(65_537)).toThrow(/tail cap/);
+  completed.push("R8-tail-fixed-physical-storage");
 });
 
 test("R5 diagnostic: ordinary printable output cannot refresh the current checkpoint at the tail cap", async () => {

@@ -42,7 +42,7 @@ export const requiredSuites = [
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/recovery-boundaries.test.mjs",
-    minimumTests: 8,
+    minimumTests: 9,
   },
   {
     project: "terminal-engine-probes",

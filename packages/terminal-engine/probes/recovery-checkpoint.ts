@@ -245,23 +245,27 @@ export function createFinalGlyphCheckpoint(
 
 export class BoundedRecoveryTail {
   readonly cap: number;
-  #chunks: Uint8Array[] = [];
+  #buffer: Uint8Array | null = null;
   #length = 0;
   #available = true;
 
   constructor(cap = 64 * 1024) {
+    if (!Number.isSafeInteger(cap) || cap < 1 || cap > 64 * 1024)
+      throw new Error("Recovery tail cap must be between 1 and 65536 bytes");
     this.cap = cap;
   }
 
   append(bytes: Uint8Array): void {
     if (!this.#available) return;
+    if (bytes.byteLength === 0) return;
     if (bytes.byteLength > this.cap - this.#length) {
-      this.#chunks = [];
+      this.#buffer = null;
       this.#length = 0;
       this.#available = false;
       return;
     }
-    this.#chunks.push(bytes.slice());
+    this.#buffer ??= new Uint8Array(this.cap);
+    this.#buffer.set(bytes, this.#length);
     this.#length += bytes.byteLength;
   }
 
@@ -271,20 +275,17 @@ export class BoundedRecoveryTail {
   get retainedBytes(): number {
     return this.#length;
   }
+  get allocatedBytes(): number {
+    return this.#buffer?.byteLength ?? 0;
+  }
 
   snapshot(): Uint8Array {
     if (!this.#available) throw new Error("Recovery unavailable: raw tail exceeded cap");
-    const tail = new Uint8Array(this.#length);
-    let offset = 0;
-    for (const chunk of this.#chunks) {
-      tail.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return tail;
+    return this.#buffer?.slice(0, this.#length) ?? new Uint8Array();
   }
 
   resetAfterProvedCheckpoint(): void {
-    this.#chunks = [];
+    this.#buffer = null;
     this.#length = 0;
     this.#available = true;
   }
