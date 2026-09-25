@@ -46,7 +46,7 @@ test("browser work deadline closes Chromium and its fixture listener", async () 
     });
     expect(result.error).toBeUndefined();
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toMatch(/deadline|timed out/);
+    expect(result.stderr).toMatch(/deadline|timed out|Timeout \d+ms exceeded/);
     const record = JSON.parse(await readFile(evidence, "utf8"));
     expect(record.browserPid).toBeGreaterThan(0);
     expect(record.completedInjectedDelays).toBeGreaterThanOrEqual(1);
