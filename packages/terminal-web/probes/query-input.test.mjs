@@ -125,21 +125,35 @@ test("compiled protocol delivery rejects wrong identity and invalid baseline chu
     "wrong-at-seq",
     "wrong-total",
     "oversized-baseline",
+    "overfull-declared-baseline",
+    "overfull-maximum-baseline",
     "oversized-output",
     "fatal-utf8",
   ]);
   expect(evidence.delivered).toBe(0);
 });
 
-test("held parser timeout and thrown work close the owned browser and listener", async () => {
+test("held parser timeout, late page errors, result bounds and thrown work close owned resources", async () => {
+  const unicodeResult = JSON.stringify({ detail: "é".repeat(140_000) });
+  expect(unicodeResult.length).toBeLessThan(256 * 1024);
+  expect(Buffer.byteLength(unicodeResult, "utf8")).toBeGreaterThan(256 * 1024);
   const directory = await mkdtemp(join(tmpdir(), "cove-query-cleanup-"));
   try {
-    for (const [scenario, extra, expected] of [
-      ["held-timeout", {}, /Intentional held parser timed out/],
+    for (const [scenario, extra, expected, disposedPages] of [
+      ["held-timeout", {}, /Intentional held parser timed out/, 1],
+      ["late-page-error", {}, /Injected late page error/, 1],
+      [
+        "late-page-error",
+        { COVE_QUERY_INJECT_CLEANUP_FAILURE: "1" },
+        /Injected late page error.*Injected query cleanup failure/s,
+        1,
+      ],
+      ["unicode-result-limit", {}, /Query result exceeds 256 KiB/, 1],
       [
         "queries",
         { COVE_QUERY_INJECT_WORK_FAILURE: "1", COVE_QUERY_INJECT_CLEANUP_FAILURE: "1" },
         /Injected query work failure.*Injected query cleanup failure/s,
+        0,
       ],
     ]) {
       const evidence = join(directory, `${scenario}.json`);
@@ -156,7 +170,7 @@ test("held parser timeout and thrown work close the owned browser and listener",
       expect(cleanup.browserPid).toBeGreaterThan(0);
       expect(cleanup.browserExited).toBe(true);
       expect(cleanup.listenerClosed).toBe(true);
-      expect(cleanup.disposedPages).toBe(scenario === "held-timeout" ? 1 : 0);
+      expect(cleanup.disposedPages).toBe(disposedPages);
       await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
         /fetch failed/,
       );

@@ -80,6 +80,8 @@ export interface ManagedBrowserContext {
   remaining(limit: number, label: string): number;
   stage(label: string): Promise<void>;
   trackPage(page: ProbePage): void;
+  reportPageError(error: string): void;
+  assertPageErrors(): void;
   browserVersion: string;
   browserRevision: string;
   browserExecutable: string;
@@ -92,7 +94,10 @@ export async function withManagedBrowser<T>(
   profile: "query" | "environment" = "query",
 ): Promise<{
   value: T;
-  context: Omit<ManagedBrowserContext, "browser" | "remaining" | "stage" | "trackPage">;
+  context: Omit<
+    ManagedBrowserContext,
+    "browser" | "remaining" | "stage" | "trackPage" | "reportPageError" | "assertPageErrors"
+  >;
 }> {
   if (!(await stat(join(builtRoot, "index.html")).catch(() => null)))
     throw new Error("Built browser fixture is absent");
@@ -184,8 +189,17 @@ export async function withManagedBrowser<T>(
   let listenerPort: number | null = null;
   let result: T | undefined;
   let contextRecord:
-    Omit<ManagedBrowserContext, "browser" | "remaining" | "stage" | "trackPage"> | undefined;
+    | Omit<
+        ManagedBrowserContext,
+        "browser" | "remaining" | "stage" | "trackPage" | "reportPageError" | "assertPageErrors"
+      >
+    | undefined;
   const ownedPages: ProbePage[] = [];
+  const pageErrors: string[] = [];
+  const assertPageErrors = () => {
+    if (pageErrors.length) throw new Error(`Browser page errors: ${JSON.stringify(pageErrors)}`);
+  };
+  let checkedPageErrors = 0;
   let primaryError: unknown;
   try {
     const listenAbort = new AbortController();
@@ -248,10 +262,14 @@ export async function withManagedBrowser<T>(
         remaining,
         stage,
         trackPage: (page) => ownedPages.push(page),
+        reportPageError: (error) => pageErrors.push(error),
+        assertPageErrors,
       }),
       remaining(workBudgetMs, "Browser work"),
       "Browser work",
     );
+    checkedPageErrors = pageErrors.length;
+    assertPageErrors();
   } catch (error) {
     primaryError = error;
   }
@@ -328,6 +346,10 @@ export async function withManagedBrowser<T>(
     cleanupErrors.push(new Error("Injected browser cleanup failure"));
   if (profile === "query" && process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE === "1")
     cleanupErrors.push(new Error("Injected query cleanup failure"));
+  if (pageErrors.length > checkedPageErrors)
+    cleanupErrors.push(
+      new Error(`Browser page errors: ${JSON.stringify(pageErrors.slice(checkedPageErrors))}`),
+    );
   if (primaryError && cleanupErrors.length)
     throw new AggregateError([primaryError, ...cleanupErrors], "Browser work and cleanup failed", {
       cause: primaryError,
@@ -351,7 +373,6 @@ export async function openQueryPage(
   context.trackPage(page);
   await context.stage("created browser page delay");
   page.setDefaultTimeout(context.remaining(5_000, "browser action"));
-  const errors: string[] = [];
   for (const event of ["console", "pageerror", "requestfailed"])
     page.on(event, (value) => {
       if (typeof value !== "object" || value === null) return;
@@ -362,13 +383,13 @@ export async function openQueryPage(
         url?: () => string;
       };
       if (event === "console" && item.type?.() === "error")
-        errors.push(item.text?.() ?? "console error");
-      if (event === "pageerror") errors.push(item.message ?? "page error");
-      if (event === "requestfailed") errors.push(`Failed request: ${item.url?.()}`);
+        context.reportPageError(item.text?.() ?? "console error");
+      if (event === "pageerror") context.reportPageError(item.message ?? "page error");
+      if (event === "requestfailed") context.reportPageError(`Failed request: ${item.url?.()}`);
     });
   page.on("request", (request) => {
     const url = (request as { url(): string }).url();
-    if (!url.startsWith(context.url)) errors.push(`External request: ${url}`);
+    if (!url.startsWith(context.url)) context.reportPageError(`External request: ${url}`);
   });
   const response = await page.goto(
     `${context.url}?fixture=query-input&adapter=${adapter}&cols=${cols}`,
@@ -376,10 +397,10 @@ export async function openQueryPage(
   );
   if (!response?.ok()) throw new Error(`Fixture navigation failed: ${response?.status()}`);
   await context.stage("loaded browser fixture delay");
-  if (errors.length) throw new Error(`Browser page errors: ${JSON.stringify(errors)}`);
+  context.assertPageErrors();
   await page.waitForFunction("window.coveQuery?.ready === true", null, {
     timeout: context.remaining(5_000, "xterm ready"),
   });
-  if (errors.length) throw new Error(`Browser page errors: ${JSON.stringify(errors)}`);
+  context.assertPageErrors();
   return page;
 }
