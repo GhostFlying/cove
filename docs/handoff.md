@@ -32,6 +32,10 @@ Clean delivered P1a and Q1/T1 planning worktrees were removed after their task p
 
 Scoped P1a type limitation: pinned Zod's unused URL helper declarations do not compile in an unmodified strict ES-only consumer. Keep genuine Zod schemas/inference; only protocol-local declaration skipping is allowed, while verbatim Cove emitted declarations are checked as TypeScript source with a negative host-global control. Root settings remain strict. Do not hide this limitation or replace the schema API with duplicated handwritten types.
 
+## Remote verification access
+
+The read-only `ssh devbox` environment probe failed GSSAPI authentication. Local Kerberos inventory marked a ticket expired; a single noninteractive renewal failed with no matching TGT. Corp-auth doctor showed internal HTTPS reachable but does not manage this Kerberos root. No remote command ran, no service/config changed, and no secret was copied. The user has been asked asynchronously to restore the usual company SSH/Kerberos login; local implementation and GitHub Linux CI continue. This is an access blocker for later devbox verification, not a product decision or permission to waive the 100-real-PTY gate. Retry after the user reports restored access.
+
 ## Fixed execution boundaries
 
 - M0 is a loopback experiment with per-launch credentials, instance-lifetime operation receipts, CLI and two browser terminal test views. Durable task/workspace/SQLite and pairing/remote deployment remain M1/M2.
