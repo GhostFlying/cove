@@ -111,21 +111,24 @@ function assembleBaseline(parts: BaselinePart[]): number[] {
       part.totalBytes !== first.totalBytes
     )
       throw new Error("Duplicate, reordered or mismatched baseline chunk");
-    received.push(
-      ...frame(
-        "baseline-chunk",
-        {
-          kind: "baseline-chunk",
-          run,
-          baselineId: part.baselineId,
-          atSeq: part.atSeq,
-          chunkIndex: part.chunkIndex,
-          chunkCount: part.chunkCount,
-          totalBytes: part.totalBytes,
-        },
-        part.payload,
-      ),
+    if (received.length + part.payload.length > first.totalBytes)
+      throw new Error(`Baseline assembly exceeds declared bytes before chunk ${index}`);
+    const decoded = frame(
+      "baseline-chunk",
+      {
+        kind: "baseline-chunk",
+        run,
+        baselineId: part.baselineId,
+        atSeq: part.atSeq,
+        chunkIndex: part.chunkIndex,
+        chunkCount: part.chunkCount,
+        totalBytes: part.totalBytes,
+      },
+      part.payload,
     );
+    if (received.length + decoded.length > first.totalBytes)
+      throw new Error(`Baseline assembly exceeds declared bytes before chunk ${index}`);
+    received.push(...decoded);
   }
   if (received.length !== first.totalBytes) throw new Error("Incomplete baseline assembly");
   return received;
@@ -624,14 +627,16 @@ async function focus(page: ProbePage): Promise<unknown> {
 
 async function transportRejection(page: ProbePage): Promise<unknown> {
   const rejected: string[] = [];
-  const expectReject = (label: string, action: () => unknown) => {
-    let failed = false;
+  const expectReject = (label: string, action: () => unknown, message?: RegExp) => {
+    let failure: unknown;
     try {
       action();
-    } catch {
-      failed = true;
+    } catch (error) {
+      failure = error;
     }
-    if (!failed) throw new Error(`Malformed delivery was accepted: ${label}`);
+    if (!(failure instanceof Error)) throw new Error(`Malformed delivery was accepted: ${label}`);
+    if (message && !message.test(failure.message))
+      throw new Error(`Wrong rejection for ${label}: ${failure.message}`);
     rejected.push(label);
   };
   for (const key of ["serverId", "relayInstanceId", "runId"] as const) {
@@ -659,6 +664,24 @@ async function transportRejection(page: ProbePage): Promise<unknown> {
   expectReject("wrong-total", () => assembleBaseline([first, { ...second, totalBytes: 3 }]));
   expectReject("oversized-baseline", () =>
     assembleBaseline([{ ...first, chunkCount: 1, totalBytes: 65_537, payload: [] }]),
+  );
+  expectReject(
+    "overfull-declared-baseline",
+    () =>
+      assembleBaseline([
+        { ...first, totalBytes: 3, payload: [65, 66] },
+        { ...second, totalBytes: 3, payload: [67, 68] },
+      ]),
+    /before chunk 1/,
+  );
+  expectReject(
+    "overfull-maximum-baseline",
+    () =>
+      assembleBaseline([
+        { ...first, totalBytes: 65_536, payload: Array(65_535).fill(65) },
+        { ...second, totalBytes: 65_536, payload: Array(65_535).fill(66) },
+      ]),
+    /before chunk 1/,
   );
   expectReject("oversized-output", () => output(Array(65_537).fill(65)));
   expectReject("fatal-utf8", () => decoder.decode(Uint8Array.of(0xff)));
@@ -694,6 +717,16 @@ export async function runQueryInputProbe(scenario: string): Promise<unknown> {
     } else if (scenario === "lifetime") value = await lifetime(adapted, context);
     else if (scenario === "focus") value = await focus(adapted);
     else if (scenario === "transport-rejection") value = await transportRejection(adapted);
+    else if (scenario === "late-page-error") {
+      const observed = new Promise<void>((resolveError) =>
+        adapted.on("pageerror", () => resolveError()),
+      );
+      await adapted.evaluate<void>(
+        "setTimeout(() => { throw new Error('Injected late page error'); }, 0)",
+      );
+      await within(observed, context.remaining(2_000, "late page error"), "late page error");
+      value = { injected: true };
+    } else if (scenario === "unicode-result-limit") value = { detail: "é".repeat(140_000) };
     else if (scenario === "held-timeout") {
       const held = pendingDeliver(adapted, Array.from(encoder.encode("\x1b]777;hold\x07")), "live");
       await adapted.waitForFunction(
@@ -704,8 +737,8 @@ export async function runQueryInputProbe(scenario: string): Promise<unknown> {
       await within(held.done, 250, "Intentional held parser");
       throw new Error("Held parser unexpectedly completed");
     } else throw new Error(`Unknown Q1 scenario: ${scenario}`);
-    const encoded = JSON.stringify(value);
-    if (encoded.length > 256 * 1024) throw new Error("Query result exceeds 256 KiB");
+    if (Buffer.byteLength(JSON.stringify(value), "utf8") > 256 * 1024)
+      throw new Error("Query result exceeds 256 KiB");
     return value;
   });
   return { scenario, browser: result.context, evidence: result.value };
