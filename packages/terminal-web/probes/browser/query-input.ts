@@ -1,6 +1,8 @@
 import { Terminal } from "@xterm/xterm";
 import { attachQueryInputAdapter, type QueryAdapterObservation } from "./query-input-adapter.js";
 
+declare const __COVE_BUNDLED_XTERM_VERSION__: string;
+
 type Phase = "live" | "baseline" | "replay" | "continued";
 type Entry = { kind: string; bytes?: number[]; phase: Phase; occurrence: number; detail?: string };
 
@@ -11,6 +13,14 @@ interface QueryFixture {
   writeDone: number[];
   deliver(bytes: number[], phase: Phase, occurrence: number): Promise<void>;
   releaseBarrier(): void;
+  readCell(column: number, row: number): string;
+  conformance(): {
+    duplicateRejected: boolean;
+    wrongVersionRejected: boolean;
+    missingSurfaceRejected: boolean;
+    oldWrapperDetached: boolean;
+    nestedBytes: string[];
+  };
   snapshot(): {
     line: string;
     cursorX: number;
@@ -37,25 +47,33 @@ const terminal = new Terminal({
   cols: Number(params.get("cols") ?? 40),
   rows: 10,
   windowOptions: { getWinSizeChars: true },
-  theme: { foreground: "#c0c0c0", background: "#101010" },
+  theme: { foreground: "#c0c0c0", background: "#101010", red: "#010203" },
 });
 const entries: Entry[] = [];
 const outbound: number[][] = [];
 const writeDone: number[] = [];
 let phase: Phase = "live";
 let occurrence = 0;
+const pendingWrites: { phase: Phase; occurrence: number }[] = [];
 let barrierRelease: (() => void) | undefined;
 let disposed = false;
 const subscriptions: { dispose(): void }[] = [];
+let retainedBytes = 0;
 const record = (entry: Entry) => {
   if (entries.length >= 4096) throw new Error("Query observation limit exceeded");
+  retainedBytes += entry.bytes?.length ?? 0;
+  if (retainedBytes > 65_536) throw new Error("Query observation bytes exceed 64 KiB");
   entries.push(entry);
 };
 const observe = (value: QueryAdapterObservation) => record({ ...value, phase, occurrence });
 const adapted = params.get("adapter") === "private";
 const publicAttempt = params.get("adapter") === "public";
 const adapter = adapted
-  ? attachQueryInputAdapter(terminal, params.get("version") ?? "6.0.0", observe)
+  ? attachQueryInputAdapter(
+      terminal,
+      params.get("version") ?? __COVE_BUNDLED_XTERM_VERSION__,
+      observe,
+    )
   : undefined;
 
 const csiIds = [
@@ -108,6 +126,8 @@ subscriptions.push(
 subscriptions.push(
   terminal.onData((data) => {
     const bytes = Array.from(new TextEncoder().encode(data));
+    if (outbound.reduce((sum, item) => sum + item.length, 0) + bytes.length > 65_536)
+      throw new Error("Query outbound bytes exceed 64 KiB");
     outbound.push(bytes);
     record({ kind: "onData", bytes, phase, occurrence });
   }),
@@ -115,6 +135,8 @@ subscriptions.push(
 subscriptions.push(
   terminal.onBinary((data) => {
     const bytes = Array.from(data, (character) => character.charCodeAt(0));
+    if (outbound.reduce((sum, item) => sum + item.length, 0) + bytes.length > 65_536)
+      throw new Error("Query outbound bytes exceed 64 KiB");
     outbound.push(bytes);
     record({ kind: "onBinary", bytes, phase, occurrence });
   }),
@@ -149,16 +171,29 @@ const fixture: QueryFixture = {
   writeDone,
   deliver(bytes, nextPhase, nextOccurrence) {
     if (disposed) return Promise.reject(new Error("Disposed query fixture"));
-    phase = nextPhase;
-    occurrence = nextOccurrence;
+    if (bytes.length > 65_536) return Promise.reject(new Error("Query write exceeds 64 KiB"));
+    pendingWrites.push({ phase: nextPhase, occurrence: nextOccurrence });
+    if (pendingWrites.length === 1) {
+      phase = nextPhase;
+      occurrence = nextOccurrence;
+    }
     return new Promise<void>((resolve, reject) => {
       try {
         terminal.write(Uint8Array.from(bytes), () => {
+          if (pendingWrites[0]?.occurrence !== nextOccurrence)
+            throw new Error("xterm write callbacks changed order");
           writeDone.push(nextOccurrence);
           record({ kind: "write-done", phase: nextPhase, occurrence: nextOccurrence });
+          pendingWrites.shift();
+          const next = pendingWrites[0];
+          if (next) {
+            phase = next.phase;
+            occurrence = next.occurrence;
+          }
           resolve();
         });
       } catch (error) {
+        pendingWrites.pop();
         reject(error);
       }
     });
@@ -166,6 +201,69 @@ const fixture: QueryFixture = {
   releaseBarrier() {
     if (!barrierRelease) throw new Error("No held parser barrier");
     barrierRelease();
+  },
+  readCell(column, row) {
+    return terminal.buffer.active.getLine(row)?.getCell(column)?.getChars() ?? "";
+  },
+  conformance() {
+    const specimen = new Terminal({ cols: 2, rows: 2 });
+    const nestedBytes: string[] = [];
+    const sink = specimen.onData((data) => {
+      nestedBytes.push(data);
+      if (data === "x") specimen.input("y", true);
+    });
+    const specimenCore = (
+      specimen as unknown as {
+        _core: { coreService: { triggerDataEvent(data: string, wasUserInput?: boolean): void } };
+      }
+    )._core.coreService;
+    const original = specimenCore.triggerDataEvent;
+    const attached = attachQueryInputAdapter(specimen, "6.0.0", () => {});
+    const oldWrapper = specimenCore.triggerDataEvent;
+    let duplicateRejected = false;
+    let wrongVersionRejected = false;
+    let missingSurfaceRejected = false;
+    try {
+      try {
+        attachQueryInputAdapter(specimen, "6.0.0", () => {});
+      } catch {
+        duplicateRejected = true;
+      }
+      const wrongVersion = new Terminal();
+      try {
+        attachQueryInputAdapter(wrongVersion, "0.0.0", () => {});
+      } catch {
+        wrongVersionRejected = true;
+      } finally {
+        wrongVersion.dispose();
+      }
+      try {
+        attachQueryInputAdapter(
+          { _core: { coreService: { triggerDataEvent() {} } } } as unknown as Terminal,
+          "6.0.0",
+          () => {},
+        );
+      } catch {
+        missingSurfaceRejected = true;
+      }
+      specimen.input("x", true);
+    } finally {
+      attached.dispose();
+    }
+    const restored = specimenCore.triggerDataEvent === original;
+    oldWrapper.call(specimenCore, "stale", true);
+    const next = attachQueryInputAdapter(specimen, "6.0.0", () => {});
+    specimen.input("z", true);
+    next.dispose();
+    sink.dispose();
+    specimen.dispose();
+    return {
+      duplicateRejected,
+      wrongVersionRejected,
+      missingSurfaceRejected,
+      oldWrapperDetached: restored && nestedBytes.join("") === "xyz",
+      nestedBytes,
+    };
   },
   snapshot() {
     const line =

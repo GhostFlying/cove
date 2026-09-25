@@ -38,6 +38,14 @@ type Snapshot = {
   background: number[];
   palette1: number[];
 };
+type BaselinePart = {
+  baselineId: string;
+  atSeq: number;
+  chunkIndex: number;
+  chunkCount: number;
+  totalBytes: number;
+  payload: number[];
+};
 
 const run = { serverId: "q1-server", relayInstanceId: "q1-relay", runId: "q1-run" };
 const encoder = new TextEncoder();
@@ -89,32 +97,57 @@ function output(bytes: number[]): number[] {
   return frame("output", { kind: "output", run, seq: seq++ }, bytes);
 }
 
-function baseline(bytes: number[]): number[] {
-  if (bytes.length > 65_536) throw new Error("Baseline exceeds 64 KiB");
-  const chunks: number[][] = [];
-  for (let start = 0; start < bytes.length; start += 17)
-    chunks.push(bytes.slice(start, start + 17));
-  if (!chunks.length) chunks.push([]);
+function assembleBaseline(parts: BaselinePart[]): number[] {
+  const first = parts[0];
+  if (!first || first.totalBytes > 65_536 || first.chunkCount !== parts.length)
+    throw new Error("Incomplete or oversized baseline assembly");
   const received: number[] = [];
-  for (const [index, chunk] of chunks.entries()) {
+  for (const [index, part] of parts.entries()) {
+    if (
+      part.chunkIndex !== index ||
+      part.chunkCount !== first.chunkCount ||
+      part.baselineId !== first.baselineId ||
+      part.atSeq !== first.atSeq ||
+      part.totalBytes !== first.totalBytes
+    )
+      throw new Error("Duplicate, reordered or mismatched baseline chunk");
     received.push(
       ...frame(
         "baseline-chunk",
         {
           kind: "baseline-chunk",
           run,
-          baselineId: "q1-baseline",
-          atSeq: seq,
-          chunkIndex: index,
-          chunkCount: chunks.length,
-          totalBytes: bytes.length,
+          baselineId: part.baselineId,
+          atSeq: part.atSeq,
+          chunkIndex: part.chunkIndex,
+          chunkCount: part.chunkCount,
+          totalBytes: part.totalBytes,
         },
-        chunk,
+        part.payload,
       ),
     );
   }
-  if (received.length !== bytes.length || received.some((byte, index) => byte !== bytes[index]))
-    throw new Error("Incomplete baseline assembly");
+  if (received.length !== first.totalBytes) throw new Error("Incomplete baseline assembly");
+  return received;
+}
+
+function baseline(bytes: number[]): number[] {
+  if (bytes.length > 65_536) throw new Error("Baseline exceeds 64 KiB");
+  const chunks: number[][] = [];
+  for (let start = 0; start < bytes.length; start += 17)
+    chunks.push(bytes.slice(start, start + 17));
+  if (!chunks.length) chunks.push([]);
+  const parts = chunks.map((payload, chunkIndex) => ({
+    baselineId: "q1-baseline",
+    atSeq: seq,
+    chunkIndex,
+    chunkCount: chunks.length,
+    totalBytes: bytes.length,
+    payload,
+  }));
+  const received = assembleBaseline(parts);
+  if (received.some((byte, index) => byte !== bytes[index]))
+    throw new Error("Baseline byte mismatch");
   return received;
 }
 
@@ -189,6 +222,19 @@ async function queryOnly(
     adapted: number[];
   }[] = [];
   for (const phase of ["live", "baseline", "replay"] as const) {
+    if (phase === "baseline") {
+      for (const [page, adapter] of [
+        [reference, "reference"],
+        [adapted, "private"],
+      ] as const) {
+        const origin = await page.evaluate<string>("location.origin");
+        await page.goto(`${origin}/?fixture=query-input&adapter=${adapter}`, {
+          waitUntil: "networkidle",
+          timeout: 5_000,
+        });
+        await page.waitForFunction("window.coveQuery?.ready === true", null, { timeout: 3_000 });
+      }
+    }
     for (const item of fixtures.queryCases) {
       for (const page of [reference, adapted]) {
         if (item.setupBytes.length) await deliver(page, item.setupBytes, phase);
@@ -206,8 +252,22 @@ async function queryOnly(
       equal(adaptedBytes, [], `${phase}/${item.caseId} adapted output`);
       requireHook(referenceState, referenceId);
       requireHook(adaptedState, adaptedId);
+      const beforeContinuation = adaptedState.snapshot;
       await deliver(reference, item.continuationBytes, "continued");
       await deliver(adapted, item.continuationBytes, "continued");
+      const referenceAfter = (await inspect(reference)).snapshot;
+      const adaptedAfter = (await inspect(adapted)).snapshot;
+      equal(adaptedAfter, referenceAfter, `${phase}/${item.caseId} continued display and modes`);
+      if (beforeContinuation.cursorX < 39) {
+        const cell = await adapted.evaluate<string>(
+          `window.coveQuery.readCell(${beforeContinuation.cursorX},${beforeContinuation.cursorY})`,
+        );
+        equal(
+          cell,
+          decoder.decode(Uint8Array.from(item.continuationBytes)),
+          `${phase}/${item.caseId} continuation cell`,
+        );
+      }
       observations.push({
         caseId: item.caseId,
         phase,
@@ -217,8 +277,46 @@ async function queryOnly(
       });
     }
   }
+  const allQueries = fixtures.queryCases.flatMap((item) => [
+    ...item.setupBytes,
+    ...item.queryBytes,
+  ]);
+  const expectedBatch = flat(fixtures.queryCases.flatMap((item) => item.expectedLiveReplies));
+  const marker = Array.from(encoder.encode("\x1b]777;hold\x07"));
+  const barriers: { reference: number[]; adapted: number[]; expected: number[] } = {
+    reference: [],
+    adapted: [],
+    expected: [
+      ...expectedBatch,
+      ...expectedBatch,
+      ...fixtures.queryCases.find((item) => item.caseId === "da-secondary")!
+        .expectedLiveReplies[0]!,
+    ],
+  };
+  for (const [page, role] of [
+    [reference, "reference"],
+    [adapted, "adapted"],
+  ] as const) {
+    const before = flat((await inspect(page)).outbound).length;
+    const held = pendingDeliver(page, [...allQueries, ...marker, ...allQueries], "replay");
+    await page.waitForFunction(
+      "window.coveQuery.entries.some(e => e.kind === 'barrier-enter')",
+      null,
+      { timeout: 3_000 },
+    );
+    const queued = pendingDeliver(page, Array.from(encoder.encode("\x1b[>c")), "live");
+    await page.evaluate<void>("window.coveQuery.releaseBarrier()");
+    await held.done;
+    await queued.done;
+    const state = await inspect(page);
+    if (!state.writeDone.includes(held.id) || !state.writeDone.includes(queued.id))
+      throw new Error("Queued query write callback absent");
+    barriers[role] = flat(state.outbound).slice(before);
+  }
+  equal(barriers.reference, barriers.expected, "queued reference replies");
+  equal(barriers.adapted, [], "queued adapted replies");
   verifiedInput(await inspect(adapted), [], "adapted query-only stream");
-  return observations;
+  return { cases: observations, barriers };
 }
 
 async function keyboard(page: ProbePage): Promise<unknown> {
@@ -227,7 +325,11 @@ async function keyboard(page: ProbePage): Promise<unknown> {
   await page.keyboard.press("Enter");
   await page.keyboard.press("Backspace");
   await page.keyboard.press("ArrowUp");
-  const held = pendingDeliver(page, Array.from(encoder.encode("\x1b]777;hold\x07\x1b[5n")), "live");
+  const held = pendingDeliver(
+    page,
+    Array.from(encoder.encode("\x1b[5n\x1b]777;hold\x07\x1b[6n")),
+    "live",
+  );
   await page.waitForFunction(
     "window.coveQuery.entries.some(e => e.kind === 'barrier-enter')",
     null,
@@ -235,8 +337,10 @@ async function keyboard(page: ProbePage): Promise<unknown> {
   );
   await page.keyboard.type("b");
   await page.keyboard.press("Control+C");
+  const queued = pendingDeliver(page, Array.from(encoder.encode("\x1b[>c")), "live");
   await page.evaluate<void>("window.coveQuery.releaseBarrier()");
   await held.done;
+  await queued.done;
   await deliver(page, Array.from(encoder.encode("\x1b[?1h")), "live");
   await page.keyboard.press("ArrowUp");
   verifiedInput(
@@ -255,11 +359,12 @@ async function paste(page: ProbePage, fixtures: FixtureModule): Promise<unknown>
   const reply = new TextDecoder().decode(
     Uint8Array.from(fixtures.queryCases[0]!.expectedLiveReplies[0]!),
   );
-  const concatenated = fixtures.queryCases
+  const replyValues = fixtures.queryCases
     .flatMap((item) => item.expectedLiveReplies)
-    .map((bytes) => decoder.decode(Uint8Array.from(bytes)))
-    .join("");
+    .map((bytes) => decoder.decode(Uint8Array.from(bytes)));
+  const concatenated = replyValues.join("");
   await sendPaste(`é\n中${reply}`);
+  for (const value of replyValues) await sendPaste(value);
   await deliver(page, Array.from(encoder.encode("\x1b[?2004h")), "live");
   const held = pendingDeliver(page, Array.from(encoder.encode("\x1b]777;hold\x07\x1b[5n")), "live");
   await page.waitForFunction(
@@ -267,40 +372,102 @@ async function paste(page: ProbePage, fixtures: FixtureModule): Promise<unknown>
     null,
     { timeout: 3_000 },
   );
-  await sendPaste(concatenated);
+  await sendPaste(`prefix\x1b[?${concatenated}suffix`);
   await page.evaluate<void>("window.coveQuery.releaseBarrier()");
   await held.done;
   await deliver(page, Array.from(encoder.encode("\x1b[?2004l")), "live");
   await sendPaste("x\r\ny\n");
-  const expected = encoder.encode(`é\r中${reply}\x1b[200~${concatenated}\x1b[201~x\ry\r`);
+  const expected = encoder.encode(
+    `é\r中${reply}${concatenated}\x1b[200~prefix\x1b[?${concatenated}suffix\x1b[201~x\ry\r`,
+  );
   verifiedInput(await inspect(page), Array.from(expected), "paste bytes");
   return { expected: Array.from(expected), actual: flat((await inspect(page)).outbound) };
 }
 
 async function mouse(page: ProbePage): Promise<unknown> {
-  await deliver(page, Array.from(encoder.encode("\x1b[?1000h\x1b[?1006h")), "live");
   const box = await page.locator(".xterm-screen").boundingBox();
   if (!box) throw new Error("Mouse target geometry absent");
-  const x = box.x + box.width * (1.5 / 160);
-  const y = box.y + box.height * (1.5 / 10);
+  const x = box.x + box.width * (99.5 / 160);
+  const y = box.y + box.height * (3.5 / 10);
   await page.mouse.click(x, y);
+  equal(flat((await inspect(page)).outbound), [], "mouse mode-off control before tracking");
+  await deliver(page, Array.from(encoder.encode("\x1b[?1000h\x1b[?1006h")), "live");
+  const firstHeld = pendingDeliver(
+    page,
+    Array.from(encoder.encode("\x1b[5n\x1b]777;hold\x07\x1b[6n")),
+    "live",
+  );
+  await page.waitForFunction(
+    "window.coveQuery.entries.some(e => e.kind === 'barrier-enter')",
+    null,
+    { timeout: 3_000 },
+  );
+  await page.mouse.click(x, y);
+  await page.mouse.wheel(0, -120);
+  await page.evaluate<void>("window.coveQuery.releaseBarrier()");
+  await firstHeld.done;
   const state = await inspect(page);
-  if (!state.outbound.length) throw new Error("SGR mouse produced no input");
+  const sgr = state.outbound;
+  const expectedSgr = [
+    Array.from(encoder.encode("\x1b[<0;100;4M")),
+    Array.from(encoder.encode("\x1b[<0;100;4m")),
+    Array.from(encoder.encode("\x1b[<64;100;4M")),
+  ];
+  equal(sgr, expectedSgr, "SGR mouse bytes");
+  await deliver(page, Array.from(encoder.encode("\x1b[?1049h")), "live");
+  const secondHeld = pendingDeliver(
+    page,
+    Array.from(encoder.encode("\x1b]777;hold\x07\x1b[5n")),
+    "replay",
+  );
+  await page.waitForFunction(
+    `window.coveQuery.entries.filter(e => e.kind === 'barrier-enter').length >= 2`,
+    null,
+    { timeout: 3_000 },
+  );
+  await page.mouse.click(x, y);
+  await page.mouse.wheel(0, -120);
+  await page.evaluate<void>("window.coveQuery.releaseBarrier()");
+  await secondHeld.done;
+  const alternate = (await inspect(page)).outbound.slice(sgr.length);
+  equal(alternate, expectedSgr, "alternate-buffer SGR mouse bytes");
+  await deliver(page, Array.from(encoder.encode("\x1b[?1049l")), "live");
   await deliver(page, Array.from(encoder.encode("\x1b[?1006l")), "live");
-  const highX = box.x + box.width * (99.5 / 160);
-  await page.mouse.click(highX, y);
+  const thirdHeld = pendingDeliver(
+    page,
+    Array.from(encoder.encode("\x1b]777;hold\x07\x1b[5n")),
+    "live",
+  );
+  await page.waitForFunction(
+    `window.coveQuery.entries.filter(e => e.kind === 'barrier-enter').length >= 3`,
+    null,
+    { timeout: 3_000 },
+  );
+  await page.mouse.click(x, y);
+  await page.evaluate<void>("window.coveQuery.releaseBarrier()");
+  await thirdHeld.done;
   const legacy = await inspect(page);
-  if (
-    !legacy.entries.some(
-      (entry) => entry.kind === "onBinary" && (entry.bytes ?? []).some((byte) => byte > 127),
-    )
-  )
-    throw new Error("Legacy binary mouse did not preserve a high byte");
+  const legacyBytes = legacy.outbound.slice(sgr.length + alternate.length);
+  equal(
+    legacyBytes,
+    [
+      [27, 91, 77, 32, 132, 36],
+      [27, 91, 77, 35, 132, 36],
+    ],
+    "legacy binary mouse bytes",
+  );
+  if (legacy.entries.filter((entry) => entry.kind === "onBinary").length !== 2)
+    throw new Error("Legacy mouse did not use exactly two binary events");
   await deliver(page, Array.from(encoder.encode("\x1b[?1000l")), "live");
   const before = flat(legacy.outbound);
   await page.mouse.click(x, y);
   equal(flat((await inspect(page)).outbound), before, "mode-off mouse control");
-  return { sgr: state.outbound, legacy: legacy.outbound.slice(state.outbound.length) };
+  verifiedInput(
+    await inspect(page),
+    flat([...expectedSgr, ...expectedSgr, ...legacyBytes]),
+    "complete mouse stream",
+  );
+  return { sgr, alternate, legacy: legacyBytes };
 }
 
 async function splitMixed(
@@ -308,36 +475,100 @@ async function splitMixed(
   publicPage: ProbePage,
   fixtures: FixtureModule,
 ): Promise<unknown> {
-  const short = Array.from(encoder.encode("\x1b[5n"));
-  for (let cut = 1; cut < short.length; cut++) {
-    await deliver(page, short.slice(0, cut), "live");
-    await deliver(page, short.slice(cut), "live");
+  await deliver(page, Array.from(encoder.encode("A")), "live");
+  for (const character of ["é", "€", "😀"]) {
+    const utf8 = Array.from(encoder.encode(character));
+    for (const byte of utf8) await deliver(page, [byte], "live");
   }
-  const utf8 = Array.from(encoder.encode("é"));
-  await deliver(page, utf8.slice(0, 1), "live");
-  await deliver(page, utf8.slice(1), "live");
+  await deliver(page, Array.from(encoder.encode("Z")), "live");
+  const unicodeLine = (await inspect(page)).snapshot.line;
+  equal(unicodeLine, "Aé€😀Z", "split UTF-8 surrounding text");
+  const cuts: Record<string, number> = {};
+  for (const item of fixtures.queryCases) {
+    if (item.setupBytes.length) await deliver(page, item.setupBytes, "live");
+    for (let cut = 1; cut < item.queryBytes.length; cut++) {
+      const beforeHooks = (await inspect(page)).entries.filter(
+        (entry) => entry.kind === "query-hook",
+      ).length;
+      await deliver(page, item.queryBytes.slice(0, cut), "live");
+      await deliver(page, item.queryBytes.slice(cut), "live");
+      const afterHooks = (await inspect(page)).entries.filter(
+        (entry) => entry.kind === "query-hook",
+      ).length;
+      if (afterHooks !== beforeHooks + 1)
+        throw new Error(`Split ${item.caseId} cut ${cut} did not finish once`);
+    }
+    cuts[item.caseId] = item.queryBytes.length - 1;
+  }
   await deliver(page, fixtures.mixedColor.setupBytes, "live");
   await deliver(publicPage, fixtures.mixedColor.setupBytes, "live");
   const originalPublic = (await inspect(publicPage)).snapshot.palette1;
-  await deliver(page, fixtures.mixedColor.queryBytes, "live");
-  await deliver(publicPage, fixtures.mixedColor.queryBytes, "live");
-  const privateState = await inspect(page);
-  const publicState = await inspect(publicPage);
-  equal(
-    privateState.snapshot.palette1,
-    fixtures.mixedColor.expectedPalette,
-    "mixed OSC setter state",
+  const held = pendingDeliver(
+    page,
+    [...fixtures.mixedColor.queryBytes, ...Array.from(encoder.encode("\x1b]777;hold\x07"))],
+    "replay",
   );
+  await page.waitForFunction(
+    "window.coveQuery.entries.some(e => e.kind === 'barrier-enter')",
+    null,
+    { timeout: 3_000 },
+  );
+  equal(
+    (await inspect(page)).snapshot.palette1,
+    fixtures.mixedColor.expectedPalette,
+    "mixed OSC setter before barrier release",
+  );
+  await deliver(publicPage, fixtures.mixedColor.queryBytes, "live");
+  const publicState = await inspect(publicPage);
   equal(publicState.snapshot.palette1, originalPublic, "public hook counterexample");
+  const reset = pendingDeliver(page, Array.from(encoder.encode("\x1b]104;1\x1b\\")), "continued");
+  await page.evaluate<void>("window.coveQuery.releaseBarrier()");
+  await held.done;
+  await reset.done;
+  const privateState = await inspect(page);
+  equal(privateState.snapshot.palette1, [1, 2, 3], "mixed OSC reset state");
   verifiedInput(privateState, [], "split/mixed query stream");
+  const origin = await publicPage.evaluate<string>("location.origin");
+  await publicPage.goto(`${origin}/?fixture=query-input&adapter=reference`, {
+    waitUntil: "networkidle",
+    timeout: 5_000,
+  });
+  await publicPage.waitForFunction("window.coveQuery?.ready === true", null, { timeout: 3_000 });
+  await deliver(publicPage, fixtures.mixedColor.setupBytes, "live");
+  await deliver(publicPage, fixtures.mixedColor.queryBytes, "live");
+  equal(
+    flat((await inspect(publicPage)).outbound),
+    flat(fixtures.mixedColor.expectedLiveReplies),
+    "unadapted mixed OSC reply",
+  );
   return {
     publicCounterexample: { before: originalPublic, after: publicState.snapshot.palette1 },
-    privatePalette: privateState.snapshot.palette1,
-    line: privateState.snapshot.line,
+    privatePalette: fixtures.mixedColor.expectedPalette,
+    resetPalette: privateState.snapshot.palette1,
+    cuts,
+    line: unicodeLine,
   };
 }
 
-async function lifetime(page: ProbePage): Promise<unknown> {
+async function lifetime(
+  page: ProbePage,
+  context: Parameters<typeof openQueryPage>[0],
+): Promise<unknown> {
+  const conformance = await page.evaluate<{
+    duplicateRejected: boolean;
+    wrongVersionRejected: boolean;
+    missingSurfaceRejected: boolean;
+    oldWrapperDetached: boolean;
+    nestedBytes: string[];
+  }>("window.coveQuery.conformance()");
+  if (
+    !conformance.duplicateRejected ||
+    !conformance.wrongVersionRejected ||
+    !conformance.missingSurfaceRejected ||
+    !conformance.oldWrapperDetached
+  )
+    throw new Error(`Adapter conformance failed: ${JSON.stringify(conformance)}`);
+  equal(conformance.nestedBytes, ["x", "y", "z"], "nested callback and reattach bytes");
   const held = pendingDeliver(
     page,
     Array.from(encoder.encode("\x1b]777;hold\x07\x1b[5n")),
@@ -350,10 +581,92 @@ async function lifetime(page: ProbePage): Promise<unknown> {
   );
   await page.evaluate<void>("window.coveQuery.dispose()");
   await held.done;
-  const state = await inspect(page).catch(() => null);
-  if (state && flat(state.outbound).length)
-    throw new Error("Disposed fixture emitted outbound input");
-  return { oldOutbound: state?.outbound ?? [], oldWriteDone: state?.writeDone ?? [] };
+  const state = await page.evaluate<{ outbound: number[][]; writeDone: number[] }>(
+    "({ outbound: window.coveQuery.outbound, writeDone: window.coveQuery.writeDone })",
+  );
+  if (flat(state.outbound).length) throw new Error("Disposed fixture emitted outbound input");
+  const replacement = await openQueryPage(context, "private");
+  await replacement.locator(".xterm-helper-textarea").focus();
+  await replacement.keyboard.type("r");
+  await deliver(replacement, Array.from(encoder.encode("\x1b[5n")), "continued");
+  verifiedInput(await inspect(replacement), [114], "replacement input generation");
+  equal(flat(state.outbound), [], "old generation after replacement");
+  return {
+    conformance,
+    oldOutbound: state.outbound,
+    oldWriteDone: state.writeDone,
+    replacementOutbound: (await inspect(replacement)).outbound,
+  };
+}
+
+async function focus(page: ProbePage): Promise<unknown> {
+  await deliver(page, Array.from(encoder.encode("\x1b[?1004h")), "live");
+  const before = (await inspect(page)).entries.filter(
+    (entry) => entry.kind === "automatic-data",
+  ).length;
+  await page.locator(".xterm-helper-textarea").focus();
+  await page.mouse.click(1, 1);
+  const state = await inspect(page);
+  const automatic = state.entries
+    .filter((entry) => entry.kind === "automatic-data")
+    .slice(before)
+    .map((entry) => entry.bytes);
+  equal(
+    automatic,
+    [Array.from(encoder.encode("\x1b[I")), Array.from(encoder.encode("\x1b[O"))],
+    "focus reports are separate automatic events",
+  );
+  verifiedInput(state, [], "focus report policy");
+  if (state.entries.some((entry) => entry.kind === "query-hook"))
+    throw new Error("Focus report was mislabeled as a query hook");
+  return { automatic, outbound: state.outbound };
+}
+
+async function transportRejection(page: ProbePage): Promise<unknown> {
+  const rejected: string[] = [];
+  const expectReject = (label: string, action: () => unknown) => {
+    let failed = false;
+    try {
+      action();
+    } catch {
+      failed = true;
+    }
+    if (!failed) throw new Error(`Malformed delivery was accepted: ${label}`);
+    rejected.push(label);
+  };
+  for (const key of ["serverId", "relayInstanceId", "runId"] as const) {
+    expectReject(`wrong-${key}`, () =>
+      frame("output", { kind: "output", run: { ...run, [key]: `wrong-${key}` }, seq: 1 }, [65]),
+    );
+  }
+  const first: BaselinePart = {
+    baselineId: "base",
+    atSeq: 4,
+    chunkIndex: 0,
+    chunkCount: 2,
+    totalBytes: 2,
+    payload: [65],
+  };
+  const second: BaselinePart = { ...first, chunkIndex: 1, payload: [66] };
+  equal(assembleBaseline([first, second]), [65, 66], "valid baseline assembly control");
+  expectReject("missing-chunk", () => assembleBaseline([first]));
+  expectReject("duplicate-chunk", () => assembleBaseline([first, first]));
+  expectReject("reordered-chunk", () => assembleBaseline([second, first]));
+  expectReject("wrong-baseline-id", () =>
+    assembleBaseline([first, { ...second, baselineId: "other" }]),
+  );
+  expectReject("wrong-at-seq", () => assembleBaseline([first, { ...second, atSeq: 5 }]));
+  expectReject("wrong-total", () => assembleBaseline([first, { ...second, totalBytes: 3 }]));
+  expectReject("oversized-baseline", () =>
+    assembleBaseline([{ ...first, chunkCount: 1, totalBytes: 65_537, payload: [] }]),
+  );
+  expectReject("oversized-output", () => output(Array(65_537).fill(65)));
+  expectReject("fatal-utf8", () => decoder.decode(Uint8Array.of(0xff)));
+  const state = await inspect(page);
+  equal(state.writeDone, [], "rejected delivery callbacks");
+  verifiedInput(state, [], "rejected delivery outbound");
+  equal(state.snapshot.line, "", "rejected delivery buffer");
+  return { rejected, delivered: state.writeDone.length };
 }
 
 export async function runQueryInputProbe(scenario: string): Promise<unknown> {
@@ -378,7 +691,9 @@ export async function runQueryInputProbe(scenario: string): Promise<unknown> {
     else if (scenario === "split-mixed") {
       const publicPage = await openQueryPage(context, "public");
       value = await splitMixed(adapted, publicPage, fixture);
-    } else if (scenario === "lifetime") value = await lifetime(adapted);
+    } else if (scenario === "lifetime") value = await lifetime(adapted, context);
+    else if (scenario === "focus") value = await focus(adapted);
+    else if (scenario === "transport-rejection") value = await transportRejection(adapted);
     else if (scenario === "held-timeout") {
       const held = pendingDeliver(adapted, Array.from(encoder.encode("\x1b]777;hold\x07")), "live");
       await adapted.waitForFunction(
