@@ -82,7 +82,7 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 
 CI 保留严格必需的 `check (ubuntu-latest)`、`check (macos-latest)` 两项，冻结安装后先核对
 Node/pnpm 精确版本，再执行 `pnpm check`。每个 job 上传 `.cache/ci` 中的环境、inventory、
-命令退出码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
+逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
 缺失 artifact 会使该 job 失败。C1 只覆盖真实 tooling 测试；应用、PTY、原生 ABI 与移动端
 测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。C1 实施记录见
 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
