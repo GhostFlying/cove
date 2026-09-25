@@ -5,6 +5,14 @@ A focused workspace for tasks and coding agents, across desktop, web, mobile, an
 ## Status
 
 Early design stage. No application has been implemented yet.
+The monorepo uses pnpm workspace, internal workspace dependencies, and
+package-scoped scripts; no Turborepo/Nx layer is planned for the initial setup.
+Server and pure TypeScript packages will use tsc with Project References and built
+package exports. Electron uses electron-vite; the terminal WebView entry uses
+Vite, and RN uses Metro. Core testing will use Vitest, with Playwright for browser
+and Electron checks. Root tooling is initialized; application and native integration
+remain unimplemented. See [development setup](docs/development.md) for pinned
+versions, commands, and current validation coverage.
 Initial native platforms: macOS desktop, macOS/Linux servers, and iOS/Android mobile.
 The macOS desktop uses Electron. A Web App is a phase-two design target,
 currently limited to access via Tailscale.
@@ -74,6 +82,9 @@ The [server architecture draft](docs/server-architecture.md) covers direct
 connectivity, state ownership, synchronization, and service lifetime.
 The [terminal architecture](docs/terminal-architecture.md) records the selected
 terminal stack, recovery boundaries, subscription model, and flow-control design.
+The [engineering plan](docs/engineering-plan.md) covers the confirmed monorepo
+direction and proposed module boundaries, milestones, and concurrent-agent workflow.
+Contributors and coding agents should read [AGENTS.md](AGENTS.md).
 
 Cove treats agents as CLI processes running in terminals. Managed agents,
 lossless agent-session migration, and agent database rewrites are outside the

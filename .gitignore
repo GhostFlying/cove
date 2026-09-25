@@ -1,1 +1,11 @@
 .DS_Store
+node_modules/
+dist/
+.cache/
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+.env
+.env.*
+!.env.example

@@ -49,10 +49,10 @@ Mobile 通过系统 Tailnet 连接执行主机，不内嵌 Tailscale；移动端
 
 以下保留两条路线的取舍，已选择第二条：
 
-| 路线 | 收益 | 代价 |
-| --- | --- | --- |
-| Relay 只转发字节并保留有限尾部 | 实现较少 | 不能保证新客户端仅靠任意尾部重建 TUI 状态 |
-| Host 持续维护 headless 终端状态，提供快照和增量 | 无客户端时仍能建立恢复起点，支持后台 tab 释放 | 增加 host 解析成本与快照兼容性责任 |
+| 路线                                            | 收益                                          | 代价                                      |
+| ----------------------------------------------- | --------------------------------------------- | ----------------------------------------- |
+| Relay 只转发字节并保留有限尾部                  | 实现较少                                      | 不能保证新客户端仅靠任意尾部重建 TUI 状态 |
+| Host 持续维护 headless 终端状态，提供快照和增量 | 无客户端时仍能建立恢复起点，支持后台 tab 释放 | 增加 host 解析成本与快照兼容性责任        |
 
 已确认传输路线为 VT 字节流，不传字符网格快照或 cell 增量；两条路线的区别是服务端是否维护状态，并非输出编码不同。
 已选择第二条：服务端持续解析所有存活终端的输出，恢复时提供可重放的 VT 基线与必要元数据。PTY 输出是有状态控制流：颜色、光标、alternate screen、输入模式、
@@ -109,12 +109,12 @@ Terminal 查询回复也是难点：headless 和多个客户端模拟器可能�
 库组合、单一权威模型、PTY 与模型同 worker、增量优先恢复及有限历史已确认。
 具体库版本、恢复字段、IPC、流控参数与兼容性仍待实现和原型验证；选型确定不代表实现已验证。
 
-| 部件 | 已选方案 | 选择理由与限制 |
-| --- | --- | --- |
-| PTY | node-pty | 支持 macOS/Linux，已有 spawn/read/write/resize/pause/resume；原生模块需随 server runtime 构建和发布 |
-| 服务端终端模型 | @xterm/headless | 与第一代客户端同族，便于验证；仍经适配器隔离，不把库版本或私有状态作为 wire 契约 |
-| VT 恢复生成 | addon-serialize 作为基础，补足 profile 内所需状态 | 可输出 VT、有限历史与部分模式；不是完整进程或任意解析器状态的序列化保证 |
-| 进程归属 | 一个运行实例固定归属某个终端子进程，其 PTY 和 headless 同进程 | 避免全部原始输出先经主进程；新实例按负载分配，不在一期迁移存活 PTY |
+| 部件           | 已选方案                                                      | 选择理由与限制                                                                                      |
+| -------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| PTY            | node-pty                                                      | 支持 macOS/Linux，已有 spawn/read/write/resize/pause/resume；原生模块需随 server runtime 构建和发布 |
+| 服务端终端模型 | @xterm/headless                                               | 与第一代客户端同族，便于验证；仍经适配器隔离，不把库版本或私有状态作为 wire 契约                    |
+| VT 恢复生成    | addon-serialize 作为基础，补足 profile 内所需状态             | 可输出 VT、有限历史与部分模式；不是完整进程或任意解析器状态的序列化保证                             |
+| 进程归属       | 一个运行实例固定归属某个终端子进程，其 PTY 和 headless 同进程 | 避免全部原始输出先经主进程；新实例按负载分配，不在一期迁移存活 PTY                                  |
 
 ```text
 Shell / agent
@@ -272,12 +272,12 @@ Server/CLI 已选 TypeScript/Node.js，终端处理使用有界子进程池；�
 
 建议产品侧依赖 Cove 自己的 TerminalBackend 契约，接口名称和字段仍待原型验证。
 
-| 层 | 负责内容 | 替换要求 |
-| --- | --- | --- |
-| Session controller | 会话身份、协议、顺序、恢复、focus/controlEpoch、输入权限 | 不引用 xterm/DOM/Lynx 私有对象 |
-| Terminal backend | 安装协商后的快照、应用有序输出/resize、测量可用网格、报告解析进度 | 可封装完整 xterm 组件，也可组合独立终端引擎和 GPU 视图 |
-| 状态引擎 | VT 解析、字符与属性、模式、光标及有限历史 | 后端内部可替换；server 的状态模块同样通过适配器接入 |
-| 画面与平台交互 | 绘制、字形、选区、输入法、粘贴、键盘、无障碍及资源生命周期 | 可由 WebView、Lynx 原生 GPU 等实现，不直接控制 PTY |
+| 层                 | 负责内容                                                          | 替换要求                                               |
+| ------------------ | ----------------------------------------------------------------- | ------------------------------------------------------ |
+| Session controller | 会话身份、协议、顺序、恢复、focus/controlEpoch、输入权限          | 不引用 xterm/DOM/Lynx 私有对象                         |
+| Terminal backend   | 安装协商后的快照、应用有序输出/resize、测量可用网格、报告解析进度 | 可封装完整 xterm 组件，也可组合独立终端引擎和 GPU 视图 |
+| 状态引擎           | VT 解析、字符与属性、模式、光标及有限历史                         | 后端内部可替换；server 的状态模块同样通过适配器接入    |
+| 画面与平台交互     | 绘制、字形、选区、输入法、粘贴、键盘、无障碍及资源生命周期        | 可由 WebView、Lynx 原生 GPU 等实现，不直接控制 PTY     |
 
 TerminalBackend 最小职责建议为 attach/detach、restore、applyEvents、measureGrid、
 setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent、focusIntent、
@@ -312,11 +312,11 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 
 ## 5. 前后台资源管理
 
-| 状态 | 客户端行为 | Host 行为 |
-| --- | --- | --- |
-| 可见 tab/pane | 实时输出，优先调度输入与绘制 | 正常维护状态并发送订阅增量 |
-| 短期隐藏 | 有界保留本地状态，降低处理频率或暂停增量订阅 | 继续维护状态 |
-| 长期隐藏 | 释放 view/模拟器及 GPU 资源，只保留身份与 UI 元数据 | 继续维护状态，激活时提供快照 |
+| 状态          | 客户端行为                                          | Host 行为                    |
+| ------------- | --------------------------------------------------- | ---------------------------- |
+| 可见 tab/pane | 实时输出，优先调度输入与绘制                        | 正常维护状态并发送订阅增量   |
+| 短期隐藏      | 有界保留本地状态，降低处理频率或暂停增量订阅        | 继续维护状态                 |
+| 长期隐藏      | 释放 view/模拟器及 GPU 资源，只保留身份与 UI 元数据 | 继续维护状态，激活时提供快照 |
 
 这些是内部资源状态，不要求用户理解或手动管理。
 多个可见 split 各自拥有 view；资源预算按可见 pane 数及 host 实测容量制定，暂不写死数量。
@@ -414,12 +414,12 @@ WebGL addon 是可选 WebGL2 渲染后端，官方给出了 context loss 时卸�
 
 ### 10.2 RN 与 Lynx 都有 WebView 路线
 
-| 路线 | 已核实依据 | 尚需验证 |
-| --- | --- | --- |
-| RN + react-native-webview + xterm | 组件支持 iOS/Android，提供消息桥及内容进程退出通知 | 真机输入法、键盘避让、选区、后台恢复、桥接吞吐与依赖版本 |
-| Lynx + WebView XElement + xterm | 官方 next 文档有 webview；上游 develop 已有 iOS WKWebView 与 Android WebView 实现 | 锁定发行包的接入/注册、平台 API 差异、进程退出恢复和同样的终端交互 |
-| Lynx + WebGL / WebGPU + 终端引擎 | 后续候选路线，目标运行时能力待验证 | 具体图形接口、字形栅格化、输入法/选区、终端状态引擎、协议恢复与真机性能 |
-| RN/Lynx 原生终端视图 | 可作为独立实现路线研究 | 需要另选/适配终端引擎及输入、字体、选择和无障碍，不是加一个 WebGL 组件即可 |
+| 路线                              | 已核实依据                                                                        | 尚需验证                                                                   |
+| --------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| RN + react-native-webview + xterm | 组件支持 iOS/Android，提供消息桥及内容进程退出通知                                | 真机输入法、键盘避让、选区、后台恢复、桥接吞吐与依赖版本                   |
+| Lynx + WebView XElement + xterm   | 官方 next 文档有 webview；上游 develop 已有 iOS WKWebView 与 Android WebView 实现 | 锁定发行包的接入/注册、平台 API 差异、进程退出恢复和同样的终端交互         |
+| Lynx + WebGL / WebGPU + 终端引擎  | 后续候选路线，目标运行时能力待验证                                                | 具体图形接口、字形栅格化、输入法/选区、终端状态引擎、协议恢复与真机性能    |
+| RN/Lynx 原生终端视图              | 可作为独立实现路线研究                                                            | 需要另选/适配终端引擎及输入、字体、选择和无障碍，不是加一个 WebGL 组件即可 |
 
 RN 依据：[组件仓库](https://github.com/react-native-webview/react-native-webview)、
 [生命周期和消息 API](https://github.com/react-native-webview/react-native-webview/blob/master/docs/Reference.md)。
@@ -494,14 +494,14 @@ Session controller 可以按容器部署在 WebView 或 native 一侧，避免�
 
 ### 11.1 按层比较，不把 GPU 标签当作完整终端能力
 
-| 方案 | 引擎与现有绘制 | 对 Cove 的价值 | 首期主要代价 / 判断 |
-| --- | --- | --- | --- |
-| [xterm.js](https://github.com/xtermjs/xterm.js)，6.0.0，MIT | TS/JS 模拟器；浏览器默认 DOM、可选 WebGL2；Node headless | 现成浏览器终端集成基线，headless 可用于 server 对照 | 浏览器组件和 WebGL addon 依赖 DOM；原生 RN 需要另一套 view，headless 在 Hermes 未验证 |
-| [ghostty-web](https://github.com/coder/ghostty-web)，0.4.0，MIT | Ghostty WASM；Canvas2D 文字与绘制 | 相对直接的 Ghostty + Canvas 接入，导出低层 GhosttyTerminal 与渲染接口 | 不是桌面 Ghostty 的 GPU renderer；浏览器输入/字体接口和 WASM 运行时需适配；不能默认已有完整恢复契约 |
-| [Vercel wterm](https://github.com/vercel-labs/wterm)，0.5.0，Apache-2.0 | Zig WASM 轻量核心，另有 Ghostty 核心；DOM renderer | TerminalCore 分层清楚，浏览器原生选区/查找/无障碍值得参考 | 官方标为 Labs experiment；RN 原生路径无法直接保留 DOM 优势，需自建 renderer；两种核心需分别验证 |
-| [restty](https://github.com/wiedymi/restty)，0.3.0，MIT | Ghostty WASM；WebGPU / WebGL2；text-shaper 处理文字 | 现有 GPU renderer 移植的优先候选，有 DOM-free headless | early release，内部渲染 API 不稳定；仍有 DOM 和 Canvas2D 彩色字形依赖；恢复日志有上限 |
-| [gespenst](https://github.com/tobilg/gespenst)，0.1.2，MIT | Ghostty WASM；GPU 背景 + Canvas2D 文字，可全 Canvas2D | headless 的 cells、changed rows、历史、输入编码与状态快照很贴近 Cove | 很早期；现有 renderer 不等于原生 GPU 文字；serialize addon 校验引擎构建身份，不能直接作为稳定 wire 格式 |
-| [Omni Terminal](https://github.com/omnidotdev/terminal)，源码 0.4.2，Apache-2.0 | Rio 衍生 Rust 应用；独立终端 backend、Sugarloaf / wgpu renderer | 完整原生终端架构参考，有 Web/WASM 和 Android frontend | 属于应用/组件群，非即插即用 RN 组件；各平台标 experimental，未列出 iOS frontend；接入范围最大 |
+| 方案                                                                            | 引擎与现有绘制                                                  | 对 Cove 的价值                                                        | 首期主要代价 / 判断                                                                                     |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| [xterm.js](https://github.com/xtermjs/xterm.js)，6.0.0，MIT                     | TS/JS 模拟器；浏览器默认 DOM、可选 WebGL2；Node headless        | 现成浏览器终端集成基线，headless 可用于 server 对照                   | 浏览器组件和 WebGL addon 依赖 DOM；原生 RN 需要另一套 view，headless 在 Hermes 未验证                   |
+| [ghostty-web](https://github.com/coder/ghostty-web)，0.4.0，MIT                 | Ghostty WASM；Canvas2D 文字与绘制                               | 相对直接的 Ghostty + Canvas 接入，导出低层 GhosttyTerminal 与渲染接口 | 不是桌面 Ghostty 的 GPU renderer；浏览器输入/字体接口和 WASM 运行时需适配；不能默认已有完整恢复契约     |
+| [Vercel wterm](https://github.com/vercel-labs/wterm)，0.5.0，Apache-2.0         | Zig WASM 轻量核心，另有 Ghostty 核心；DOM renderer              | TerminalCore 分层清楚，浏览器原生选区/查找/无障碍值得参考             | 官方标为 Labs experiment；RN 原生路径无法直接保留 DOM 优势，需自建 renderer；两种核心需分别验证         |
+| [restty](https://github.com/wiedymi/restty)，0.3.0，MIT                         | Ghostty WASM；WebGPU / WebGL2；text-shaper 处理文字             | 现有 GPU renderer 移植的优先候选，有 DOM-free headless                | early release，内部渲染 API 不稳定；仍有 DOM 和 Canvas2D 彩色字形依赖；恢复日志有上限                   |
+| [gespenst](https://github.com/tobilg/gespenst)，0.1.2，MIT                      | Ghostty WASM；GPU 背景 + Canvas2D 文字，可全 Canvas2D           | headless 的 cells、changed rows、历史、输入编码与状态快照很贴近 Cove  | 很早期；现有 renderer 不等于原生 GPU 文字；serialize addon 校验引擎构建身份，不能直接作为稳定 wire 格式 |
+| [Omni Terminal](https://github.com/omnidotdev/terminal)，源码 0.4.2，Apache-2.0 | Rio 衍生 Rust 应用；独立终端 backend、Sugarloaf / wgpu renderer | 完整原生终端架构参考，有 Web/WASM 和 Android frontend                 | 属于应用/组件群，非即插即用 RN 组件；各平台标 experimental，未列出 iOS frontend；接入范围最大           |
 
 上述许可为项目声明；真正采用时还需核对分发的字体、WASM 和其他依赖许可。
 此处不以 README 性能数字或 GPU API 新旧排序；Cove 更看重实际 agent TUI、恢复、输入与维护边界。
@@ -550,12 +550,12 @@ TerminalCore 包含写入、cell、dirty rows、光标/模式、历史和回复�
 
 ### 11.3 RN/Expo 不依赖 WebView 的实际选项
 
-| 图形基础 | 已核实能力 | 对终端的边界 |
-| --- | --- | --- |
-| [Expo GL](https://docs.expo.dev/versions/latest/sdk/gl-view/) | iOS/Android 原生 GL surface，WebGL 风格 API；包含于 Expo Go | 需验证所用 WebGL2 API 子集与资源生命周期；不提供 DOM、Canvas2D 文字或终端输入 |
+| 图形基础                                                                                                  | 已核实能力                                                          | 对终端的边界                                                                               |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| [Expo GL](https://docs.expo.dev/versions/latest/sdk/gl-view/)                                             | iOS/Android 原生 GL surface，WebGL 风格 API；包含于 Expo Go         | 需验证所用 WebGL2 API 子集与资源生命周期；不提供 DOM、Canvas2D 文字或终端输入              |
 | [react-native-webgpu](https://wcandillon.github.io/react-native-webgpu/docs/getting-started/installation) | Dawn 原生 WebGPU；文档支持 iOS/Android 等，当前要求 RN 0.81+ 新架构 | 可复用相应 GPU 算法/着色器，但需适配 surface、present、字体及 runtime；Expo 用原生开发构建 |
-| [React Native Skia](https://shopify.github.io/react-native-skia/docs/text/paragraph/) | 原生 2D、文字、字体 fallback、Paragraph 能力 | 可直接实现终端网格绘制；不是浏览器 CanvasRenderingContext2D 的原样替代品 |
-| [react-native-canvas](https://github.com/iddan/react-native-canvas/blob/master/src/Canvas.js) | Canvas API 的 RN 包装 | 源码使用 WebView，不满足这次无 WebView 路线 |
+| [React Native Skia](https://shopify.github.io/react-native-skia/docs/text/paragraph/)                     | 原生 2D、文字、字体 fallback、Paragraph 能力                        | 可直接实现终端网格绘制；不是浏览器 CanvasRenderingContext2D 的原样替代品                   |
+| [react-native-canvas](https://github.com/iddan/react-native-canvas/blob/master/src/Canvas.js)             | Canvas API 的 RN 包装                                               | 源码使用 WebView，不满足这次无 WebView 路线                                                |
 
 RN WebGPU 的 Expo 接入和呈现方式见 [Expo 文档](https://wcandillon.github.io/react-native-webgpu/docs/getting-started/expo)、
 [Canvas 文档](https://wcandillon.github.io/react-native-webgpu/docs/getting-started/canvas)。
@@ -622,13 +622,13 @@ RN WebGPU 默认绘制逻辑仍运行于 React 所在 JS 线程；可以改用 w
 依据：[RN WebGPU worklets](https://wcandillon.github.io/react-native-webgpu/docs/integrations/worklets)、
 [RN performance](https://reactnative.dev/docs/performance)。
 
-| 成本 | 去掉 WebView 的潜在收益 | 不能默认的结论 |
-| --- | --- | --- |
-| 数据传输 | 减少 RN 与网页之间的序列化、复制和消息排队 | WebView 不必经 RN 转发全部终端流；可达且授权条件允许时可直接建立 WebSocket |
-| 绘制 | 更直接控制资源、提交、批处理及生命周期 | 浏览器 GPU renderer 本身已做优化，原生或 WebGPU 标签不保证更快 |
-| 线程 | 将热点放在独立 runtime/原生线程 | 全部搬入 RN JS 线程可能与 app UI 争抢 CPU；UI 线程也不能承载无界解析 |
-| 内存与启动 | 可能减少网页容器和独立运行环境成本 | 原生引擎、字体/GPU 缓存及模块同样有成本；测量须覆盖 app 相关进程 |
-| 输入 | 更直接整合原生 IME、键盘与手势 | 完整输入语义不会自动获得；远端回显还受网络和 PTY 程序影响 |
+| 成本       | 去掉 WebView 的潜在收益                    | 不能默认的结论                                                             |
+| ---------- | ------------------------------------------ | -------------------------------------------------------------------------- |
+| 数据传输   | 减少 RN 与网页之间的序列化、复制和消息排队 | WebView 不必经 RN 转发全部终端流；可达且授权条件允许时可直接建立 WebSocket |
+| 绘制       | 更直接控制资源、提交、批处理及生命周期     | 浏览器 GPU renderer 本身已做优化，原生或 WebGPU 标签不保证更快             |
+| 线程       | 将热点放在独立 runtime/原生线程            | 全部搬入 RN JS 线程可能与 app UI 争抢 CPU；UI 线程也不能承载无界解析       |
+| 内存与启动 | 可能减少网页容器和独立运行环境成本         | 原生引擎、字体/GPU 缓存及模块同样有成本；测量须覆盖 app 相关进程           |
+| 输入       | 更直接整合原生 IME、键盘与手势             | 完整输入语义不会自动获得；远端回显还受网络和 PTY 程序影响                  |
 
 直接连接能力依据：[WebSocket API](https://developer.mozilla.org/en-US/docs/Web/API/WebSocket)。
 若内嵌 Tailscale 等要求连接留在 native 侧，保留必要桥接并测实际成本，不能为了实验绕过真实产品网络路径。
@@ -655,12 +655,12 @@ RN WebGPU 默认绘制逻辑仍运行于 React 所在 JS 线程；可以改用 w
 社区已有同时覆盖浏览器风格 2D 与 WebGL 的路线，不能从清单遗漏推断不存在。
 以下仅核实公开文档与接口，不宣称与 Lynx + WebGL / WebGPU 候选路线有相同 API 覆盖或性能。
 
-| 方案 | 与统一绘图环境的关系 | 已核实限制 |
-| --- | --- | --- |
-| Alibaba GCanvas / `@flyskywhy/react-native-gcanvas` | C++ / OpenGL ES 原生 Canvas2D 与 WebGL，提供 browser-like API；最接近所问的现成路线 | 原仓库明确停止 RN/JS bridge 支持；社区 fork README 记录 RN 新架构 Bridgeless 下 WebGL 纹理显示黑色 |
-| `expo-gl` + `expo-2d-context` | 在 GL context 上以 JS 实现 Canvas2D API，无需 WebView | README 明示其实现比原生 2D context 慢，性能优先时建议 WebView；需要显式 flush；不能将旧文档当成当前设备实测 |
-| RN Skia Graphite + RN WebGPU | 原生 2D 与 WebGPU 可以共享 Dawn、设备和纹理 | 2D 是 Skia API，不是完整 HTML Canvas2D 兼容层；Graphite 位于实验性 `@next` 通道，必须匹配 Dawn 版本 |
-| Redraw + RN WebGPU | 已有基于 WebGPU 的 RN 2D 绘制库 | 目前为面向订阅者的技术预览，API 不稳定；不是已证明完整的 CanvasRenderingContext2D 替代品 |
+| 方案                                                | 与统一绘图环境的关系                                                                | 已核实限制                                                                                                  |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Alibaba GCanvas / `@flyskywhy/react-native-gcanvas` | C++ / OpenGL ES 原生 Canvas2D 与 WebGL，提供 browser-like API；最接近所问的现成路线 | 原仓库明确停止 RN/JS bridge 支持；社区 fork README 记录 RN 新架构 Bridgeless 下 WebGL 纹理显示黑色          |
+| `expo-gl` + `expo-2d-context`                       | 在 GL context 上以 JS 实现 Canvas2D API，无需 WebView                               | README 明示其实现比原生 2D context 慢，性能优先时建议 WebView；需要显式 flush；不能将旧文档当成当前设备实测 |
+| RN Skia Graphite + RN WebGPU                        | 原生 2D 与 WebGPU 可以共享 Dawn、设备和纹理                                         | 2D 是 Skia API，不是完整 HTML Canvas2D 兼容层；Graphite 位于实验性 `@next` 通道，必须匹配 Dawn 版本         |
+| Redraw + RN WebGPU                                  | 已有基于 WebGPU 的 RN 2D 绘制库                                                     | 目前为面向订阅者的技术预览，API 不稳定；不是已证明完整的 CanvasRenderingContext2D 替代品                    |
 
 依据：[GCanvas](https://github.com/alibaba/GCanvas)、
 [RN fork 与新架构限制](https://github.com/flyskywhy/react-native-gcanvas)、
@@ -688,14 +688,14 @@ GCanvas 可列入兼容性研究，但已知的新架构纹理问题使它不能
 本轮重新核对官方开发分支 README 与相关源码；以下是原型优先级，不是实测性能排名，
 也不保证开发分支接口已进入所选发行版。
 
-| 方案 | 作为首版客户端的理由 | 对持久 server 的实际边界 | 原型定位 |
-| --- | --- | --- | --- |
-| xterm.js + WebGL2 | 输入、选区、无障碍及插件生态可作为完整性基准 | headless + VT serialize 有现成路径，serialize 仍标实验性；不保证任意解析中间态和跨版本完整恢复 | 功能与集成成本基准，未预定胜出 |
-| restty | Ghostty WASM + WebGPU/WebGL2 与文字 shaping，值得测试高频 TUI 绘制 | headless 有 render snapshot 和有界 replay，不能当完整 parser checkpoint | 优先性能挑战者，补恢复方案的成本需计入 |
-| gespenst | 默认 worker 解析/绘制、headless、输入编码和多后端降级，结构贴近远程终端 | serialize 校验 ABI schema 与 Ghostty build hash；需设计稳定恢复基线，不能依赖客户同时升级 | 优先架构候选；GPU 加速背景、Canvas2D 绘字，不能据 GPU 标签宣称性能胜出 |
-| ghostty-web | 相对直接的 Ghostty WASM + Canvas2D 浏览器接入 | 低层核心可用，不等于已完成 Cove 的同步恢复契约 | Canvas2D 对照与备选；不能直接继承桌面 Ghostty renderer 的性能结论 |
-| wterm | DOM 原生文字选择、查找、无障碍；核心可替换 | 默认核心与 Ghostty 核心分别验收；新 snapshot 实验不属于已发布稳定契约 | 重视浏览器文字交互时提升优先级；Labs 状态需计入维护成本 |
-| Omni Terminal | 原生终端 backend 与 renderer 架构可参考，另提供可嵌入 WASM Web 包 | Web 包可作为接入入口，但仍需验证 WebView、Cove transport 与恢复契约；原生 RN 接入是另一项工程 | 首轮不作为主要实现候选，依据是接入与社区验证不足，而非不存在 Web 组件 |
+| 方案              | 作为首版客户端的理由                                                    | 对持久 server 的实际边界                                                                       | 原型定位                                                               |
+| ----------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| xterm.js + WebGL2 | 输入、选区、无障碍及插件生态可作为完整性基准                            | headless + VT serialize 有现成路径，serialize 仍标实验性；不保证任意解析中间态和跨版本完整恢复 | 功能与集成成本基准，未预定胜出                                         |
+| restty            | Ghostty WASM + WebGPU/WebGL2 与文字 shaping，值得测试高频 TUI 绘制      | headless 有 render snapshot 和有界 replay，不能当完整 parser checkpoint                        | 优先性能挑战者，补恢复方案的成本需计入                                 |
+| gespenst          | 默认 worker 解析/绘制、headless、输入编码和多后端降级，结构贴近远程终端 | serialize 校验 ABI schema 与 Ghostty build hash；需设计稳定恢复基线，不能依赖客户同时升级      | 优先架构候选；GPU 加速背景、Canvas2D 绘字，不能据 GPU 标签宣称性能胜出 |
+| ghostty-web       | 相对直接的 Ghostty WASM + Canvas2D 浏览器接入                           | 低层核心可用，不等于已完成 Cove 的同步恢复契约                                                 | Canvas2D 对照与备选；不能直接继承桌面 Ghostty renderer 的性能结论      |
+| wterm             | DOM 原生文字选择、查找、无障碍；核心可替换                              | 默认核心与 Ghostty 核心分别验收；新 snapshot 实验不属于已发布稳定契约                          | 重视浏览器文字交互时提升优先级；Labs 状态需计入维护成本                |
+| Omni Terminal     | 原生终端 backend 与 renderer 架构可参考，另提供可嵌入 WASM Web 包       | Web 包可作为接入入口，但仍需验证 WebView、Cove transport 与恢复契约；原生 RN 接入是另一项工程  | 首轮不作为主要实现候选，依据是接入与社区验证不足，而非不存在 Web 组件  |
 
 新核对的 [wterm libghostty 实验](https://github.com/vercel-labs/wterm/tree/main/experiments/libghostty)
 已覆盖部分屏幕、历史及解析中间态恢复，但明确不改变发布包，并说明上游快照格式没有二进制兼容保证。
@@ -798,14 +798,14 @@ agent 最后业务状态后续由 hook 提供，该能力不作为首期终端�
 
 状态按独立维度保存，CLI 返回结构化事实，GUI 根据事实组合展示：
 
-| 维度 | 建议表达 | 作用 |
-| --- | --- | --- |
-| 运行生命周期 | 未启动、启动中、运行中、已结束、会话中断 | 描述当前运行实例，不把逻辑 tab 删除与进程退出混为一谈 |
-| 观测可验证性 | live / exited / unverifiable，以及观测时间 | 失联和陈旧缓存不能证明进程退出；中断也不证明所有派生进程已结束 |
-| 程序类型 | shell / agent / other / unknown | 不将识别失败解释为没有进程 |
-| 普通终端活动 | 命令执行中、近期活动、闲置、未知 | 区分命令仍在执行与回到提示符后经过的时间 |
-| Agent 工作状态 | 工作中、等待输入、等待批准、未知 | 仅对具备可靠信号的 adapter 展示，不引入 managed agent |
-| 客户端交互 | 可见性、选中、焦点、控制权 | 当前页面状态，不定义 server 进程的生命周期 |
+| 维度           | 建议表达                                   | 作用                                                           |
+| -------------- | ------------------------------------------ | -------------------------------------------------------------- |
+| 运行生命周期   | 未启动、启动中、运行中、已结束、会话中断   | 描述当前运行实例，不把逻辑 tab 删除与进程退出混为一谈          |
+| 观测可验证性   | live / exited / unverifiable，以及观测时间 | 失联和陈旧缓存不能证明进程退出；中断也不证明所有派生进程已结束 |
+| 程序类型       | shell / agent / other / unknown            | 不将识别失败解释为没有进程                                     |
+| 普通终端活动   | 命令执行中、近期活动、闲置、未知           | 区分命令仍在执行与回到提示符后经过的时间                       |
+| Agent 工作状态 | 工作中、等待输入、等待批准、未知           | 仅对具备可靠信号的 adapter 展示，不引入 managed agent          |
+| 客户端交互     | 可见性、选中、焦点、控制权                 | 当前页面状态，不定义 server 进程的生命周期                     |
 
 可展示“命令执行中”“最近执行于 2 分钟前”“闲置 30 分钟”“Agent 等待输入”“已退出”“会话中断”等，
 不再把它们压成三类。最终字段名和组合规则在协议设计中确定，避免枚举所有维度的笛卡尔积。
@@ -839,13 +839,13 @@ Cove 借鉴分类边界，不复制标题启发式作为进程存活判据。
 
 建议在运行实例上分别记录 execution、时间戳和观测来源，不由每个客户端独立猜测：
 
-| 信息 | 用途 |
-| --- | --- |
-| `execution = running / prompt / unknown` | 区分仍在执行与已回到 shell 提示符；unknown 不等于已完成 |
-| `lastCommandStartedAt` / `lastCommandFinishedAt` | 展示真实命令边界，长命令结束后开始近期活动窗口 |
-| `lastUserInputAt` | 识别实际提交给当前实例的用户交互，输入不自动等于新命令 |
-| `lastOutputAt` | 独立展示输出活动；后台日志不伪造成用户最近执行了命令 |
-| `observedAt` / 来源 / 实例身份 | 识别陈旧、缺失或属于旧实例的状态 |
+| 信息                                             | 用途                                                    |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| `execution = running / prompt / unknown`         | 区分仍在执行与已回到 shell 提示符；unknown 不等于已完成 |
+| `lastCommandStartedAt` / `lastCommandFinishedAt` | 展示真实命令边界，长命令结束后开始近期活动窗口          |
+| `lastUserInputAt`                                | 识别实际提交给当前实例的用户交互，输入不自动等于新命令  |
+| `lastOutputAt`                                   | 独立展示输出活动；后台日志不伪造成用户最近执行了命令    |
+| `observedAt` / 来源 / 实例身份                   | 识别陈旧、缺失或属于旧实例的状态                        |
 
 初版可为 Cove 启动的受支持 shell 提供命令开始/结束及提示符 integration，结合执行主机的进程观测。
 直接启动的程序可按进程生命周期判断执行；嵌套 SSH/tmux、未支持 shell 或钩子失效时按观测能力降级。

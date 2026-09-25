@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": ".cache/tooling",
+    "tsBuildInfoFile": ".cache/tooling.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["vitest.config.ts", "tests/tooling/**/*.ts"]
+}
