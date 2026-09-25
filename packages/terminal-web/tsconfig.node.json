@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "probes/node",
+    "outDir": "dist/probes/node",
+    "tsBuildInfoFile": "dist/terminal-web-node.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["probes/node/**/*.ts"]
+}

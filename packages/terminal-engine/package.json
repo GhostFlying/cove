@@ -1,0 +1,25 @@
+{
+  "name": "@cove/terminal-engine",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./probes/environment": {
+      "types": "./dist/probes/environment.d.ts",
+      "import": "./dist/probes/environment.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm --dir ../.. native:prepare && pnpm build && pnpm --dir ../.. exec vitest run --project terminal-engine-probes",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@xterm/headless": "catalog:",
+    "@xterm/addon-serialize": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "node-pty": "catalog:"
+  }
+}

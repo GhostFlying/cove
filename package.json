@@ -9,15 +9,16 @@
     "pnpm": "12.6.0"
   },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && pnpm --filter @cove/terminal-web --fail-if-no-match build:browser",
     "typecheck": "tsc -b",
-    "clean": "tsc -b --clean",
+    "native:prepare": "node scripts/node-pty-install.mjs",
+    "clean": "tsc -b --clean && pnpm --filter @cove/terminal-web --fail-if-no-match clean:browser",
     "lint": "oxlint --deny-warnings .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node scripts/ci-test-gate.mjs",
     "test:watch": "vitest",
-    "check": "pnpm format:check && pnpm lint && pnpm build && pnpm test"
+    "check": "pnpm native:prepare && pnpm format:check && pnpm lint && pnpm build && pnpm test"
   },
   "devDependencies": {
     "@types/node": "26.6.2",

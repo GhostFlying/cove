@@ -146,10 +146,16 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   temporaryDirectories.push(checkout);
   await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
+  await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
+  await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "packages/terminal-engine/probes/native.test.mjs",
+    "packages/terminal-web/probes/browser.test.mjs",
     "tests/tooling/excluded.spec.ts",
     "tests/tooling/registered.test.ts",
   ]);

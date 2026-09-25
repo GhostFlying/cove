@@ -14,6 +14,17 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 2 },
+  {
+    project: "terminal-engine-probes",
+    file: "packages/terminal-engine/probes/environment.test.mjs",
+    minimumTests: 1,
+  },
+  {
+    project: "terminal-web-probes",
+    file: "packages/terminal-web/probes/environment.test.mjs",
+    minimumTests: 1,
+  },
 ];
 
 function repositoryPath(path) {
@@ -109,7 +120,14 @@ async function testFilesIn(directory, prefix) {
 }
 
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
-  return testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling");
+  return Promise.all([
+    testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling"),
+    testFilesIn(
+      join(checkoutRoot, "packages/terminal-engine/probes"),
+      "packages/terminal-engine/probes",
+    ),
+    testFilesIn(join(checkoutRoot, "packages/terminal-web/probes"), "packages/terminal-web/probes"),
+  ]).then((groups) => groups.flat().sort());
 }
 
 export async function recordedCommand(stage, binary, args, outputFile, timeoutMs = 120_000) {
@@ -188,6 +206,7 @@ async function environment() {
 
 async function main() {
   await mkdir(evidenceDir, { recursive: true });
+  await rm(join(evidenceDir, "smoke"), { recursive: true, force: true });
   await Promise.all(
     [
       "environment.json",

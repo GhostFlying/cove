@@ -12,6 +12,24 @@ export default defineConfig({
           hookTimeout: 30_000,
         },
       },
+      {
+        test: {
+          name: "terminal-engine-probes",
+          environment: "node",
+          include: ["packages/terminal-engine/probes/**/*.test.mjs"],
+          testTimeout: 35_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
+          name: "terminal-web-probes",
+          environment: "node",
+          include: ["packages/terminal-web/probes/**/*.test.mjs"],
+          testTimeout: 45_000,
+          maxWorkers: 1,
+        },
+      },
     ],
   },
 });
