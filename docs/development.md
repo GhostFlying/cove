@@ -52,9 +52,11 @@ pnpm check
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
 目前只有 tooling 测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
-已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与仓库测试文件，
+已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与其拥有的
+`tests/tooling` 下测试文件，
 再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
-新增真实包时，在同一 PR 将 tsconfig 加入引用图、将测试加入 Vitest projects 和 inventory，
+新增真实包时，在同一 PR 将 tsconfig 加入引用图、将其真实测试根目录及 suite 加入
+Vitest projects 和 inventory，
 提供对应包脚本，再使用 `pnpm --filter <package> <script>` 做局部验证。`pnpm test:watch` 供开发交互使用，
 不产生 CI gate 证据。
 根工具配置/测试输出到 `.cache/tooling`；应用包各自设置 rootDir、dist 和 tsBuildInfoFile。
@@ -83,6 +85,7 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 CI 保留严格必需的 `check (ubuntu-latest)`、`check (macos-latest)` 两项，冻结安装后先核对
 Node/pnpm 精确版本，再执行 `pnpm check`。每个 job 上传 `.cache/ci` 中的环境、inventory、
 逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
-缺失 artifact 会使该 job 失败。C1 只覆盖真实 tooling 测试；应用、PTY、原生 ABI 与移动端
+缺失 artifact 会使该 job 失败。Vitest 进程的 8 分钟上限是防挂死预算，给 15 分钟 job 的
+安装、构建和上传留时间，并非性能 SLA。C1 只覆盖真实 tooling 测试；应用、PTY、原生 ABI 与移动端
 测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。C1 实施记录见
 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
