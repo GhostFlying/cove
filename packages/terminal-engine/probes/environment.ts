@@ -142,6 +142,8 @@ export async function runEnvironmentProbe(): Promise<EngineProbeResult> {
         resolve(event);
       }),
     );
+    if (process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
+      throw new Error("Injected engine work failure");
     const wait = (marker: string) =>
       waitForOutput(
         () => output,
@@ -268,8 +270,17 @@ export async function runEnvironmentProbe(): Promise<EngineProbeResult> {
       cleanupErrors.push(error);
     }
   }
+  if (process.env.COVE_PROBE_INJECT_CLEANUP_FAILURE === "1")
+    cleanupErrors.push(new Error("Injected engine cleanup failure"));
   if (primaryError) {
-    if (cleanupErrors.length) console.error("Probe cleanup failed:", cleanupErrors);
+    if (cleanupErrors.length)
+      throw new AggregateError(
+        [primaryError, ...cleanupErrors],
+        "Engine probe work and cleanup failed",
+        {
+          cause: primaryError,
+        },
+      );
     throw primaryError;
   }
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Probe cleanup failed");

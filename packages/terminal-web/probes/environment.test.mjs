@@ -55,3 +55,40 @@ test("browser work deadline closes Chromium and its fixture listener", async () 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("browser export preserves work and cleanup failures after closing Chromium", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-browser-errors-"));
+  const evidence = join(directory, "cleanup.json");
+  try {
+    const script = `import { runEnvironmentProbe } from ${JSON.stringify(import.meta.resolve("@cove/terminal-web/probes/environment"))};
+try { await runEnvironmentProbe(); process.exitCode = 2; }
+catch (error) { console.log(JSON.stringify({ name: error.name, messages: error.errors?.map((item) => item.message), cause: error.cause?.message })); }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 40_000,
+      env: {
+        ...process.env,
+        COVE_PROBE_INJECT_WORK_FAILURE: "1",
+        COVE_PROBE_INJECT_CLEANUP_FAILURE: "1",
+        COVE_PROBE_CLEANUP_EVIDENCE: evidence,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      name: "AggregateError",
+      messages: ["Injected browser work failure", "Injected browser cleanup failure"],
+      cause: "Injected browser work failure",
+    });
+    const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+    expect(cleanup.browserPid).toBeGreaterThan(0);
+    expect(cleanup.browserExited).toBe(true);
+    expect(cleanup.listenerClosed).toBe(true);
+    await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
+      /fetch failed/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

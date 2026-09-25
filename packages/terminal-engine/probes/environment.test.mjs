@@ -54,3 +54,37 @@ test("engine work deadline still reaps its owned PTY child and temporary directo
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("engine export preserves work and cleanup failures after reaping its PTY", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-engine-errors-"));
+  const evidence = join(directory, "cleanup.json");
+  try {
+    const script = `import { runEnvironmentProbe } from ${JSON.stringify(import.meta.resolve("@cove/terminal-engine/probes/environment"))};
+try { await runEnvironmentProbe(); process.exitCode = 2; }
+catch (error) { console.log(JSON.stringify({ name: error.name, messages: error.errors?.map((item) => item.message), cause: error.cause?.message })); }`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 30_000,
+      env: {
+        ...process.env,
+        COVE_PROBE_INJECT_WORK_FAILURE: "1",
+        COVE_PROBE_INJECT_CLEANUP_FAILURE: "1",
+        COVE_PROBE_CLEANUP_EVIDENCE: evidence,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toEqual({
+      name: "AggregateError",
+      messages: ["Injected engine work failure", "Injected engine cleanup failure"],
+      cause: "Injected engine work failure",
+    });
+    const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+    expect(cleanup.childPid).toBeGreaterThan(0);
+    expect(cleanup.childExited).toBe(true);
+    expect(cleanup.temporaryCwdRemoved).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
