@@ -9,6 +9,7 @@ import {
 } from "./recovery-checkpoint.js";
 import { observeRecovery, writeParsed, type RecoveryObservation } from "./recovery-observation.js";
 import { assertPinnedRecoveryPackages, readPrivateRecoveryState } from "./xterm-recovery-state.js";
+import { createSourceDerivedRecovery } from "./source-derived-recovery.js";
 
 const require = createRequire(import.meta.url);
 
@@ -193,6 +194,7 @@ export {
   BoundedRecoveryTail,
   createRecoveryCheckpoint,
   createFinalGlyphCheckpoint,
+  createSourceDerivedRecovery,
   observeRecovery,
   readPrivateRecoveryState,
   writeParsed,

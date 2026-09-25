@@ -151,6 +151,17 @@ test("combined recovery geometry suite is mandatory", async () => {
   );
 });
 
+test("source-derived recovery diagnostic suite is mandatory", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/terminal-engine/probes/recovery-source-derived.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 4 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+    /Required suite terminal-engine-probes:/,
+  );
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
