@@ -1,50 +1,39 @@
 # Cove current handoff
 
-Updated: 2026-09-25. This is the coordinator-owned entry point; verify live GitHub and checkout state before acting. Design authority remains in the linked design documents, not this status record.
+Updated: 2026-09-26. Verify live GitHub/checkout state before resuming. Accepted behavior remains in the design documents; exact task evidence belongs to linked Issues/PRs.
 
-## Authorized scope and stage boundary
+## Authorized stage
 
-Engineering bootstrap and workflow governance are merged through PRs #4 and #3. Current main baseline is `1e1398462c2aadc5a9171e40aef7c5d9f0ad3da7`, with post-merge checks successful. The user authorized proceeding with the next planning step: produce the concrete M0 scope and dependency graph for review. The user accepted the local-only experimental scope (temporary credentials, run-lifetime operation records, two browser test terminals; persistence/pairing later). M0 feature implementation is not yet authorized; final DAG/entry review and plan publication are separate from implementation permission.
+The user explicitly approved M0 implementation on 2026-09-26 after reviewing [the merged M0 DAG](milestones/m0.md). The entry blocker is removed; do not ask again for routine implementation, testing or gated PR merges within that scope. M0 exit and M1 entry still require user review/permission. Architecture, product scope and acceptance changes still go to the user with evidence/options.
 
-Autonomous PR merging remains conditional on independent validation, GPT-6 Sol review and required CI. Product/architecture/scope/acceptance decisions and milestone entry/transitions remain with the user.
+Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic commits by rebase. Baseline main `a902ee0bae0e6539afab6555c0585ff6745261d5` passed macOS/Linux checks; tree equality, independent validation/review, corrected review findings and commit mappings are recorded in PR #27 and [Issue #5](https://github.com/GhostFlying/cove/issues/5). Planning Issues #5–#8 are closed and their clean worktrees were removed.
 
-## Current tasks and dependencies
+## Current dispatch
 
-| Task                            | Tracking                                                 | Owner / checkout                                                     | State                                        |
-| ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------- |
-| M0 plan integration             | [Issue #5](https://github.com/GhostFlying/cove/issues/5) | Coordinator; primary checkout, `p/luchengxuan/m0-5-plan-integration` | Delivered in PR #27; evidence recorded there |
-| Protocol/server/client/CLI plan | [Issue #6](https://github.com/GhostFlying/cove/issues/6) | Astra high; task branch `p/luchengxuan/m0-6-protocol-plan`           | Delivered `docs/plans/m0-protocol.md`        |
-| Terminal engine/worker plan     | [Issue #7](https://github.com/GhostFlying/cove/issues/7) | Astra high; task branch `p/luchengxuan/m0-7-terminal-plan`           | Delivered `docs/plans/m0-terminal.md`        |
-| CI/acceptance plan              | [Issue #8](https://github.com/GhostFlying/cove/issues/8) | Astra high; task branch `p/luchengxuan/m0-8-ci-plan`                 | Delivered `docs/plans/m0-ci.md`              |
+[M0 execution record](tasks/m0-execution.md) owns current allocation and the milestone DAG owns prerequisite order. All 19 implementation Issues #9–#26 and #28 are authorized in scope, but cannot start before their individual dependencies pass on integrated main.
 
-All planner checkouts start at the stated baseline. Native runtime has four concurrent slots including coordinator, the three planners have delivered and are idle; task agents/worktrees remain capped at five across runtimes. No recursive dispatch. The coordinator alone owns this handoff and aggregate milestone/task records. Read-only source reference is clean GhostFlying/orca fork `322c1839888f4a462e2d68839deafb1fe616c685` (version 1.4.190, not a claim of current upstream behavior).
+| Task                                                    | Owner and writable scope                                                                                                                                                             | State                                                                    |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| C1 [#9](https://github.com/GhostFlying/cove/issues/9)   | `/root/m0_c1_impl`, GPT-6 Sol high; task checkout `cove-worktrees/m0-ci-gates`, branch `p/luchengxuan/m0-9-ci-gates`; root tooling/CI/tests plus its own task plan/development notes | Implementing early inventory and fail-closed CI gate from baseline above |
+| C1 integration and authorization records                | Coordinator; primary checkout `p/luchengxuan/m0-9-ci-integration`; handoff, execution record and plan authorization updates                                                          | No overlapping edits to implementation files                             |
+| B0 [#10](https://github.com/GhostFlying/cove/issues/10) | Root/dependency writer to assign after C1                                                                                                                                            | Waiting for C1 main checks; all later tasks follow DAG                   |
 
-Use live agent/checkout/GitHub state before cleanup or continuing a task. A task record is not permission to adopt another session or overwrite another writer.
+C1 independent tester and separate Sol-high reviewer will receive a frozen head. Local TraeX 5.6 Sol high through warmpool is eligible; warm miss is allowed and does not justify bypassing the wrapper. No delegation plugin. Linux task execution uses `ssh devbox`. No application or remote workload has yet been executed in M0.
 
-## Stable decisions and references
+There are initially two task worktrees and one active child implementer. Recompute live allocation rather than trusting these historical counts: at most five task agents/worktrees globally, and the current native tool limit is four including coordinator. No nested dispatch without allocation. Preserve unrelated files/processes and clean up only verified task-owned resources.
 
-- [Engineering workflow](engineering-plan.md): roles, DAG scheduling, user decisions, rebase-only merge, atomic commits and M0 CI requirements.
-- [Contributor instructions](../AGENTS.md): stable rules for every agent.
-- [Product design](design.md), [server](server-architecture.md), [terminal](terminal-architecture.md), [protocol](relay-protocol.md): accepted architecture and unresolved proposals.
-- [Workflow setup record](tasks/workflow-governance.md), [registry fix record on its branch](https://github.com/GhostFlying/cove/blob/40b0ad89b34d4a602c641be0b39440762097c4c0/docs/tasks/public-registry.md): task scope and evidence.
+## Fixed execution boundaries
 
-Planning and decision analysis should inspect relevant Orca implementation, pin source revision/paths, and assess suitability rather than assume it is correct. Preserve reasons in the existing design documents. Use local TraeX rather than delegation; warm misses do not block dispatch. Linux work uses `ssh devbox`.
+- M0 is a loopback experiment with per-launch credentials, instance-lifetime operation receipts, CLI and two browser terminal test views. Durable task/workspace/SQLite and pairing/remote deployment remain M1/M2.
+- Recovery/query input probes precede final profile freeze. P2 owns runtime pool/refresh, W2 supplies worker status/preview, P3 owns controller and V1 display adapter. Shared manifests/lockfile/exports and CI each have one writer.
+- F1 freezes a complete reference; E1 must make an actual useful compatible runtime change before independent C4b tests. Metadata-only differences do not qualify.
+- C5 and final-main X1 retain 100 real PTYs concurrently producing sustained synthetic output on devbox. Idle PTYs/headless models do not qualify. Only real-agent/mobile/long-duration qualification remains deferred.
+- Required main ruleset `23994191`: linear history, PRs, strict `check (ubuntu-latest)` and `check (macos-latest)`, no force/deletion/bypass; only rebase & merge. Independently test/review each exact head, resolve concrete findings, record mapping and verify final main CI before releasing dependents. Agent review is not second-account GitHub approval.
 
-## Integration checkpoint
+## Source and durable references
 
-The previous governance setup is complete. PR #4 preserves public-registry dependency versions/integrities; PR #3 introduced atomic commits, rebase-only integration, role independence and durable handoffs. Evidence and source-to-main SHA mappings are in their PR comments. Prior temporary worktrees were cleaned.
+[AGENTS.md](../AGENTS.md), [engineering](engineering-plan.md), [product](design.md), [server](server-architecture.md), [terminal](terminal-architecture.md), [protocol](relay-protocol.md), and [M0 plans](milestones/m0.md) remain authoritative. Write the task-specific implementation plan before coding; use atomic what/why commits and rationale comments. Keep execution results out of commit messages.
 
-Main ruleset `23994191` remains active: linear history, PRs, strict `check (ubuntu-latest)` / `check (macos-latest)`, no force-push/deletion or bypass actors. Independent agent review remains a coordinator gate, not a fabricated second-account approval.
+Orca research pinned fork `322c1839888f4a462e2d68839deafb1fe616c685`, upstream main `646e9a5b02514795af5139961ccca225dfa01b12`, and stable v1.4.211 `5534462b50c660888487a2108700d4cf284270db`; compare relevant implementation when deciding, without treating upstream as authority or modifying the user's Orca checkout.
 
-## Next actions
-
-1. Complete gated publication of [PR #27](https://github.com/GhostFlying/cove/pull/27); verify its live head/base, review/validation and final main CI in PR/Issue #5 evidence before resuming. The original proposal passed independent checks; subsequent corrections require corresponding revalidation.
-2. Present the M0 scope, DAG, exit criteria and material choices to the user. Start implementation only after explicit review/permission; do not infer stage entry from closing planning Issues.
-
-## M0 planning delivery
-
-The three Astra module plans are integrated in `docs/plans/m0-*.md`; [aggregate scope/DAG](milestones/m0.md) maps exclusive writers, staged CI, and all cross-module prerequisites. Implementation Issues [#9–#26 and #28](https://github.com/GhostFlying/cove/milestone/1) are proposed/blocked on user M0 entry approval, not runnable authorization. Root integration branch remains `p/luchengxuan/m0-5-plan-integration`. Planning worktrees have delivered clean commits; no implementation agent or application service has started.
-
-Module originals → integration commits: terminal `4c02bc9` → `4ac1333`; CI `229482c` → `a792059`; protocol `738cc32` → `ca30379`. Coordinator reconciliation is a separate atomic change. Sol high dependency analysis resolved P2/T5, staged C2, full A7 reference and credential ownership gaps. Independent final documentation validation/review and hosted CI gate [PR #27](https://github.com/GhostFlying/cove/pull/27); exact current PR/head/main evidence is recorded on [Issue #5](https://github.com/GhostFlying/cove/issues/5) and PR comments, avoiding stale SHA claims in this file. A documentation merge does not approve M0 implementation.
-
-The compatibility review correction adds E1 #28, and the accepted synthetic 100-PTY devbox gate is retained in C5/X1; only 100 real-agent/mobile/long-duration capacity remains deferred. Next: finish the exact-head publication gates, then present the concrete plan for user entry review. After approval, C1 is the only initial ready task; subsequent dispatch follows the DAG. End-of-M0 X1 requires another user review before any M1 work.
+Next: complete C1 implementation, independent tests/review and exact-head CI, merge rebase-only and verify main; then release B0. Continue inside approved M0, escalating only actual product/architecture/scope/acceptance decisions. X1 completion never authorizes M1 automatically.

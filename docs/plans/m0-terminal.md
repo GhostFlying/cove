@@ -1,6 +1,6 @@
 # M0 terminal-engine / terminal-worker plan
 
-Status: planning only; implementation begins only after the coordinator obtains M0 entry approval.
+Status: M0 entry approved by the user on 2026-09-26. Dispatch follows the aggregate DAG; this plan is not implementation evidence.
 Tracking: [#7](https://github.com/GhostFlying/cove/issues/7), parent [#5](https://github.com/GhostFlying/cove/issues/5).
 Planner: `/root/m0_terminal_plan`, GPT-6 Astra high; coordinator assigns separate implementation, independent test and Sol high review owners.
 Base: `1e1398462c2aadc5a9171e40aef7c5d9f0ad3da7`; branch: `p/luchengxuan/m0-7-terminal-plan`.

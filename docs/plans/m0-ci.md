@@ -1,6 +1,6 @@
 # M0 CI 与验收计划
 
-状态：规划提案，未授权实现；[Issue #8](https://github.com/GhostFlying/cove/issues/8)，父任务 [#5](https://github.com/GhostFlying/cove/issues/5)。完成本计划不启动 M0，也不自动进入 M1。
+状态：用户已于 2026-09-26 批准 M0 实施；[Issue #8](https://github.com/GhostFlying/cove/issues/8)，父任务 [#5](https://github.com/GhostFlying/cove/issues/5)。按汇总 DAG 派发，不自动进入 M1。
 
 ## 归属与边界
 
@@ -9,7 +9,7 @@
 - 本次唯一可写文件为本文；不改 workflow、manifest、lockfile、实现或其他计划，不执行远程命令、启动服务、push 或 PR。
 - 依据：`AGENTS.md`、`docs/handoff.md`、`engineering-plan.md` §4/6/9、`development.md`、`terminal-architecture.md` §3、`relay-protocol.md` §4/5/9/10、已保存的 benchmark RESULTS。
 - M0 交付验证真实 server/worker/CLI、两个最小终端客户端及兼容契约；排除完整产品 UI、Electron/RN/真机、持久配对/部署、tsnet、迁移、发布、100 个真实 agent 和长时容量承诺。
-- 用户已批准 M0 本地 loopback 实验 server、临时凭据、实例内易失操作回执及两个浏览器终端测试页；Origin 校验随协议契约落实。正式持久化/配对属 M1/M2；汇总 DAG 仍需用户审阅后才启动功能实现。
+- 用户已批准 M0 本地 loopback 实验 server、临时凭据、实例内易失操作回执及两个浏览器终端测试页；Origin 校验随协议契约落实。正式持久化/配对属 M1/M2；汇总 DAG 已于 2026-09-26 经用户批准。
 
 ## 现状与 Orca 比较证据
 
@@ -97,7 +97,7 @@ CI 验证 harness 自身的失效路径：缺产物、错 ABI、坏参考摘要�
 
 ## devbox 与资源预算
 
-执行需等用户批准 M0 与协调者派发；本计划没有运行 Linux 检查。C6 经 `ssh devbox` 创建自己的 clean checkout，checkout 精确集成 SHA，记录 uname/arch、Node/pnpm/ABI、CPU/cgroup、内存及当时负载。frozen install、独立 node_modules/dist/tsbuildinfo/state，临时 loopback 端口；浏览器若在本地，显式 SSH tunnel 并分别记录两端环境，不能把本机 Linux 模拟当作 devbox 结果。
+M0 已经用户批准，执行仍需协调者按依赖派发；本计划没有运行 Linux 检查。C6 经 `ssh devbox` 创建自己的 clean checkout，checkout 精确集成 SHA，记录 uname/arch、Node/pnpm/ABI、CPU/cgroup、内存及当时负载。frozen install、独立 node_modules/dist/tsbuildinfo/state，临时 loopback 端口；浏览器若在本地，显式 SSH tunnel 并分别记录两端环境，不能把本机 Linux 模拟当作 devbox 结果。
 
 使用带 finally/trap 的有界 runner 记录自己创建的进程、启动身份和目录；失败/取消只终止这些资源，核实清理。SSH 失联不能宣称进程已退出；恢复联系后核实 task-owned PID/身份，无法核实时报告剩余资源并阻断退出。禁止 pkill 全局进程、重启 daemon、修改现有服务/防火墙或清理其他 checkout。
 
@@ -122,4 +122,4 @@ M0 acceptance recommendation / explicit user exit decision / next stage NOT star
 
 协调者串行 rebase merge 前重新核对 head/base、独立测试/review 和必需 CI；base 漂移或冲突解决后重做受影响验证和 review，不沿用旧 SHA 结论。合入后记录映射、检查最终 main CI；C6 验收对象为最终 main 的精确 SHA，不能拼凑多个分支绿色结果。
 
-用户已批准实验认证/易失回执/双浏览器 harness 范围；剩余阶段卡口是汇总 DAG 的审阅和 M0 实现进入许可，CI 不新增架构选择。若 T1 显示所选 profile/query/recovery 无法满足已确认语义，协调者呈现复现证据和替代方案，由用户决定范围/架构变化；此前不降低断言。普通实现参数在已批准契约内由 owner 决定并记录。
+用户已批准实验认证/易失回执/双浏览器 harness 范围；汇总 DAG 与 M0 入口已于 2026-09-26 经用户批准；下一阶段卡口是 M0 退出/M1 进入，CI 不新增架构选择。若 T1 显示所选 profile/query/recovery 无法满足已确认语义，协调者呈现复现证据和替代方案，由用户决定范围/架构变化；此前不降低断言。普通实现参数在已批准契约内由 owner 决定并记录。
