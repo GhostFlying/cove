@@ -175,9 +175,20 @@ test("held parser timeout, late page errors, result bounds and thrown work close
         /fetch failed/,
       );
     }
-    for (const [mode, extra, expectedSuccess] of [
-      ["delayed", { COVE_QUERY_TEST_DISPOSE_DELAY_MS: "700" }, true],
-      ["hung", { COVE_QUERY_TEST_DISPOSE_HANG: "1" }, false],
+    for (const [mode, extra, expectedSuccess, expectedError] of [
+      ["delayed", { COVE_QUERY_TEST_DISPOSE_DELAY_MS: "700" }, true, /^$/],
+      [
+        "hung-disposal",
+        { COVE_QUERY_TEST_DISPOSE_HANG: "1" },
+        false,
+        /Query fixture disposal page 1\/2 .*timed out/,
+      ],
+      [
+        "hung-browser-close",
+        { COVE_QUERY_TEST_BROWSER_CLOSE_HANG: "1" },
+        false,
+        /Browser close timed out/,
+      ],
     ]) {
       const evidence = join(directory, `${mode}-disposal.json`);
       const result = spawnSync(process.execPath, [entry, "cleanup-two-pages"], {
@@ -191,11 +202,10 @@ test("held parser timeout, late page errors, result bounds and thrown work close
       expect(result.status === 0 ? JSON.parse(result.stdout.trim()).evidence : null).toEqual(
         expectedSuccess ? { pages: 2 } : null,
       );
-      expect(result.stderr).toMatch(
-        expectedSuccess ? /^$/ : /Query fixture disposal page 1\/2 .*timed out/,
-      );
+      expect(result.stderr).toMatch(expectedError);
       const cleanup = JSON.parse(await readFile(evidence, "utf8"));
       expect(cleanup.disposedPages).toBe(2);
+      expect(cleanup.browserPid).toBeGreaterThan(0);
       expect(cleanup.browserExited).toBe(true);
       expect(cleanup.listenerClosed).toBe(true);
       expect(cleanup.cleanupElapsedMs).toBeLessThan(8_000);
