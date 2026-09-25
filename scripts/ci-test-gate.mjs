@@ -32,7 +32,7 @@ export const requiredSuites = [
   {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/query-input.test.mjs",
-    minimumTests: 6,
+    minimumTests: 10,
   },
 ];
 
