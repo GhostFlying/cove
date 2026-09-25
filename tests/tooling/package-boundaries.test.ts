@@ -123,7 +123,7 @@ test("isolated compiled consumer sees only experimental exports and emitted decl
   const declarations = join(directory, "promoted-declarations");
   await mkdir(declarations);
   await writeFile(join(declarations, "package.json"), '{"type":"module"}');
-  const declarationNames = ["errors", "identity", "pipe", "terminal"];
+  const declarationNames = ["errors", "frame", "identity", "pipe", "terminal"];
   const emitted = (await readdir(join(protocol, "dist/provisional")))
     .filter((name) => name.endsWith(".d.ts"))
     .sort();
@@ -207,4 +207,27 @@ for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-we
   });
   if (runtime.status !== 0) throw new Error(runtime.stderr || runtime.stdout);
   expect(runtime.status).toBe(0);
+});
+
+test("compiled export removal fails in an isolated consumer", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-missing-export-"));
+  directories.push(directory);
+  const packagePath = join(directory, "node_modules/@cove/protocol");
+  await mkdir(packagePath, { recursive: true });
+  await writeFile(
+    join(packagePath, "package.json"),
+    JSON.stringify({
+      name: "@cove/protocol",
+      type: "module",
+      exports: { "./provisional/terminal": "./dist/provisional/missing.js" },
+    }),
+  );
+  await writeFile(join(directory, "consumer.mjs"), 'import "@cove/protocol/provisional/terminal";');
+  const result = spawnSync(process.execPath, [join(directory, "consumer.mjs")], {
+    cwd: directory,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toMatch(/ERR_MODULE_NOT_FOUND/);
 });

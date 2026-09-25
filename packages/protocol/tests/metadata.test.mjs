@@ -32,6 +32,8 @@ test("complete references preserve instance and incarnation identity", () => {
   expect(sameRunRef(run, { ...run })).toBe(true);
   expect(sameRunRef(run, { ...run, serverId: "s-2" })).toBe(false);
   expect(sameRunRef(run, { ...run, relayInstanceId: "i-2" })).toBe(false);
+  expect(sameRunRef(run, { ...run, runId: "r-2" })).toBe(false);
+  expect(sameWorkerRef(worker, { ...worker, workerId: "w-2" })).toBe(false);
   expect(sameWorkerRef(worker, { ...worker, workerIncarnationId: "wi-2" })).toBe(false);
 });
 
@@ -52,6 +54,16 @@ test("known metadata tolerates extra fields but rejects unknown kinds and absent
     PipeMetadataSchema.safeParse({ kind: "probe-request", worker, run, requestId: "q", extra: 1 })
       .success,
   ).toBe(true);
+  expect(
+    PipeMetadataSchema.safeParse({ kind: "future", worker, run, requestId: "q" }).success,
+  ).toBe(false);
+});
+
+test("request correlation does not default from sequence or baseline identity and failures stay fixed", () => {
+  const invalid = { kind: "input", run, seq: 7, baselineId: "secret-marker" };
+  const result = validateTerminalMessage(invalid, Uint8Array.of(27, 93));
+  expect(result).toMatchObject({ ok: false, error: { code: "INVALID_METADATA", offset: 0 } });
+  expect(JSON.stringify(result)).not.toMatch(/secret-marker|\[27/);
 });
 
 test("baseline metadata requires feasible declared totals and zero-byte shape", () => {

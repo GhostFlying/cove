@@ -12,11 +12,13 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
-  { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 6 },
+  { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
+  { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
+  { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 9 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 3 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 4 },
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/environment.test.mjs",
