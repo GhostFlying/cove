@@ -6,5 +6,6 @@
     "tsBuildInfoFile": "dist/terminal-web-node.tsbuildinfo",
     "types": ["node"]
   },
-  "include": ["probes/node/**/*.ts"]
+  "include": ["probes/node/**/*.ts"],
+  "references": [{ "path": "../protocol" }]
 }

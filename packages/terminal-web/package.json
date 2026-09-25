@@ -7,6 +7,10 @@
     "./probes/environment": {
       "types": "./dist/probes/node/environment.d.ts",
       "import": "./dist/probes/node/environment.js"
+    },
+    "./probes/query-input": {
+      "types": "./dist/probes/node/query-input.d.ts",
+      "import": "./dist/probes/node/query-input.js"
     }
   },
   "scripts": {
@@ -18,6 +22,7 @@
     "clean:browser": "node --input-type=module -e \"import {rm} from 'node:fs/promises'; await rm('dist/browser',{recursive:true,force:true})\""
   },
   "dependencies": {
+    "@cove/protocol": "workspace:*",
     "@xterm/xterm": "catalog:"
   },
   "devDependencies": {

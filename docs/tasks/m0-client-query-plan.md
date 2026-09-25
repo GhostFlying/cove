@@ -2,6 +2,8 @@
 
 Status: implementation plan for [Q1 #12](https://github.com/GhostFlying/cove/issues/12), 2026-09-26. M0 is authorized. This document records source inspection and a runnable experiment design, not a passing query/input experiment or a frozen production profile.
 
+Implementation assignment (2026-09-26): `/root/m0_q1_impl`, GPT-6 Sol high, owns checkout `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-client-query` at base `1468a470eb4f963fd21f9a580f6bd1a804b285bb`, branch `p/luchengxuan/m0-12-query-input`. The coordinator additionally assigned exclusive terminal-web manifest/lock/tsconfig, CI inventory and its tooling tests, and `docs/development.md` until the first coherent registration commit is frozen and transferred. The objective and acceptance corpus below are unchanged. Build and test in this checkout with its own installed dependencies and browser; keep engine/T1, root handoff, and GitHub state outside this write scope. Start with public parser hooks, retain a failing counterexample if mixed state/query handling forces a narrow private adapter, then validate actual DOM input and protocol-framed output. Run scoped checks and full `pnpm check`; independent test/review and cross-OS CI are coordinator-owned gates.
+
 ## Ownership and dependencies
 
 - Planner: `/root/m0_q1_plan`, GPT-6 Astra high; checkout `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-client-query-plan`, branch `p/luchengxuan/m0-12-query-plan`. This dispatch writes only this file and one atomic plan commit; no install, code/config change, browser run, push, PR or nested agents.

@@ -29,6 +29,11 @@ export const requiredSuites = [
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
   },
+  {
+    project: "terminal-web-probes",
+    file: "packages/terminal-web/probes/query-input.test.mjs",
+    minimumTests: 6,
+  },
 ];
 
 function repositoryPath(path) {
