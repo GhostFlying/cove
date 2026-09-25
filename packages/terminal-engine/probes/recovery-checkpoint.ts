@@ -70,10 +70,11 @@ function savedState(
   restoreOrigin: boolean,
   charset: PrivateRecoveryState["charset"],
   finalActive: boolean,
+  allowPendingCurrentX = false,
 ): string {
   // A saved row evicted from scrollback is restored by stable headless at viewport row zero.
   const savedY = Math.max(0, state.savedY - state.ybase);
-  if (state.x >= cols || state.savedX >= cols || savedY >= rows)
+  if ((state.x >= cols && !allowPendingCurrentX) || state.savedX >= cols || savedY >= rows)
     throw new Error("VT saved-state candidate cannot address a pending-wrap cursor");
   let vt = "\u001b[?6l";
   vt += `\u001b[${state.scrollTop + 1};${state.scrollBottom + 1}r`;
@@ -97,24 +98,25 @@ function savedState(
     if (state.y < state.scrollTop || state.y > state.scrollBottom)
       throw new Error("Origin-mode cursor is outside scroll margins");
     vt += "\u001b[?6h";
-    vt += absolutePosition(state.x, state.y - state.scrollTop);
-  } else vt += absolutePosition(state.x, state.y);
+    vt += absolutePosition(Math.min(state.x, cols - 1), state.y - state.scrollTop);
+  } else vt += absolutePosition(Math.min(state.x, cols - 1), state.y);
   vt += sgr(currentAttr);
   return vt;
 }
 
 // Checkpoints are taken only at a verified parser/decoder boundary; an in-flight sequence stays in the raw tail.
-export function createRecoveryCheckpoint(
+function buildRecoveryCheckpoint(
   terminal: Terminal,
   serializer: Serializer,
   byteOffset: number,
-  maxBytes = 8 * 1024 * 1024,
+  maxBytes: number,
+  allowFinalGlyph: boolean,
 ): RecoveryCheckpoint {
   const state = readPrivateRecoveryState(terminal);
   if (
     state.parserState !== state.initialParserState ||
     state.utf8Interim.some((byte) => byte !== 0) ||
-    state.precedingJoinState !== 0
+    (!allowFinalGlyph && state.precedingJoinState !== 0)
   )
     throw new Error("Parser or UTF-8 decoder is not at a checkpoint boundary");
   const started = performance.now();
@@ -133,8 +135,11 @@ export function createRecoveryCheckpoint(
       false,
       state.charset,
       false,
+      allowFinalGlyph,
     );
     vt += "\u001b[?47h\u001b[H";
+    if (allowFinalGlyph && terminal.buffer.alternate.getLine(0)?.isWrapped)
+      vt += "D".repeat(terminal.cols);
     vt += stock.slice(marker + ALT_MARKER.length);
     vt += savedState(
       state.alternate,
@@ -144,6 +149,7 @@ export function createRecoveryCheckpoint(
       terminal.modes.originMode,
       state.charset,
       true,
+      allowFinalGlyph,
     );
   } else {
     vt =
@@ -156,6 +162,7 @@ export function createRecoveryCheckpoint(
         terminal.modes.originMode,
         state.charset,
         true,
+        allowFinalGlyph,
       );
   }
   if (state.cursorHidden) vt += "\u001b[?25l";
@@ -163,6 +170,77 @@ export function createRecoveryCheckpoint(
   const bytes = new TextEncoder().encode(vt);
   if (bytes.byteLength > maxBytes) throw new Error("Recovery checkpoint VT exceeds byte cap");
   return { vt: bytes, byteOffset, generatedMs: performance.now() - started };
+}
+
+export function createRecoveryCheckpoint(
+  terminal: Terminal,
+  serializer: Serializer,
+  byteOffset: number,
+  maxBytes = 8 * 1024 * 1024,
+): RecoveryCheckpoint {
+  return buildRecoveryCheckpoint(terminal, serializer, byteOffset, maxBytes, false);
+}
+
+export interface FinalGlyphWitness {
+  readonly bytes: Uint8Array;
+  readonly startX: number;
+  readonly startY: number;
+  readonly cellWidth: 1 | 2;
+  readonly preimage: "erase" | "delete" | "none";
+}
+
+// An authored, bounded preimage experiment; the witness location is not inferred from arbitrary output.
+export function createFinalGlyphCheckpoint(
+  terminal: Terminal,
+  serializer: Serializer,
+  byteOffset: number,
+  witness: FinalGlyphWitness,
+  maxBytes = 8 * 1024 * 1024,
+): RecoveryCheckpoint {
+  if (witness.bytes.length === 0 || witness.bytes.length > 64)
+    throw new Error("Final glyph witness exceeds bounded size");
+  const rendered = new TextDecoder("utf-8", { fatal: true }).decode(witness.bytes);
+  if ([...rendered].some((character) => character.codePointAt(0)! < 0x20 || character === "\u007f"))
+    throw new Error("Final glyph witness contains control data");
+  if (
+    !Number.isInteger(witness.startX) ||
+    !Number.isInteger(witness.startY) ||
+    witness.startX < 0 ||
+    witness.startX >= terminal.cols ||
+    witness.startY < 0 ||
+    witness.startY >= terminal.rows
+  )
+    throw new Error("Final glyph witness position is outside the logical grid");
+  const state = readPrivateRecoveryState(terminal);
+  const base = buildRecoveryCheckpoint(terminal, serializer, byteOffset, maxBytes, true);
+  if (state.precedingJoinState === 0)
+    throw new Error("Final glyph witness has no join state to rebuild");
+  let addressY = witness.startY;
+  if (terminal.modes.originMode) {
+    const active = terminal.buffer.active.type === "alternate" ? state.alternate : state.normal;
+    addressY -= active.scrollTop;
+    if (addressY < 0) throw new Error("Final glyph witness is outside origin margins");
+  }
+  const position = absolutePosition(witness.startX, addressY);
+  const preimage =
+    witness.preimage === "erase"
+      ? `\u001b[${witness.cellWidth}X`
+      : witness.preimage === "delete"
+        ? `\u001b[${witness.cellWidth}P`
+        : "";
+  const prefix = new TextEncoder().encode(`${position}${preimage}${position}`);
+  const leadingContext = terminal.buffer.normal.getLine(0)?.isWrapped
+    ? new TextEncoder().encode("D".repeat(terminal.cols))
+    : new Uint8Array();
+  const bytes = new Uint8Array(
+    leadingContext.length + base.vt.length + prefix.length + witness.bytes.length,
+  );
+  bytes.set(leadingContext);
+  bytes.set(base.vt, leadingContext.length);
+  bytes.set(prefix, leadingContext.length + base.vt.length);
+  bytes.set(witness.bytes, leadingContext.length + base.vt.length + prefix.length);
+  if (bytes.length > maxBytes) throw new Error("Final glyph checkpoint VT exceeds byte cap");
+  return { vt: bytes, byteOffset, generatedMs: base.generatedMs };
 }
 
 export class BoundedRecoveryTail {
