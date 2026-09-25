@@ -1,12 +1,13 @@
 import { createServer } from "node:http";
 import { realpathSync } from "node:fs";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface WebProbeResult {
   readonly browserVersion: string;
+  readonly browserRevision: string;
   readonly browserExecutable: string;
   readonly renderedWidth: number;
   readonly renderedHeight: number;
@@ -110,13 +111,43 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     throw new Error("Built browser fixture is absent");
   }
   process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
-  const imported: unknown = createRequire(import.meta.url)("playwright");
+  const require = createRequire(import.meta.url);
+  const playwrightManifest = require("playwright/package.json") as {
+    version?: string;
+    dependencies?: { "playwright-core"?: string };
+  };
+  if (
+    playwrightManifest.version !== "1.63.0" ||
+    playwrightManifest.dependencies?.["playwright-core"] !== "1.63.0"
+  )
+    throw new Error("Unexpected Playwright package version");
+  const coreRequire = createRequire(require.resolve("playwright/package.json"));
+  const coreManifestPath = coreRequire.resolve("playwright-core/package.json");
+  const coreManifest = JSON.parse(await readFile(coreManifestPath, "utf8")) as { version?: string };
+  if (coreManifest.version !== "1.63.0") throw new Error("Unexpected Playwright core version");
+  const browsersManifest = JSON.parse(
+    await readFile(join(dirname(coreManifestPath), "browsers.json"), "utf8"),
+  ) as { browsers?: { name?: string; revision?: string; browserVersion?: string }[] };
+  const chromiumEntries = browsersManifest.browsers?.filter((item) => item.name === "chromium");
+  const chromiumEntry = chromiumEntries?.[0];
+  if (
+    chromiumEntries?.length !== 1 ||
+    !chromiumEntry?.revision ||
+    !/^\d+$/.test(chromiumEntry.revision) ||
+    !chromiumEntry.browserVersion
+  )
+    throw new Error("Pinned Chromium manifest entry is invalid");
+  const imported: unknown = require("playwright");
   if (typeof imported !== "object" || imported === null || !("chromium" in imported))
     throw new Error("Playwright Chromium launcher is absent");
   // Playwright's Node API declarations reference DOM types; this probe uses only its public runtime methods.
   const chromium = imported.chromium as ChromiumLauncher;
-  const executable = chromium.executablePath();
+  const executable = process.env.COVE_PROBE_TEST_EXECUTABLE ?? chromium.executablePath();
   if (!(await stat(executable).catch(() => null))) throw new Error("Managed Chromium is absent");
+  const resolvedExecutable = await realpath(executable);
+  const managedRevision = join(await realpath(browsersPath), `chromium-${chromiumEntry.revision}`);
+  if (!resolvedExecutable.startsWith(`${managedRevision}${sep}`))
+    throw new Error(`Chromium executable is outside managed revision ${chromiumEntry.revision}`);
   const workBudgetMs = probeWorkBudget(24_000);
   const workStarted = performance.now();
   const workDeadline = workStarted + workBudgetMs;
@@ -169,7 +200,7 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     listenerPort = address.port;
     browserServer = await chromium.launchServer({
       headless: true,
-      executablePath: executable,
+      executablePath: resolvedExecutable,
       timeout: remaining(8_000, "Chromium launch"),
     });
     if (process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
@@ -179,6 +210,15 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     browser = await chromium.connect(browserServer.wsEndpoint(), {
       timeout: remaining(5_000, "Chromium connect"),
     });
+    const browserVersion = browser.version();
+    const reportedVersion = process.env.COVE_PROBE_TEST_REPORTED_VERSION ?? browserVersion;
+    if (
+      browserVersion !== chromiumEntry.browserVersion ||
+      reportedVersion !== chromiumEntry.browserVersion
+    )
+      throw new Error(
+        `Chromium version ${browserVersion !== chromiumEntry.browserVersion ? browserVersion : reportedVersion} does not match pinned ${chromiumEntry.browserVersion}`,
+      );
     await injectedDelay(remaining, "connected Chromium delay");
     completedInjectedDelays++;
     const pageBudget = remaining(5_000, "Browser page creation");
@@ -245,8 +285,9 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     const browserPid = browserServer.process().pid;
     if (!browserPid) throw new Error("Browser process identity is unavailable");
     record = {
-      browserVersion: browser.version(),
-      browserExecutable: executable,
+      browserVersion,
+      browserRevision: chromiumEntry.revision,
+      browserExecutable: resolvedExecutable,
       renderedWidth: rendered.width,
       renderedHeight: rendered.height,
       input,

@@ -18,6 +18,9 @@ test("compiled web export serves built xterm in managed Chromium and receives ke
   expect(result.status).toBe(0);
   const record = JSON.parse(result.stdout.trim());
   expect(record.input).toBe("ok");
+  expect(record.browserRevision).toBe("1243");
+  expect(record.browserVersion).toBe("153.0.8010.12");
+  expect(record.browserExecutable).toContain(`chromium-${record.browserRevision}`);
   expect(record.renderedWidth).toBeGreaterThan(0);
   expect(record.renderedHeight).toBeGreaterThan(0);
   await expect(fetch(`http://127.0.0.1:${record.listenerPort}/`)).rejects.toThrow(/fetch failed/);
@@ -81,6 +84,56 @@ catch (error) { console.log(JSON.stringify({ name: error.name, messages: error.e
       messages: ["Injected browser work failure", "Injected browser cleanup failure"],
       cause: "Injected browser work failure",
     });
+    const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+    expect(cleanup.browserPid).toBeGreaterThan(0);
+    expect(cleanup.browserExited).toBe(true);
+    expect(cleanup.listenerClosed).toBe(true);
+    await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
+      /fetch failed/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("browser rejects an executable outside the pinned managed revision", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-browser-selection-"));
+  const unrelated = join(directory, "unrelated-browser");
+  try {
+    await writeFile(unrelated, "not a browser");
+    const result = spawnSync(process.execPath, [entry], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 40_000,
+      env: { ...process.env, COVE_PROBE_TEST_EXECUTABLE: unrelated },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/outside managed revision 1243/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("browser rejects a wrong reported version and closes its owned resources", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-browser-version-"));
+  const evidence = join(directory, "cleanup.json");
+  try {
+    const result = spawnSync(process.execPath, [entry], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 40_000,
+      env: {
+        ...process.env,
+        COVE_PROBE_TEST_REPORTED_VERSION: "0.0.0.0",
+        COVE_PROBE_CLEANUP_EVIDENCE: evidence,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(
+      /Chromium version 0\.0\.0\.0 does not match pinned 153\.0\.8010\.12/,
+    );
     const cleanup = JSON.parse(await readFile(evidence, "utf8"));
     expect(cleanup.browserPid).toBeGreaterThan(0);
     expect(cleanup.browserExited).toBe(true);
