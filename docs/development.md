@@ -110,6 +110,8 @@ Zod `4.6.5` 的自身声明在 `v4/core/schemas.d.cts` 的未使用 URL helper �
 
 ## 兼容性边界
 
+T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露编译后的探针入口；`recovery-state.test.mjs` 首先验证普通保存光标及双缓冲区的续写语义。其余 parser、查询和边界用例会与各自的实际 suite 同步注册到 CI inventory。探针保留原始反例和版本/形状检查；当前实验不构成生产恢复能力承诺。
+
 - 最新 typescript-eslint 8.70.1 的 TypeScript peer 范围为 `>=4.8.4 <6.1.0`，因此本次采用 Oxlint + tsc，未强行忽略 peer 范围。
 - 最新 electron-vite 5.0.0 的 Vite peer 范围止于 7。Electron 尚未初始化，不在根安装该依赖，也不宣称与 Vite 8 已兼容。
   后续引入时重新检查最新 release；若仍有冲突，明确记录兼容版本例外或按包隔离其依赖，不能静默降级或关闭严格校验。
