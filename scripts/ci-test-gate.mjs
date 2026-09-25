@@ -12,6 +12,7 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
+  { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 6 },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
@@ -122,6 +123,7 @@ async function testFilesIn(directory, prefix) {
 
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
   return Promise.all([
+    testFilesIn(join(checkoutRoot, "packages/protocol/tests"), "packages/protocol/tests"),
     testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling"),
     testFilesIn(
       join(checkoutRoot, "packages/terminal-engine/probes"),

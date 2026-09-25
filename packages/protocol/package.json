@@ -1,0 +1,24 @@
+{
+  "name": "@cove/protocol",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./provisional/terminal": {
+      "types": "./dist/provisional/terminal.d.ts",
+      "import": "./dist/provisional/terminal.js"
+    },
+    "./provisional/pipe": {
+      "types": "./dist/provisional/pipe.d.ts",
+      "import": "./dist/provisional/pipe.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project protocol",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  }
+}

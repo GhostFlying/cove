@@ -136,8 +136,9 @@ test("records spawn and timeout failures before propagating them", async () => {
 });
 
 test("rejects removal of a gate test below the required floor", () => {
+  const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
-    verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredSuites),
+    verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
   ).toThrow(/needs 8/);
 });
 
@@ -148,12 +149,15 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
+  await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",
     "packages/terminal-web/probes/browser.test.mjs",
     "tests/tooling/excluded.spec.ts",

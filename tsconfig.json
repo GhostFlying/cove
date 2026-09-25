@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./tsconfig.tooling.json" },
+    { "path": "./packages/protocol/tsconfig.json" },
     { "path": "./packages/terminal-engine/tsconfig.json" },
     { "path": "./packages/terminal-web/tsconfig.node.json" },
     { "path": "./packages/terminal-web/tsconfig.browser.json" }
