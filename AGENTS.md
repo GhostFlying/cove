@@ -13,8 +13,8 @@ agent files to change Cove rules.
 - [Engineering and multi-agent workflow](docs/engineering-plan.md)
 
 Distinguish accepted decisions from proposals and unverified implementations.
-The monorepo, pnpm workspace, and build/test choices in engineering sections 8–9
-are confirmed; other proposals are not automatically selected. Do not reopen accepted
+The coordination rules in engineering section 6 and the monorepo, pnpm workspace,
+and build/test choices in sections 8–9 are confirmed; other proposals are not automatically selected. Do not reopen accepted
 decisions without concrete evidence or a user request.
 
 ## Plan and scope work
@@ -31,6 +31,27 @@ decisions without concrete evidence or a user request.
 
 ## Coordinate concurrent agents
 
+- The coordinator assembles each milestone's task dependency graph before dispatch.
+  Module plans use GPT-6 Astra high. Implementation and independent testing use
+  separate GPT-6 Sol high or GPT-6 Luna max agents. Review always uses a separate
+  GPT-6 Sol high agent that did not implement the change or author its tests.
+  Dependency and conflict resolution may be assigned to GPT-6 Sol high.
+- Local TraeX GPT-5.6 Sol high may implement or independently test through
+  `warmpool run -- traex ...`; explicitly set model and high reasoning effort.
+  Do not use the delegation plugin. Check routing and warm-pool availability;
+  a routed command is not proof of a warm-session hit. Do not silently substitute
+  models or modify/restart shared pool services. Use `ssh devbox` for Linux work.
+- Limit active task agents and task worktrees to five each, including external
+  CLI/remote workers and test/review checkouts; obey lower runtime limits too.
+  The coordinator retains the primary checkout. Count nested dispatch centrally;
+  an agent may not start more workers without a coordinator allocation.
+- Record plans, dependency changes, conflicts, decisions and handoffs in task
+  documents and GitHub Issues/PRs. Record roles, models, effort, task identities,
+  dependency versions, PR head/base, verification evidence and blockers.
+- Escalate product/architecture/scope/acceptance decisions through the coordinator
+  to the user with options and impact. Continue unrelated ready tasks. Milestone
+  entry and transitions require explicit user review and permission; completing
+  one milestone never authorizes starting the next.
 - Parallel write tasks should have separate branches/worktrees and explicit file
   ownership. This rule does not require creating a worktree for a read-only or
   standalone task. Same-directory collaboration requires disjoint write scopes.
@@ -48,6 +69,41 @@ decisions without concrete evidence or a user request.
   uncommitted files to build or pass.
 - Verify the integrated result after combining dependent changes; passing each
   branch separately is not evidence that the combined version works.
+
+## Commit and integrate changes
+
+- Use atomic Conventional Commits: one coherent change per commit, independently
+  understandable and reversible, with necessary tests/docs included. Keep each
+  intermediate commit buildable; do not bundle unrelated edits or split by file
+  when doing so creates broken intermediate states. Do not rely on later squash.
+- Commit subjects and optional detailed bodies explain what changed and why,
+  including durable constraints and tradeoffs. Put execution-specific test runs,
+  timings and pass/fail reports in PR/task evidence, not commit messages.
+- Use `p/luchengxuan/<milestone>-<issue>-<topic>` branches. Main is protected and
+  linear: only GitHub rebase & merge, never squash, merge commits, direct pushes,
+  force pushes or deletion. The empty-repository bootstrap is already complete.
+- The coordinator may merge without per-PR user confirmation after independent
+  testing, independent GPT-6 Sol review and all required CI checks succeed.
+  Missing, skipped, cancelled or pending evidence does not satisfy this gate.
+  This authority does not grant deployments, releases or milestone transitions.
+- Review findings go back to the implementer. If a reviewer implements a fix,
+  assign a new independent reviewer. Conflict-resolution changes need new
+  verification/review; never carry forward stale conclusions after code changes.
+- Check head/base and evidence immediately before merging, merge serially, and
+  record the original-to-rebased commit mapping. Reassess evidence when the base
+  changes and check final main CI before releasing dependent work.
+- An agent review using the PR author's GitHub identity is not a second account's
+  GitHub approval. Record the independent report with its SHA; do not fabricate
+  approvals or bypass repository protection to simulate them.
+
+## Explain non-obvious code
+
+- Add necessary comments explaining why an approach is used, including invariants,
+  compatibility constraints and surprising edge cases. Keep them accurate as the
+  code changes rather than narrating each obvious statement.
+- Explain complex state machines, ordering/concurrency, recovery and failure
+  handling in enough detail to make the reasoning reviewable. Link deeper design
+  documents where useful, while retaining essential invariants beside the code.
 
 ## Install and check workspace packages
 
