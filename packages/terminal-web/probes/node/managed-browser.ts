@@ -276,7 +276,9 @@ export async function withManagedBrowser<T>(
   const cleanupErrors: unknown[] = [];
   const cleanupStarted = performance.now();
   const cleanupDeadline = cleanupStarted + 7_000;
+  // Q1 reserves a forced-kill interval after graceful close and a final listener interval.
   const pageDeadline = cleanupDeadline - 3_500;
+  const gracefulCloseDeadline = cleanupDeadline - 2_500;
   const browserDeadline = profile === "query" ? cleanupDeadline - 1_000 : cleanupDeadline;
   const cleanupRemaining = (limit: number, phaseDeadline = cleanupDeadline) =>
     Math.max(1, Math.min(limit, Math.floor(phaseDeadline - performance.now())));
@@ -289,13 +291,19 @@ export async function withManagedBrowser<T>(
   let disposedPages = 0;
   const pages = ownedPages.reverse();
   for (const [index, page] of pages.entries()) {
-    // Share the page phase while reserving browser reaping and listener closure.
-    const pageShare = Math.max(
-      1,
-      Math.floor((pageDeadline - performance.now()) / (pages.length - index)),
-    );
-    const pageEnd = Math.min(pageDeadline, performance.now() + pageShare);
-    const disposalBudget = cleanupRemaining(Math.min(1_500, Math.max(1, pageShare - 500)), pageEnd);
+    // Q1 shares page time; B0 retains its original 500 ms page-operation limits.
+    const pageShare =
+      profile === "query"
+        ? Math.max(1, Math.floor((pageDeadline - performance.now()) / (pages.length - index)))
+        : undefined;
+    const pageEnd =
+      pageShare === undefined
+        ? cleanupDeadline
+        : Math.min(pageDeadline, performance.now() + pageShare);
+    const disposalBudget =
+      pageShare === undefined
+        ? cleanupRemaining(500)
+        : cleanupRemaining(Math.min(1_500, Math.max(1, pageShare - 500)), pageEnd);
     const injectedHang =
       profile === "query" && process.env.COVE_QUERY_TEST_DISPOSE_HANG === "1" && index === 0;
     const disposalExpression = injectedHang
@@ -320,10 +328,15 @@ export async function withManagedBrowser<T>(
     }
   }
   if (browserServer) {
+    const injectedCloseHang =
+      profile === "query" && process.env.COVE_QUERY_TEST_BROWSER_CLOSE_HANG === "1";
     try {
       await within(
-        browserServer.close(),
-        cleanupRemaining(profile === "query" ? 2_000 : 3_000, browserDeadline),
+        injectedCloseHang ? new Promise<void>(() => {}) : browserServer.close(),
+        cleanupRemaining(
+          profile === "query" ? 2_000 : 3_000,
+          profile === "query" ? gracefulCloseDeadline : browserDeadline,
+        ),
         "Browser close",
       );
     } catch (error) {
@@ -331,7 +344,7 @@ export async function withManagedBrowser<T>(
       try {
         await within(
           browserServer.kill(),
-          cleanupRemaining(2_000, browserDeadline),
+          cleanupRemaining(profile === "query" ? 1_500 : 2_000, browserDeadline),
           "Browser kill",
         );
       } catch (killError) {
