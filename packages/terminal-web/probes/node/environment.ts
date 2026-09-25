@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,6 +67,30 @@ async function within<T>(operation: Promise<T>, milliseconds: number, label: str
   }
 }
 
+function probeWorkBudget(maximum: number): number {
+  const requested = Number(process.env.COVE_PROBE_WORK_BUDGET_MS);
+  return Number.isFinite(requested) && requested >= 500 ? Math.min(requested, maximum) : maximum;
+}
+
+async function injectedDelay(remaining: (limit: number, label: string) => number, label: string) {
+  const requested = Number(process.env.COVE_PROBE_STAGE_DELAY_MS);
+  if (!Number.isFinite(requested) || requested <= 0) return;
+  const delay = Math.min(requested, 2_000);
+  await new Promise<void>((resolve, reject) => {
+    const delayTimer = setTimeout(() => {
+      clearTimeout(deadlineTimer);
+      resolve();
+    }, delay);
+    const deadlineTimer = setTimeout(
+      () => {
+        clearTimeout(delayTimer);
+        reject(new Error(`${label} exceeded work deadline`));
+      },
+      remaining(delay + 1, label),
+    );
+  });
+}
+
 function browserError(event: string, value: unknown): string | undefined {
   if (typeof value !== "object" || value === null) return `${event}: invalid event`;
   const item = value as {
@@ -92,6 +117,14 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
   const chromium = imported.chromium as ChromiumLauncher;
   const executable = chromium.executablePath();
   if (!(await stat(executable).catch(() => null))) throw new Error("Managed Chromium is absent");
+  const workBudgetMs = probeWorkBudget(24_000);
+  const workStarted = performance.now();
+  const workDeadline = workStarted + workBudgetMs;
+  const remaining = (limit: number, label: string) => {
+    const left = Math.floor(workDeadline - performance.now());
+    if (left <= 0) throw new Error(`Browser work deadline exceeded before ${label}`);
+    return Math.min(limit, left);
+  };
   const server = createServer(async (request, response) => {
     try {
       const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
@@ -114,21 +147,43 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
   let browserServer: BrowserServerHandle | undefined;
   let primaryError: unknown;
   let record: WebProbeResult | undefined;
+  let listenerPort: number | null = null;
+  let completedInjectedDelays = 0;
   try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", resolve);
-    });
+    const listenController = new AbortController();
+    try {
+      await within(
+        new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen({ port: 0, host: "127.0.0.1", signal: listenController.signal }, resolve);
+        }),
+        remaining(2_000, "fixture listener"),
+        "fixture listener",
+      );
+    } catch (error) {
+      listenController.abort();
+      throw error;
+    }
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Unexpected listener address");
+    listenerPort = address.port;
     browserServer = await chromium.launchServer({
       headless: true,
       executablePath: executable,
-      timeout: 8_000,
+      timeout: remaining(8_000, "Chromium launch"),
     });
-    browser = await chromium.connect(browserServer.wsEndpoint(), { timeout: 5_000 });
-    const page = await within(browser.newPage(), 5_000, "Browser page creation");
-    page.setDefaultTimeout(5_000);
+    await injectedDelay(remaining, "launched Chromium delay");
+    completedInjectedDelays++;
+    browser = await chromium.connect(browserServer.wsEndpoint(), {
+      timeout: remaining(5_000, "Chromium connect"),
+    });
+    await injectedDelay(remaining, "connected Chromium delay");
+    completedInjectedDelays++;
+    const pageBudget = remaining(5_000, "Browser page creation");
+    const page = await within(browser.newPage(), pageBudget, "Browser page creation");
+    await injectedDelay(remaining, "created browser page delay");
+    completedInjectedDelays++;
+    page.setDefaultTimeout(remaining(5_000, "Browser actions"));
     const errors: string[] = [];
     for (const event of ["console", "pageerror", "requestfailed"]) {
       page.on(event, (value) => {
@@ -143,23 +198,31 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     });
     const response = await page.goto(`http://127.0.0.1:${address.port}/`, {
       waitUntil: "networkidle",
-      timeout: 10_000,
+      timeout: remaining(10_000, "fixture navigation"),
     });
     if (!response?.ok()) throw new Error(`Fixture navigation failed: ${response?.status()}`);
-    await page.waitForFunction("window.coveProbe?.ready === true", null, { timeout: 5_000 });
-    const rendered = await page.evaluate<{
-      line?: string;
-      cursorX: number;
-      width: number;
-      height: number;
-    }>(`(() => {
+    await injectedDelay(remaining, "loaded browser fixture delay");
+    completedInjectedDelays++;
+    await page.waitForFunction("window.coveProbe?.ready === true", null, {
+      timeout: remaining(5_000, "xterm ready"),
+    });
+    const rendered = await within(
+      page.evaluate<{
+        line?: string;
+        cursorX: number;
+        width: number;
+        height: number;
+      }>(`(() => {
       const probe = window.coveProbe;
       if (!probe) throw new Error("Browser probe unavailable");
       const line = probe.terminal.buffer.active.getLine(0)?.translateToString(true);
       const dimensions = document.querySelector(".xterm-screen")?.getBoundingClientRect();
       probe.terminal.focus();
       return { line, cursorX: probe.terminal.buffer.active.cursorX, width: dimensions?.width ?? 0, height: dimensions?.height ?? 0 };
-    })()`);
+    })()`),
+      remaining(5_000, "xterm inspection"),
+      "xterm inspection",
+    );
     if (
       rendered.line !== "COVE_BROWSER_READY" ||
       rendered.cursorX !== 18 ||
@@ -168,8 +231,13 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     ) {
       throw new Error(`Browser buffer or geometry mismatch: ${JSON.stringify(rendered)}`);
     }
-    await within(page.keyboard.type("ok"), 5_000, "Browser keyboard input");
-    const input = await page.evaluate<string>("window.coveProbe?.input");
+    const keyboardBudget = remaining(5_000, "Browser keyboard input");
+    await within(page.keyboard.type("ok"), keyboardBudget, "Browser keyboard input");
+    const input = await within(
+      page.evaluate<string>("window.coveProbe?.input"),
+      remaining(5_000, "Browser input inspection"),
+      "Browser input inspection",
+    );
     if (input !== "ok" || errors.length)
       throw new Error(`Browser input/errors: ${JSON.stringify({ input, errors })}`);
     const browserPid = browserServer.process().pid;
@@ -187,13 +255,16 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
     primaryError = error;
   }
   const cleanupErrors: unknown[] = [];
+  const cleanupDeadline = performance.now() + 7_000;
+  const cleanupRemaining = (limit: number) =>
+    Math.max(1, Math.min(limit, Math.floor(cleanupDeadline - performance.now())));
   if (browserServer) {
     try {
-      await within(browserServer.close(), 3_000, "Browser close");
+      await within(browserServer.close(), cleanupRemaining(3_000), "Browser close");
     } catch (error) {
       cleanupErrors.push(error);
       try {
-        await within(browserServer.kill(), 2_000, "Browser kill");
+        await within(browserServer.kill(), cleanupRemaining(2_000), "Browser kill");
       } catch (killError) {
         cleanupErrors.push(killError);
       }
@@ -209,8 +280,23 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
         new Promise<void>((resolve, reject) =>
           server.close((error) => (error ? reject(error) : resolve())),
         ),
-        2_000,
+        cleanupRemaining(2_000),
         "Fixture listener close",
+      );
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (process.env.COVE_PROBE_CLEANUP_EVIDENCE) {
+    try {
+      const browserProcess = browserServer?.process();
+      await within(
+        writeFile(
+          process.env.COVE_PROBE_CLEANUP_EVIDENCE,
+          `${JSON.stringify({ browserPid: browserProcess?.pid ?? null, browserExited: browserProcess ? browserProcess.exitCode !== null || browserProcess.signalCode !== null : true, listenerPort, listenerClosed: !server.listening, workBudgetMs, completedInjectedDelays, elapsedMs: Math.round(performance.now() - workStarted) })}\n`,
+        ),
+        cleanupRemaining(1_000),
+        "Browser cleanup evidence",
       );
     } catch (error) {
       cleanupErrors.push(error);
@@ -225,7 +311,10 @@ export async function runEnvironmentProbe(): Promise<WebProbeResult> {
   return record;
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (
+  process.argv[1] &&
+  realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])
+) {
   runEnvironmentProbe()
     .then((result) => console.log(JSON.stringify(result)))
     .catch((error) => {

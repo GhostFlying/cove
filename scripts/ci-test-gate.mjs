@@ -15,16 +15,16 @@ export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 2 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 3 },
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/environment.test.mjs",
-    minimumTests: 1,
+    minimumTests: 2,
   },
   {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
-    minimumTests: 1,
+    minimumTests: 2,
   },
 ];
 

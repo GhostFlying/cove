@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
-import { mkdir, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 
@@ -23,4 +24,34 @@ test("compiled web export serves built xterm in managed Chromium and receives ke
   const evidence = resolve(import.meta.dirname, "../../../.cache/ci/smoke");
   await mkdir(evidence, { recursive: true });
   await writeFile(resolve(evidence, "web.json"), `${JSON.stringify(record, null, 2)}\n`);
+});
+
+test("browser work deadline closes Chromium and its fixture listener", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-browser-deadline-"));
+  const evidence = join(directory, "cleanup.json");
+  try {
+    const result = spawnSync(process.execPath, [entry], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 40_000,
+      env: {
+        ...process.env,
+        COVE_PROBE_WORK_BUDGET_MS: "8000",
+        COVE_PROBE_STAGE_DELAY_MS: "2000",
+        COVE_PROBE_CLEANUP_EVIDENCE: evidence,
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/deadline|timed out/);
+    const record = JSON.parse(await readFile(evidence, "utf8"));
+    expect(record.browserPid).toBeGreaterThan(0);
+    expect(record.completedInjectedDelays).toBeGreaterThanOrEqual(1);
+    expect(record.browserExited).toBe(true);
+    expect(record.listenerClosed).toBe(true);
+    expect(record.elapsedMs).toBeLessThan(16_000);
+    await expect(fetch(`http://127.0.0.1:${record.listenerPort}/`)).rejects.toThrow(/fetch failed/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
