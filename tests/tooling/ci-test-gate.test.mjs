@@ -72,6 +72,17 @@ test("rejects a required suite removed from discovery", () => {
   );
 });
 
+test("protocol registration and its actual test root are required", async () => {
+  const protocolSuite = requiredSuites.find(
+    ({ file }) => file === "packages/protocol/tests/metadata.test.mjs",
+  );
+  expect(protocolSuite).toMatchObject({ project: "protocol", minimumTests: 7 });
+  expect(await readVitestOwnedTestFiles()).toContain(protocolSuite.file);
+  expect(() => verifyDiscovery([], [protocolSuite.file], [protocolSuite])).toThrow(
+    /Required suite protocol:/,
+  );
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
@@ -139,7 +150,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 8/);
+  ).toThrow(/needs 9/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {

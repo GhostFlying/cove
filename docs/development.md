@@ -51,9 +51,9 @@ pnpm check
 | `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-当前有 tooling、terminal-engine-probes 和 terminal-web-probes 三个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
+当前有 tooling、protocol、terminal-engine-probes 和 terminal-web-probes 四个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
 已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与其拥有的
-`tests/tooling` 及两个包的 `probes` 下测试文件，
+`tests/tooling`、协议包 `tests` 及两个终端实验包的 `probes` 下测试文件，
 再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
 新增真实包时，在同一 PR 将 tsconfig 加入引用图、将其真实测试根目录及 suite 加入
 Vitest projects 和 inventory，
@@ -91,6 +91,20 @@ serialize 发布声明引用浏览器 xterm 类型但未声明其依赖；引擎
 两个编译后探针各有整体工作期限和独立、有限的资源清理期限，测试进程上限高于两者之和。测试还用分阶段延迟迫使整体期限到期，核验 PTY 子进程、临时目录、Chromium 和本地 HTTP listener 的清理结果。PTY 尺寸探针在同一期限内轮询子进程报告的实际尺寸。Web fixture 的 Vite 构建同时拒绝直接、动态、间接引入的 Node 内置模块和原生包；独立负例构建覆盖这些导入形式。
 
 Web 探针从已安装的 `playwright-core/browsers.json` 读取 Chromium revision 和版本，要求可执行文件位于本 checkout 对应的托管 revision 目录，并在连接后核对浏览器实际报告的版本。结果记录 revision、实际版本和规范化的可执行文件路径；错误选择或版本不匹配会使检查失败，并清理已启动的浏览器与 listener。
+
+## P1a 临时协议实验
+
+`@cove/protocol` 仅公开 `./provisional/terminal` 与 `./provisional/pipe` 两个编译入口。两者提供 Zod 身份与元数据 schema、交叉身份与基线块约束，以及接收/发送 `Uint8Array` 的临时帧编码器和增量解码器。调用方先校验元数据，自己完成 JSON 与 UTF-8 转换；接收方使用 fatal UTF-8 解码，只解析已经完整且不超过 4096 字节的元数据，再用 `validateTerminalFrame` 或 `validatePipeFrame` 核对头部 kind、身份和 payload 约束。具体组合例子见 `packages/protocol/tests/composition.test.mjs`。
+
+实验帧有 16 字节头部，metadata 最多 4096 字节、payload 最多 65536 字节。一次 `read` 至多消耗 256 KiB 输入并交付 32 帧和 256 KiB 完整帧；返回 `consumedBytes`，调用方保留未消耗的输入，在下次调度重试。`finish` 遇半帧报错并关闭解码器。`baseline-chunk` 保持不透明，库不组装或安装基线，也不实现 terminal profile、输入控制、服务端 RPC、worker IPC 或恢复状态机。
+
+```sh
+pnpm --filter @cove/protocol --fail-if-no-match build
+pnpm --filter @cove/protocol --fail-if-no-match test
+pnpm check
+```
+
+Zod `4.6.5` 的自身声明在 `v4/core/schemas.d.cts` 的未使用 URL helper 中引用标准 `URL` 全局类型，故完整传递依赖声明无法在 `lib: ["ES2024"]`、`types: []`、`skipLibCheck: false` 下原样通过。协议包仅在自己的 tsconfig 使用 `skipLibCheck: true`，不启用 DOM/Node 库；边界测试把发出的 Cove 声明原文复制为临时 `.ts` 源文件，在相同 ES2024/no-global 条件下完整类型检查，同时跳过第三方 `.d.ts` 检查，并以直接 `URL` 泄漏负例验证该门禁。测试也从临时消费者运行真实编译 exports、拒绝私有子路径。此门禁证明 Cove 自有声明没有宿主类型泄漏，不声称 Zod 的全部声明在纯 ES 环境中通过严格检查。
 
 ## 兼容性边界
 
