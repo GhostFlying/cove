@@ -140,6 +140,17 @@ test("final glyph checkpoint refresh suite is mandatory", async () => {
   );
 });
 
+test("combined recovery geometry suite is mandatory", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/terminal-engine/probes/recovery-geometry.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 3 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+    /Required suite terminal-engine-probes:/,
+  );
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
@@ -207,7 +218,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 14/);
+  ).toThrow(/needs 15/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
