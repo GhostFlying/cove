@@ -230,6 +230,9 @@ importers:
 
   packages/terminal-web:
     dependencies:
+      '@cove/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@xterm/xterm':
         specifier: 'catalog:'
         version: 6.0.0

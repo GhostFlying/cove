@@ -83,6 +83,17 @@ test("protocol registration and its actual test root are required", async () => 
   );
 });
 
+test("query input browser suite is mandatory with six acceptance rows", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/terminal-web/probes/query-input.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "terminal-web-probes", minimumTests: 6 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+    /Required suite terminal-web-probes:/,
+  );
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),

@@ -23,14 +23,19 @@ function assertDependencyBoundary(
 ) {
   if (Object.keys(engineManifest.exports).join() !== "./probes/environment")
     throw new Error("Engine exports more than its experiment");
-  if (Object.keys(webManifest.exports).join() !== "./probes/environment")
+  if (
+    Object.keys(webManifest.exports).sort().join() !== "./probes/environment,./probes/query-input"
+  )
     throw new Error("Web exports more than its experiment");
   if (
     Object.keys(engineManifest.dependencies).sort().join() !==
     "@xterm/addon-serialize,@xterm/headless"
   )
     throw new Error("Engine runtime dependency escaped Node boundary");
-  if (Object.keys(webManifest.dependencies).join() !== "@xterm/xterm")
+  if (
+    Object.keys(webManifest.dependencies).sort().join() !== "@cove/protocol,@xterm/xterm" ||
+    webManifest.dependencies["@cove/protocol"] !== "workspace:*"
+  )
     throw new Error("Web runtime dependency escaped browser boundary");
   if (
     Object.keys(protocolManifest.dependencies).join() !== "zod" ||
