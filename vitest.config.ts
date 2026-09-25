@@ -7,7 +7,7 @@ export default defineConfig({
         test: {
           name: "tooling",
           environment: "node",
-          include: ["tests/tooling/**/*.test.ts"],
+          include: ["tests/tooling/**/*.test.{ts,mjs}"],
           testTimeout: 30_000,
           hookTimeout: 30_000,
         },

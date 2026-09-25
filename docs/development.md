@@ -20,7 +20,9 @@
 
 Node 固定在 `.node-version`，Node/pnpm 同时由 `package.json` engines 校验；`packageManager` 固定 pnpm。
 直接依赖使用精确版本，间接依赖由根锁文件固定；不在每次安装时查询或升级 latest。
-GitHub Actions 同样固定到当日最新正式 release 的 commit：checkout v7.0.1、setup-node v7.0.0、pnpm/action-setup v6.1.0。
+GitHub Actions 固定到正式 release 的 commit：checkout v7.0.1、setup-node v7.0.0、
+pnpm/action-setup v6.1.0、upload-artifact v7.0.1。上传 action 的 SHA 由官方
+`actions/upload-artifact` v7.0.1 tag 核对。
 
 参考：[Node Current](https://nodejs.org/en/download/current)、[pnpm 安装](https://pnpm.io/installation)、
 [Oxlint 配置](https://oxc.rs/docs/guide/usage/linter/config)。
@@ -39,18 +41,22 @@ pnpm install --frozen-lockfile
 pnpm check
 ```
 
-| 命令                                | 行为                                      |
-| ----------------------------------- | ----------------------------------------- |
-| `pnpm build`                        | 按根 solution 的 Project References 编译  |
-| `pnpm typecheck`                    | 同一引用图的增量类型检查，会生成/更新产物 |
-| `pnpm clean`                        | 清理引用图的 TypeScript 产物              |
-| `pnpm lint`                         | Oxlint，警告也导致检查失败                |
-| `pnpm format` / `pnpm format:check` | 写入格式 / 只检查格式                     |
-| `pnpm test` / `pnpm test:watch`     | Vitest 一次运行 / 持续运行                |
-| `pnpm check`                        | 顺序执行格式、lint、构建、测试            |
+| 命令                                | 行为                                             |
+| ----------------------------------- | ------------------------------------------------ |
+| `pnpm build`                        | 按根 solution 的 Project References 编译         |
+| `pnpm typecheck`                    | 同一引用图的增量类型检查，会生成/更新产物        |
+| `pnpm clean`                        | 清理引用图的 TypeScript 产物                     |
+| `pnpm lint`                         | Oxlint，警告也导致检查失败                       |
+| `pnpm format` / `pnpm format:check` | 写入格式 / 只检查格式                            |
+| `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
+| `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-目前只有 tooling 测试 project；新增真实包时将 tsconfig 加入引用图、将测试加入 Vitest projects，
-提供对应包脚本，再使用 `pnpm --filter <package> <script>` 做局部验证。不要靠“未发现测试也成功”掩盖遗漏。
+目前只有 tooling 测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
+已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与仓库测试文件，
+再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
+新增真实包时，在同一 PR 将 tsconfig 加入引用图、将测试加入 Vitest projects 和 inventory，
+提供对应包脚本，再使用 `pnpm --filter <package> <script>` 做局部验证。`pnpm test:watch` 供开发交互使用，
+不产生 CI gate 证据。
 根工具配置/测试输出到 `.cache/tooling`；应用包各自设置 rootDir、dist 和 tsBuildInfoFile。
 通用配置不注入 Node/DOM 全局类型，由各执行环境显式选择；浏览器/RN 按 bundler 宿主覆盖模块解析与库。
 内部依赖使用 `workspace:*`，通过公开 exports 读取编译后的 JS/types，不提供跨包 src alias。
@@ -74,5 +80,9 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 用 Node 运行编译后的 ESM/exports，并检查类型不匹配、私有子路径导入被拒绝。
 不依赖临时包的源码 alias，也不启动真实 agent 或用户终端。
 
-CI 配置覆盖 macOS/Linux，冻结安装后执行 `pnpm check`。实际本地验证结果记录在
-[本次任务计划](tasks/engineering-bootstrap.md)。尚未执行的远端 CI、应用/原生/移动端测试不属于本次验收结果。
+CI 保留严格必需的 `check (ubuntu-latest)`、`check (macos-latest)` 两项，冻结安装后先核对
+Node/pnpm 精确版本，再执行 `pnpm check`。每个 job 上传 `.cache/ci` 中的环境、inventory、
+命令退出码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
+缺失 artifact 会使该 job 失败。C1 只覆盖真实 tooling 测试；应用、PTY、原生 ABI 与移动端
+测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。C1 实施记录见
+[任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
