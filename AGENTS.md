@@ -38,8 +38,10 @@ decisions without concrete evidence or a user request.
   Dependency and conflict resolution may be assigned to GPT-6 Sol high.
 - Local TraeX GPT-5.6 Sol high may implement or independently test through
   `warmpool run -- traex ...`; explicitly set model and high reasoning effort.
-  Do not use the delegation plugin. Check routing and warm-pool availability;
-  a routed command is not proof of a warm-session hit. Do not silently substitute
+  Do not use the delegation plugin. Warm hits are an optimization, not an
+  admission requirement: dispatch through warmpool even when warm=0 or no warm
+  session is selected; execution may queue briefly or start immediately. Record
+  routing and actual warm hits separately. Do not silently substitute
   models or modify/restart shared pool services. Use `ssh devbox` for Linux work.
 - Limit active task agents and task worktrees to five each, including external
   CLI/remote workers and test/review checkouts; obey lower runtime limits too.
