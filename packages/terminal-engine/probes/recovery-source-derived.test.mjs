@@ -21,9 +21,10 @@ const peaks = {
   capturedTextUnits: 0,
   geometryOperations: 0,
   accountedPayloadBytes: 0,
+  tailBytes: 0,
 };
 afterAll(() =>
-  writeRecoverySuiteEvidence("recovery-source-derived", completed, 4, { outcomes, peaks }),
+  writeRecoverySuiteEvidence("recovery-source-derived", completed, 5, { outcomes, peaks }),
 );
 
 function terminal(cols, rows = 4, scrollback = 10) {
@@ -160,6 +161,8 @@ test("source-only ordinary stream attempts 20 fresh checkpoints under the raw-ta
       const tail = new BoundedRecoveryTail();
       let total = 0;
       let attempts = 0;
+      const replies = [];
+      const listener = source.onData((reply) => replies.push(reply));
       try {
         if (alternate) await writeParsed(source, bytes("\u001b[?47h"));
         for (const target of targets) {
@@ -168,24 +171,43 @@ test("source-only ordinary stream attempts 20 fresh checkpoints under the raw-ta
             tail.append(chunk);
             await writeParsed(source, chunk);
             total += chunk.length;
+            peaks.tailBytes = Math.max(peaks.tailBytes, tail.retainedBytes);
           }
           const result = await install(source, 10);
+          const reference = terminal(cols);
+          let afterEqual = false;
+          try {
+            if (alternate) await writeParsed(reference, bytes("\u001b[?47h"));
+            await writeParsed(reference, bytes("A".repeat(total)));
+            expect(same(source, reference)).toBe(true);
+            expect(result.beforeEqual).toBe(true);
+            for (const suffix of ["\u001b[3b", "́", "\u001b8Q"]) {
+              await writeParsed(reference, bytes(suffix));
+              await writeParsed(result.receiver, bytes(suffix));
+              expect(same(reference, result.receiver)).toBe(true);
+            }
+            afterEqual = true;
+          } finally {
+            reference.dispose();
+            result.receiver.dispose();
+          }
           outcomes.push({
             id: `S-stream-${cols}-${alternate}-${target}`,
             beforeEqual: result.beforeEqual,
+            afterEqual,
             firstDifference: result.firstDifference,
             tailAvailable: tail.available,
           });
-          expect(result.beforeEqual).toBe(false);
-          result.receiver.dispose();
           attempts++;
-          if (result.beforeEqual) tail.resetAfterProvedCheckpoint();
+          if (result.beforeEqual && afterEqual) tail.resetAfterProvedCheckpoint();
         }
         expect(attempts).toBe(5);
         expect(total).toBe(131_073);
-        expect(tail.available).toBe(false);
+        expect(tail.available).toBe(true);
+        expect(replies).toEqual([]);
         completed.push(`S-stream-${cols}-${alternate ? "alternate" : "normal"}`);
       } finally {
+        listener.dispose();
         source.dispose();
       }
     }
@@ -208,6 +230,7 @@ test("source-only combined geometry attempts both row orders, history and joined
       suffix: `\u001b[${shortRow + 1};40H\u001b[@\u001b[${shortRow + 1};40H\u001b[P`,
     });
     expect(result.beforeEqual).toBe(false);
+    expect(result.firstDifference).toBe("public.normal.lines.1.cells.23.chars");
     completed.push(`S-mixed-${shortRow}`);
   }
   const history = await trial("S-history", historyNormal + alternateContent, {
@@ -219,6 +242,7 @@ test("source-only combined geometry attempts both row orders, history and joined
     suffix: "\u001b[1;40H\u001b[@\u001b[1;40H\u001b[P",
   });
   expect(history.beforeEqual).toBe(false);
+  expect(history.firstDifference).toBe("public.alternate.lines.1.cells.0.fg");
   completed.push("S-history");
   const joined = await trial("S-mixed-final-print", mixedNormal + alternateContent, {
     initialCols: 41,
@@ -227,6 +251,7 @@ test("source-only combined geometry attempts both row orders, history and joined
     suffix: "́\u001b[3b",
   });
   expect(joined.beforeEqual).toBe(false);
+  expect(joined.firstDifference).toBe("public.normal.lines.1.cells.23.chars");
   completed.push("S-mixed-final-print");
 });
 
@@ -248,6 +273,29 @@ test("source-only profile rejects excess geometry and caps output without a rece
     );
     completed.push("S-bounds");
   } finally {
+    source.dispose();
+  }
+});
+
+test("source-only 120x40 and 1000-line history stays within declared scan and VT caps", async () => {
+  const source = terminal(120, 40, 1000);
+  let result;
+  try {
+    await writeParsed(source, bytes(`${"X".repeat(119)}\r\n`.repeat(1040)));
+    result = await install(source, 1000);
+    const generated = createSourceDerivedRecovery(source);
+    expect(result.beforeEqual).toBe(true);
+    expect(generated.metrics.scannedCells).toBeLessThanOrEqual(2 * 120 * 1040);
+    expect(generated.metrics.encodedBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(generated.metrics.geometryOperations).toBeLessThanOrEqual(1040 * 2 + 3);
+    outcomes.push({
+      id: "S-profile-120x40-1000",
+      beforeEqual: result.beforeEqual,
+      firstDifference: result.firstDifference,
+    });
+    completed.push("S-profile-120x40-1000");
+  } finally {
+    result?.receiver.dispose();
     source.dispose();
   }
 });

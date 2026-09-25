@@ -71,6 +71,7 @@ export function savedState(
   charset: PrivateRecoveryState["charset"],
   finalActive: boolean,
   allowPendingCurrentX = false,
+  preservePriorSave = false,
 ): string {
   // A saved row evicted from scrollback is restored by stable headless at viewport row zero.
   const savedY = Math.max(0, state.savedY - state.ybase);
@@ -82,10 +83,12 @@ export function savedState(
   for (const tab of state.tabs) {
     if (tab >= 0 && tab < cols) vt += `${absolutePosition(tab, 0)}\u001bH`;
   }
-  vt += absolutePosition(state.savedX, savedY);
-  vt += sgr(state.savedAttr);
-  vt += `\u001b(${state.savedCharset}\u000f`;
-  vt += "\u001b7";
+  if (!preservePriorSave) {
+    vt += absolutePosition(state.savedX, savedY);
+    vt += sgr(state.savedAttr);
+    vt += `\u001b(${state.savedCharset}\u000f`;
+    vt += "\u001b7";
+  }
   if (finalActive) {
     vt += `\u001b(${charset.g0}\u001b)${charset.g1}${charset.glevel === 1 ? "\u000e" : "\u000f"}`;
     if (charset.current !== (charset.glevel === 1 ? charset.g1 : charset.g0)) {
