@@ -71,3 +71,11 @@ Independent preparation finished cleanly at `f9094a4` with no install/probe exec
 T1 incorporated Q1 source `1c7c65e` as `435615c`; its first coherent implementation source is `28e8c3d`, author full macOS gate 58/58. It remains incomplete/unaccepted; parser/query/bounds and continuous-printable preceding-state recovery are being expanded. This T1 implementation is not integrated into Q1 PR #32.
 
 A read-only devbox environment probe failed before any remote command because GSSAPI authentication was rejected. Local Kerberos output marked expiry; `kinit -R` failed noninteractively with no matching TGT. No services/settings changed. Corp-auth diagnostics were used; Kerberos is outside its managed provider set. User was asked asynchronously to restore normal SSH login. Local/GitHub Linux work continues; required devbox verification is not waived or claimed.
+
+## Retained-column recovery counterexample investigation
+
+T1 reported a required same-grid continuation gap: alternate buffer initialized at 41 columns retains its off-grid final cell after narrowing to 40; a subsequent DCH can shift that cell back into view. A fresh 40-column stock VT baseline loses it, so a later-resize-only fallback is insufficient. Required semantics remain unchanged; no dependency patch or unavailable waiver is authorized.
+
+The implementer has a one-case candidate using public retained cells, receiver initialization at storage width, VT replay and an ordered resize to logical width; this is narrow feasibility evidence, not general recovery acceptance. `/root/m0_p1a_plan` is reassigned to bounded Astra-high read-only options analysis, output `/tmp/cove-m0-probes-planning/retained-columns-options.md`. Independent TraeX session `01a0da05-4310-7340-a747-2235cbdf9d49` resumes only for a bounded original-engine reproduction in its existing `f9094a4` checkout; outputs under `/tmp/cove-m0-probes-verification/retained-columns/`. It may frozen-install its own checkout, but does not inspect uncommitted implementation or run the full Q1/T1 matrix.
+
+Allocation is now coordinator, two implementers, Astra analyst and external verifier: five active task agents, four native including coordinator, four worktrees. No further worker dispatch until a role completes. Routine probe work continues; only evidence-backed accepted-contract changes go to the user.
