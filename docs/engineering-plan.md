@@ -131,7 +131,9 @@ Review 默认只报告问题，修复交回实现者；若 reviewer 参与实现
 
 TraeX 是本地 CLI，不能使用 delegation 插件替代。交互 alias 不保证在非交互 shell 存在，
 使用显式 `warmpool run -- traex ...`；显式指定 `gpt-5.6-sol` 和 `model_reasoning_effort="high"`，
-不从 `ultra` 之类 profile 名推断真实强度。先检查 daemon 和目标模型状态，区分路由经过 warmpool 与实际命中 warm session。
+不从 `ultra` 之类 profile 名推断真实强度。可检查 daemon 和目标模型状态，并区分路由经过 warmpool 与实际命中 warm session。
+Warm 命中仅是加速项，不能将 warm=0 或未命中当作不可用或延迟派发的条件：仍经 warmpool 启动，
+可能短暂排队，也可能直接执行；只有实际启动/执行失败才按具体错误处理。
 当前调用的可用性、失败和排队记录在任务中，不写入长期可用保证；不为任务修改共享池配置或重启其他任务的服务。
 Linux 执行与验证通过 `ssh devbox`，使用任务独立 checkout 和资源，记录实际版本与环境。
 
