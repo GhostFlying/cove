@@ -15,7 +15,7 @@
     "lint": "oxlint --deny-warnings .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
+    "test": "node scripts/ci-test-gate.mjs",
     "test:watch": "vitest",
     "check": "pnpm format:check && pnpm lint && pnpm build && pnpm test"
   },
