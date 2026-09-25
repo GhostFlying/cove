@@ -59,3 +59,9 @@ T1 Astra-high plan `ed011fa974d2ccce224f983be48c57db3a6b9f8b` is integrated. `/r
 ## Independent probe verification preparation
 
 Native independent-verifier dispatch returned an agent-limit error; no native verifier started. The user-authorized local TraeX path supplies independent preparation instead: session `01a0da05-4310-7340-a747-2235cbdf9d49` through `warmpool run -- traex`, metadata verified as GPT-5.6-Sol/high, detached `cove-worktrees/m0-probes-verify` at `f9094a4`. It writes only `/tmp/cove-m0-probes-verification/strategy.md`, without installation/testing or implementation inspection until a frozen head is assigned. No warm-hit claim. Four active task agents/checkouts including coordinator and external verifier; Q1/T1 remain separate implementers. A separate Sol-high reviewer will be assigned after implementation, without concurrent over-allocation.
+
+## Shared registration transfer from Q1 to T1
+
+Q1 first coherent probe/registration source `1c7c65ee63a1b99a8d058e99be74366433d4634e` is frozen and integrated. Author reports macOS browser 11/11 and full 54/54; this is not independent acceptance. Q1 now writes only browser probes/client fixtures/Q1 plan/results. T1 explicitly receives exclusive ownership of `pnpm-lock.yaml`, `scripts/ci-test-gate.mjs`, affected gate/package-boundary tooling tests and `docs/development.md`, plus its engine manifest/project reference. It incorporates the immutable Q1 commit after checking local changes before registering actual T1 code. No concurrent shared writer; findings requiring root changes need a recorded handoff.
+
+Independent preparation finished cleanly at `f9094a4` with no install/probe execution. Strategy `/tmp/cove-m0-probes-verification/strategy.md` SHA256 `1290f433411723646b2aa2ab63653359e198bf0cc984cd1a1ef222bc573e395f`; external session is idle until frozen-head execution. Current active allocation: coordinator plus two implementers; four checkouts, including idle verifier.
