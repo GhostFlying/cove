@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { loadSerializeAddon } from "./serialize-loader.js";
@@ -89,9 +89,21 @@ async function injectedDelay(remaining: (limit: number, label: string) => number
 export async function runEnvironmentProbe(): Promise<EngineProbeResult> {
   const require = createRequire(import.meta.url);
   const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
+  const manifestPath = require.resolve("node-pty/package.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { version?: string };
+  if (manifest.version !== "1.1.0")
+    throw new Error(`Unexpected node-pty version ${manifest.version}`);
+  const packageRoot = await realpath(dirname(manifestPath));
   const pty = require(process.env.COVE_PROBE_PTY_MODULE ?? "node-pty") as typeof import("node-pty");
-  const nativeBinary = Object.keys(require.cache).find((path) => path.endsWith(".node"));
-  if (!nativeBinary) throw new Error("node-pty native binary did not load");
+  const nativeCandidates = Object.keys(require.cache).filter(
+    (path) => path.startsWith(`${packageRoot}${sep}`) && path.endsWith(".node"),
+  );
+  const candidate = nativeCandidates[0];
+  if (nativeCandidates.length !== 1 || !candidate)
+    throw new Error("Exact node-pty native binary did not load");
+  const nativeBinary = await realpath(candidate);
+  if (!nativeBinary.startsWith(`${packageRoot}${sep}`))
+    throw new Error("Loaded native binary escaped the exact node-pty package");
   const nativeSha256 = createHash("sha256")
     .update(await readFile(nativeBinary))
     .digest("hex");
