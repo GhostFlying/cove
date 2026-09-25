@@ -153,3 +153,7 @@ P5 证据需包含真实 PTY、已编译 exports/入口、两个客户端断言�
 协调者已将两项范围选择提交用户，并于 2026-09-25 确认采用：本地临时凭据与两个浏览器测试页；本次 server 生命周期内操作记录。替代方案会把 Electron/RN、正式配对或 SQLite 提前，增加阶段范围，因此不采用，也不再次要求用户选择。
 
 汇总 DAG 与 M0 进入许可仍待用户评审。无需用户选择 opcode、header 位宽、RPC 路径、默认队列水位、库补丁细节等普通实现项；由 P1b 与终端负责人基于风险原型确定。若 profile 验证无法满足已确认的 query/恢复/resize 行为，先报告具体缺口与方案，经协调者提交用户：优先局限于 adapter 补足并量化维护成本，替代是另选兼容引擎或调整范围；不得静默降低验收或改架构。
+
+## 汇总交接补充
+
+实施任务以 [M0 汇总 DAG](../milestones/m0.md) 为派发入口：P2 完整验收依赖 T3/T4/T5；T5 需要的 S-runtime 接口在 P1b 联合冻结，不等待 P2 实现。P1b owns bootstrap/Origin/instance 与本地凭据交付契约；P2 owns secret 生成、受限 rendezvous 与 admission 校验；P4 owns CLI/浏览器 harness 的显式注入与清理，凭据不进入 URL/log/trace。C2 随 worker/server/CLI 入口分批接线，C3 等完整 P4 与恢复路径，C4a 冻结完整 A7 所需旅程。
