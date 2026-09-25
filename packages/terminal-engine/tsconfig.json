@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "probes",
+    "outDir": "dist/probes",
+    "tsBuildInfoFile": "dist/terminal-engine.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["probes/**/*.ts"],
+  "exclude": ["probes/**/*.test.mjs"]
+}

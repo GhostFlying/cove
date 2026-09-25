@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": "probes/browser",
+    "outDir": "dist/probes/browser-types",
+    "tsBuildInfoFile": "dist/terminal-web-browser.tsbuildinfo"
+  },
+  "include": ["probes/browser/**/*.ts"]
+}
