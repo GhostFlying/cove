@@ -18,7 +18,7 @@ interface Serializer {
 
 const ALT_MARKER = "\u001b[?1049h\u001b[H";
 
-function sgr(attr: AttributeState): string {
+export function sgr(attr: AttributeState): string {
   const codes = ["0"];
   for (const [name, code] of [
     ["bold", "1"],
@@ -58,11 +58,11 @@ function sgr(attr: AttributeState): string {
   return `\u001b[${codes.join(";")}m`;
 }
 
-function absolutePosition(x: number, y: number): string {
+export function absolutePosition(x: number, y: number): string {
   return `\u001b[${y + 1};${x + 1}H`;
 }
 
-function savedState(
+export function savedState(
   state: PrivateBufferState,
   cols: number,
   rows: number,

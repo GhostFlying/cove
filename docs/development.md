@@ -110,7 +110,7 @@ Zod `4.6.5` 的自身声明在 `v4/core/schemas.d.cts` 的未使用 URL helper �
 
 ## 兼容性边界
 
-T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露编译后的探针入口；六个 recovery suite 检查保存光标/样式、双缓冲区、分段 UTF-8/控制序列、实时查询、资源上限、普通打印的候选 checkpoint 刷新、复合几何与临时 pipe 分块。每个 suite 在 `.cache/ci/smoke/terminal-recovery/` 写入带当前 SHA、运行环境和完成的 fixture ID 的有界 JSON，并验证读回。`recovery-boundaries.test.mjs` 保存了 41→40 列时保留列经 DCH 进入可见区、以及原始 ground-only 策略在普通连续打印超过 64 KiB 后无法刷新 checkpoint 的确切反例；`recovery-join.test.mjs` 和 `recovery-geometry.test.mjs` 分别验证有限矩阵中的 final-glyph-last 与复合双缓冲区候选。诊断测试通过不表示 R5/R6 恢复验收通过。完整矩阵及候选几何边界见 [T1 实验记录](tasks/m0-terminal-spike.md)。
+T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露编译后的探针入口；七个 recovery suite 检查保存光标/样式、双缓冲区、分段 UTF-8/控制序列、实时查询、资源上限、普通打印的候选 checkpoint 刷新、复合几何、source-only 构造与临时 pipe 分块。每个 suite 在 `.cache/ci/smoke/terminal-recovery/` 写入带当前 SHA、运行环境和完成的 fixture ID 的有界 JSON，并验证读回。`recovery-boundaries.test.mjs` 保存了 41→40 列时保留列经 DCH 进入可见区、以及原始 ground-only 策略在普通连续打印超过 64 KiB 后无法刷新 checkpoint 的确切反例；`recovery-join.test.mjs` 和 `recovery-geometry.test.mjs` 分别验证有限矩阵中的 final-glyph-last 与复合双缓冲区候选。`recovery-source-derived.test.mjs` 单独记录 source-only 生成后仍有的长流与复合几何反例。诊断测试通过不表示 R5/R6 恢复验收通过。完整矩阵及候选几何边界见 [T1 实验记录](tasks/m0-terminal-spike.md)。
 
 - 最新 typescript-eslint 8.70.1 的 TypeScript peer 范围为 `>=4.8.4 <6.1.0`，因此本次采用 Oxlint + tsc，未强行忽略 peer 范围。
 - 最新 electron-vite 5.0.0 的 Vite peer 范围止于 7。Electron 尚未初始化，不在根安装该依赖，也不宣称与 Vite 8 已兼容。
