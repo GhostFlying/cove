@@ -4,17 +4,22 @@ Updated: 2026-09-25. This is the coordinator-owned entry point; verify live GitH
 
 ## Authorized scope and stage boundary
 
-Engineering bootstrap is complete locally. The CI portability prerequisite is merged. Workflow-governance changes are delivered through PR #3; verify its final merge/check status on GitHub rather than infer it from this document. M0 implementation has not started; submit the M0 task DAG and scope for user review/permission before dispatching feature work. Autonomous PR merging is authorized only when independent testing, GPT-6 Sol review and required CI pass. Milestone transitions and material decisions remain with the user.
+Engineering bootstrap and workflow governance are merged through PRs #4 and #3. Current main baseline is `1e1398462c2aadc5a9171e40aef7c5d9f0ad3da7`, with post-merge checks successful. The user authorized proceeding with the next planning step: produce the concrete M0 scope and dependency graph for review. The user accepted the local-only experimental scope (temporary credentials, run-lifetime operation records, two browser test terminals; persistence/pairing later). M0 feature implementation is not yet authorized; final DAG/entry review and plan publication are separate from implementation permission.
+
+Autonomous PR merging remains conditional on independent validation, GPT-6 Sol review and required CI. Product/architecture/scope/acceptance decisions and milestone entry/transitions remain with the user.
 
 ## Current tasks and dependencies
 
-| Task                               | Tracking                                                                                                      | Owner / checkout                                                                                      | State and dependency                                                                                                                                                      |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Public registry portability        | [Issue #2](https://github.com/GhostFlying/cove/issues/2), [PR #4](https://github.com/GhostFlying/cove/pull/4) | Sol implementation; `p/luchengxuan/fix-public-registry` in task worktree                              | Merged as `3628bc03935067b5f5ddf3524b035be5ea9d24fe` from source `40b0ad89b34d4a602c641be0b39440762097c4c0`; independent validation, Sol review and both PR checks passed |
-| Workflow governance                | [Issue #1](https://github.com/GhostFlying/cove/issues/1), [PR #3](https://github.com/GhostFlying/cove/pull/3) | Coordinator; `p/luchengxuan/workflow-governance` in primary checkout                                  | Based on the merged #2 fix; includes latest user clarifications. Final head/base evidence and merge status are on the PR                                                  |
-| Documentation validation via TraeX | Local bounded read-only worker, no standalone feature Issue                                                   | Local TraeX `gpt-5.6-sol`, explicit high, through warmpool; detached validation checkout at `8bb98e4` | Completed against that revision; flagged a task-record Linux-route omission, now clarified. Supplementary validation, not the required Sol review                         |
+| Task                            | Tracking                                                 | Owner / checkout                                                     | State                                             |
+| ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
+| M0 plan integration             | [Issue #5](https://github.com/GhostFlying/cove/issues/5) | Coordinator; primary checkout, `p/luchengxuan/m0-5-plan-integration` | Integrated; independent validation/review pending |
+| Protocol/server/client/CLI plan | [Issue #6](https://github.com/GhostFlying/cove/issues/6) | Astra high; task branch `p/luchengxuan/m0-6-protocol-plan`           | Delivered `docs/plans/m0-protocol.md`             |
+| Terminal engine/worker plan     | [Issue #7](https://github.com/GhostFlying/cove/issues/7) | Astra high; task branch `p/luchengxuan/m0-7-terminal-plan`           | Delivered `docs/plans/m0-terminal.md`             |
+| CI/acceptance plan              | [Issue #8](https://github.com/GhostFlying/cove/issues/8) | Astra high; task branch `p/luchengxuan/m0-8-ci-plan`                 | Delivered `docs/plans/m0-ci.md`                   |
 
-Task agents/worktrees are capped at five each across runtimes, also respecting lower native tool limits. The coordinator owns allocation and root governance documents. The registry implementer alone owns its package configuration/lockfile change. Review/test workers do not modify implementation files. Inspect task records and live processes before cleanup; never remove resources belonging to another task.
+All planner checkouts start at the stated baseline. Native runtime has four concurrent slots including coordinator, the three planners have delivered and are idle; task agents/worktrees remain capped at five across runtimes. No recursive dispatch. The coordinator alone owns this handoff and aggregate milestone/task records. Read-only source reference is clean GhostFlying/orca fork `322c1839888f4a462e2d68839deafb1fe616c685` (version 1.4.190, not a claim of current upstream behavior).
+
+Use live agent/checkout/GitHub state before cleanup or continuing a task. A task record is not permission to adopt another session or overwrite another writer.
 
 ## Stable decisions and references
 
@@ -27,12 +32,19 @@ Planning and decision analysis should inspect relevant Orca implementation, pin 
 
 ## Integration checkpoint
 
-Initial remote main was bootstrapped at `9be4021dff2c10a059dd943dd3dac512483e15b4`. Rebase-only merge settings and active ruleset `23994191` require linear main, PRs, strict macOS/Linux checks, no force-push/deletion and no bypass actors. Independent agent review is a coordinator gate because all workers share the same GitHub account.
+The previous governance setup is complete. PR #4 preserves public-registry dependency versions/integrities; PR #3 introduced atomic commits, rebase-only integration, role independence and durable handoffs. Evidence and source-to-main SHA mappings are in their PR comments. Prior temporary worktrees were cleaned.
 
-First hosted CI failed because private mirror tarball URLs entered the root lockfile. PR #4 fixes project registry scope without dependency-version or integrity drift. Do not weaken the required checks. Source review and validation comments are recorded on each PR; verify their head/base before using them.
+Main ruleset `23994191` remains active: linear history, PRs, strict `check (ubuntu-latest)` / `check (macos-latest)`, no force-push/deletion or bypass actors. Independent agent review remains a coordinator gate, not a fabricated second-account approval.
 
 ## Next actions
 
-1. Verify post-merge main CI for #4 and the latest PR #3 state. If #3 remains open, require current-head/base independent validation, Sol review and both hosted checks before rebase-merging. If merged, inspect its final main checks; do not replay or duplicate it.
-2. Record source-to-main SHA mappings and final evidence on the Issue/PR. Remove only clean task-owned validation resources after workers finish; completed workers in the table are history, not permission to adopt another session.
-3. Present M0 planning/entry review to the user. Do not automatically start M0 implementation or later milestones.
+1. Independently validate/review the integrated aggregate plan and existing proposed implementation Issues, then publish/merge only the planning documents through normal checks.
+2. Present the M0 scope, DAG, exit criteria and material choices to the user. Start implementation only after explicit review/permission; do not infer stage entry from closing planning Issues.
+
+## M0 planning delivery
+
+The three Astra module plans are integrated in `docs/plans/m0-*.md`; [aggregate scope/DAG](milestones/m0.md) maps exclusive writers, staged CI, and all cross-module prerequisites. Implementation Issues [#9–#26](https://github.com/GhostFlying/cove/milestone/1) are proposed/blocked on user M0 entry approval, not runnable authorization. Root integration branch remains `p/luchengxuan/m0-5-plan-integration`. Planning worktrees have delivered clean commits; no implementation agent or application service has started.
+
+Module originals → integration commits: terminal `4c02bc9` → `4ac1333`; CI `229482c` → `a792059`; protocol `738cc32` → `ca30379`. Coordinator reconciliation is a separate atomic change. Sol high dependency analysis resolved P2/T5, staged C2, full A7 reference and credential ownership gaps. Independent final documentation validation/review and hosted CI still gate the planning PR; exact PR/head/main evidence will be recorded on Issue #5. A documentation merge does not approve M0 implementation.
+
+Next: validate/review/publish this planning change, then present the concrete plan for user entry review. After approval, C1 is the only initial ready task; subsequent dispatch follows the DAG. End-of-M0 X1 requires another user review before any M1 work.
