@@ -175,6 +175,34 @@ test("held parser timeout, late page errors, result bounds and thrown work close
         /fetch failed/,
       );
     }
+    for (const [mode, extra, expectedSuccess] of [
+      ["delayed", { COVE_QUERY_TEST_DISPOSE_DELAY_MS: "700" }, true],
+      ["hung", { COVE_QUERY_TEST_DISPOSE_HANG: "1" }, false],
+    ]) {
+      const evidence = join(directory, `${mode}-disposal.json`);
+      const result = spawnSync(process.execPath, [entry, "cleanup-two-pages"], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 40_000,
+        env: { ...process.env, ...extra, COVE_QUERY_CLEANUP_EVIDENCE: evidence },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status === 0).toBe(expectedSuccess);
+      expect(result.status === 0 ? JSON.parse(result.stdout.trim()).evidence : null).toEqual(
+        expectedSuccess ? { pages: 2 } : null,
+      );
+      expect(result.stderr).toMatch(
+        expectedSuccess ? /^$/ : /Query fixture disposal page 1\/2 .*timed out/,
+      );
+      const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+      expect(cleanup.disposedPages).toBe(2);
+      expect(cleanup.browserExited).toBe(true);
+      expect(cleanup.listenerClosed).toBe(true);
+      expect(cleanup.cleanupElapsedMs).toBeLessThan(8_000);
+      await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
+        /fetch failed/,
+      );
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
