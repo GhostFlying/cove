@@ -28,6 +28,8 @@ Planning dispatched; no implementation tasks started. Detailed current state is 
 
 ## Integrated dependency review
 
-Sol high `/root/m0_dag_check` independently identified the missing full P2→T5 prerequisite, staged C2 entry wiring, complete A7 reference requirements, and credential handoff ownership. The coordinator incorporated these into the aggregate DAG and module addenda. B0/Q1/V1 now have explicit owners; P1a → parallel T1/Q1 → P1b breaks the recovery-freeze cycle. Implementation Issues #9–#26 remain proposed and blocked on M0 entry approval. No feature implementation has started.
+Sol high `/root/m0_dag_check` independently identified the missing full P2→T5 prerequisite, staged C2 entry wiring, complete A7 reference requirements, and credential handoff ownership. The coordinator incorporated these into the aggregate DAG and module addenda. B0/Q1/V1 now have explicit owners; P1a → parallel T1/Q1 → P1b breaks the recovery-freeze cycle. Implementation Issues #9–#26 plus #28 remain proposed and blocked on M0 entry approval. No feature implementation has started.
 
 Upstream verification also read the latest stable v1.4.211 peeled commit `5534462b50c660888487a2108700d4cf284270db`; exact source distinctions and bounded comparison are recorded in the milestone. Original Orca checkout remains unchanged.
+
+Independent final Sol review at `2e7b951` found that a later fixture-only SHA could pass the mixed-version acceptance with identical executable code. Added E1 #28 between F1 and C4b, owned by an implementation agent and coordinated by the protocol writer, requiring a useful compatible M0 evolution plus runtime source/normalized artifact differences. C4b remains independent validation, and metadata-only changes do not satisfy the gate.
