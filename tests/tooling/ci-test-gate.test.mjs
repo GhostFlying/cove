@@ -122,7 +122,7 @@ test("recovery boundary suite includes real diagnostic and transport cases", asy
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-boundaries.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 8 });
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 9 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
     /Required suite terminal-engine-probes:/,
