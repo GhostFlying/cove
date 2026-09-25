@@ -5,6 +5,14 @@ export default defineConfig({
     projects: [
       {
         test: {
+          name: "protocol",
+          environment: "node",
+          include: ["packages/protocol/tests/**/*.test.mjs"],
+          testTimeout: 30_000,
+        },
+      },
+      {
+        test: {
           name: "tooling",
           environment: "node",
           include: ["tests/tooling/**/*.test.{ts,mjs}"],

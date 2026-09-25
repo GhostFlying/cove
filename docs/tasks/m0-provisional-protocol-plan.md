@@ -1,6 +1,8 @@
 # P1a provisional terminal and pipe envelopes
 
-Status: executable implementation plan, 2026-09-26. This commit is planning only. M0 is authorized; the protocol below is an experiment contract, not a frozen recovery profile or a production wire promise.
+Status: implementation in progress, 2026-09-26. M0 is authorized; the protocol below is an experiment contract, not a frozen recovery profile or a production wire promise.
+
+Implementation dispatch (2026-09-26): `/root/m0_p1a_impl` owns the combined protocol/root registration scope below in `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-provisional-protocol`, branch `p/luchengxuan/m0-11-protocol`, base `fd72b4130c2b8f5012b9946df7e4eb0e91c60cb1`. The coordinator's current B0 final CI and this allocation supersede the older handoff text in this checkout. The two implementation commits target (1) compiled metadata/identity schemas and exact build/test registration and (2) bounded byte framing plus host-composition tests. Validation is scoped package build/test, frozen install and root `pnpm check`; native and browser gates remain intact. Root retains handoff/execution/GitHub ownership. No runtime, profile freeze, or other package edits are in scope. Read-only Orca comparison was checked at stable `5534462`: terminal stream's numeric clamping and unknown-frame null behavior are unsuitable for Cove's explicit failure boundary; relay decoder's bounded turns motivate the pull API without its Node buffer/scheduling dependencies.
 
 ## Ownership, base and dependencies
 

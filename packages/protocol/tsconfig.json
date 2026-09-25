@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/protocol.tsbuildinfo",
+    "types": [],
+    "lib": ["ES2024"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}
