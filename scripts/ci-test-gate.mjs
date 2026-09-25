@@ -14,6 +14,7 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 8 },
+  { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 2 },
   {
     project: "terminal-engine-probes",
