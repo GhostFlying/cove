@@ -22,7 +22,7 @@ C1 [PR #29](https://github.com/GhostFlying/cove/pull/29) is merged. Current comp
 
 Local TraeX 5.6 Sol high has been successfully used through warmpool for independent C1 tests, including resumes after fixes. Model/effort and wrapper routing were verified; pre-dispatch warm count was 0, no warm-hit claim made. Do not require a warm hit or use delegation. Linux execution uses `ssh devbox`.
 
-Current allocation is coordinator plus one implementer and two worktrees; recompute live allocation before dispatch. Limits remain five task agents/worktrees globally and four native agents including coordinator. No recursive dispatch. No application or remote workload has yet been executed in M0.
+The implementer and coordinator use separate checkouts; `cove-worktrees/m0-package-verify` is reserved for independent TraeX verification (session `01a0d989-82a7-7b13-b6f7-2195da7e733a`, verified GPT-5.6 Sol high through warmpool). `/root/m0_b0_review`, GPT-6 Sol high, performed an early read-only review and will re-review the frozen head. Recompute active agents before dispatch; there are three task checkouts. Limits remain five task agents/worktrees globally and four native agents including coordinator. No recursive dispatch. No application or remote workload has yet been executed in M0.
 
 ## Fixed execution boundaries
 
