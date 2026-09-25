@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -84,6 +85,37 @@ catch (error) { console.log(JSON.stringify({ name: error.name, messages: error.e
     expect(cleanup.childPid).toBeGreaterThan(0);
     expect(cleanup.childExited).toBe(true);
     expect(cleanup.temporaryCwdRemoved).toBe(true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("engine identifies the node-pty binary despite an unrelated cached native entry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-native-cache-"));
+  const unrelated = join(directory, "unrelated.node");
+  try {
+    const script = `import { createRequire } from "node:module";
+const lookup = createRequire(${JSON.stringify(entry)});
+lookup.cache[${JSON.stringify(unrelated)}] = { id: ${JSON.stringify(unrelated)}, filename: ${JSON.stringify(unrelated)}, loaded: true, exports: {} };
+const { runEnvironmentProbe } = await import(${JSON.stringify(import.meta.resolve("@cove/terminal-engine/probes/environment"))});
+console.log(JSON.stringify(await runEnvironmentProbe()));`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+      cwd: resolve(import.meta.dirname, "../../.."),
+      encoding: "utf8",
+      timeout: 30_000,
+    });
+    expect(result.error).toBeUndefined();
+    if (result.status !== 0)
+      throw new Error(result.stderr || `Engine probe exited ${result.status}`);
+    const record = JSON.parse(result.stdout.trim());
+    expect(record.nativeBinary).toContain("node-pty");
+    expect(record.nativeBinary).not.toBe(unrelated);
+    expect(record.nativeSha256).toBe(
+      createHash("sha256")
+        .update(await readFile(record.nativeBinary))
+        .digest("hex"),
+    );
+    await expect(access(record.temporaryCwd)).rejects.toMatchObject({ code: "ENOENT" });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
