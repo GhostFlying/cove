@@ -43,7 +43,7 @@ Main ruleset `23994191` remains active: linear history, PRs, strict `check (ubun
 
 ## M0 planning delivery
 
-The three Astra module plans are integrated in `docs/plans/m0-*.md`; [aggregate scope/DAG](milestones/m0.md) maps exclusive writers, staged CI, and all cross-module prerequisites. Implementation Issues [#9–#26](https://github.com/GhostFlying/cove/milestone/1) are proposed/blocked on user M0 entry approval, not runnable authorization. Root integration branch remains `p/luchengxuan/m0-5-plan-integration`. Planning worktrees have delivered clean commits; no implementation agent or application service has started.
+The three Astra module plans are integrated in `docs/plans/m0-*.md`; [aggregate scope/DAG](milestones/m0.md) maps exclusive writers, staged CI, and all cross-module prerequisites. Implementation Issues [#9–#26 and #28](https://github.com/GhostFlying/cove/milestone/1) are proposed/blocked on user M0 entry approval, not runnable authorization. Root integration branch remains `p/luchengxuan/m0-5-plan-integration`. Planning worktrees have delivered clean commits; no implementation agent or application service has started.
 
 Module originals → integration commits: terminal `4c02bc9` → `4ac1333`; CI `229482c` → `a792059`; protocol `738cc32` → `ca30379`. Coordinator reconciliation is a separate atomic change. Sol high dependency analysis resolved P2/T5, staged C2, full A7 reference and credential ownership gaps. Independent final documentation validation/review and hosted CI still gate the planning PR; exact PR/head/main evidence will be recorded on Issue #5. A documentation merge does not approve M0 implementation.
 
