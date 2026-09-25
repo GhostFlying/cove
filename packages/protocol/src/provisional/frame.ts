@@ -111,6 +111,7 @@ export class FrameDecoder {
     return this.filled;
   }
 
+  // The caller owns ingress beyond consumedBytes and resubmits it later; only one copied partial frame is retained.
   read(input: Uint8Array): ReadResult {
     if (this.closed)
       return {
@@ -123,6 +124,7 @@ export class FrameDecoder {
     let consumedBytes = 0;
     let emittedBytes = 0;
     while (consumedBytes < input.byteLength && consumedBytes < MAX_READ_BYTES) {
+      // A validated header can expand expected from 16 bytes to a full frame; do not exceed this call's output budget.
       if (frames.length >= MAX_READ_FRAMES || emittedBytes + this.expected > MAX_READ_BYTES) break;
       const count = Math.min(
         this.expected - this.filled,
@@ -135,6 +137,7 @@ export class FrameDecoder {
       this.offset += count;
       if (this.filled !== this.expected) continue;
       if (this.expected === HEADER_BYTES) {
+        // Reject the header before allocating its body; fatal failure releases pending bytes but preserves earlier frames.
         const checked = inspectHeader(this.pending, this.lane, this.revision);
         if (!checked.ok) {
           this.close();
