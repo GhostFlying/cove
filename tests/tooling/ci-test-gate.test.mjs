@@ -1,6 +1,8 @@
-import { resolve } from "node:path";
-import { expect, test } from "vitest";
-import { verifyDiscovery, verifyInventory } from "../../scripts/ci-test-gate.mjs";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { afterEach, expect, test } from "vitest";
+import { recordedCommand, verifyDiscovery, verifyInventory } from "../../scripts/ci-test-gate.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const first = "tests/tooling/project-references.test.ts";
@@ -21,6 +23,19 @@ const discoveredCases = [
     name: `gate ${index}`,
   })),
 ];
+const temporaryDirectories = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
+  );
+});
+
+async function isolatedEvidence() {
+  const directory = await mkdtemp(resolve(tmpdir(), "cove-ci-evidence-"));
+  temporaryDirectories.push(directory);
+  return resolve(directory, "execution.json");
+}
 
 function report() {
   return {
@@ -70,4 +85,46 @@ test("rejects a missing execution report and zero passed tests", () => {
   const result = report();
   result.numPassedTests = 0;
   expect(() => verifyInventory(discoveredCases, result, [first, second], suites)).toThrow(/totals/);
+});
+
+test("records a failed discovery command with exact argv and exit code", async () => {
+  const output = await isolatedEvidence();
+  const args = ["--eval", "process.exit(7)"];
+  const result = await recordedCommand("discovery", process.execPath, args, output);
+  expect(result.status).toBe(7);
+  expect(JSON.parse(await readFile(output, "utf8"))).toEqual([
+    {
+      stage: "discovery",
+      argv: [process.execPath, ...args],
+      timeoutMs: 120_000,
+      exitCode: 7,
+      signal: null,
+      errorCode: null,
+      timedOut: false,
+    },
+  ]);
+});
+
+test("records spawn and timeout failures before propagating them", async () => {
+  const output = await isolatedEvidence();
+  const absent = resolve(dirname(output), "missing-command");
+  await expect(recordedCommand("discovery", absent, [], output)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  await expect(
+    recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", "setInterval(() => {}, 1000)"],
+      output,
+      50,
+    ),
+  ).rejects.toMatchObject({ code: "ETIMEDOUT" });
+  const attempts = JSON.parse(await readFile(output, "utf8"));
+  expect(
+    attempts.map(({ stage, errorCode, timedOut }) => ({ stage, errorCode, timedOut })),
+  ).toEqual([
+    { stage: "discovery", errorCode: "ENOENT", timedOut: false },
+    { stage: "vitest", errorCode: "ETIMEDOUT", timedOut: true },
+  ]);
 });

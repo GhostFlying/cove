@@ -116,14 +116,52 @@ async function testFiles(directory = root, prefix = "") {
   return found.sort();
 }
 
-function command(binary, args, timeout = 120_000) {
-  const result = spawnSync(binary, args, { cwd: root, encoding: "utf8", timeout });
-  if (result.error) throw result.error;
+export async function recordedCommand(stage, binary, args, outputFile, timeoutMs = 120_000) {
+  const attempt = {
+    stage,
+    argv: [binary, ...args],
+    timeoutMs,
+    exitCode: null,
+    signal: null,
+    errorCode: null,
+    timedOut: false,
+  };
+  let result;
+  let failure;
+  try {
+    result = spawnSync(binary, args, {
+      cwd: root,
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 512 * 1024,
+    });
+    attempt.exitCode = result.status;
+    attempt.signal = result.signal;
+    failure = result.error;
+  } catch (error) {
+    failure = error;
+  }
+  attempt.errorCode = failure?.code ?? null;
+  attempt.timedOut = failure?.code === "ETIMEDOUT";
+  await mkdir(dirname(outputFile), { recursive: true });
+  let prior = [];
+  try {
+    prior = JSON.parse(await readFile(outputFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  await writeFile(outputFile, `${JSON.stringify([...prior, attempt], null, 2)}\n`);
+  if (failure) throw failure;
   return result;
 }
 
 async function environment() {
-  const pnpm = command("pnpm", ["--version"]);
+  const pnpm = await recordedCommand(
+    "toolchain",
+    "pnpm",
+    ["--version"],
+    join(evidenceDir, "execution.json"),
+  );
   if (pnpm.status !== 0) throw new Error(`pnpm --version exited ${pnpm.status}`);
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   const expectedNode = pkg.engines.node;
@@ -153,48 +191,71 @@ async function environment() {
 }
 
 async function main() {
-  await environment();
-  if (process.argv[2] === "--environment") return;
-  if (process.argv.length > 2) throw new Error(`Unknown argument: ${process.argv[2]}`);
+  await mkdir(evidenceDir, { recursive: true });
   await Promise.all(
-    ["vitest-results.json", "vitest-results.xml", "execution.json", "inventory.json"].map((name) =>
-      rm(join(evidenceDir, name), { force: true }),
-    ),
+    [
+      "environment.json",
+      "vitest-results.json",
+      "vitest-results.xml",
+      "execution.json",
+      "inventory.json",
+      "failure.json",
+    ].map((name) => rm(join(evidenceDir, name), { force: true })),
   );
-  const discovery = command(process.execPath, [vitest, "list", "--json"]);
-  if (discovery.status !== 0) {
-    throw new Error(`vitest list --json exited ${discovery.status}: ${discovery.stderr}`);
+  let stage = "environment";
+  try {
+    await environment();
+    if (process.argv[2] === "--environment") return;
+    if (process.argv.length > 2) throw new Error(`Unknown argument: ${process.argv[2]}`);
+    stage = "discovery";
+    const discovery = await recordedCommand(
+      stage,
+      process.execPath,
+      [vitest, "list", "--json"],
+      join(evidenceDir, "execution.json"),
+    );
+    if (discovery.status !== 0) {
+      throw new Error(`vitest list --json exited ${discovery.status}: ${discovery.stderr}`);
+    }
+    const discovered = JSON.parse(discovery.stdout);
+    const sources = await testFiles();
+    // Validate discovery before running, then validate actual execution from a fresh report.
+    verifyDiscovery(discovered, sources);
+    stage = "vitest";
+    const runArgs = [
+      vitest,
+      "run",
+      "--reporter=default",
+      "--reporter=json",
+      "--reporter=junit",
+      `--outputFile.json=${resultPath}`,
+      `--outputFile.junit=${junitPath}`,
+    ];
+    const result = await recordedCommand(
+      stage,
+      process.execPath,
+      runArgs,
+      join(evidenceDir, "execution.json"),
+      14 * 60_000,
+    );
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (result.status !== 0) throw new Error(`Vitest exited ${result.status}`);
+    stage = "report-validation";
+    const report = JSON.parse(await readFile(resultPath, "utf8"));
+    if ((await stat(junitPath)).size === 0) throw new Error("Vitest JUnit report is empty");
+    const inventory = verifyInventory(discovered, report, sources);
+    await writeFile(join(evidenceDir, "inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
+    console.log(
+      `Required suite inventory passed: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
+    );
+  } catch (error) {
+    await writeFile(
+      join(evidenceDir, "failure.json"),
+      `${JSON.stringify({ stage, errorCode: error.code ?? null }, null, 2)}\n`,
+    );
+    throw error;
   }
-  const discovered = JSON.parse(discovery.stdout);
-  const sources = await testFiles();
-  // Validate discovery before running, then validate actual execution from a fresh report.
-  verifyDiscovery(discovered, sources);
-  const runArgs = [
-    vitest,
-    "run",
-    "--reporter=default",
-    "--reporter=json",
-    "--reporter=junit",
-    `--outputFile.json=${resultPath}`,
-    `--outputFile.junit=${junitPath}`,
-  ];
-  const result = command(process.execPath, runArgs, 14 * 60_000);
-  process.stdout.write(result.stdout);
-  process.stderr.write(result.stderr);
-  const execution = {
-    command:
-      "node node_modules/vitest/vitest.mjs run --reporter=default --reporter=json --reporter=junit",
-    exitCode: result.status,
-  };
-  await writeFile(join(evidenceDir, "execution.json"), `${JSON.stringify(execution, null, 2)}\n`);
-  if (result.status !== 0) throw new Error(`Vitest exited ${result.status}`);
-  const report = JSON.parse(await readFile(resultPath, "utf8"));
-  if ((await stat(junitPath)).size === 0) throw new Error("Vitest JUnit report is empty");
-  const inventory = verifyInventory(discovered, report, sources);
-  await writeFile(join(evidenceDir, "inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
-  console.log(
-    `Required suite inventory passed: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
-  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
