@@ -1,5 +1,12 @@
 # T1 terminal recovery and continuation probe
 
+## Implementer entry (2026-09-26)
+
+- Owner: `/root/m0_t1_impl`, GPT-6 Sol high. Checkout `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-terminal-recovery`, branch `p/luchengxuan/m0-13-recovery`, base `55c59b107f82a6a1e68d260c0f4366d4550bfedc`; clean at entry.
+- Initial writable scope: `packages/terminal-engine/probes/**`, `tests/fixtures/terminal/engine/**`, this plan, `docs/tasks/m0-terminal-spike.md`. Q1 exclusively owns shared registration until explicit coordinator handoff. No engine production, worker, server, protocol, or client edits.
+- Implement the smallest public serializer round trip first, independently observe the source and receiver, then probe each hidden state and partial parser cut. Keep a bounded checkpoint/tail candidate and exact counterexamples; defer any private patch or pin changes for coordinator decision. Use a worktree-owned frozen install with Node 26.10.0/pnpm 12.6.0. After registration, build compiled exports, run scoped suites and `pnpm check`.
+- Validate real restored continuation, exact query bytes, byte bounds and synthetic transport identity. Do not treat reference package copies as an executable dependency. Commit coherent buildable steps with evidence in the spike document and report gaps, SHAs, and cleanup.
+
 Status: executable implementation plan, 2026-09-26; no recovery probe has been run by this planner. [T1 #13](https://github.com/GhostFlying/cove/issues/13) follows B0/P1a and, together with Q1, gates P1b. M0 entry is approved; M0 exit/M1 entry remain user decisions.
 
 ## Ownership and exact entry

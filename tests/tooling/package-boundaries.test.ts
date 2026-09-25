@@ -21,7 +21,10 @@ function assertDependencyBoundary(
   webManifest: { dependencies: Record<string, string>; exports: Record<string, unknown> },
   protocolManifest: { dependencies: Record<string, string>; exports: Record<string, unknown> },
 ) {
-  if (Object.keys(engineManifest.exports).join() !== "./probes/environment")
+  if (
+    Object.keys(engineManifest.exports).sort().join() !==
+    "./probes/environment,./probes/recovery-boundaries"
+  )
     throw new Error("Engine exports more than its experiment");
   if (
     Object.keys(webManifest.exports).sort().join() !== "./probes/environment,./probes/query-input"
@@ -29,9 +32,11 @@ function assertDependencyBoundary(
     throw new Error("Web exports more than its experiment");
   if (
     Object.keys(engineManifest.dependencies).sort().join() !==
-    "@xterm/addon-serialize,@xterm/headless"
+    "@cove/protocol,@xterm/addon-serialize,@xterm/headless"
   )
     throw new Error("Engine runtime dependency escaped Node boundary");
+  if (engineManifest.dependencies["@cove/protocol"] !== "workspace:*")
+    throw new Error("Engine protocol dependency lost workspace linkage");
   if (
     Object.keys(webManifest.dependencies).sort().join() !== "@cove/protocol,@xterm/xterm" ||
     webManifest.dependencies["@cove/protocol"] !== "workspace:*"

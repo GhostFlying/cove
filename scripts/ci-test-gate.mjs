@@ -16,13 +16,18 @@ export const requiredSuites = [
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 9 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 11 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 4 },
   {
     project: "terminal-engine-probes",
     file: "packages/terminal-engine/probes/environment.test.mjs",
     minimumTests: 4,
+  },
+  {
+    project: "terminal-engine-probes",
+    file: "packages/terminal-engine/probes/recovery-state.test.mjs",
+    minimumTests: 3,
   },
   {
     project: "terminal-web-probes",

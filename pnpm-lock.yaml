@@ -214,6 +214,9 @@ importers:
 
   packages/terminal-engine:
     dependencies:
+      '@cove/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@xterm/addon-serialize':
         specifier: 'catalog:'
         version: 0.14.0

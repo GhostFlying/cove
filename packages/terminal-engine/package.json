@@ -7,6 +7,10 @@
     "./probes/environment": {
       "types": "./dist/probes/environment.d.ts",
       "import": "./dist/probes/environment.js"
+    },
+    "./probes/recovery-boundaries": {
+      "types": "./dist/probes/recovery-boundaries.d.ts",
+      "import": "./dist/probes/recovery-boundaries.js"
     }
   },
   "scripts": {
@@ -15,6 +19,7 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
+    "@cove/protocol": "workspace:*",
     "@xterm/headless": "catalog:",
     "@xterm/addon-serialize": "catalog:"
   },
