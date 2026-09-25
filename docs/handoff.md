@@ -10,12 +10,12 @@ Autonomous PR merging remains conditional on independent validation, GPT-6 Sol r
 
 ## Current tasks and dependencies
 
-| Task                            | Tracking                                                 | Owner / checkout                                                     | State                                             |
-| ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------- |
-| M0 plan integration             | [Issue #5](https://github.com/GhostFlying/cove/issues/5) | Coordinator; primary checkout, `p/luchengxuan/m0-5-plan-integration` | Integrated; independent validation/review pending |
-| Protocol/server/client/CLI plan | [Issue #6](https://github.com/GhostFlying/cove/issues/6) | Astra high; task branch `p/luchengxuan/m0-6-protocol-plan`           | Delivered `docs/plans/m0-protocol.md`             |
-| Terminal engine/worker plan     | [Issue #7](https://github.com/GhostFlying/cove/issues/7) | Astra high; task branch `p/luchengxuan/m0-7-terminal-plan`           | Delivered `docs/plans/m0-terminal.md`             |
-| CI/acceptance plan              | [Issue #8](https://github.com/GhostFlying/cove/issues/8) | Astra high; task branch `p/luchengxuan/m0-8-ci-plan`                 | Delivered `docs/plans/m0-ci.md`                   |
+| Task                            | Tracking                                                 | Owner / checkout                                                     | State                                        |
+| ------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------- |
+| M0 plan integration             | [Issue #5](https://github.com/GhostFlying/cove/issues/5) | Coordinator; primary checkout, `p/luchengxuan/m0-5-plan-integration` | Delivered in PR #27; evidence recorded there |
+| Protocol/server/client/CLI plan | [Issue #6](https://github.com/GhostFlying/cove/issues/6) | Astra high; task branch `p/luchengxuan/m0-6-protocol-plan`           | Delivered `docs/plans/m0-protocol.md`        |
+| Terminal engine/worker plan     | [Issue #7](https://github.com/GhostFlying/cove/issues/7) | Astra high; task branch `p/luchengxuan/m0-7-terminal-plan`           | Delivered `docs/plans/m0-terminal.md`        |
+| CI/acceptance plan              | [Issue #8](https://github.com/GhostFlying/cove/issues/8) | Astra high; task branch `p/luchengxuan/m0-8-ci-plan`                 | Delivered `docs/plans/m0-ci.md`              |
 
 All planner checkouts start at the stated baseline. Native runtime has four concurrent slots including coordinator, the three planners have delivered and are idle; task agents/worktrees remain capped at five across runtimes. No recursive dispatch. The coordinator alone owns this handoff and aggregate milestone/task records. Read-only source reference is clean GhostFlying/orca fork `322c1839888f4a462e2d68839deafb1fe616c685` (version 1.4.190, not a claim of current upstream behavior).
 
@@ -38,13 +38,13 @@ Main ruleset `23994191` remains active: linear history, PRs, strict `check (ubun
 
 ## Next actions
 
-1. Independently validate/review the integrated aggregate plan and existing proposed implementation Issues, then publish/merge only the planning documents through normal checks.
+1. Complete gated publication of [PR #27](https://github.com/GhostFlying/cove/pull/27); verify its live head/base, review/validation and final main CI in PR/Issue #5 evidence before resuming. The original proposal passed independent checks; subsequent corrections require corresponding revalidation.
 2. Present the M0 scope, DAG, exit criteria and material choices to the user. Start implementation only after explicit review/permission; do not infer stage entry from closing planning Issues.
 
 ## M0 planning delivery
 
 The three Astra module plans are integrated in `docs/plans/m0-*.md`; [aggregate scope/DAG](milestones/m0.md) maps exclusive writers, staged CI, and all cross-module prerequisites. Implementation Issues [#9–#26 and #28](https://github.com/GhostFlying/cove/milestone/1) are proposed/blocked on user M0 entry approval, not runnable authorization. Root integration branch remains `p/luchengxuan/m0-5-plan-integration`. Planning worktrees have delivered clean commits; no implementation agent or application service has started.
 
-Module originals → integration commits: terminal `4c02bc9` → `4ac1333`; CI `229482c` → `a792059`; protocol `738cc32` → `ca30379`. Coordinator reconciliation is a separate atomic change. Sol high dependency analysis resolved P2/T5, staged C2, full A7 reference and credential ownership gaps. Independent final documentation validation/review and hosted CI still gate the planning PR; exact PR/head/main evidence will be recorded on Issue #5. A documentation merge does not approve M0 implementation.
+Module originals → integration commits: terminal `4c02bc9` → `4ac1333`; CI `229482c` → `a792059`; protocol `738cc32` → `ca30379`. Coordinator reconciliation is a separate atomic change. Sol high dependency analysis resolved P2/T5, staged C2, full A7 reference and credential ownership gaps. Independent final documentation validation/review and hosted CI gate [PR #27](https://github.com/GhostFlying/cove/pull/27); exact current PR/head/main evidence is recorded on [Issue #5](https://github.com/GhostFlying/cove/issues/5) and PR comments, avoiding stale SHA claims in this file. A documentation merge does not approve M0 implementation.
 
-Next: validate/review/publish this planning change, then present the concrete plan for user entry review. After approval, C1 is the only initial ready task; subsequent dispatch follows the DAG. End-of-M0 X1 requires another user review before any M1 work.
+The compatibility review correction adds E1 #28, and the accepted synthetic 100-PTY devbox gate is retained in C5/X1; only 100 real-agent/mobile/long-duration capacity remains deferred. Next: finish the exact-head publication gates, then present the concrete plan for user entry review. After approval, C1 is the only initial ready task; subsequent dispatch follows the DAG. End-of-M0 X1 requires another user review before any M1 work.

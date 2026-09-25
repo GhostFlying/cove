@@ -21,7 +21,7 @@ Client disconnect/view disposal never stops PTY. Runtime/worker failure has no k
 Preserve normal and alternate state, limited history, server-only query replies, foreground control epochs and replaceable client renderers.
 Refresh state/previews for every run, including unobserved runs, with bounded staggered work and stale-cache reporting.
 Exclude PTY keeper, disk snapshots/scrollback/raw logs, agent management/hooks, task/workspace/SQLite domains, migration, production Desktop/RN and deployment.
-The devbox target remains at least 100 frequently outputting agents; full real-agent capacity belongs to later capacity acceptance, not M0 success.
+M0 retains the accepted devbox gate of 100 real PTYs concurrently producing sustained synthetic output. This is distinct from at least 100 frequently outputting real agents, mobile rendering and long-duration capacity acceptance in later milestones.
 
 ## Pinned Orca comparison
 
@@ -159,7 +159,7 @@ Independent tests extend the authored fixtures with adversarial scheduling; asse
 CI owner supplies executable scoped commands before implementation readiness: package typecheck/test/build, compiled worker/server/CLI smoke,
 real PTY integration and browser two-client test; do not document nonexistent commands as already verified.
 Both required macOS/Linux jobs and `ssh devbox` use the integrated SHA, exact Node/native ABI and dependency pins; record OS/arch and owned PIDs.
-M0 workload: multiple real PTYs with operator plus bulk output, both client connections, hidden previews and forced resnapshots; include a deterministic TUI.
+M0 workload: ordinary CI uses multiple real PTYs with operator plus bulk output, both client connections, hidden previews and forced resnapshots; include a deterministic TUI. C5/X1 additionally require 100 concurrently outputting real PTYs on devbox, with per-run offered/achieved rate, active count, bounds, fairness and cleanup evidence at the final integrated SHA. Idle PTYs or headless-only models do not satisfy this gate; insufficient host resources block the lane rather than reduce its required count.
 Use monotonic timestamps for input admission→PTY write, PTY read→parsed, serialize wall time, pipe queue/drain and client parse→paint;
 measure client input→paint on one client clock, avoiding subtraction of unsynchronized host clocks. Correlate sequence IDs without recording private contents.
 Record p50/p95/p99/max, event-loop lag, per-worker CPU/RSS, total memory, queue peaks, recovery time and preview age by workload/dimensions/history.
