@@ -118,25 +118,28 @@ async function run(caseId, setup, tail, continuation, geometry = {}) {
 }
 
 test("pragmatic normal saved position and current pen continue", async () => {
-  await run(
+  const result = await run(
     "normal-saved-position-pen",
     "\u001b[2;3H\u001b[31m\u001b7\u001b[4;9H\u001b[34m",
     "",
     "C\u001b8S\u001b[4;9HX",
   );
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
 });
 
 test("pragmatic alternate baseline preserves hidden normal on exit", async () => {
-  await run(
+  const result = await run(
     "alternate-normal-exit",
     "normal\u001b[2;3H\u001b7\u001b[?47hALT\u001b[32m",
     "",
     "Z\u001b[?47l\u001b8Q",
   );
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
 });
 
 test("pragmatic split query tail replies only through the live source sink", async () => {
-  await run("split-query-tail", "ready", "\u001b[?6", "n");
+  const result = await run("split-query-tail", "ready", "\u001b[?6", "n");
+  expect(result.sourceReplies).toEqual(["\u001b[?1;6R"]);
 });
 
 const commonCases = [
@@ -217,7 +220,8 @@ const commonCases = [
 test.each(commonCases)(
   "pragmatic $caseId",
   async ({ caseId, setup, tail = "", continuation, geometry }) => {
-    await run(caseId, setup, tail, continuation, geometry);
+    const result = await run(caseId, setup, tail, continuation, geometry);
+    expect(result.checkpoint.vt.length).toBeGreaterThan(0);
   },
 );
 
@@ -266,7 +270,8 @@ const joinedCases = [
 ];
 
 test.each(joinedCases)("pragmatic joined $0", async (id, setup, continuation, geometry) => {
-  await run(`joined-${id}`, setup, "", continuation, geometry);
+  const result = await run(`joined-${id}`, setup, "", continuation, geometry);
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
 });
 
 test("pragmatic printable stream proves twenty fresh checkpoints before resetting each tail", async () => {
@@ -347,6 +352,7 @@ test("pragmatic C0 effects inside CSI execute exactly once", async () => {
     ["bel", "\u0007"],
   ])
     await run(`c0-${id}`, "\u001b[2;3H", `\u001b[1${control}`, ";2H!");
+  expect(completed.filter((id) => id.startsWith("c0-"))).toHaveLength(7);
 });
 
 test("pragmatic source answers nine live query families without replay to its sink", async () => {
