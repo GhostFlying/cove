@@ -78,3 +78,13 @@ sole registrar持有patch注册hash、pnpm lock、必要manifest/build/export/CI
 - 可写范围：`patches/node-pty@1.1.0.patch` 及其批准的 node-pty1.1.0 补丁表面；`packages/terminal-worker/tests/native-write-spawn-contract.test.mjs`、必要的命名对应 fixture 和已有同类 native-write rollback/fault 测试；本任务 plan/results；若源码真实需要，唯一写者负责 patch/hash、`pnpm-lock.yaml`、manifest/build/导出、根 Vitest/CI inventory 与对应 tooling 测试。不要改协议、R1/G0、N2 native-pty/pty-input、worker pump、W2/P2、pin版本或 devbox。
 - 先核对接受源码与当前已安装编译/原生表面，做最小公开 preflight 和失败 spawn 回执，保持成功路径。测试须直接消费重新构建后的公开 JS/声明，且以实际独立 owner/child/fd 事实验证 cleanup；不把仅返回 `confirmed-clean` 当作自身证明。新增真实套件和注册作为同一个可构建候选原子边界，无空导出/空门禁。先定向 Node26.10/pnpm12.6 build 和有限 native 检查，冻结 SHA 后交独立测试/审查，最后双系统 hosted/final-main 才接受。
 - G0 的独立候选在另一既有 checkout `m0-terminal-view`，不混入本分支。若真实 public/native 合同达不到本计划的确认清理与 3 秒终态界限，按前节向根报告最小反例与取舍，不以私有读取或普通异常文字替代承诺。
+
+## 547 候选的有界修正计划，2026-09-27
+
+独立源码审查 `/tmp/cove-m0-w1-n1b-source-review/report.md`（SHA-256 `1db4eba6c44508223b5c0d7f3dbbf657e630ea1908d4321ac9b568390a488021`）针对 `547abcbffaf6bdec7b1663417904351a0a4f9cad` 指出两项生产阻塞和一项注册测试缺口。该结论不否定同 SHA 的独立有限正向验证 `/tmp/cove-m0-w1-n1b-native-verify/report-547.md`（SHA-256 `f29d7fc3aa21a87263ecee9719c6f01694a5ba9f324dcecad1feda5d6cff7b32`），但尚不能接受 N1b。保留原候选、日志与失败证据；以下修正不得改 N2、R1、G0 或成功写入语义。
+
+1. 失败时已创建 child、但 watcher 尚未安装的路径不得在 JS/native 同步调用栈执行 `waitpid(..., 0)`。把该 child 一次性交给现有 owned watcher/state 通道，再关闭已取得的 fd、按身份请求停止并报告 pending；watcher 的实际 reap 触发公开回执，三秒上限只让回执落到 uncertain，不伪造进程退出。若 watcher 本身不能建立，仍立即返回 uncertain，并只做合法的已知 owner 清理，不增加第二个 reaper 或无界同步等待。package-local 有限故障入口需证明 watcher 前 child 暂不退出时 `spawn` 迅速抛出、cleanup pending→超时 uncertain，迟到 reap 不改终态；正常成功和 legacy 路径不变。
+2. macOS `pty_posix_spawn` 已记录的 `spawn_cleanup_clean=false` 必须贯穿以后全部 native 失败分类，包括 nonblock、duplicate、对象发布和 watcher 后 catch；成功创建 child 后若已经有父侧清理歧义，也不能返回一个表面成功的 owner。通过只在测试故障入口标记 auxiliary-close 歧义并组合后续失败，证明 primary master/writer/child 即使独立清理完成仍返回 uncertain。不得重试可能已经关闭的数字 fd。
+3. 扩展同一已注册 suite 的小型 1/2-slot consumer ledger 和受控失败入口：纯校验不计费；pending 阻塞；confirmed-clean 恰释放一次；uncertain 到容量上限后拒绝；late callback 不改 promise 终态、不释放 tombstone；reader/writer close 歧义同样保留 slot。先实际增加具名测试，再把 CI floor 提升到真实数量。证明 test-owned child/descriptor 都结束或明确保留不确定，不以自身回执作为唯一 OS oracle。
+
+生产 patch、lock/hash/安装 marker、真实 fixture、suite floor 在一个新的可构建原子提交里同步；结果文档另记 exact head 与定向/full/独立/hosted 门禁。先完成其他已释放 R1 的独立集成冻结点，再继续此分支源码修复；不在 R1 checkout 混写 native patch。
