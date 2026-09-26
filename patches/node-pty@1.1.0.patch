@@ -797,7 +797,7 @@ index c53e086b4968d6fb0bf601ace3a813809433fedb..4088e4b509648694a7f075aea9663c10
    pty: string;
  }
 diff --git a/src/unix/pty.cc b/src/unix/pty.cc
-index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78fff5810dad 100644
+index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570ce2b271e2 100644
 --- a/src/unix/pty.cc
 +++ b/src/unix/pty.cc
 @@ -24,6 +24,9 @@
@@ -871,7 +871,16 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78ff
  void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
    std::thread *th = new std::thread;
    // Don't use Napi::AsyncWorker which is limited by UV_THREADPOOL_SIZE.
-@@ -262,7 +319,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -167,6 +224,8 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
+         }
+       }
+     }
++    // The wait thread owns the kqueue descriptor after its final event.
++    if (kq >= 0) close(kq);
+ #else
+     while (true) {
+       errno = 0;
+@@ -262,7 +321,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
    Napi::Env napiEnv(info.Env());
    Napi::HandleScope scope(napiEnv);
  
@@ -880,7 +889,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78ff
        !info[0].IsString() ||
        !info[1].IsArray() ||
        !info[2].IsArray() ||
-@@ -273,9 +330,11 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -273,9 +332,11 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        !info[7].IsNumber() ||
        !info[8].IsBoolean() ||
        !info[9].IsString() ||
@@ -893,7 +902,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78ff
  
    // file
    std::string file = info[0].As<Napi::String>();
-@@ -373,6 +432,12 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -373,6 +434,12 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
      throw Napi::Error::New(napiEnv, "posix_spawnp failed.");
    }
    if (pty_nonblock(master) == -1) {
@@ -906,7 +915,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78ff
      throw Napi::Error::New(napiEnv, "Could not set master fd to nonblocking.");
    }
  #else
-@@ -443,11 +508,79 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -443,11 +510,79 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        }
      default:
        if (pty_nonblock(master) == -1) {
@@ -986,7 +995,197 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..cb3d15d51c7287b915e30045f3aa78ff
    Napi::Object obj = Napi::Object::New(napiEnv);
    obj.Set("fd", Napi::Number::New(napiEnv, master));
    obj.Set("pid", Napi::Number::New(napiEnv, pid));
-@@ -789,6 +922,7 @@ done:
+@@ -691,95 +826,105 @@ pty_posix_spawn(char** argv, char** env,
+                 int* master,
+                 pid_t* pid,
+                 int* err) {
+-  int low_fds[3];
+-  size_t count = 0;
+-
+-  for (; count < 3; count++) {
+-    low_fds[count] = posix_openpt(O_RDWR);
+-    if (low_fds[count] >= STDERR_FILENO)
+-      break;
+-  }
+-
+-  int flags = POSIX_SPAWN_CLOEXEC_DEFAULT |
+-              POSIX_SPAWN_SETSIGDEF |
+-              POSIX_SPAWN_SETSIGMASK |
+-              POSIX_SPAWN_SETSID;
+-  *master = posix_openpt(O_RDWR);
+-  if (*master == -1) {
+-    return;
+-  }
+-
+-  int res = grantpt(*master) || unlockpt(*master);
+-  if (res == -1) {
+-    return;
+-  }
+-
+-  // Use TIOCPTYGNAME instead of ptsname() to avoid threading problems.
+-  int slave;
+-  char slave_pty_name[128];
+-  res = ioctl(*master, TIOCPTYGNAME, slave_pty_name);
+-  if (res == -1) {
+-    return;
+-  }
+-
+-  slave = open(slave_pty_name, O_RDWR | O_NOCTTY);
+-  if (slave == -1) {
+-    return;
+-  }
+-
+-  if (termp) {
+-    res = tcsetattr(slave, TCSANOW, termp);
+-    if (res == -1) {
+-      return;
+-    };
+-  }
+-
+-  if (winp) {
+-    res = ioctl(slave, TIOCSWINSZ, winp);
+-    if (res == -1) {
+-      return;
+-    }
+-  }
+-
++  int low_fds[3] = {-1, -1, -1};
++  size_t low_count = 0;
++  int slave = -1;
++  bool actions_initialized = false;
++  bool attrs_initialized = false;
+   posix_spawn_file_actions_t acts;
+-  posix_spawn_file_actions_init(&acts);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDIN_FILENO);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDOUT_FILENO);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDERR_FILENO);
+-  posix_spawn_file_actions_addclose(&acts, slave);
+-  posix_spawn_file_actions_addclose(&acts, *master);
+-
+   posix_spawnattr_t attrs;
+-  posix_spawnattr_init(&attrs);
+-  *err = posix_spawnattr_setflags(&attrs, flags);
+-  if (*err != 0) {
+-    goto done;
+-  }
+-
+-  sigset_t signal_set;
+-  /* Reset all signal the child to their default behavior */
+-  sigfillset(&signal_set);
+-  *err = posix_spawnattr_setsigdefault(&attrs, &signal_set);
+-  if (*err != 0) {
+-    goto done;
+-  }
++  *master = -1;
++  *pid = -1;
++  *err = 0;
++
++  do {
++    // Reserve closed stdio numbers so PTY master/slave never become 0, 1 or 2.
++    while (low_count < 3) {
++      const int fd = posix_openpt(O_RDWR);
++      if (fd == -1) {
++        *err = errno;
++        break;
++      }
++      low_fds[low_count++] = fd;
++      if (fd >= STDERR_FILENO) break;
++    }
++    if (*err != 0) break;
+ 
+-  /* Reset the signal mask for all signals */
+-  sigemptyset(&signal_set);
+-  *err = posix_spawnattr_setsigmask(&attrs, &signal_set);
+-  if (*err != 0) {
+-    goto done;
+-  }
++    *master = posix_openpt(O_RDWR);
++    if (*master == -1) {
++      *err = errno;
++      break;
++    }
++    if (grantpt(*master) == -1 || unlockpt(*master) == -1) {
++      *err = errno;
++      break;
++    }
+ 
+-  do
+-    *err = posix_spawn(pid, argv[0], &acts, &attrs, argv, env);
+-  while (*err == EINTR);
+-done:
+-  posix_spawn_file_actions_destroy(&acts);
+-  posix_spawnattr_destroy(&attrs);
++    // Use TIOCPTYGNAME instead of ptsname() to avoid threading problems.
++    char slave_pty_name[128];
++    if (ioctl(*master, TIOCPTYGNAME, slave_pty_name) == -1) {
++      *err = errno;
++      break;
++    }
++    slave = open(slave_pty_name, O_RDWR | O_NOCTTY);
++    if (slave == -1) {
++      *err = errno;
++      break;
++    }
++    if (termp && tcsetattr(slave, TCSANOW, termp) == -1) {
++      *err = errno;
++      break;
++    }
++    if (winp && ioctl(slave, TIOCSWINSZ, winp) == -1) {
++      *err = errno;
++      break;
++    }
+ 
+-  for (; count > 0; count--) {
+-    close(low_fds[count]);
++    *err = posix_spawn_file_actions_init(&acts);
++    if (*err != 0) break;
++    actions_initialized = true;
++    *err = posix_spawn_file_actions_adddup2(&acts, slave, STDIN_FILENO);
++    if (*err != 0) break;
++    *err = posix_spawn_file_actions_adddup2(&acts, slave, STDOUT_FILENO);
++    if (*err != 0) break;
++    *err = posix_spawn_file_actions_adddup2(&acts, slave, STDERR_FILENO);
++    if (*err != 0) break;
++    *err = posix_spawn_file_actions_addclose(&acts, slave);
++    if (*err != 0) break;
++    *err = posix_spawn_file_actions_addclose(&acts, *master);
++    if (*err != 0) break;
++
++    *err = posix_spawnattr_init(&attrs);
++    if (*err != 0) break;
++    attrs_initialized = true;
++    const int flags = POSIX_SPAWN_CLOEXEC_DEFAULT |
++                      POSIX_SPAWN_SETSIGDEF |
++                      POSIX_SPAWN_SETSIGMASK |
++                      POSIX_SPAWN_SETSID;
++    *err = posix_spawnattr_setflags(&attrs, flags);
++    if (*err != 0) break;
++
++    sigset_t signal_set;
++    sigfillset(&signal_set);
++    *err = posix_spawnattr_setsigdefault(&attrs, &signal_set);
++    if (*err != 0) break;
++    sigemptyset(&signal_set);
++    *err = posix_spawnattr_setsigmask(&attrs, &signal_set);
++    if (*err != 0) break;
++
++    do {
++      *err = posix_spawn(pid, argv[0], &acts, &attrs, argv, env);
++    } while (*err == EINTR);
++  } while (false);
++
++  if (attrs_initialized) posix_spawnattr_destroy(&attrs);
++  if (actions_initialized) posix_spawn_file_actions_destroy(&acts);
++  // Child file actions do not release descriptors retained by this parent.
++  if (slave >= 0) close(slave);
++  for (size_t index = 0; index < low_count; index++) close(low_fds[index]);
++  if (*err != 0 && *master >= 0) {
++    close(*master);
++    *master = -1;
+   }
+ }
+ #endif
+@@ -789,6 +934,7 @@ done:
   */
  
  Napi::Object init(Napi::Env env, Napi::Object exports) {
