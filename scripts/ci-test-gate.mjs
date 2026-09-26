@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { release } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -209,6 +211,86 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
   }));
 }
 
+async function recordViewEvidence(report, inventory) {
+  const source = await recordedCommand(
+    "source-revision",
+    "git",
+    ["rev-parse", "HEAD", "HEAD^{tree}"],
+    join(evidenceDir, "execution.json"),
+  );
+  if (source.status !== 0) throw new Error(`git rev-parse exited ${source.status}`);
+  const [commit, tree] = source.stdout.trim().split("\n");
+  if (!/^[0-9a-f]{40}$/.test(commit) || !/^[0-9a-f]{40}$/.test(tree))
+    throw new Error("Source revision evidence is incomplete");
+  const web = join(root, "packages/terminal-web");
+  const requireWeb = createRequire(join(web, "package.json"));
+  const playwrightPath = requireWeb.resolve("playwright/package.json");
+  const requirePlaywright = createRequire(playwrightPath);
+  const browserPath = join(
+    dirname(requirePlaywright.resolve("playwright-core/package.json")),
+    "browsers.json",
+  );
+  const [xterm, playwright, browsers, lock, profile] = await Promise.all([
+    readFile(join(web, "node_modules/@xterm/xterm/package.json"), "utf8").then(JSON.parse),
+    readFile(playwrightPath, "utf8").then(JSON.parse),
+    readFile(browserPath, "utf8").then(JSON.parse),
+    readFile(join(root, "pnpm-lock.yaml")),
+    readFile(join(root, "tests/fixtures/protocol/m0/profile.json")),
+  ]);
+  const chromium = browsers.browsers?.filter((entry) => entry.name === "chromium");
+  if (
+    xterm.version !== "6.0.0" ||
+    playwright.version !== "1.63.0" ||
+    chromium?.length !== 1 ||
+    chromium[0].revision !== "1243" ||
+    !chromium[0].browserVersion
+  )
+    throw new Error("V1 browser dependency evidence differs from the pinned profile");
+  const viewFiles = new Set(
+    inventory.filter((suite) => suite.project === "terminal-web").map((suite) => suite.file),
+  );
+  if (viewFiles.size !== 3) throw new Error("V1 browser suite evidence is incomplete");
+  const cases = report.testResults
+    .filter((suite) => viewFiles.has(repositoryPath(suite.name)))
+    .flatMap((suite) =>
+      suite.assertionResults.map((result) => ({
+        file: repositoryPath(suite.name),
+        name: result.fullName,
+        status: result.status,
+      })),
+    );
+  if (cases.length !== 18 || cases.some((item) => item.status !== "passed"))
+    throw new Error("V1 browser case evidence is incomplete");
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const toolchain = JSON.parse(await readFile(join(evidenceDir, "environment.json"), "utf8"));
+  await writeFile(
+    join(evidenceDir, "view-evidence.json"),
+    `${JSON.stringify(
+      {
+        commit,
+        tree,
+        platform: toolchain.platform,
+        arch: toolchain.arch,
+        node: toolchain.node,
+        pnpm: toolchain.pnpm,
+        xterm: xterm.version,
+        playwright: playwright.version,
+        chromiumRevision: chromium[0].revision,
+        chromiumVersion: chromium[0].browserVersion,
+        lockSha256: digest(lock),
+        profileSha256: digest(profile),
+        cases,
+        cleanup: {
+          basis: "withViewPage awaits withManagedBrowser cleanup before each case can pass",
+          perCaseProcessRecord: false,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 async function testFilesIn(directory, prefix) {
   const found = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -322,6 +404,7 @@ async function main() {
       "execution.json",
       "inventory.json",
       "failure.json",
+      "view-evidence.json",
     ].map((name) => rm(join(evidenceDir, name), { force: true })),
   );
   let stage = "environment";
@@ -368,6 +451,7 @@ async function main() {
     if ((await stat(junitPath)).size === 0) throw new Error("Vitest JUnit report is empty");
     const inventory = verifyInventory(discovered, report, sources);
     await writeFile(join(evidenceDir, "inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
+    await recordViewEvidence(report, inventory);
     console.log(
       `Required suite inventory passed: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
     );
