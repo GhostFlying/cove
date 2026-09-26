@@ -88,3 +88,9 @@ sole registrar持有patch注册hash、pnpm lock、必要manifest/build/export/CI
 3. 扩展同一已注册 suite 的小型 1/2-slot consumer ledger 和受控失败入口：纯校验不计费；pending 阻塞；confirmed-clean 恰释放一次；uncertain 到容量上限后拒绝；late callback 不改 promise 终态、不释放 tombstone；reader/writer close 歧义同样保留 slot。先实际增加具名测试，再把 CI floor 提升到真实数量。证明 test-owned child/descriptor 都结束或明确保留不确定，不以自身回执作为唯一 OS oracle。
 
 生产 patch、lock/hash/安装 marker、真实 fixture、suite floor 在一个新的可构建原子提交里同步；结果文档另记 exact head 与定向/full/独立/hosted 门禁。先完成其他已释放 R1 的独立集成冻结点，再继续此分支源码修复；不在 R1 checkout 混写 native patch。
+
+## 627 候选的测试证据修正，2026-09-27
+
+独立静态复核 `/tmp/cove-m0-w1-n1b-corrected-review/report.md`（SHA-256 `ed9d9ad5edea87d247e0ac888c0358e2f32c92e4edae4ab7d3d208f6c204a5cc`）确认前述两项生产阻塞均已关闭，但 `before-watcher-held` 的注册测试只观察到命令行消失，没有证明 3.6 秒后的唯一 watcher 回调与实际 reap；该测试断言失败也缺 nonce 绑定的 `finally` 清理。独立有限原生正向报告 `/tmp/cove-m0-w1-n1b-native-verify/corrected-627/report.md`（SHA-256 `d7547735a2928352ae87661c8a7583f9891fc89fcd690b6843654897955fdb80`）不替代仓库里的耐久回归。
+
+只修改 `packages/terminal-worker/tests/native-write-spawn-contract.test.mjs`：在现有 native.fork 测试包装中转发原 onExit，同时记录本次 nonce 的实际回调；延迟场景必须在三秒回执之后有界等到恰好一次回调，再核对回执和容量仍为 uncertain/占用。每个会创建 helper 的测试登记 nonce，以 `finally` 按确切 fixture 路径与 nonce 再查进程身份，只向验证仍属于本测试的 live PID 发停止信号；身份不可证时不发信号，保留首个失败且继续处理其他已验证 owner，并有界复查退出。不得靠 `ps` 的 argv 消失单独声称 reap。测试声明数仍为 11，CI floor 与生产 patch/hash/lock/marker 不变。先定向原生、tooling/格式检查冻结 test-only 提交，交独立负向注入和静态 delta；待该证据接受后移植到当前 main `b010c58939949cde3428326f70bc4880a54dfa7b`，组合 full gate 只跑一次，不在旧 base 重跑完整浏览器套件。
