@@ -31,6 +31,13 @@ const builtRoot = resolve(
 
 export async function withViewPage(work) {
   if (++invocation > 48) throw new Error("V1 browser cleanup evidence invocation limit exceeded");
+  let testName = null;
+  try {
+    const { expect } = await import("vitest");
+    testName = expect.getState().currentTestName || null;
+  } catch {
+    // The isolated version-mismatch CLI uses this runner without Vitest.
+  }
   const caller = new Error().stack?.match(
     /(view-(?:input|recovery|lifecycle)\.test\.mjs):(\d+):\d+/,
   );
@@ -40,7 +47,7 @@ export async function withViewPage(work) {
   lastEvidencePath = path;
   await writeFile(
     path,
-    `${JSON.stringify({ schemaVersion: 1, final: false, caseId, runId, sourceCommit, sourceDirty })}\n`,
+    `${JSON.stringify({ schemaVersion: 1, final: false, caseId, testName, runId, sourceCommit, sourceDirty })}\n`,
   );
   const { value } = await withManagedBrowser(
     async (context) => {
@@ -56,6 +63,7 @@ export async function withViewPage(work) {
     {
       path,
       caseId,
+      testName,
       runId,
       sourceCommit,
       sourceDirty,
