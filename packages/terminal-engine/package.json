@@ -4,6 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
+    ".": {
+      "types": "./dist/src/terminal-model.d.ts",
+      "import": "./dist/src/terminal-model.js"
+    },
     "./probes/environment": {
       "types": "./dist/probes/environment.d.ts",
       "import": "./dist/probes/environment.js"
@@ -15,7 +19,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "pnpm --dir ../.. native:prepare && pnpm build && pnpm --dir ../.. exec vitest run --project terminal-engine-probes",
+    "test": "pnpm --dir ../.. native:prepare && pnpm build && pnpm --dir ../.. exec vitest run --project terminal-engine --project terminal-engine-probes",
     "clean": "tsc -b --clean"
   },
   "dependencies": {

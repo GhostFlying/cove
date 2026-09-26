@@ -22,6 +22,15 @@ export default defineConfig({
       },
       {
         test: {
+          name: "terminal-engine",
+          environment: "node",
+          include: ["packages/terminal-engine/tests/**/*.test.mjs"],
+          testTimeout: 35_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "terminal-engine-probes",
           environment: "node",
           include: ["packages/terminal-engine/probes/**/*.test.mjs"],

@@ -51,9 +51,9 @@ pnpm check
 | `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-当前有 tooling、protocol、terminal-engine-probes 和 terminal-web-probes 四个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
+当前有 tooling、protocol、terminal-engine、terminal-engine-probes 和 terminal-web-probes 五个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
 已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与其拥有的
-`tests/tooling`、协议包 `tests` 及两个终端实验包的 `probes` 下测试文件，
+`tests/tooling`、协议包 `tests`、引擎包 `tests` 及两个终端实验包的 `probes` 下测试文件，
 再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
 新增真实包时，在同一 PR 将 tsconfig 加入引用图、将其真实测试根目录及 suite 加入
 Vitest projects 和 inventory，
@@ -71,7 +71,7 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 
 Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行十项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
 
-`@cove/terminal-engine` 公开 `./probes/environment` 与 `./probes/recovery-boundaries` 编译入口，`@cove/terminal-web` 公开 `./probes/environment` 与 `./probes/query-input`；这些均非生产 API。前者用稳定版 headless `6.0.0`、serialize `0.14.0` 和 node-pty `1.1.0`，启动一个自己的 Node PTY 子进程验证 nonce 回应、尺寸、退出与小型 VT 序列化往返；后者用 xterm `6.0.0`、Vite `8.3.1` 和 Playwright `1.63.0` 构建静态 fixture，在托管 Chromium 中验证缓冲区、几何与键盘输入。
+`@cove/terminal-engine` 公开根入口 `createTerminalModel`，负责一个权威 headless 模型的 FIFO 解析、有限恢复快照、当前屏幕预览和实时查询/焦点回复；其五个 `terminal-engine` suite 通过编译后的根出口验证这些边界。引擎包仍保留 `./probes/environment` 与 `./probes/recovery-boundaries` 实验入口，`@cove/terminal-web` 公开 `./probes/environment` 与 `./probes/query-input`；实验入口均非生产 API。引擎环境探针用稳定版 headless `6.0.0`、serialize `0.14.0` 和 node-pty `1.1.0`，启动一个自己的 Node PTY 子进程验证 nonce 回应、尺寸、退出与小型 VT 序列化往返；后者用 xterm `6.0.0`、Vite `8.3.1` 和 Playwright `1.63.0` 构建静态 fixture，在托管 Chromium 中验证缓冲区、几何与键盘输入。
 
 首次安装与复验使用以下命令。macOS 的浏览器下载只写入本 checkout 的 `packages/terminal-web/.cache/playwright`；Ubuntu CI 的 `browser:install` 在一次性 runner 中加 `--with-deps` 安装系统库，本地 macOS 不自动修改系统依赖。
 

@@ -209,6 +209,25 @@ test("pragmatic logical-grid recovery suite is mandatory", async () => {
   );
 });
 
+test("compiled terminal adapter suites are all mandatory", async () => {
+  for (const [name, minimumTests] of [
+    ["terminal-model", 9],
+    ["engine-recovery", 8],
+    ["engine-parser", 6],
+    ["engine-query", 8],
+    ["engine-preview", 6],
+  ]) {
+    const suite = requiredSuites.find(
+      ({ file }) => file === `packages/terminal-engine/tests/${name}.test.mjs`,
+    );
+    expect(suite).toMatchObject({ project: "terminal-engine", minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+    expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+      /Required suite terminal-engine:/,
+    );
+  }
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
@@ -276,7 +295,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 21/);
+  ).toThrow(/needs 22/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
@@ -285,17 +304,20 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/terminal-engine/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
+  await writeFile(resolve(checkout, "packages/terminal-engine/tests/engine.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
     "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",
+    "packages/terminal-engine/tests/engine.test.mjs",
     "packages/terminal-web/probes/browser.test.mjs",
     "tests/tooling/excluded.spec.ts",
     "tests/tooling/registered.test.ts",
