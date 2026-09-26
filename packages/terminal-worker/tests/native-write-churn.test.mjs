@@ -41,9 +41,18 @@ async function runChurn(fault, watchdogMs) {
     env: { ...process.env, COVE_N1_CHURN_FAULT: fault ?? "" },
   });
   const owned = new Map();
+  let resolveHangReady;
+  let hangObserved = false;
+  const hangReady = new Promise((resolveReady) => {
+    resolveHangReady = resolveReady;
+  });
   child.on("message", (value) => {
-    if (value?.nonce === nonce && Number.isSafeInteger(value.pid) && value.pid > 0)
-      owned.set(value.pid, value.executable);
+    if (value?.nonce !== nonce || !Number.isSafeInteger(value.pid) || value.pid <= 0) return;
+    if (typeof value.executable === "string") owned.set(value.pid, value.executable);
+    if (value.phase === "hang-ready" && owned.has(value.pid)) {
+      hangObserved = true;
+      resolveHangReady();
+    }
   });
   let stdout = "";
   let stderr = "";
@@ -58,9 +67,25 @@ async function runChurn(fault, watchdogMs) {
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
   let watchdog;
+  let phaseWatchdog;
   let failure;
   let outcome;
   try {
+    if (fault === "hang-completion" || fault === "hang-completion-no-ack") {
+      await Promise.race([
+        hangReady,
+        exit.then(() => {
+          throw new Error("churn runner exited before hang phase");
+        }),
+        new Promise((_, reject) => {
+          phaseWatchdog = setTimeout(
+            () => reject(new Error("churn hang phase not observed")),
+            8_000,
+          );
+        }),
+      ]);
+      assert.ok(owned.size > 0);
+    }
     outcome = await Promise.race([
       exit,
       new Promise((_, reject) => {
@@ -71,6 +96,7 @@ async function runChurn(fault, watchdogMs) {
     failure = error;
   } finally {
     clearTimeout(watchdog);
+    clearTimeout(phaseWatchdog);
     try {
       stopVerified(child.pid, runner, nonce);
     } catch (error) {
@@ -111,7 +137,9 @@ async function runChurn(fault, watchdogMs) {
   if (failure) {
     failure.cleanup = {
       runnerAbsent: child.pid === undefined || absent(child.pid),
-      childrenAbsent: [...owned.keys()].every(absent),
+      hangObserved,
+      ownedObserved: owned.size > 0,
+      childrenAbsent: owned.size > 0 && [...owned.keys()].every(absent),
     };
     throw failure;
   }
@@ -137,6 +165,17 @@ test("hung churn completion retires the owned runner before the framework deadli
   }
   expect(failure).toMatchObject({
     message: "churn runner timed out",
-    cleanup: { runnerAbsent: true, childrenAbsent: true },
+    cleanup: { hangObserved: true, ownedObserved: true, runnerAbsent: true, childrenAbsent: true },
+  });
+
+  let unacknowledged;
+  try {
+    await runChurn("hang-completion-no-ack", 250);
+  } catch (error) {
+    unacknowledged = error;
+  }
+  expect(unacknowledged).toMatchObject({
+    message: "churn hang phase not observed",
+    cleanup: { hangObserved: false, ownedObserved: true, runnerAbsent: true, childrenAbsent: true },
   });
 }, 45_000);

@@ -65,7 +65,11 @@ try {
     boundedWrite: { maxAllocatedBytes: payload.byteLength, maxTasks: 1 },
   });
   process.send?.({ pid: terminal.pid, nonce, scratch });
-  if (process.env.COVE_N1_REUSE_FAULT === "hang") await new Promise(() => {});
+  if (["hang", "hang-no-ack"].includes(process.env.COVE_N1_REUSE_FAULT)) {
+    if (process.env.COVE_N1_REUSE_FAULT === "hang")
+      process.send?.({ phase: "hang-ready", pid: terminal.pid, nonce, scratch });
+    await new Promise(() => {});
+  }
   terminal.onExit(() => {
     exited = true;
   });

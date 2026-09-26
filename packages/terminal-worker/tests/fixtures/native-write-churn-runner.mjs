@@ -54,8 +54,11 @@ async function cycle(enabled) {
   } finally {
     terminal.destroy();
     if (enabled) {
-      if (process.env.COVE_N1_CHURN_FAULT === "hang-completion")
+      if (["hang-completion", "hang-completion-no-ack"].includes(process.env.COVE_N1_CHURN_FAULT)) {
+        if (process.env.COVE_N1_CHURN_FAULT === "hang-completion")
+          process.send?.({ nonce, pid: terminal.pid, phase: "hang-ready" });
         await new Promise(() => setInterval(() => {}, 1_000));
+      }
       assert.deepEqual(await terminal.boundedWriteCompletion, { kind: "closed" });
     }
   }

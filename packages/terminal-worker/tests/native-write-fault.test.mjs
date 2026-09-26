@@ -36,6 +36,69 @@ function stopVerified(pid, fixture, nonce) {
   process.kill(pid, "SIGKILL");
 }
 
+function cleanupOwnedProcesses(
+  fixtures,
+  nonce,
+  recordFailure,
+  discover = matchingProcesses,
+  stop = stopVerified,
+) {
+  for (const fixture of fixtures) {
+    let pids = [];
+    try {
+      pids = discover(fixture, nonce);
+    } catch (error) {
+      recordFailure(error);
+    }
+    for (const pid of pids) {
+      try {
+        stop(pid, fixture, nonce);
+      } catch (error) {
+        recordFailure(error);
+      }
+    }
+  }
+}
+
+test("owned cleanup keeps the first failure and attempts the other fixture after inspection fails", () => {
+  const primary = new Error("primary rollback failure");
+  const inspected = [];
+  const stopped = [];
+  let failure = primary;
+  cleanupOwnedProcesses(
+    ["runner", "child"],
+    "owned-nonce",
+    (error) => {
+      failure ??= error;
+    },
+    (fixture) => {
+      inspected.push(fixture);
+      if (fixture === "runner") throw new Error("ps unavailable");
+      return [123];
+    },
+    (pid, fixture) => stopped.push([pid, fixture]),
+  );
+  assert.equal(failure, primary);
+  assert.deepEqual(inspected, ["runner", "child"]);
+  assert.deepEqual(stopped, [[123, "child"]]);
+
+  const attempted = [];
+  cleanupOwnedProcesses(
+    ["runner", "child"],
+    "owned-nonce",
+    (error) => {
+      failure ??= error;
+    },
+    (fixture) => (fixture === "runner" ? [111, 112] : [123]),
+    (pid) => {
+      attempted.push(pid);
+      if (pid === 111) throw new Error("identity unverifiable");
+    },
+  );
+  assert.equal(failure, primary);
+  assert.deepEqual(attempted, [111, 112, 123]);
+});
+
 test("native duplicate and watcher failure phases leave no owned descriptors or child", async () => {
   const runner = resolve(import.meta.dirname, "fixtures/native-write-fault-runner.mjs");
   const childFixture = resolve(import.meta.dirname, "fixtures/native-write-child.mjs");
@@ -71,9 +134,10 @@ test("native duplicate and watcher failure phases leave no owned descriptors or 
     failure = error;
   } finally {
     clearTimeout(watchdog);
-    for (const pid of matchingProcesses(runner, nonce)) stopVerified(pid, runner, nonce);
-    for (const pid of matchingProcesses(childFixture, nonce))
-      stopVerified(pid, childFixture, nonce);
+    const recordFailure = (error) => {
+      failure ??= error;
+    };
+    cleanupOwnedProcesses([runner, childFixture], nonce, recordFailure);
     let exitWatchdog;
     try {
       await Promise.race([
@@ -85,11 +149,20 @@ test("native duplicate and watcher failure phases leave no owned descriptors or 
           );
         }),
       ]);
-      assert.deepEqual(matchingProcesses(childFixture, nonce), []);
     } catch (error) {
-      failure ??= error;
+      recordFailure(error);
     } finally {
       clearTimeout(exitWatchdog);
+    }
+    try {
+      assert.deepEqual(matchingProcesses(runner, nonce), []);
+    } catch (error) {
+      recordFailure(error);
+    }
+    try {
+      assert.deepEqual(matchingProcesses(childFixture, nonce), []);
+    } catch (error) {
+      recordFailure(error);
     }
   }
   if (failure) throw failure;
