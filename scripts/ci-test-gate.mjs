@@ -30,7 +30,7 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 24 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 26 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 5 },
   {
@@ -211,6 +211,53 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
   }));
 }
 
+export function viewEvidenceCases(report, inventory) {
+  const registered = new Map(
+    requiredSuites
+      .filter((suite) => suite.project === "terminal-web")
+      .map((suite) => [suite.file, suite.minimumTests]),
+  );
+  const viewSuites = inventory.filter((suite) => suite.project === "terminal-web");
+  if (
+    registered.size !== 3 ||
+    viewSuites.length !== 3 ||
+    viewSuites.some(
+      (suite) =>
+        !registered.has(suite.file) ||
+        !Number.isSafeInteger(suite.passed) ||
+        suite.passed < registered.get(suite.file) ||
+        suite.passed !== suite.discovered,
+    )
+  )
+    throw new Error("V1 browser suite evidence is incomplete");
+  const counts = new Map(viewSuites.map((suite) => [suite.file, suite.passed]));
+  if (counts.size !== registered.size) throw new Error("V1 browser suite evidence is incomplete");
+  const observed = new Set();
+  const cases = [];
+  for (const suite of report.testResults) {
+    const file = repositoryPath(suite.name);
+    if (!counts.has(file)) continue;
+    if (
+      observed.has(file) ||
+      suite.status !== "passed" ||
+      !Array.isArray(suite.assertionResults) ||
+      suite.assertionResults.length !== counts.get(file) ||
+      suite.assertionResults.some((result) => result.status !== "passed")
+    )
+      throw new Error("V1 browser case evidence is incomplete");
+    observed.add(file);
+    cases.push(
+      ...suite.assertionResults.map((result) => ({
+        file,
+        name: result.fullName,
+        status: result.status,
+      })),
+    );
+  }
+  if (observed.size !== counts.size) throw new Error("V1 browser case evidence is incomplete");
+  return cases;
+}
+
 async function recordViewEvidence(report, inventory) {
   const source = await recordedCommand(
     "source-revision",
@@ -246,21 +293,7 @@ async function recordViewEvidence(report, inventory) {
     !chromium[0].browserVersion
   )
     throw new Error("V1 browser dependency evidence differs from the pinned profile");
-  const viewFiles = new Set(
-    inventory.filter((suite) => suite.project === "terminal-web").map((suite) => suite.file),
-  );
-  if (viewFiles.size !== 3) throw new Error("V1 browser suite evidence is incomplete");
-  const cases = report.testResults
-    .filter((suite) => viewFiles.has(repositoryPath(suite.name)))
-    .flatMap((suite) =>
-      suite.assertionResults.map((result) => ({
-        file: repositoryPath(suite.name),
-        name: result.fullName,
-        status: result.status,
-      })),
-    );
-  if (cases.length !== 18 || cases.some((item) => item.status !== "passed"))
-    throw new Error("V1 browser case evidence is incomplete");
+  const cases = viewEvidenceCases(report, inventory);
   const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const toolchain = JSON.parse(await readFile(join(evidenceDir, "environment.json"), "utf8"));
   await writeFile(
