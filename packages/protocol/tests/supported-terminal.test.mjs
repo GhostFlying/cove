@@ -16,6 +16,10 @@ import { DEFAULT_APPEARANCE, QUERY_SUPPORT, validateAppearance } from "@cove/pro
 import {
   TERMINAL_LANE,
   TERMINAL_REVISION,
+  ExternalTerminalEventSchema,
+  RunEventSchema,
+  TerminalEventSchema,
+  TerminalResultSchema,
   createTerminalDecoder,
   encodeTerminalFrame,
   validateTerminalFrame,
@@ -137,11 +141,17 @@ test("error fields reject injected detail and mismatched next action", () => {
 test("frozen lane and class header cannot enter provisional decoder", () => {
   const encoded = encodeTerminalFrame(1, Uint8Array.of(123, 125), empty);
   expect(encoded.ok).toBe(true);
-  expect(Array.from(encoded.value.subarray(0, 5))).toEqual([0x43, 0x50, 3, 1, 1]);
+  expect(Array.from(encoded.value.subarray(0, 5))).toEqual([0x43, 0x50, 3, 2, 1]);
   expect(TERMINAL_LANE).toBe(3);
-  expect(TERMINAL_REVISION).toBe(1);
+  expect(TERMINAL_REVISION).toBe(2);
   expect(createProbeDecoder().read(encoded.value).status).toBe("error");
   expect(createTerminalDecoder().read(encoded.value).frames).toHaveLength(1);
+  const oldRevision = encoded.value.slice();
+  oldRevision[3] = 1;
+  expect(createTerminalDecoder().read(oldRevision)).toMatchObject({
+    status: "error",
+    error: { code: "UNSUPPORTED_FORMAT" },
+  });
 });
 
 test("frozen decoder owns split payload and rejects malformed header and EOF", () => {
@@ -175,7 +185,7 @@ test("terminal command payload is confined to input and metadata class is closed
   ).toBe(false);
 });
 
-test("run output and resize have contiguous positive seq and exact payload class", () => {
+test("routed run output preserves inner events and binds full subscription identity", () => {
   const first = { type: "output", run, seq: 1 };
   const second = {
     type: "resize",
@@ -184,11 +194,108 @@ test("run output and resize have contiguous positive seq and exact payload class
     geometry: { cols: 12, rows: 4 },
     requiresBaseline: true,
   };
-  expect(validateTerminalFrame(frame(3, Uint8Array.of(0)), first).ok).toBe(true);
-  expect(validateTerminalFrame(frame(3), first).ok).toBe(false);
-  expect(validateTerminalFrame(frame(3), second).ok).toBe(true);
+  const delivered = { type: "run-event", subscription, event: first };
+  expect(RunEventSchema.safeParse(first).success).toBe(true);
+  expect(TerminalEventSchema.safeParse(first).success).toBe(true);
+  expect(ExternalTerminalEventSchema.safeParse(delivered).success).toBe(true);
+  expect(validateTerminalFrame(frame(3, Uint8Array.of(0)), delivered, connection).ok).toBe(true);
+  expect(validateTerminalFrame(frame(3), delivered, connection).ok).toBe(false);
+  expect(validateTerminalFrame(frame(3), { ...delivered, event: second }, connection).ok).toBe(
+    true,
+  );
+  expect(
+    validateTerminalFrame(frame(3, Uint8Array.of(1)), { ...delivered, event: second }, connection)
+      .ok,
+  ).toBe(false);
+  expect(validateTerminalFrame(frame(3, Uint8Array.of(0)), first, connection).ok).toBe(false);
+  for (const changed of [
+    { ...delivered, event: { ...first, run: { ...run, runId: "r2" } } },
+    { ...delivered, subscription: { ...subscription, run: { ...run, runId: "r2" } } },
+  ])
+    expect(validateTerminalFrame(frame(3, Uint8Array.of(0)), changed, connection).ok).toBe(false);
+  expect(
+    validateTerminalFrame(frame(3, Uint8Array.of(0)), delivered, { ...connection, generation: 2 })
+      .ok,
+  ).toBe(false);
   expect(validateContiguousEvents([first, second], 0)).toBe(true);
   expect(validateContiguousEvents([first, { ...second, seq: 3 }], 0)).toBe(false);
+});
+
+test("two subscriptions on one run remain independently routed", () => {
+  const other = { ...subscription, subscriptionId: "sub2", viewId: "v2" };
+  const first = {
+    type: "run-event",
+    subscription,
+    event: { type: "output", run, seq: 4 },
+  };
+  const second = {
+    type: "run-event",
+    subscription: other,
+    event: { type: "output", run, seq: 9 },
+  };
+  expect(validateTerminalFrame(frame(3, Uint8Array.of(1)), first, connection).ok).toBe(true);
+  expect(validateTerminalFrame(frame(3, Uint8Array.of(1)), second, connection).ok).toBe(true);
+  expect(first.subscription).not.toEqual(second.subscription);
+  expect(first.event.seq).not.toBe(second.event.seq);
+});
+
+test("new attach gets a fresh ID while recovery keeps the complete existing ref", () => {
+  const reconnectConnection = { ...connection, generation: 2 };
+  const attach = {
+    type: "attach",
+    requestId: "attach-2",
+    run,
+    connection: reconnectConnection,
+    viewId: subscription.viewId,
+    profile: "pragmatic-logical-grid-v1",
+    encoding: "vt-checkpoint-tail-v1",
+  };
+  const reattached = {
+    type: "attach-result",
+    requestId: attach.requestId,
+    run,
+    subscription: {
+      ...subscription,
+      connection: reconnectConnection,
+      subscriptionId: "sub-new",
+    },
+    mode: "replay",
+    atSeq: 4,
+  };
+  expect(validateTerminalResultForCommand(attach, reattached)).toBe(true);
+  expect(reattached.subscription.subscriptionId).not.toBe(subscription.subscriptionId);
+
+  const command = {
+    type: "recover",
+    requestId: "recover-1",
+    run,
+    subscription,
+    reason: "gap",
+    resume: {
+      appliedSeq: 4,
+      profile: "pragmatic-logical-grid-v1",
+      encoding: "vt-checkpoint-tail-v1",
+      geometry: { cols: 12, rows: 4 },
+    },
+  };
+  const result = {
+    type: "recover-result",
+    requestId: command.requestId,
+    run,
+    subscription,
+    mode: "replay",
+    atSeq: 4,
+  };
+  expect(validateTerminalResultForCommand(command, result)).toBe(true);
+  expect(validateTerminalResultForCommand(command, { ...result, atSeq: 3 })).toBe(false);
+  expect(
+    validateTerminalResultForCommand(command, {
+      ...result,
+      subscription: { ...subscription, subscriptionId: "sub2" },
+    }),
+  ).toBe(false);
+  const projected = TerminalResultSchema.parse({ ...result, replacement: reattached.subscription });
+  expect(Object.hasOwn(projected, "replacement")).toBe(false);
 });
 
 test("result correlation rejects stale request, run, subscription and input sequence", () => {
@@ -337,12 +444,32 @@ test("baseline accepts any exact ordered bounded nonempty chunk partition", () =
 
 test("baseline start rejects mismatched run and never carries opaque cells", () => {
   const start = { type: "baseline-start", run, descriptor };
-  expect(validateTerminalFrame(frame(3), start).ok).toBe(true);
+  expect(validateTerminalFrame(frame(3), start, connection).ok).toBe(true);
   expect(
-    validateTerminalFrame(frame(3), {
-      ...start,
-      run: { ...run, runId: "other" },
-    }).ok,
+    validateTerminalFrame(
+      frame(3),
+      {
+        ...start,
+        run: { ...run, runId: "other" },
+      },
+      connection,
+    ).ok,
+  ).toBe(false);
+  expect(
+    validateTerminalFrame(
+      frame(3),
+      {
+        ...start,
+        descriptor: {
+          ...descriptor,
+          subscription: {
+            ...subscription,
+            connection: { ...connection, generation: 2 },
+          },
+        },
+      },
+      connection,
+    ).ok,
   ).toBe(false);
   expect(JSON.stringify(descriptor)).not.toMatch(/cells|privateState/);
 });
@@ -364,4 +491,20 @@ test("frame cap and cross-lane refusal preserve provisional framing limits", () 
   const wrong = encoded.value.slice();
   wrong[2] = 4;
   expect(createTerminalDecoder().read(wrong).status).toBe("error");
+  const event = {
+    type: "run-event",
+    subscription,
+    event: { type: "output", run, seq: 1 },
+  };
+  expect(
+    validateTerminalFrame(
+      { ...frame(3, Uint8Array.of(1)), metadata: new Uint8Array(4097) },
+      event,
+      connection,
+    ).ok,
+  ).toBe(false);
+  const oversizedMetadata = new TextEncoder().encode(
+    JSON.stringify({ ...event, ignored: "x".repeat(4096) }),
+  );
+  expect(encodeTerminalFrame(3, oversizedMetadata, Uint8Array.of(1)).ok).toBe(false);
 });

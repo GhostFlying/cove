@@ -32,10 +32,10 @@ import {
 const request = {
   type: "cove-bootstrap",
   bootstrapVersion: 1,
-  protocolVersion: 1,
+  protocolVersion: 2,
   buildVersion: "client-build",
   capabilities: [
-    "terminal-framing-v1",
+    "terminal-framing-v2",
     "logical-grid-recovery-v1",
     "terminal-preview-v1",
     "future-optional",
@@ -80,7 +80,7 @@ test("bootstrap separates protocol and build and intersects only known capabilit
   expect(result.type).toBe("cove-bootstrap-result");
   expect(result.buildVersion).toBe("server-build");
   expect(result.capabilities).toEqual([
-    "terminal-framing-v1",
+    "terminal-framing-v2",
     "logical-grid-recovery-v1",
     "terminal-preview-v1",
   ]);
@@ -89,17 +89,28 @@ test("bootstrap separates protocol and build and intersects only known capabilit
 
 test("bootstrap requires both baseline capabilities, profile and encoding", () => {
   expect(
-    negotiateBootstrap({ ...request, capabilities: ["terminal-framing-v1"] }, server).kind,
+    negotiateBootstrap({ ...request, capabilities: ["terminal-framing-v2"] }, server).kind,
   ).toBe("CAPABILITY_UNAVAILABLE");
   expect(negotiateBootstrap({ ...request, profiles: [] }, server).kind).toBe("PROFILE_UNSUPPORTED");
   expect(negotiateBootstrap({ ...request, encodings: [] }, server).kind).toBe(
     "PROFILE_UNSUPPORTED",
   );
+  expect(
+    negotiateBootstrap(
+      {
+        ...request,
+        capabilities: request.capabilities.map((capability) =>
+          capability === "terminal-framing-v2" ? "terminal-framing-v1" : capability,
+        ),
+      },
+      server,
+    ).kind,
+  ).toBe("CAPABILITY_UNAVAILABLE");
 });
 
 test("bootstrap identity and protocol mismatch never return run inventory", () => {
   for (const altered of [
-    { protocolVersion: 2 },
+    { protocolVersion: 1 },
     { expectedServerId: "s2" },
     { expectedRelayInstanceId: "i2" },
   ]) {
@@ -110,7 +121,7 @@ test("bootstrap identity and protocol mismatch never return run inventory", () =
   expect(negotiateBootstrap({ ...request, bootstrapVersion: 2 }, server).kind).toBe(
     "BOOTSTRAP_UNSUPPORTED",
   );
-  const failure = negotiateBootstrap({ ...request, protocolVersion: 2 }, server);
+  const failure = negotiateBootstrap({ ...request, protocolVersion: 1 }, server);
   expect(BootstrapFailureSchema.safeParse(failure).success).toBe(true);
   expect(BootstrapFailureSchema.safeParse({ ...failure, message: "secret path" }).success).toBe(
     false,
@@ -142,7 +153,7 @@ test("RPC admission requires instance and protocol headers before dispatch", () 
   const rpc = {
     ...admission,
     path: "/rpc",
-    expectedProtocol: 1,
+    expectedProtocol: 2,
     expectedServerId: "s1",
     expectedRelayInstanceId: "i1",
   };
@@ -515,7 +526,7 @@ test("status result cannot advertise budgets rejected by the shared policy", () 
     serverId: "s1",
     relayInstanceId: "i1",
     buildVersion: "b1",
-    protocolVersion: 1,
+    protocolVersion: 2,
     profile: "pragmatic-logical-grid-v1",
     effectiveBudgets: M0_LIMITS,
     workerCount: 1,

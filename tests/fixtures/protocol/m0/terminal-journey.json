@@ -1,8 +1,12 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "protocolVersion": 2,
+  "terminalRevision": 2,
   "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
   "connection": { "connectionId": "fixture-c", "generation": 1 },
   "subscriptionId": "fixture-sub",
+  "secondSubscriptionId": "fixture-sub-2",
+  "reconnectSubscriptionId": "fixture-sub-new",
   "viewId": "fixture-view",
   "baseline": {
     "baselineId": "fixture-b",
@@ -38,6 +42,29 @@
     "epoch": 2,
     "acceptance": "unknown",
     "nextAction": "inspect-run"
+  },
+  "recovery": {
+    "requestId": "fixture-recover",
+    "resumeAppliedSeq": 3,
+    "mode": "replay",
+    "atSeq": 3,
+    "validTrace": [
+      { "kind": "recover", "attempt": 2 },
+      { "kind": "recover-result", "attempt": 2, "atSeq": 3 },
+      { "kind": "run-event", "attempt": 2, "seq": 4, "retainedBytes": 24 },
+      { "kind": "applied-ack", "attempt": 2, "seq": 4 }
+    ],
+    "lateOldDeliveryTrace": [
+      { "kind": "recover", "attempt": 2 },
+      { "kind": "recover-result", "attempt": 2, "atSeq": 3 },
+      { "kind": "run-event", "attempt": 1, "seq": 4, "retainedBytes": 24 }
+    ],
+    "reusedAckTrace": [
+      { "kind": "recover", "attempt": 2 },
+      { "kind": "recover-result", "attempt": 2, "atSeq": 3 },
+      { "kind": "run-event", "attempt": 2, "seq": 4, "retainedBytes": 24 },
+      { "kind": "applied-ack", "attempt": 1, "seq": 4 }
+    ]
   },
   "stalePreview": { "knownVersion": 4, "currentVersion": 5, "mustRefresh": true }
 }

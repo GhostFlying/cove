@@ -52,6 +52,14 @@ test("frozen pipe lane rejects provisional frames and owns split bytes", () => {
   const decoder = createPipeDecoder();
   expect(decoder.read(encoded.value.subarray(0, 7)).frames).toHaveLength(0);
   expect(decoder.read(encoded.value.subarray(7)).frames).toHaveLength(1);
+  expect(PIPE_VERSION).toBe(2);
+  expect(PIPE_REVISION).toBe(2);
+  const oldRevision = encoded.value.slice();
+  oldRevision[3] = 1;
+  expect(createPipeDecoder().read(oldRevision)).toMatchObject({
+    status: "error",
+    error: { code: "UNSUPPORTED_FORMAT" },
+  });
 });
 
 test("hello/ready require exact worker, version and limits but not build string", () => {
@@ -70,7 +78,7 @@ test("hello/ready require exact worker, version and limits but not build string"
       },
     }),
   ).toBe(false);
-  expect(validatePipeFrame(frame(2), { ...hello, type: "ready", pipeVersion: 2 }).ok).toBe(false);
+  expect(validatePipeFrame(frame(2), { ...hello, type: "ready", pipeVersion: 1 }).ok).toBe(false);
   expect(
     validatePipeFrame(frame(1), {
       ...hello,
@@ -151,6 +159,7 @@ test("result correlation fences worker incarnation, request, run and command", (
   };
   expect(validatePipeFrame(frame(2), result).ok).toBe(true);
   expect(validatePipeResultForCommand(command, result)).toBe(true);
+  expect(validatePipeResultForCommand(command, { ...result, requestId: "q2" })).toBe(false);
   for (const mismatch of [
     { requestId: "q2" },
     { commandType: "spawn" },
@@ -162,7 +171,13 @@ test("result correlation fences worker incarnation, request, run and command", (
 });
 
 test("terminal event has one metadata copy and one opaque payload", () => {
-  const event = { type: "terminal-event", worker, run, terminal: { type: "output", run, seq: 1 } };
+  const event = {
+    type: "terminal-event",
+    worker,
+    run,
+    subscription,
+    terminal: { type: "output", run, seq: 1 },
+  };
   expect(validatePipeFrame(frame(3, Uint8Array.of(27, 0)), event).ok).toBe(true);
   expect(validatePipeFrame(frame(3), event).ok).toBe(false);
   expect(
@@ -171,6 +186,15 @@ test("terminal event has one metadata copy and one opaque payload", () => {
       terminal: { ...event.terminal, run: { ...run, runId: "r2" } },
     }).ok,
   ).toBe(false);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(1)), { ...event, subscription: undefined }).ok,
+  ).toBe(false);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(1)), {
+      ...event,
+      subscription: { ...subscription, subscriptionId: "sub2" },
+    }).ok,
+  ).toBe(true);
 });
 
 test("preview and run status distinguish current, stale and exited evidence", () => {
@@ -215,24 +239,112 @@ test("safe pipe errors and structure bounds reject credential leakage", () => {
   let nested = {};
   for (let index = 0; index < 17; index++) nested = { child: nested };
   expect(validatePipeFrame(frame(4), { ...error, future: nested }).ok).toBe(false);
+  expect(validatePipeFrame({ ...frame(4), metadata: new Uint8Array(4097) }, error).ok).toBe(false);
+  const output = {
+    type: "terminal-event",
+    worker,
+    run,
+    subscription,
+    terminal: { type: "output", run, seq: 1 },
+  };
+  expect(validatePipeFrame(frame(3, new Uint8Array(65_537)), output).ok).toBe(false);
+  expect(encodePipeFrame(3, encoder(JSON.stringify(output)), new Uint8Array(65_537)).ok).toBe(
+    false,
+  );
 });
 
-test("recover preserves connection and view while allocating a fresh subscription", () => {
+test("recover keeps one complete subscription and accepted result marks the barrier", () => {
   const command = {
     type: "recover",
     worker,
     run,
     requestId: "q1",
     subscription,
-    replacement: { ...subscription, subscriptionId: "sub2" },
+    appliedSeq: 3,
   };
   expect(validatePipeFrame(frame(1), command).ok).toBe(true);
-  for (const replacement of [
+  const result = {
+    type: "result",
+    worker,
+    run,
+    requestId: command.requestId,
+    commandType: "recover",
+    outcome: "accepted",
+    recoveryMode: "replay",
+    atSeq: 3,
+  };
+  expect(validatePipeFrame(frame(2), result).ok).toBe(true);
+  expect(validatePipeResultForCommand(command, result)).toBe(true);
+  expect(validatePipeFrame(frame(2), { ...result, recoveryMode: undefined }).ok).toBe(false);
+  expect(validatePipeFrame(frame(2), { ...result, atSeq: undefined }).ok).toBe(false);
+  expect(validatePipeResultForCommand(command, { ...result, atSeq: 2 })).toBe(false);
+  expect(
+    validatePipeFrame(frame(2), {
+      ...result,
+      commandType: "status",
+      recoveryMode: "baseline",
+    }).ok,
+  ).toBe(false);
+  const subscribe = {
+    type: "subscribe",
+    worker,
+    run,
+    requestId: "q-subscribe",
+    subscription: { ...subscription, subscriptionId: "sub-new" },
+    atSeq: 4,
+  };
+  const subscribed = {
+    ...result,
+    requestId: subscribe.requestId,
+    commandType: "subscribe",
+    recoveryMode: "baseline",
+    atSeq: 4,
+  };
+  expect(validatePipeFrame(frame(1), subscribe).ok).toBe(true);
+  expect(validatePipeFrame(frame(2), subscribed).ok).toBe(true);
+  expect(validatePipeResultForCommand(subscribe, subscribed)).toBe(true);
+  expect(validatePipeFrame(frame(2), { ...subscribed, recoveryMode: undefined }).ok).toBe(false);
+  const projected = PipeCommandSchema.parse({
+    ...command,
+    replacement: { ...subscription, subscriptionId: "sub-new" },
+  });
+  expect(Object.hasOwn(projected, "replacement")).toBe(false);
+});
+
+test("baseline route matches its embedded ref and preview forbids a live route", () => {
+  const baseline = {
+    type: "terminal-event",
+    worker,
+    run,
     subscription,
-    { ...command.replacement, viewId: "v2" },
-    { ...command.replacement, connection: { ...subscription.connection, generation: 2 } },
-  ])
-    expect(validatePipeFrame(frame(1), { ...command, replacement }).ok).toBe(false);
+    terminal: {
+      type: "baseline-chunk",
+      run,
+      subscription,
+      baselineId: "b1",
+      ordinal: 0,
+    },
+  };
+  expect(validatePipeFrame(frame(3, Uint8Array.of(1)), baseline).ok).toBe(true);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(1)), {
+      ...baseline,
+      subscription: { ...subscription, viewId: "v2" },
+    }).ok,
+  ).toBe(false);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(1)), { ...baseline, subscription: undefined }).ok,
+  ).toBe(false);
+  const preview = {
+    type: "terminal-event",
+    worker,
+    run,
+    terminal: { type: "preview-chunk", run, previewId: "p1", version: 1, ordinal: 0 },
+  };
+  expect(validatePipeFrame(frame(3, Uint8Array.of(1)), preview).ok).toBe(true);
+  expect(validatePipeFrame(frame(3, Uint8Array.of(1)), { ...preview, subscription }).ok).toBe(
+    false,
+  );
 });
 
 test("non-null control grant increments epoch exactly once", () => {

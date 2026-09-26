@@ -1,5 +1,7 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "pipeVersion": 2,
+  "pipeRevision": 2,
   "worker": {
     "serverId": "fixture-s",
     "relayInstanceId": "fixture-i",
@@ -7,6 +9,24 @@
     "workerIncarnationId": "fixture-wi"
   },
   "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
+  "subscription": {
+    "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
+    "connection": { "connectionId": "fixture-c", "generation": 1 },
+    "subscriptionId": "fixture-sub",
+    "viewId": "fixture-view"
+  },
+  "secondSubscription": {
+    "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
+    "connection": { "connectionId": "fixture-c", "generation": 1 },
+    "subscriptionId": "fixture-sub-2",
+    "viewId": "fixture-view-2"
+  },
+  "recovery": {
+    "requestId": "fixture-recover",
+    "appliedSeq": 3,
+    "recoveryMode": "replay",
+    "atSeq": 3
+  },
   "helloBuild": "server-build-a",
   "readyBuild": "worker-build-b",
   "spawnArguments": {
