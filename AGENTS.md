@@ -44,12 +44,12 @@ decisions without concrete evidence or a user request.
   tracks ownership, dependencies and gates only; delegate
   documentation, integration, GitHub operations and conflict resolution to an
   explicitly assigned non-plan owner. GPT-6 Astra high writes plans only.
-  Allocate implementation, testing, review and operations separately from
-  GPT-6 Sol high, GPT-6 Luna max or local TraeX GPT-5.6 Sol high. Prefer TraeX
-  for bounded non-plan work when the task fits. Review must be independent of
-  implementation and test authorship.
+  For interactive non-plan work, allocate native GPT-6 Sol high or GPT-6 Luna
+  max by difficulty; native review uses a separate GPT-6 Sol high. Prefer local
+  TraeX GPT-5.6 Sol xhigh for self-contained non-plan work, including review.
+  Implementation, testing and review authors must remain independent.
 - Route local TraeX through `warmpool run -- traex ...` with explicit
-  `gpt-5.6-sol` and high reasoning effort.
+  `gpt-5.6-sol` and xhigh reasoning effort.
   Do not use the delegation plugin. Warm hits are an optimization, not an
   admission requirement: dispatch through warmpool even when warm=0 or no warm
   session is selected; execution may queue briefly or start immediately. Record
