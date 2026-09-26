@@ -85,6 +85,7 @@ interface BrowserCleanupPhase {
 interface ManagedBrowserEvidenceOptions {
   path: string;
   caseId: string;
+  testName: string | null;
   runId: string;
   sourceCommit: string;
   sourceDirty: boolean;
@@ -597,6 +598,7 @@ export async function withManagedBrowser<T>(
     schemaVersion: 1,
     final: true,
     caseId: evidenceOptions?.caseId ?? null,
+    testName: evidenceOptions?.testName ?? null,
     runId: evidenceOptions?.runId ?? null,
     sourceCommit: evidenceOptions?.sourceCommit ?? null,
     sourceDirty: evidenceOptions?.sourceDirty ?? null,

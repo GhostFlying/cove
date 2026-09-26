@@ -488,12 +488,66 @@ export async function prepareBrowserCleanupEvidence(
   );
 }
 
+function browserEvidenceInteger(value, minimum, maximum) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
+}
+
+function validBrowserCleanupPhase(phase, deadline, maximumBudget) {
+  if (!phase || !browserEvidenceInteger(phase.attempts, 0, 1) || phase.phaseDeadlineMs !== deadline)
+    return false;
+  if (phase.attempts === 0)
+    return (
+      phase.startedMs === null &&
+      phase.phaseRemainingMs === null &&
+      phase.budgetMs === 0 &&
+      phase.elapsedMs === 0 &&
+      phase.outcome === "not-started" &&
+      phase.lateOutcome === undefined
+    );
+  return (
+    browserEvidenceInteger(phase.startedMs, 0, 30_000) &&
+    browserEvidenceInteger(phase.phaseRemainingMs, -30_000, deadline) &&
+    browserEvidenceInteger(phase.budgetMs, 1, maximumBudget) &&
+    browserEvidenceInteger(phase.elapsedMs, 0, 30_000) &&
+    ["completed", "timed-out", "rejected"].includes(phase.outcome) &&
+    (phase.lateOutcome === undefined ||
+      (phase.outcome === "timed-out" && ["completed", "rejected"].includes(phase.lateOutcome)))
+  );
+}
+
+function validBrowserCleanupRecord(record) {
+  const exit = record.browserExit;
+  return (
+    record.profile === "query" &&
+    ["completed", "rejected"].includes(record.primaryOutcome) &&
+    (record.primaryOutcome === "completed"
+      ? record.primaryErrorName === null
+      : typeof record.primaryErrorName === "string" &&
+        /^[A-Za-z][A-Za-z0-9]{0,79}$/.test(record.primaryErrorName)) &&
+    browserEvidenceInteger(record.listenerPort, 1, 65_535) &&
+    exit &&
+    ((browserEvidenceInteger(exit.code, 0, 255) && exit.signal === null) ||
+      (exit.code === null && /^SIG[A-Z0-9]+$/.test(exit.signal))) &&
+    browserEvidenceInteger(exit.observedMs, 0, 30_000) &&
+    validBrowserCleanupPhase(record.graceful, 4_500, 2_000) &&
+    record.graceful.attempts === 1 &&
+    validBrowserCleanupPhase(record.kill, 6_000, 1_500) &&
+    record.kill.attempts === (record.graceful.outcome === "completed" ? 0 : 1) &&
+    validBrowserCleanupPhase(record.listener, 7_000, 750) &&
+    record.listener.attempts === 1 &&
+    browserEvidenceInteger(record.cleanupElapsedMs, 0, 30_000) &&
+    browserEvidenceInteger(record.workBudgetMs, 500, 32_000) &&
+    Array.isArray(record.pages) &&
+    browserEvidenceInteger(record.disposedPages, 0, record.pages.length)
+  );
+}
+
 export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases) {
   const minimumRecords = Array.isArray(expectedCases) ? expectedCases.length : expectedCases;
   const names = await readdir(directory);
   const marker = JSON.parse(await readFile(join(directory, "run.json"), "utf8"));
   const cases = names.filter((name) => name !== "run.json");
-  const observedSites = new Map();
+  const observedCases = new Map();
   if (
     marker.sourceCommit !== sourceCommit ||
     !/^[A-Za-z0-9-]{1,80}$/.test(marker.runId) ||
@@ -512,29 +566,31 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
       record.sourceDirty !== false ||
       record.runId !== marker.runId ||
       !/^(standalone|view-(?:input|recovery|lifecycle)\.test\.mjs:\d+)$/.test(record.caseId) ||
+      (record.caseId === "standalone"
+        ? record.testName !== null
+        : typeof record.testName !== "string" || !record.testName) ||
       !Number.isSafeInteger(record.browserPid) ||
       record.browserPid <= 0 ||
       record.browserExited !== true ||
       record.listenerClosed !== true ||
-      record.graceful?.attempts !== 1 ||
-      record.graceful.budgetMs > 2_000 ||
-      record.kill?.budgetMs > 1_500
+      !validBrowserCleanupRecord(record)
     )
       throw new Error(`Browser cleanup evidence incomplete: ${name}`);
-    const file = record.caseId.split(":")[0];
-    if (!observedSites.has(file)) observedSites.set(file, new Set());
-    observedSites.get(file).add(record.caseId);
+    if (record.testName !== null) {
+      const key = `${record.caseId.split(":")[0]}\0${record.testName}`;
+      observedCases.set(key, (observedCases.get(key) ?? 0) + 1);
+    }
   }
   if (Array.isArray(expectedCases)) {
-    const requiredByFile = new Map();
-    for (const item of expectedCases) {
-      const file = item.file.split("/").at(-1);
-      requiredByFile.set(file, (requiredByFile.get(file) ?? 0) + 1);
-    }
-    for (const [file, count] of requiredByFile) {
-      if ((observedSites.get(file)?.size ?? 0) < count)
-        throw new Error(`Browser cleanup evidence missing distinct cases for ${file}`);
-    }
+    const expected = new Set(
+      expectedCases.map((item) => `${item.file.split("/").at(-1)}\0${item.name}`),
+    );
+    if (
+      expected.size !== expectedCases.length ||
+      observedCases.size !== expected.size ||
+      [...expected].some((key) => observedCases.get(key) !== 1)
+    )
+      throw new Error("Browser cleanup evidence does not match executed cases");
   }
   return { runId: marker.runId, recordCount: cases.length };
 }
