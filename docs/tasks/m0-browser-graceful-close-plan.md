@@ -70,3 +70,10 @@ G0冻结后执行一次针对V1-L4的精确场景，以及一次完整B0/Q1/V1�
 - 可写范围：本文件与任务 results；`packages/terminal-web/probes/node/managed-browser.ts`、`packages/terminal-web/tests/view-browser-runner.mjs`、`packages/terminal-web/tests/view-lifecycle.test.mjs`、`packages/terminal-web/probes/query-input.test.mjs`、`packages/terminal-web/probes/node/query-input.ts`；只有注册确有必要时，`scripts/ci-test-gate.mjs` 与对应 `tests/tooling/ci-test-gate.test.mjs`。不编辑 renderer、protocol、native、依赖、锁文件、共享架构/交接文档、N1 或 R1 checkout。
 - 先实现单次有界 G0 观测和失败留存：不改变 2 秒 graceful、4.5/6/7 秒 phase、B0 默认或超时判失败语义。验证预列真实 V1-L4、受影响 B0/Q1/V1 套件与有限负例。只有新证据证明范围内实现错误才作最小 G1 修正；预算与判据交协调者请求用户决定。
 - 集成边界：G0 独立原子提交、独立源码审查/测试与双 OS CI 后才可作为单独 PR 线性 rebase 合入。已冻结 N1 [PR #42](https://github.com/GhostFlying/cove/pull/42) 与 R1 [PR #43](https://github.com/GhostFlying/cove/pull/43) 不在本分支改写/force-push/merge-commit。G0 接受后由专职集成所有者按实际先后顺序刷新仍开放的 PR 基线，核对原子提交映射和组合 CI；旧 PR43 macOS 失败不能由 G0 本地通过自动视为通过。
+
+## b39 候选有限修正计划，2026-09-27
+
+- 基线：本工作区干净的 `b39b336121012aa9faa2f390b2967b1091ce3f27`；独立源码审查 `/tmp/cove-m0-browser-graceful-close-source-review/report.md` SHA-256 `1bdbb940f1a6fc143ab311b2aef5653ef3da06f2e498c1632526223c9c492542`，独立执行 `/tmp/cove-m0-browser-graceful-close-native-verify/report.md` SHA-256 `af4566f4bb041d574a3fc908b8cb78fc9e1b7cf29444b1cc77d5311e289be1c0`。后者的 5 文件回归为 37/38，L8 的 lateOutcome 时序断言失败；不能称 G0 已通过，也不能据此宣称 PR43 宿主超时根因。
+- 作者与范围沿用上节；只修本计划列出的 `managed-browser.ts`、V1 browser runner/lifecycle tests、CI gate 与对应 tooling tests。先把受控 late-result 观察边界分出可直接验证的极小函数，分别固定 final 之前可记录与 final 之后不可变，真实浏览器 L8 保留 close timeout、单次 close、owned kill/exit 验证但不预设二者的完成次序。L10 仅验证 clipped budget 和实际分支一致，不额外要求真实 close 在短余量中成功。
+- 证据门禁校验完整、有界的 phase/process schema 与各分支合法组合，拒绝缺字段、负预算、不可能时间和身份错配；把每次调用绑定当前 Vitest test identity，与已验证的通过用例逐个比对，而不是只比较栈行号数量。新增有限阴性回归，保持非 Vitest standalone 调用的已用边界。分关注点原子提交，定向回归后冻结交独立 delta 审查和运行；完整 gate、双 OS 及集成仍是后续必需门禁。
+- 不修改 2 秒 graceful、4.5/6/7 秒 phase、B0 默认或 cleanup 错误语义，不增依赖或扩大产品范围。PR42 已合并 main `410e6f397b58440394667a4b1ba2c9f0f3e2a4e0`，其 final-main CI 尚未完成；G0 当前基线仍为已接受的 `77de10a`，后续按实际接受顺序评估并重放，不能暗中把未验收 R1 作为依赖。
