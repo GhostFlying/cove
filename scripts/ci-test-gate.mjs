@@ -34,22 +34,22 @@ export const requiredSuites = [
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
-    minimumTests: 9,
+    minimumTests: 11,
   },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/engine-recovery.test.mjs",
-    minimumTests: 8,
+    minimumTests: 9,
   },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/engine-parser.test.mjs",
-    minimumTests: 6,
+    minimumTests: 9,
   },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/engine-query.test.mjs",
-    minimumTests: 8,
+    minimumTests: 11,
   },
   {
     project: "terminal-engine",

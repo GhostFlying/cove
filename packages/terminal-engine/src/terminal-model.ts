@@ -101,6 +101,8 @@ interface Queued {
   readonly run: () => Promise<unknown>;
   readonly resolve: (result: unknown) => void;
   readonly disposedResult: unknown;
+  readonly faultedResult: (reason: string) => unknown;
+  readonly settledState: boolean;
   settled: boolean;
 }
 const failure = (code: EngineErrorCode, reason: string): EngineResult<never> & { ok: false } => ({
@@ -266,6 +268,8 @@ export class TerminalModel {
         }
       },
       failure("disposed", "Terminal model disposed"),
+      (reason) => failure("faulted", reason),
+      true,
     );
     if (admitted.ok) {
       this.#receivedSeq = event.seq;
@@ -291,6 +295,8 @@ export class TerminalModel {
         return success(this.#state());
       },
       failure("disposed", "Terminal model disposed"),
+      (reason) => failure("faulted", reason),
+      true,
     );
     if (!admitted.ok) return Promise.resolve(admitted.error);
     this.#fenced = true;
@@ -306,6 +312,8 @@ export class TerminalModel {
       0,
       async () => success(this.#state()),
       failure("disposed", "Terminal model disposed"),
+      (reason) => failure("faulted", reason),
+      true,
     );
     return admitted.ok ? admitted.promise : Promise.resolve(admitted.error);
   }
@@ -346,6 +354,7 @@ export class TerminalModel {
         };
       },
       { status: "disposed", reason: "Terminal model disposed" },
+      (reason) => ({ status: "faulted", reason }),
     );
     return admitted.ok
       ? admitted.promise
@@ -381,6 +390,7 @@ export class TerminalModel {
         }
       },
       { status: "disposed", reason: "Terminal model disposed" },
+      (reason) => ({ status: "faulted", reason }),
     );
     return admitted.ok
       ? admitted.promise
@@ -418,6 +428,8 @@ export class TerminalModel {
     bytes: number,
     run: () => Promise<T>,
     disposedResult: T,
+    faultedResult: (reason: string) => T,
+    settledState = false,
   ): { ok: true; promise: Promise<T> } | { ok: false; error: EngineResult<never> & { ok: false } } {
     if (
       this.#outstanding.size >= this.#budgets.pendingWorkerCommands ||
@@ -430,6 +442,8 @@ export class TerminalModel {
         run,
         resolve: (value) => resolve(value as T),
         disposedResult,
+        faultedResult,
+        settledState,
         settled: false,
       };
       this.#queue.push(item);
@@ -445,12 +459,16 @@ export class TerminalModel {
     this.#busy = true;
     while (!this.#disposed && this.#queue.length) {
       const item = this.#queue.shift()!;
+      if (this.#fault) {
+        this.#settle(item, item.faultedResult(this.#fault));
+        continue;
+      }
       let result: unknown;
       try {
         result = await item.run();
       } catch {
         this.#fault = "Terminal model operation failed";
-        result = failure("faulted", this.#fault);
+        result = item.faultedResult(this.#fault);
       }
       this.#settle(item, result);
     }
@@ -462,7 +480,15 @@ export class TerminalModel {
     item.settled = true;
     this.#outstanding.delete(item);
     this.#queuedBytes -= item.bytes;
-    item.resolve(result);
+    if (
+      item.settledState &&
+      typeof result === "object" &&
+      result !== null &&
+      "ok" in result &&
+      result.ok === true
+    )
+      item.resolve(success(this.#state()));
+    else item.resolve(result);
   }
 
   #write(bytes: Uint8Array): Promise<void> {

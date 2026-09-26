@@ -140,3 +140,74 @@ test("Q08 sink failure faults model and disposal prevents later emission", async
   engine.dispose();
   expect((await engine.barrier()).error.code).toBe("disposed");
 });
+
+test("Q09 custom pushed appearance is the OSC reset target, including unknown colors", async () => {
+  const { engine, replies } = collected();
+  try {
+    const pushed = {
+      foreground: "1111/2222/3333",
+      background: "4444/5555/6666",
+      palette: [{ index: 3, rgb: "7777/8888/9999" }],
+    };
+    await engine.apply(appearance(1, pushed));
+    await engine.apply(
+      output(2),
+      utf8("\u001b]10;#abcdef\u0007\u001b]11;#123456\u0007\u001b]4;3;#aabbcc;1;#123456\u0007"),
+    );
+    await engine.apply(output(3), utf8("\u001b]110\u0007\u001b]111\u0007\u001b]104;3;1\u0007"));
+    await engine.apply(output(4), utf8("\u001b]10;?\u0007\u001b]11;?\u0007\u001b]4;3;?;1;?\u0007"));
+    expect(replies.map(({ text }) => text)).toEqual([
+      "\u001b]10;rgb:1111/2222/3333\u001b\\",
+      "\u001b]11;rgb:4444/5555/6666\u001b\\",
+      "\u001b]4;3;rgb:7777/8888/9999\u001b\\",
+    ]);
+    const baseline = await engine.captureBaseline();
+    expect(baseline.status).toBe("ready");
+    expect(baseline.baseline.appearance).toEqual(pushed);
+    await engine.apply(appearance(5, { palette: [] }));
+    await engine.apply(output(6), utf8("\u001b]10;#abcdef\u0007\u001b]110\u0007\u001b]10;?\u0007"));
+    expect(replies).toHaveLength(3);
+    expect((await engine.barrier()).value.appearance.foreground).toBeUndefined();
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("Q10 queued query-bearing output stops at first sink fault", async () => {
+  let calls = 0;
+  const engine = model({
+    onAutomaticOutput: () => {
+      calls++;
+      throw new Error("sink");
+    },
+  });
+  try {
+    const first = engine.apply(output(1), utf8("\u001b[5n"));
+    const second = engine.apply(output(2), utf8("\u001b[5n"));
+    const queuedCapture = engine.captureBaseline();
+    expect((await first).error.code).toBe("faulted");
+    expect((await second).error.code).toBe("faulted");
+    expect((await queuedCapture).status).toBe("faulted");
+    expect(calls).toBe(1);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("Q11 split reset remains an exact raw tail before pushed-color continuation", async () => {
+  const { engine, replies } = collected();
+  try {
+    await engine.apply(appearance(1, { foreground: "1111/2222/3333", palette: [] }));
+    await engine.apply(output(2), utf8("\u001b]10;#abcdef\u0007"));
+    await engine.apply(output(3), utf8("\u001b]110"));
+    const mid = await engine.captureBaseline();
+    expect(mid.status).toBe("ready");
+    expect(mid.baseline.atSeq).toBe(3);
+    expect(mid.baseline.tail).toEqual(utf8("\u001b]10;#abcdef\u0007\u001b]110"));
+    await engine.apply(output(4), utf8("\u0007\u001b]10;?\u0007"));
+    expect(replies.map(({ text }) => text)).toEqual(["\u001b]10;rgb:1111/2222/3333\u001b\\"]);
+    expect((await engine.captureBaseline()).baseline.appearance.foreground).toBe("1111/2222/3333");
+  } finally {
+    engine.dispose();
+  }
+});
