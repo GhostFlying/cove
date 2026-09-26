@@ -507,11 +507,35 @@ function validBrowserCleanupPhase(phase, deadline, maximumBudget) {
   return (
     browserEvidenceInteger(phase.startedMs, 0, 30_000) &&
     browserEvidenceInteger(phase.phaseRemainingMs, -30_000, deadline) &&
+    Math.abs(phase.startedMs + phase.phaseRemainingMs - deadline) <= 2 &&
     browserEvidenceInteger(phase.budgetMs, 1, maximumBudget) &&
     browserEvidenceInteger(phase.elapsedMs, 0, 30_000) &&
     ["completed", "timed-out", "rejected"].includes(phase.outcome) &&
     (phase.lateOutcome === undefined ||
       (phase.outcome === "timed-out" && ["completed", "rejected"].includes(phase.lateOutcome)))
+  );
+}
+
+function validBrowserPageRecord(page, index) {
+  const dispose = page?.dispose;
+  const close = page?.close;
+  return (
+    page?.page === index + 1 &&
+    browserEvidenceInteger(page.shareMs, -30_000, 3_500) &&
+    dispose &&
+    browserEvidenceInteger(dispose.budgetMs, 0, 1_500) &&
+    browserEvidenceInteger(dispose.elapsedMs, 0, 30_000) &&
+    ["completed", "timed-out", "phase-expired", "error"].includes(dispose.outcome) &&
+    (dispose.outcome !== "completed" || dispose.budgetMs > 0) &&
+    close &&
+    browserEvidenceInteger(close.attempts, 0, 1) &&
+    browserEvidenceInteger(close.budgetMs, 0, 3_500) &&
+    browserEvidenceInteger(close.elapsedMs, 0, 30_000) &&
+    ["completed", "timed-out", "phase-expired", "error"].includes(close.outcome) &&
+    (close.attempts !== 0 || ["phase-expired", "error"].includes(close.outcome)) &&
+    (close.outcome !== "completed" || (close.attempts === 1 && close.budgetMs > 0)) &&
+    (close.lateOutcome === undefined ||
+      (close.outcome === "timed-out" && ["completed", "rejected"].includes(close.lateOutcome)))
   );
 }
 
@@ -538,7 +562,9 @@ function validBrowserCleanupRecord(record) {
     browserEvidenceInteger(record.cleanupElapsedMs, 0, 30_000) &&
     browserEvidenceInteger(record.workBudgetMs, 500, 32_000) &&
     Array.isArray(record.pages) &&
-    browserEvidenceInteger(record.disposedPages, 0, record.pages.length)
+    record.pages.every(validBrowserPageRecord) &&
+    record.disposedPages ===
+      record.pages.filter((page) => page.close.outcome === "completed").length
   );
 }
 
@@ -547,7 +573,7 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
   const names = await readdir(directory);
   const marker = JSON.parse(await readFile(join(directory, "run.json"), "utf8"));
   const cases = names.filter((name) => name !== "run.json");
-  const observedCases = new Map();
+  const observedCases = new Set();
   if (
     marker.sourceCommit !== sourceCommit ||
     !/^[A-Za-z0-9-]{1,80}$/.test(marker.runId) ||
@@ -565,6 +591,7 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
       record.sourceCommit !== sourceCommit ||
       record.sourceDirty !== false ||
       record.runId !== marker.runId ||
+      record.invocationId !== name.slice(0, -5) ||
       !/^(standalone|view-(?:input|recovery|lifecycle)\.test\.mjs:\d+)$/.test(record.caseId) ||
       (record.caseId === "standalone"
         ? record.testName !== null
@@ -578,7 +605,7 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
       throw new Error(`Browser cleanup evidence incomplete: ${name}`);
     if (record.testName !== null) {
       const key = `${record.caseId.split(":")[0]}\0${record.testName}`;
-      observedCases.set(key, (observedCases.get(key) ?? 0) + 1);
+      observedCases.add(key);
     }
   }
   if (Array.isArray(expectedCases)) {
@@ -588,7 +615,7 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
     if (
       expected.size !== expectedCases.length ||
       observedCases.size !== expected.size ||
-      [...expected].some((key) => observedCases.get(key) !== 1)
+      [...expected].some((key) => !observedCases.has(key))
     )
       throw new Error("Browser cleanup evidence does not match executed cases");
   }
