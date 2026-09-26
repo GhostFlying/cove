@@ -216,3 +216,94 @@ test("safe pipe errors and structure bounds reject credential leakage", () => {
   for (let index = 0; index < 17; index++) nested = { child: nested };
   expect(validatePipeFrame(frame(4), { ...error, future: nested }).ok).toBe(false);
 });
+
+test("recover preserves connection and view while allocating a fresh subscription", () => {
+  const command = {
+    type: "recover",
+    worker,
+    run,
+    requestId: "q1",
+    subscription,
+    replacement: { ...subscription, subscriptionId: "sub2" },
+  };
+  expect(validatePipeFrame(frame(1), command).ok).toBe(true);
+  for (const replacement of [
+    subscription,
+    { ...command.replacement, viewId: "v2" },
+    { ...command.replacement, connection: { ...subscription.connection, generation: 2 } },
+  ])
+    expect(validatePipeFrame(frame(1), { ...command, replacement }).ok).toBe(false);
+});
+
+test("non-null control grant increments epoch exactly once", () => {
+  const command = {
+    type: "set-control",
+    worker,
+    run,
+    requestId: "q1",
+    expectedEpoch: 4,
+    nextEpoch: 5,
+    geometry,
+    holder: { connection: subscription.connection, viewId: "v1", subscriptionId: "sub1" },
+  };
+  expect(validatePipeFrame(frame(1), command).ok).toBe(true);
+  expect(validatePipeFrame(frame(1), { ...command, nextEpoch: 4 }).ok).toBe(false);
+  expect(validatePipeFrame(frame(1), { ...command, nextEpoch: 6 }).ok).toBe(false);
+  expect(validatePipeFrame(frame(1), { ...command, holder: null, nextEpoch: 4 }).ok).toBe(true);
+});
+
+test("successful status and input results require bound execution evidence", () => {
+  const statusCommand = { type: "status", worker, run, requestId: "q1" };
+  const status = {
+    run,
+    status: "live",
+    geometry,
+    controlEpoch: 1,
+    controlHolder: null,
+    receivedSeq: 2,
+    parsedSeq: 2,
+    recovery: "ready",
+    exitCode: null,
+    signal: null,
+  };
+  const result = {
+    type: "result",
+    worker,
+    run,
+    requestId: "q1",
+    commandType: "status",
+    outcome: "accepted",
+    runStatus: status,
+  };
+  expect(validatePipeFrame(frame(2), result).ok).toBe(true);
+  expect(validatePipeResultForCommand(statusCommand, result)).toBe(true);
+  expect(validatePipeFrame(frame(2), { ...result, runStatus: undefined }).ok).toBe(false);
+  expect(
+    validatePipeFrame(frame(2), {
+      ...result,
+      runStatus: { ...status, run: { ...run, runId: "r2" } },
+    }).ok,
+  ).toBe(false);
+  const input = {
+    type: "input",
+    worker,
+    run,
+    requestId: "q2",
+    subscription,
+    epoch: 1,
+    inputSeq: 1,
+  };
+  const written = {
+    type: "result",
+    worker,
+    run,
+    requestId: "q2",
+    commandType: "input",
+    outcome: "accepted",
+    inputSeq: 1,
+    writtenBytes: 2,
+  };
+  expect(validatePipeFrame(frame(2), written).ok).toBe(true);
+  expect(validatePipeResultForCommand(input, written)).toBe(true);
+  expect(validatePipeFrame(frame(2), { ...written, writtenBytes: undefined }).ok).toBe(false);
+});

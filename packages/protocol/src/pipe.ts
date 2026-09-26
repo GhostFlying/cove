@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ERROR_CODES } from "./errors.js";
 import { validateEffectiveBudgets } from "./budgets.js";
-import { sameRunRef, sameWorkerRef, workerMatchesRun } from "./identity.js";
+import { sameConnectionRef, sameRunRef, sameWorkerRef, workerMatchesRun } from "./identity.js";
 import { boundedJsonStructure } from "./terminal.js";
 import { validateBaselineDescriptor } from "./terminal-recovery.js";
 import { validateEventBinding } from "./terminal-events.js";
@@ -58,7 +58,29 @@ function validIdentity(value: PipeMetadata): boolean {
     return false;
   if ("run" in value && !workerMatchesRun(value.worker, value.run)) return false;
   if ("subscription" in value && !sameRunRef(value.run, value.subscription.run)) return false;
-  if (value.type === "recover" && !sameRunRef(value.run, value.replacement.run)) return false;
+  if (
+    value.type === "recover" &&
+    (!sameRunRef(value.run, value.replacement.run) ||
+      !sameConnectionRef(value.subscription.connection, value.replacement.connection) ||
+      value.subscription.viewId !== value.replacement.viewId ||
+      value.subscription.subscriptionId === value.replacement.subscriptionId)
+  )
+    return false;
+  if (
+    value.type === "set-control" &&
+    value.holder !== null &&
+    (value.expectedEpoch === Number.MAX_SAFE_INTEGER || value.nextEpoch !== value.expectedEpoch + 1)
+  )
+    return false;
+  if (
+    value.type === "result" &&
+    ((value.runStatus && !sameRunRef(value.run, value.runStatus.run)) ||
+      (value.commandType === "status" && value.outcome === "accepted" && !value.runStatus) ||
+      (value.commandType === "input" &&
+        value.outcome === "accepted" &&
+        (value.inputSeq === undefined || value.writtenBytes === undefined)))
+  )
+    return false;
   if (value.type === "terminal-event") {
     if (!sameRunRef(value.run, value.terminal.run)) return false;
     if ("subscription" in value.terminal && !sameRunRef(value.run, value.terminal.subscription.run))
@@ -133,6 +155,26 @@ export function validatePipeResultForCommand(
     if (result.type === "result" && result.operationId !== command.operationId) return false;
   }
   if (command.type === "input" && result.type === "result" && result.inputSeq !== command.inputSeq)
+    return false;
+  if (
+    command.type === "input" &&
+    result.type === "result" &&
+    result.outcome === "accepted" &&
+    result.writtenBytes === undefined
+  )
+    return false;
+  if (
+    result.type === "result" &&
+    result.runStatus &&
+    !sameRunRef(command.run, result.runStatus.run)
+  )
+    return false;
+  if (
+    command.type === "status" &&
+    result.type === "result" &&
+    result.outcome === "accepted" &&
+    !result.runStatus
+  )
     return false;
   return true;
 }
