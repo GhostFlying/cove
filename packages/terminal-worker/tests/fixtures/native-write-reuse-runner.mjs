@@ -9,16 +9,12 @@ if (process.env.UV_THREADPOOL_SIZE !== "1") throw new Error("single libuv worker
 const require = createRequire(import.meta.url);
 const candidate = process.env.COVE_N1_PACKAGE_ROOT;
 const pty = candidate ? require(resolve(candidate, "lib/index.js")) : require("node-pty");
-const nonce = `n1-${process.pid}-${Date.now()}`;
+const nonce = process.argv[2];
+assert.match(nonce, /^[0-9a-f-]{36}$/);
 const fixture = resolve(import.meta.dirname, "native-write-child.mjs");
-const scratch = mkdtempSync(join(tmpdir(), "cove-n1-reuse-"));
 const payload = Buffer.from(`REUSED-FD-${nonce}`);
-const terminal = pty.spawn(process.execPath, [fixture, nonce], {
-  cols: 80,
-  rows: 24,
-  encoding: null,
-  boundedWrite: { maxAllocatedBytes: payload.byteLength, maxTasks: 1 },
-});
+let scratch;
+let terminal;
 let exited = false;
 let output = Buffer.alloc(0);
 let settlement;
@@ -27,12 +23,6 @@ let destroyed = false;
 let readerReused = -1;
 let sentinelPath;
 const extraFds = [];
-terminal.onExit(() => {
-  exited = true;
-});
-terminal.onData((chunk) => {
-  output = Buffer.concat([output, Buffer.from(chunk)]);
-});
 
 async function until(predicate, label, timeoutMs = 8_000) {
   const deadline = Date.now() + timeoutMs;
@@ -58,20 +48,42 @@ function occupyWorker() {
   });
 }
 function destroyOnce() {
-  if (!destroyed) {
+  if (terminal && !destroyed) {
     destroyed = true;
     terminal.destroy();
   }
 }
 
+let failure;
 try {
   assert.equal(pty.native.coveBoundedWriterVersion, 1);
+  scratch = mkdtempSync(join(tmpdir(), "cove-n1-reuse-"));
+  terminal = pty.spawn(process.execPath, [fixture, nonce], {
+    cols: 80,
+    rows: 24,
+    encoding: null,
+    boundedWrite: { maxAllocatedBytes: payload.byteLength, maxTasks: 1 },
+  });
+  process.send?.({ pid: terminal.pid, nonce, scratch });
+  terminal.onExit(() => {
+    exited = true;
+  });
+  terminal.onData((chunk) => {
+    output = Buffer.concat([output, Buffer.from(chunk)]);
+  });
+  if (process.env.COVE_N1_REUSE_FAULT === "after-spawn") {
+    throw new Error("synthetic post-spawn failure");
+  }
   await until(() => output.includes(Buffer.from(`READY ${nonce}`)), "child ready");
   const readerFd = terminal.fd;
   const writerFd = terminal._writeStream._fd;
   assert.notEqual(writerFd, readerFd);
   assert.equal(descriptorIsClosed(writerFd), false);
-  blocker = occupyWorker();
+  blocker =
+    process.env.COVE_N1_REUSE_FAULT === "blocker"
+      ? Promise.reject(new Error("synthetic blocker failure"))
+      : occupyWorker();
+  if (process.env.COVE_N1_REUSE_FAULT === "blocker") await blocker;
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   assert.equal(
     terminal.writeBounded(payload, (value) => {
@@ -117,15 +129,29 @@ try {
       settlement,
     }) + "\n",
   );
+} catch (error) {
+  failure = error;
 } finally {
-  terminal.disposeBoundedWrite();
-  destroyOnce();
-  if (blocker) await blocker;
-  if (!exited) {
-    terminal._boundedOwnedStop(9);
-    await until(() => exited, "owned child cleanup", 3_000);
+  const cleanup = async (step) => {
+    try {
+      await step();
+    } catch (error) {
+      failure ??= error;
+    }
+  };
+  await cleanup(() => terminal?.disposeBoundedWrite());
+  await cleanup(() => destroyOnce());
+  await cleanup(async () => {
+    if (blocker) await blocker;
+  });
+  if (terminal && !exited) {
+    await cleanup(async () => {
+      terminal._boundedOwnedStop(9);
+      await until(() => exited, "owned child cleanup", 3_000);
+    });
   }
-  for (const fd of extraFds) closeSync(fd);
-  if (readerReused >= 0) closeSync(readerReused);
-  rmSync(scratch, { recursive: true, force: true });
+  for (const fd of extraFds) await cleanup(() => closeSync(fd));
+  if (readerReused >= 0) await cleanup(() => closeSync(readerReused));
+  if (scratch) await cleanup(() => rmSync(scratch, { recursive: true, force: true }));
 }
+if (failure) throw failure;

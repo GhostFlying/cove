@@ -214,7 +214,13 @@ test("ambiguous close is never retried and retains a finite owner-ledger tombsto
   const io = new WriteIo();
   io.closeError = Object.assign(new Error("ambiguous close"), { code: "EINTR" });
   const stream = bounded(io);
-  const ownerLedger = { occupied: 1 };
+  const ownerLedger = { occupied: 0, capacity: 1 };
+  const admit = () => {
+    if (ownerLedger.occupied >= ownerLedger.capacity) return false;
+    ownerLedger.occupied++;
+    return true;
+  };
+  expect(admit()).toBe(true);
   const result = stream.boundedWriteCompletion.then((value) => {
     if (value.kind === "closed") ownerLedger.occupied--;
     return value;
@@ -224,7 +230,7 @@ test("ambiguous close is never retried and retains a finite owner-ledger tombsto
   expect(io.closes).toEqual([41]);
   expect(await result).toEqual({ kind: "close-uncertain", error: "ambiguous close" });
   expect(ownerLedger.occupied).toBe(1);
-  expect(ownerLedger.occupied < 1).toBe(false);
+  expect(admit()).toBe(false);
 });
 
 test("permanent callback error reports its returned prefix and cancels later work", async () => {
