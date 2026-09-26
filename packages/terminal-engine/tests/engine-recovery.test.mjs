@@ -140,3 +140,23 @@ test("R08 returned snapshot is detached and capture emits no live reply", async 
     engine.dispose();
   }
 });
+
+test("R09 failed candidate under a small VT cap preserves the prior checkpoint and raw tail", async () => {
+  const engine = model({ effectiveBudgets: { ...M0_LIMITS, baselineVtBytes: 300 } });
+  try {
+    const initial = await engine.captureBaseline();
+    expect(initial.status).toBe("ready");
+    expect(initial.baseline.vt.length).toBeLessThanOrEqual(300);
+    const bytes = utf8("\u001b[31mHello");
+    expect((await engine.apply(output(1), bytes)).ok).toBe(true);
+    const capture = await engine.captureBaseline();
+    expect(capture.status).toBe("ready");
+    expect(capture.baseline.checkpointSeq).toBe(0);
+    expect(capture.baseline.atSeq).toBe(1);
+    expect(capture.baseline.vt).toEqual(initial.baseline.vt);
+    expect(capture.baseline.tail).toEqual(bytes);
+    expect(assertTransfer(capture.baseline)).toBe(true);
+  } finally {
+    engine.dispose();
+  }
+});

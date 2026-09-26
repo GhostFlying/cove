@@ -1,7 +1,11 @@
+import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { parserSequences } from "../../../tests/fixtures/terminal/engine/recovery-cases.mjs";
 import { model, output, resize, utf8, receiver, restore, write, observation } from "./driver.mjs";
+
+const { Terminal } = createRequire(import.meta.url)("@xterm/headless");
 
 async function cutCase(sequence, cut, chunked) {
   const engine = model();
@@ -127,4 +131,70 @@ test("P06 finite payload and geometry limits reject before mutating parser", asy
   } finally {
     engine.dispose();
   }
+});
+
+test("P07 split UTF-8 across real resize waits for its final bytes", async () => {
+  const engine = model();
+  try {
+    await engine.apply(output(1), Uint8Array.of(0xe4));
+    await engine.apply(resize(2, 10));
+    expect((await engine.captureBaseline()).status).toBe("waiting-checkpoint");
+    await engine.apply(output(3), Uint8Array.of(0xb8, 0xad));
+    const capture = await engine.captureBaseline();
+    expect(capture.status).toBe("ready");
+    expect(capture.baseline).toMatchObject({
+      checkpointSeq: 3,
+      atSeq: 3,
+      currentGeometry: { cols: 10, rows: 4 },
+    });
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("P08 a changed private shape makes public recovery explicitly unavailable", async () => {
+  const original = Terminal.prototype.write;
+  Terminal.prototype.write = function (bytes, callback) {
+    original.call(this, bytes, () => {
+      this._core._inputHandler._utf8Decoder.interim = new Uint8Array(2);
+      callback();
+    });
+  };
+  const engine = model();
+  try {
+    expect((await engine.apply(output(1), utf8("A"))).ok).toBe(true);
+    expect((await engine.captureBaseline()).status).toBe("unavailable");
+    expect((await engine.barrier()).value.recovery.state).toBe("unavailable");
+  } finally {
+    Terminal.prototype.write = original;
+    engine.dispose();
+  }
+});
+
+test("P09 changed installed version fails before model allocation", () => {
+  const script = `
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+const original = fs.readFileSync;
+fs.readFileSync = (path, ...args) => {
+  const value = original(path, ...args);
+  if (!String(path).replaceAll("\\\\", "/").endsWith("/@xterm/headless/package.json")) return value;
+  return JSON.stringify({ ...JSON.parse(value.toString()), version: "0.0.0" });
+};
+syncBuiltinESMExports();
+const { createTerminalModel } = await import("@cove/terminal-engine");
+try {
+  createTerminalModel({ run: { serverId: "s", relayInstanceId: "i", runId: "r" },
+    geometry: { cols: 12, rows: 4 }, onAutomaticOutput() {} });
+  process.exitCode = 2;
+} catch (error) {
+  if (!String(error).includes("version or entry changed")) process.exitCode = 3;
+}
+`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  expect(result.status).toBe(0);
 });

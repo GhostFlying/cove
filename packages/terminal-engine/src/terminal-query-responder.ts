@@ -28,6 +28,7 @@ function setter(id: number, value: string): string {
 
 // The live parser owns OSC order; recovery and preview only read this bounded state.
 export class TerminalQueryResponder {
+  #pushed: Appearance = DEFAULT_APPEARANCE;
   #foreground: string | undefined;
   #background: string | undefined;
   #palette = new Map<number, string>();
@@ -71,6 +72,11 @@ export class TerminalQueryResponder {
   setAppearance(input: Appearance): void {
     const value = validateAppearance(input);
     if (!value) throw new Error("Invalid appearance");
+    this.#pushed = {
+      ...(value.foreground ? { foreground: value.foreground.toLowerCase() } : {}),
+      ...(value.background ? { background: value.background.toLowerCase() } : {}),
+      palette: value.palette.map(({ index, rgb }) => ({ index, rgb: rgb.toLowerCase() })),
+    };
     this.#foreground = value.foreground?.toLowerCase();
     this.#background = value.background?.toLowerCase();
     this.#palette = new Map(value.palette.map(({ index, rgb }) => [index, rgb.toLowerCase()]));
@@ -132,7 +138,7 @@ export class TerminalQueryResponder {
   }
 
   #resetSimple(id: 10 | 11): boolean {
-    const color = id === 10 ? DEFAULT_APPEARANCE.foreground : DEFAULT_APPEARANCE.background;
+    const color = id === 10 ? this.#pushed.foreground : this.#pushed.background;
     if (id === 10) this.#foreground = color;
     else this.#background = color;
     this.#epoch++;
@@ -140,11 +146,13 @@ export class TerminalQueryResponder {
   }
 
   #resetPalette(data: string): boolean {
-    const defaults = new Map(DEFAULT_APPEARANCE.palette.map(({ index, rgb }) => [index, rgb]));
-    const indices = data ? data.split(";").map(Number) : [...this.#palette.keys()];
+    const pushed = new Map(this.#pushed.palette.map(({ index, rgb }) => [index, rgb]));
+    const indices = data
+      ? data.split(";").map(Number)
+      : [...new Set([...this.#palette.keys(), ...pushed.keys()])];
     for (const index of indices) {
       if (!Number.isInteger(index) || index < 0 || index > 255) continue;
-      const color = defaults.get(index);
+      const color = pushed.get(index);
       if (color) this.#palette.set(index, color);
       else this.#palette.delete(index);
       this.#epoch++;

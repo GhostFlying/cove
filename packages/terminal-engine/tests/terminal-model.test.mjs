@@ -1,7 +1,18 @@
+import { createRequire } from "node:module";
 import { expect, test } from "vitest";
 import { TerminalModel } from "@cove/terminal-engine";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { RUN, model, output, resize, utf8, string, assertTransfer } from "./driver.mjs";
+
+const { Terminal } = createRequire(import.meta.url)("@xterm/headless");
+const tick = () => new Promise((resolve) => setTimeout(resolve, 2));
+async function until(predicate) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    if (predicate()) return;
+    await tick();
+  }
+  throw new Error("Held parser callback was not reached");
+}
 
 test("M01 compiled root owns one model and a protocol-valid seq-0 capture", async () => {
   const engine = model();
@@ -131,4 +142,65 @@ test("M09 dispose settles queued work and rejects late calls", async () => {
   expect((await engine.barrier()).error.code).toBe("disposed");
   expect((await engine.captureBaseline()).status).toBe("disposed");
   expect(replies).toEqual([]);
+});
+
+test("M10 queue byte/count admission and completion resources reflect settled work", async () => {
+  const original = Terminal.prototype.write;
+  const callbacks = [];
+  Terminal.prototype.write = function (bytes, callback) {
+    original.call(this, bytes, () => callbacks.push(callback));
+  };
+  const budgets = {
+    ...M0_LIMITS,
+    parseLowBytes: 1024,
+    parseHighBytes: 65_536,
+    parseHardBytes: 65_537,
+    pendingWorkerCommands: 2,
+  };
+  const engine = model({ effectiveBudgets: budgets });
+  try {
+    const first = engine.apply(output(1), new Uint8Array(65_536));
+    const second = engine.apply(output(2), utf8("B"));
+    expect((await engine.apply(output(3), utf8("C"))).error.code).toBe("capacity");
+    expect((await engine.barrier()).error.code).toBe("capacity");
+    await until(() => callbacks.length === 1);
+    callbacks.shift()();
+    const completedFirst = await first;
+    expect(completedFirst.value.resources).toMatchObject({ queuedBytes: 1, pendingOperations: 1 });
+    await until(() => callbacks.length === 1);
+    callbacks.shift()();
+    const completedLast = await second;
+    expect(completedLast.value.resources).toMatchObject({ queuedBytes: 0, pendingOperations: 0 });
+    expect(completedLast.value.resources.queuedBytes).toBeLessThan(budgets.parseLowBytes);
+    Terminal.prototype.write = original;
+    expect((await engine.apply(output(3), utf8("C"))).ok).toBe(true);
+  } finally {
+    Terminal.prototype.write = original;
+    engine.dispose();
+  }
+});
+
+test("M11 disposal during held parse settles pending promises and ignores late callback", async () => {
+  const original = Terminal.prototype.write;
+  const callbacks = [];
+  Terminal.prototype.write = function (bytes, callback) {
+    original.call(this, bytes, () => callbacks.push(callback));
+  };
+  const replies = [];
+  const engine = model({ onAutomaticOutput: (item) => replies.push(item) });
+  try {
+    const first = engine.apply(output(1), utf8("A"));
+    const second = engine.apply(output(2), utf8("\u001b[5n"));
+    await until(() => callbacks.length === 1);
+    engine.dispose();
+    expect((await first).error.code).toBe("disposed");
+    expect((await second).error.code).toBe("disposed");
+    callbacks.shift()();
+    await tick();
+    expect(replies).toEqual([]);
+    expect((await engine.apply(output(3), utf8("B"))).error.code).toBe("disposed");
+  } finally {
+    Terminal.prototype.write = original;
+    engine.dispose();
+  }
 });

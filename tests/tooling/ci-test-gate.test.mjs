@@ -211,10 +211,10 @@ test("pragmatic logical-grid recovery suite is mandatory", async () => {
 
 test("compiled terminal adapter suites are all mandatory", async () => {
   for (const [name, minimumTests] of [
-    ["terminal-model", 9],
-    ["engine-recovery", 8],
-    ["engine-parser", 6],
-    ["engine-query", 8],
+    ["terminal-model", 11],
+    ["engine-recovery", 9],
+    ["engine-parser", 9],
+    ["engine-query", 11],
     ["engine-preview", 6],
   ]) {
     const suite = requiredSuites.find(
