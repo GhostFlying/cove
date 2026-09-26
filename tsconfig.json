@@ -5,6 +5,8 @@
     { "path": "./packages/protocol/tsconfig.json" },
     { "path": "./packages/terminal-engine/tsconfig.json" },
     { "path": "./packages/terminal-web/tsconfig.node.json" },
-    { "path": "./packages/terminal-web/tsconfig.browser.json" }
+    { "path": "./packages/terminal-web/tsconfig.browser.json" },
+    { "path": "./packages/terminal-web/tsconfig.production.json" },
+    { "path": "./packages/terminal-web/tsconfig.tests.json" }
   ]
 }

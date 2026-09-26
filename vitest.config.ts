@@ -47,6 +47,15 @@ export default defineConfig({
           maxWorkers: 1,
         },
       },
+      {
+        test: {
+          name: "terminal-web",
+          environment: "node",
+          include: ["packages/terminal-web/tests/**/*.test.mjs"],
+          testTimeout: 45_000,
+          maxWorkers: 1,
+        },
+      },
     ],
   },
 });

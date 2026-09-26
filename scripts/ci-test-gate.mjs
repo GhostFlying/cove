@@ -28,9 +28,9 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 22 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 23 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 4 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 5 },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
@@ -110,6 +110,21 @@ export const requiredSuites = [
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/query-input.test.mjs",
     minimumTests: 10,
+  },
+  {
+    project: "terminal-web",
+    file: "packages/terminal-web/tests/view-input.test.mjs",
+    minimumTests: 6,
+  },
+  {
+    project: "terminal-web",
+    file: "packages/terminal-web/tests/view-recovery.test.mjs",
+    minimumTests: 6,
+  },
+  {
+    project: "terminal-web",
+    file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
+    minimumTests: 6,
   },
 ];
 
@@ -218,6 +233,7 @@ export function readVitestOwnedTestFiles(checkoutRoot = root) {
       "packages/terminal-engine/probes",
     ),
     testFilesIn(join(checkoutRoot, "packages/terminal-web/probes"), "packages/terminal-web/probes"),
+    testFilesIn(join(checkoutRoot, "packages/terminal-web/tests"), "packages/terminal-web/tests"),
   ]).then((groups) => groups.flat().sort());
 }
 
