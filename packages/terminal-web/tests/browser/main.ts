@@ -1,5 +1,4 @@
 import { Terminal } from "@xterm/xterm";
-import "@xterm/xterm/css/xterm.css";
 import { createXtermTerminalView } from "@cove/terminal-web/xterm-view";
 import { QUERY_SUPPORT, type Appearance, type Geometry } from "@cove/protocol/profile";
 import type { BaselineDescriptor, TerminalEvent } from "@cove/protocol/terminal";
@@ -227,6 +226,22 @@ const fixture = {
   setHidden(hidden: boolean) {
     container.style.display = hidden ? "none" : "block";
     return evidence();
+  },
+  structuralLayout() {
+    const root = container.querySelector<HTMLElement>(".xterm")!;
+    const viewport = root.querySelector<HTMLElement>(".xterm-viewport")!;
+    const screen = root.querySelector<HTMLElement>(".xterm-screen")!;
+    const textarea = root.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")!;
+    const screenBox = screen.getBoundingClientRect();
+    return {
+      rootPosition: getComputedStyle(root).position,
+      viewportPosition: getComputedStyle(viewport).position,
+      screenPosition: getComputedStyle(screen).position,
+      textareaPosition: getComputedStyle(textarea).position,
+      textareaOpacity: getComputedStyle(textarea).opacity,
+      screenWidth: screenBox.width,
+      screenHeight: screenBox.height,
+    };
   },
   setAppearance(next: Appearance) {
     view!.setAppearance(next);

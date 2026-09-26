@@ -1,4 +1,5 @@
 import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { DomainErrorSchema, domainError, type DomainError } from "@cove/protocol/errors";
 import {
