@@ -98,16 +98,22 @@ const BootstrapFailureFieldsSchema = z.object({
   message: z.string().min(1).max(256),
   supportedVersions: z.object({
     bootstrap: z.array(z.number().int()).max(4),
-    protocol: z.array(z.number().int()).max(4),
+    protocol: z
+      .array(z.number().int().min(1).max(255))
+      .min(1)
+      .max(4)
+      .refine((versions) => new Set(versions).size === versions.length),
   }),
 });
+// A mismatch must be readable before peers share a business protocol version. Keep
+// bootstrap itself exact, but validate the peer's bounded protocol set independently
+// of the versions implemented by this process. Local failure generation below remains
+// the authority for what this process truthfully advertises.
 export const BootstrapFailureSchema = BootstrapFailureFieldsSchema.refine(
   (value) =>
     value.message === value.kind.replaceAll("_", " ") &&
     value.supportedVersions.bootstrap.length === 1 &&
-    value.supportedVersions.bootstrap[0] === BOOTSTRAP_VERSION &&
-    value.supportedVersions.protocol.length === 1 &&
-    value.supportedVersions.protocol[0] === PROTOCOL_VERSION,
+    value.supportedVersions.bootstrap[0] === BOOTSTRAP_VERSION,
 );
 export type BootstrapFailure = z.infer<typeof BootstrapFailureSchema>;
 

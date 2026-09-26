@@ -84,5 +84,23 @@
   "currentPeerCapabilities": ["terminal-framing-v2", "logical-grid-recovery-v1"],
   "optionalExtension": "future-optional-v1",
   "optionalField": { "futureOptionalV1": "fixture-only" },
-  "incompatibleProtocolVersion": 1
+  "incompatibleProtocolVersion": 1,
+  "historicalExperimentalV1": {
+    "sourceRevision": "6ccd5641bdc74eb4ada6b4a429b57a1cf2c1eaca",
+    "clientRequest": {
+      "type": "cove-bootstrap",
+      "bootstrapVersion": 1,
+      "protocolVersion": 1,
+      "buildVersion": "client-build-b",
+      "capabilities": ["terminal-framing-v1", "logical-grid-recovery-v1"],
+      "profiles": ["pragmatic-logical-grid-v1"],
+      "encodings": ["vt-checkpoint-tail-v1"]
+    },
+    "serverFailure": {
+      "type": "cove-bootstrap-error",
+      "kind": "PROTOCOL_MISMATCH",
+      "message": "PROTOCOL MISMATCH",
+      "supportedVersions": { "bootstrap": [1], "protocol": [1] }
+    }
+  }
 }
