@@ -323,6 +323,47 @@ const fixture = {
       deliveries: structuredClone(controlDeliveries),
     };
   },
+  async inputReentry() {
+    await initialize();
+    await ready();
+    const staleGeneration = generation;
+    let successorReady: Promise<void> | undefined;
+    let successorListener: { dispose(): void };
+    successorListener = view!.onFocusIntent((intent) => {
+      if (!intent.focused) return;
+      successorListener.dispose();
+      generation++;
+      successorReady = view!
+        .initialize({
+          profile: "pragmatic-logical-grid-v1",
+          encoding: "vt-checkpoint-tail-v1",
+          geometry: currentGeometry,
+          appearance,
+          viewGeneration: generation,
+        })
+        .then(() => ready());
+    });
+    const staleTerminal = capturedTerminal!;
+    staleTerminal.input("s", true);
+    await successorReady;
+    const successor = { staleGeneration, generation, evidence: evidence() };
+    capturedTerminal!.input("n", true);
+    const successorFresh = evidence();
+
+    await initialize();
+    await ready();
+    let hideListener: { dispose(): void };
+    hideListener = view!.onFocusIntent((intent) => {
+      if (!intent.focused) return;
+      hideListener.dispose();
+      view!.setVisibility(false);
+    });
+    capturedTerminal!.input("h", true);
+    const withdrawn = evidence();
+    view!.setVisibility(true);
+    capturedTerminal!.input("v", true);
+    return { successor, successorFresh, withdrawn, shownFresh: evidence() };
+  },
   paste(text: string) {
     const data = new DataTransfer();
     data.setData("text/plain", text);

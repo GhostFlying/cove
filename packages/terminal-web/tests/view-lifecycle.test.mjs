@@ -146,7 +146,8 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
     }));
     await page.evaluate(() => window.coveView.setVisibility(false));
     const afterHide = await page.evaluate(() => window.coveView.evidence());
-    return { before, afterFirst, takeover, afterSecond, afterHide, box };
+    const reentry = await page.evaluate(() => window.coveView.inputReentry());
+    return { before, afterFirst, takeover, afterSecond, afterHide, reentry, box };
   });
   expect(result.before.focuses).toEqual([]);
   expect(result.before.inputs).toEqual([]);
@@ -170,6 +171,40 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
   });
   expect(result.afterSecond.evidence.focuses.map((item) => item.focused)).toEqual([true, true]);
   expect(result.afterHide.focuses.map((item) => item.focused)).toEqual([true, true, false]);
+  expect(result.reentry.successor.generation).toBeGreaterThan(
+    result.reentry.successor.staleGeneration,
+  );
+  expect(result.reentry.successor.evidence.inputs).toEqual([]);
+  expect(result.reentry.successor.evidence.focuses).toEqual([
+    expect.objectContaining({
+      viewGeneration: result.reentry.successor.staleGeneration,
+      focusSeq: 1,
+      focused: true,
+    }),
+  ]);
+  expect(result.reentry.successorFresh.inputs).toEqual([
+    expect.objectContaining({
+      viewGeneration: result.reentry.successor.generation,
+      source: "keyboard",
+      bytes: [110],
+    }),
+  ]);
+  expect(result.reentry.successorFresh.focuses.at(-1)).toMatchObject({
+    viewGeneration: result.reentry.successor.generation,
+    focusSeq: 1,
+    focused: true,
+  });
+  expect(result.reentry.withdrawn.inputs).toEqual([]);
+  expect(result.reentry.withdrawn.focuses.map((item) => item.focused)).toEqual([true, false]);
+  expect(result.reentry.withdrawn.hidden).toBe(true);
+  expect(result.reentry.shownFresh.inputs).toEqual([
+    expect.objectContaining({ source: "keyboard", bytes: [118] }),
+  ]);
+  expect(result.reentry.shownFresh.focuses.map((item) => item.focused)).toEqual([
+    true,
+    false,
+    true,
+  ]);
 });
 
 test("V1-L5 validates appearance and rejects oversized input without truncating or losing the model", async () => {
