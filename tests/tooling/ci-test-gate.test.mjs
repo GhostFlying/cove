@@ -103,6 +103,15 @@ test("supported terminal protocol suite is mandatory with compiled cases", async
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
 
+test("supported worker pipe suite is mandatory with compiled cases", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/protocol/tests/supported-pipe.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 8 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
+});
+
 test("recovery state suite is mandatory with actual discovered cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-state.test.mjs",
