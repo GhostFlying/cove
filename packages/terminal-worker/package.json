@@ -1,0 +1,23 @@
+{
+  "name": "@cove/terminal-worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    "./qualification": {
+      "types": "./dist/src/native-qualification.d.ts",
+      "import": "./dist/src/native-qualification.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project terminal-worker",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "node-pty": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2"
+  }
+}

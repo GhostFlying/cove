@@ -40,6 +40,15 @@ export default defineConfig({
       },
       {
         test: {
+          name: "terminal-worker",
+          environment: "node",
+          include: ["packages/terminal-worker/tests/**/*.test.mjs"],
+          testTimeout: 15_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "terminal-web-probes",
           environment: "node",
           include: ["packages/terminal-web/probes/**/*.test.mjs"],
