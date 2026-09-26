@@ -20,6 +20,10 @@
       "types": "./dist/budgets.d.ts",
       "import": "./dist/budgets.js"
     },
+    "./bootstrap": {
+      "types": "./dist/bootstrap.d.ts",
+      "import": "./dist/bootstrap.js"
+    },
     "./terminal": {
       "types": "./dist/terminal.d.ts",
       "import": "./dist/terminal.js"
@@ -31,6 +35,10 @@
     "./runtime": {
       "types": "./dist/runtime.d.ts",
       "import": "./dist/runtime.js"
+    },
+    "./view": {
+      "types": "./dist/view.d.ts",
+      "import": "./dist/view.js"
     },
     "./provisional/terminal": {
       "types": "./dist/provisional/terminal.d.ts",
