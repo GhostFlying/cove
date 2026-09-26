@@ -27,6 +27,12 @@ At replay head `b312a8d1f50ce10ddadc142ee7a6518f520bcb13`, ten old integration c
 
 Final source/test/fixture Git trees match old reviewed PR43 exactly: `packages/protocol/src` `f26914707235f148ebd5c17f4b8795916d31efda`, `packages/protocol/tests` `3bcd846e4c64a23b885fb1f2c1b99044f9f0058b`, and `tests/fixtures/protocol/m0` `fc07fcc3127aac76a4677575c91cae6ff05bcfbf`. The accepted G0/N1 lock, native patch, and required-suite gate are unchanged from main `3472ea9`. This mapping is replay evidence, not a combined runtime or hosted acceptance claim.
 
+### G0-base author gate
+
+The frozen review candidate `12bb4b3c9422eba1989f7b4551c7de302d1cceb6` has tree `8d277847dbfcaadd2b4a62dac2cac6e2233e6940`. At that exact source, a frozen offline install, scoped protocol 7/87, build, and format check passed. One pinned macOS Node 26.10.0/pnpm 12.6.0 `pnpm check` then passed native preparation, format, lint, build, and the required-suite gate: 37/37 files and 317/317 tests. The suite composition is protocol 7 files/87 tests, tooling 4/41, terminal engine 5/46, engine probes 9/75, terminal worker 7/30, web probes 2/16, and production web 3/22. Author log `/tmp/cove-m0-r1-g0-author-check.log` has SHA-256 `4c1f9e6f8b9d8f80928769205e3ef511de919d05762b3b813ac252a589db1c58`. A prior invocation through the unpinned system pnpm failed before any check because that registry could not provide pnpm 12.6.0; the pinned toolchain run above is the actual gate result.
+
+Independent source review, independent combined verification, exact-head dual-OS hosted CI, and final-main readback remain pending. This local author result does not accept the R1/G0 combination.
+
 Status: frozen local integration checkpoint, 2026-09-27. Accepted-main base `77de10a2f91fb3eb0fc42c7fc27dd5270ce56704` was integrated on branch `p/luchengxuan/m0-19-routed-protocol-integration`. The exact functionally tested parent is `56e567d85fade02d1baedc5dc0dcf6229ed8640c`, tree `28f7791f7ae23022ca9148eb4f57ef31e788739f`; its complete binary diff from the accepted base has SHA-256 `acbdf19be59bce75d36ea3489082a5c668b03a77990ce0cb4f4e27c6572cb77b`. The immediate successor is documentation-only and is identified by exact head/tree in the external correction report so this commit does not contain a self-reference. The completed author branch remains at `7e7cbeb6496b8eff6d86afe6bf1f86045fadd864` and must not be rewritten.
 
 ## Transplant mapping and conflict record
