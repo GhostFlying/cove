@@ -266,6 +266,7 @@ export function evaluateAdmission(input: AdmissionRequest): AdmissionKind {
   return "malformed";
 }
 
+// Origin absence permits only unauthenticated CLI-compatible bootstrap; all peers still authenticate.
 export function evaluateWsUpgrade(input: {
   path: string;
   host: string;

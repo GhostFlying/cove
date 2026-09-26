@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "server": {
+    "serverId": "fixture-s",
+    "relayInstanceId": "fixture-i",
+    "buildVersion": "server-build-a"
+  },
+  "clientBuild": "client-build-b",
+  "boundAuthority": "127.0.0.1:4173",
+  "origin": "http://127.0.0.1:4174",
+  "methodCalls": [
+    { "method": "server.status", "params": {} },
+    { "method": "terminal.list", "params": { "limit": 2 } },
+    {
+      "method": "terminal.get",
+      "params": {
+        "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" }
+      }
+    },
+    {
+      "method": "terminal.create",
+      "params": {
+        "operationId": "fixture-create",
+        "expectedRelayInstanceId": "fixture-i",
+        "executable": "/bin/sh",
+        "argv": ["-c", "printf fixture"],
+        "cwd": "/tmp",
+        "geometry": { "cols": 80, "rows": 24 }
+      }
+    },
+    {
+      "method": "terminal.stop",
+      "params": {
+        "operationId": "fixture-stop",
+        "expectedRelayInstanceId": "fixture-i",
+        "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" }
+      }
+    },
+    {
+      "method": "operation.get",
+      "params": { "operationId": "fixture-create", "expectedRelayInstanceId": "fixture-i" }
+    }
+  ],
+  "resultFixtures": {
+    "server.status": { "workerCount": 1, "runCount": 1, "admission": "ready", "health": "live" },
+    "terminal.list": { "nextAfterRunId": "fixture-r" },
+    "terminal.get": { "runId": "fixture-r", "previewVersion": 4, "stale": false },
+    "terminal.create": {
+      "operationId": "fixture-create",
+      "method": "terminal.create",
+      "revision": 1,
+      "state": "accepted"
+    },
+    "terminal.stop": {
+      "operationId": "fixture-stop",
+      "method": "terminal.stop",
+      "revision": 1,
+      "state": "running"
+    },
+    "operation.get": {
+      "operationId": "fixture-create",
+      "method": "terminal.create",
+      "revision": 2,
+      "state": "succeeded"
+    }
+  },
+  "errorKinds": {
+    "server.status": "WORKER_UNAVAILABLE",
+    "terminal.list": "BUSY",
+    "terminal.get": "RUN_NOT_FOUND",
+    "terminal.create": "RESULT_UNKNOWN",
+    "terminal.stop": "STALE_CONTROL",
+    "operation.get": "OPERATION_NOT_FOUND"
+  },
+  "sameIntentOtherRpcId": "q-repeat",
+  "literalBaseV1": {
+    "bootstrapVersion": 1,
+    "protocolVersion": 1,
+    "profile": "pragmatic-logical-grid-v1",
+    "encoding": "vt-checkpoint-tail-v1",
+    "requiredCapabilities": ["terminal-framing-v1", "logical-grid-recovery-v1"]
+  },
+  "oldPeerCapabilities": ["terminal-framing-v1", "logical-grid-recovery-v1"],
+  "optionalExtension": "future-optional-v1",
+  "incompatibleProtocolVersion": 2
+}

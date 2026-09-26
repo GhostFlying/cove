@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "worker": {
+    "serverId": "fixture-s",
+    "relayInstanceId": "fixture-i",
+    "workerId": "fixture-w",
+    "workerIncarnationId": "fixture-wi"
+  },
+  "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
+  "helloBuild": "server-build-a",
+  "readyBuild": "worker-build-b",
+  "spawnArguments": {
+    "executable": "/bin/sh",
+    "argv": ["-c", "printf fixture"],
+    "cwd": "/tmp"
+  },
+  "spawnOperationId": "fixture-create",
+  "preview": {
+    "version": 4,
+    "atSeq": 4,
+    "generatedAtMs": 1000,
+    "vt": [27, 91, 72, 88]
+  },
+  "status": "live",
+  "uncertainInput": { "requestId": "fixture-input", "inputSeq": 1, "acceptance": "unknown" },
+  "lateWrongIncarnation": "fixture-wi-old"
+}

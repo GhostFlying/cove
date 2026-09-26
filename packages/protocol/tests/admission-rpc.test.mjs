@@ -166,7 +166,7 @@ test("preflight is exact origin, method and headers without business dispatch", 
   expect(evaluateAdmission({ ...options, origin: "null" })).toBe("forbidden");
 });
 
-test("WS upgrade authenticates only after exact-origin first-message bootstrap", () => {
+test("WS upgrade checks present Origin and authenticates every first message", () => {
   const upgrade = {
     path: "/terminal",
     host: admission.host,

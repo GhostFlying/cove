@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "files": {
+    "profile.json": "85bdb168027df1e796d106ede7dccf255f565218b7f3fc42ff561969b8c61987",
+    "terminal-journey.json": "113a56e8e5049f3bad74b369e61091bad3dd7790f3001a50b31f697b7b3a46a2",
+    "pipe-journey.json": "496a1d47d9bba3f05937bc7b9f9ea460e52df6738fc2a596ac2bb0a16883950d",
+    "admission-rpc.json": "7a14a6546a750192ff5072d7127f5710dd05af5acd1d6292573aae3314b42b1c"
+  }
+}

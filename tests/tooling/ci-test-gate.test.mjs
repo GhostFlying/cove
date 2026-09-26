@@ -121,6 +121,15 @@ test("local admission and RPC suite is mandatory with compiled cases", async () 
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
 
+test("compiled protocol consumer journey suite is mandatory", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/protocol/tests/consumer-contracts.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 9 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
+});
+
 test("recovery state suite is mandatory with actual discovered cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-state.test.mjs",
@@ -267,7 +276,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 18/);
+  ).toThrow(/needs 21/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {

@@ -22,8 +22,13 @@ export const requiredSuites = [
   },
   { project: "protocol", file: "packages/protocol/tests/supported-pipe.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/admission-rpc.test.mjs", minimumTests: 17 },
+  {
+    project: "protocol",
+    file: "packages/protocol/tests/consumer-contracts.test.mjs",
+    minimumTests: 9,
+  },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 18 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 21 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 4 },
   {

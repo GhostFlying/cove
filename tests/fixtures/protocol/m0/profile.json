@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "profile": "pragmatic-logical-grid-v1",
+  "encoding": "vt-checkpoint-tail-v1",
+  "geometry": { "cols": 80, "rows": 24 },
+  "coverage": {
+    "normal": {
+      "historyLines": 3,
+      "includedHistoryLines": 3,
+      "trimmedBefore": false,
+      "resizeContext": "complete"
+    },
+    "alternate": { "included": true, "resizeContext": "complete" }
+  },
+  "queryFixtureIds": [
+    "dsr-status",
+    "cpr",
+    "dec-cpr",
+    "da-primary",
+    "da-secondary",
+    "mode-report",
+    "color-fg",
+    "color-bg",
+    "color-palette"
+  ],
+  "classification": {
+    "visibleLogicalGrid": "required",
+    "savedSgrCharset": "diagnostic",
+    "retainedOffGrid": "diagnostic",
+    "realAgentWorkflow": "integration-obligation"
+  }
+}
