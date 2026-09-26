@@ -93,14 +93,24 @@ test("V1-L3 measures unequal and hidden containers without changing authoritativ
       await window.coveView.ready();
       const small = window.coveView.setSize(320, 160);
       const large = window.coveView.setSize(1000, 600);
+      const structural = window.coveView.structuralLayout();
       const hidden = window.coveView.setHidden(true);
-      return { small, large, hidden };
+      return { small, large, structural, hidden };
     }),
   );
   expect(result.small.logical).toMatchObject({ cols: 40, rows: 10 });
   expect(result.large.logical).toMatchObject({ cols: 40, rows: 10 });
   expect(result.small.measurement).not.toEqual(result.large.measurement);
   expect(result.hidden.measurement).toEqual(result.large.measurement);
+  expect(result.structural).toMatchObject({
+    rootPosition: "relative",
+    viewportPosition: "absolute",
+    screenPosition: "relative",
+    textareaPosition: "absolute",
+    textareaOpacity: "0",
+  });
+  expect(result.structural.screenWidth).toBeGreaterThan(0);
+  expect(result.structural.screenHeight).toBeGreaterThan(0);
   for (const value of [result.small.measurement, result.large.measurement]) {
     expect(value.cols).toBeGreaterThanOrEqual(2);
     expect(value.cols).toBeLessThanOrEqual(120);
