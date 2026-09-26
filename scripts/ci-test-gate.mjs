@@ -30,7 +30,7 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 28 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 29 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 5 },
   {
@@ -161,7 +161,7 @@ export const requiredSuites = [
   {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
-    minimumTests: 6,
+    minimumTests: 10,
   },
 ];
 
@@ -329,6 +329,11 @@ async function recordViewEvidence(report, inventory) {
   )
     throw new Error("V1 browser dependency evidence differs from the pinned profile");
   const cases = viewEvidenceCases(report, inventory);
+  const cleanup = await verifyBrowserCleanupEvidence(
+    join(evidenceDir, "browser-cleanup"),
+    commit,
+    cases,
+  );
   const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const toolchain = JSON.parse(await readFile(join(evidenceDir, "environment.json"), "utf8"));
   await writeFile(
@@ -350,7 +355,10 @@ async function recordViewEvidence(report, inventory) {
         cases,
         cleanup: {
           basis: "withViewPage awaits withManagedBrowser cleanup before each case can pass",
-          perCaseProcessRecord: false,
+          perCaseProcessRecord: true,
+          directory: "browser-cleanup",
+          runId: cleanup.runId,
+          recordCount: cleanup.recordCount,
         },
       },
       null,
@@ -465,6 +473,72 @@ async function environment() {
   return evidence;
 }
 
+export async function prepareBrowserCleanupEvidence(
+  sourceCommit,
+  runId,
+  directory = join(evidenceDir, "browser-cleanup"),
+) {
+  if (!/^[a-f0-9]{40}$/.test(sourceCommit) || !/^[A-Za-z0-9-]{1,80}$/.test(runId))
+    throw new Error("Invalid browser cleanup evidence identity");
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "run.json"),
+    `${JSON.stringify({ sourceCommit, runId, githubCommit: process.env.GITHUB_SHA ?? null })}\n`,
+  );
+}
+
+export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases) {
+  const minimumRecords = Array.isArray(expectedCases) ? expectedCases.length : expectedCases;
+  const names = await readdir(directory);
+  const marker = JSON.parse(await readFile(join(directory, "run.json"), "utf8"));
+  const cases = names.filter((name) => name !== "run.json");
+  const observedSites = new Map();
+  if (
+    marker.sourceCommit !== sourceCommit ||
+    !/^[A-Za-z0-9-]{1,80}$/.test(marker.runId) ||
+    cases.length < minimumRecords ||
+    cases.length > 64
+  )
+    throw new Error("Browser cleanup evidence identity or count is incomplete");
+  for (const name of cases) {
+    if (!/^\d+-\d+\.json$/.test(name))
+      throw new Error("Browser cleanup evidence filename is invalid");
+    const record = JSON.parse(await readFile(join(directory, name), "utf8"));
+    if (
+      record.schemaVersion !== 1 ||
+      record.final !== true ||
+      record.sourceCommit !== sourceCommit ||
+      record.sourceDirty !== false ||
+      record.runId !== marker.runId ||
+      !/^(standalone|view-(?:input|recovery|lifecycle)\.test\.mjs:\d+)$/.test(record.caseId) ||
+      !Number.isSafeInteger(record.browserPid) ||
+      record.browserPid <= 0 ||
+      record.browserExited !== true ||
+      record.listenerClosed !== true ||
+      record.graceful?.attempts !== 1 ||
+      record.graceful.budgetMs > 2_000 ||
+      record.kill?.budgetMs > 1_500
+    )
+      throw new Error(`Browser cleanup evidence incomplete: ${name}`);
+    const file = record.caseId.split(":")[0];
+    if (!observedSites.has(file)) observedSites.set(file, new Set());
+    observedSites.get(file).add(record.caseId);
+  }
+  if (Array.isArray(expectedCases)) {
+    const requiredByFile = new Map();
+    for (const item of expectedCases) {
+      const file = item.file.split("/").at(-1);
+      requiredByFile.set(file, (requiredByFile.get(file) ?? 0) + 1);
+    }
+    for (const [file, count] of requiredByFile) {
+      if ((observedSites.get(file)?.size ?? 0) < count)
+        throw new Error(`Browser cleanup evidence missing distinct cases for ${file}`);
+    }
+  }
+  return { runId: marker.runId, recordCount: cases.length };
+}
+
 async function main() {
   await mkdir(evidenceDir, { recursive: true });
   await rm(join(evidenceDir, "smoke"), { recursive: true, force: true });
@@ -484,6 +558,15 @@ async function main() {
     await environment();
     if (process.argv[2] === "--environment") return;
     if (process.argv.length > 2) throw new Error(`Unknown argument: ${process.argv[2]}`);
+    const checkout = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+    if (checkout.status !== 0 || !/^[a-f0-9]{40}\n?$/.test(checkout.stdout))
+      throw new Error("Browser cleanup evidence source commit is unavailable");
+    const sourceCommit = checkout.stdout.trim();
+    const runId = /^\d+$/.test(process.env.GITHUB_RUN_ID ?? "")
+      ? `github-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`
+      : `local-${process.pid}-${Date.now()}`;
+    await prepareBrowserCleanupEvidence(sourceCommit, runId);
+    process.env.COVE_BROWSER_CLEANUP_RUN_ID = runId;
     stage = "discovery";
     const discovery = await recordedCommand(
       stage,

@@ -37,9 +37,16 @@ interface ProbeBrowser {
 }
 interface BrowserServer {
   wsEndpoint(): string;
-  process(): { pid?: number; exitCode: number | null; signalCode: string | null };
+  process(): BrowserProcess;
   close(): Promise<void>;
   kill(): Promise<void>;
+}
+interface BrowserProcess {
+  pid?: number;
+  exitCode: number | null;
+  signalCode: string | null;
+  on(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
+  off(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
 }
 interface BrowserLauncher {
   executablePath(): string;
@@ -62,6 +69,25 @@ interface PageCleanupRecord {
     outcome: string;
     lateOutcome?: "completed" | "rejected";
   };
+}
+
+interface BrowserCleanupPhase {
+  attempts: number;
+  startedMs: number | null;
+  phaseDeadlineMs: number;
+  phaseRemainingMs: number | null;
+  budgetMs: number;
+  elapsedMs: number;
+  outcome: "not-started" | "completed" | "timed-out" | "rejected";
+  lateOutcome?: "completed" | "rejected";
+}
+
+interface ManagedBrowserEvidenceOptions {
+  path: string;
+  caseId: string;
+  runId: string;
+  sourceCommit: string;
+  sourceDirty: boolean;
 }
 
 const defaultBuiltRoot = fileURLToPath(new URL("../../browser/", import.meta.url));
@@ -104,6 +130,7 @@ export async function withManagedBrowser<T>(
   work: (context: ManagedBrowserContext) => Promise<T>,
   profile: "query" | "environment" = "query",
   requestedBuiltRoot?: string,
+  evidenceOptions?: ManagedBrowserEvidenceOptions,
 ): Promise<{
   value: T;
   context: Omit<
@@ -207,6 +234,11 @@ export async function withManagedBrowser<T>(
     }
   });
   let browserServer: BrowserServer | undefined;
+  let browserProcess: BrowserProcess | undefined;
+  let exitEvent: { code: number | null; signal: string | null; at: number } | undefined;
+  const onBrowserExit = (code: number | null, signal: string | null) => {
+    exitEvent = { code, signal, at: performance.now() };
+  };
   let browser: ProbeBrowser | undefined;
   let listenerPort: number | null = null;
   let result: T | undefined;
@@ -246,6 +278,8 @@ export async function withManagedBrowser<T>(
       executablePath: resolvedExecutable,
       timeout: remaining(8_000, "Chromium launch"),
     });
+    browserProcess = browserServer.process();
+    browserProcess.on("exit", onBrowserExit);
     if (profile === "environment" && process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
       throw new Error("Injected browser work failure");
     if (profile === "query" && process.env.COVE_QUERY_INJECT_WORK_FAILURE === "1")
@@ -300,10 +334,22 @@ export async function withManagedBrowser<T>(
   let cleanupEvidenceFinalized = false;
   const cleanupStarted = performance.now();
   const cleanupDeadline = cleanupStarted + 7_000;
+  const phase = (deadline: number): BrowserCleanupPhase => ({
+    attempts: 0,
+    startedMs: null,
+    phaseDeadlineMs: Math.round(deadline - cleanupStarted),
+    phaseRemainingMs: null,
+    budgetMs: 0,
+    elapsedMs: 0,
+    outcome: "not-started",
+  });
   // Q1 reserves a forced-kill interval after graceful close and a final listener interval.
   const pageDeadline = cleanupDeadline - 3_500;
   const gracefulCloseDeadline = cleanupDeadline - 2_500;
   const browserDeadline = profile === "query" ? cleanupDeadline - 1_000 : cleanupDeadline;
+  const graceful = phase(profile === "query" ? gracefulCloseDeadline : browserDeadline);
+  const kill = phase(browserDeadline);
+  const listener = phase(cleanupDeadline);
   const cleanupRemaining = (limit: number, phaseDeadline = cleanupDeadline) =>
     Math.max(1, Math.min(limit, Math.floor(phaseDeadline - performance.now())));
   const pageRemaining = (phaseDeadline: number, label: string) => {
@@ -441,53 +487,133 @@ export async function withManagedBrowser<T>(
   if (browserServer) {
     const injectedCloseHang =
       profile === "query" && process.env.COVE_QUERY_TEST_BROWSER_CLOSE_HANG === "1";
+    const closeDelay =
+      profile === "query" ? Number(process.env.COVE_QUERY_TEST_BROWSER_CLOSE_DELAY_MS ?? 0) : 0;
+    const killMode =
+      profile === "query" ? process.env.COVE_QUERY_TEST_BROWSER_KILL_MODE : undefined;
+    const killDelay =
+      profile === "query" ? Number(process.env.COVE_QUERY_TEST_BROWSER_KILL_DELAY_MS ?? 0) : 0;
+    const gracefulStarted = performance.now();
+    graceful.startedMs = Math.round(gracefulStarted - cleanupStarted);
+    graceful.phaseRemainingMs = Math.floor(
+      (profile === "query" ? gracefulCloseDeadline : browserDeadline) - gracefulStarted,
+    );
     try {
-      await within(
-        injectedCloseHang ? new Promise<void>(() => {}) : browserServer.close(),
-        cleanupRemaining(
-          profile === "query" ? 2_000 : 3_000,
-          profile === "query" ? gracefulCloseDeadline : browserDeadline,
-        ),
-        "Browser close",
+      if (!Number.isSafeInteger(closeDelay) || closeDelay < 0 || closeDelay > 2_500)
+        throw new Error("Invalid browser close delay injection");
+      if (killMode && !["hang", "reject"].includes(killMode))
+        throw new Error("Invalid browser kill mode injection");
+      if (!Number.isSafeInteger(killDelay) || killDelay < 0 || killDelay > 1_000)
+        throw new Error("Invalid browser kill delay injection");
+      graceful.budgetMs = cleanupRemaining(
+        profile === "query" ? 2_000 : 3_000,
+        profile === "query" ? gracefulCloseDeadline : browserDeadline,
       );
+      graceful.attempts = 1;
+      const actualClose = injectedCloseHang ? new Promise<void>(() => {}) : browserServer.close();
+      const closeOperation = closeDelay
+        ? actualClose.then(
+            () => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, closeDelay)),
+          )
+        : actualClose;
+      void closeOperation.then(
+        () => {
+          if (graceful.outcome === "timed-out" && !cleanupEvidenceFinalized)
+            graceful.lateOutcome = "completed";
+        },
+        () => {
+          if (graceful.outcome === "timed-out" && !cleanupEvidenceFinalized)
+            graceful.lateOutcome = "rejected";
+        },
+      );
+      await within(closeOperation, graceful.budgetMs, "Browser close");
+      graceful.outcome = "completed";
     } catch (error) {
+      graceful.outcome =
+        error instanceof Error && error.message.includes("timed out") ? "timed-out" : "rejected";
       cleanupErrors.push(error);
+      const killStarted = performance.now();
+      kill.startedMs = Math.round(killStarted - cleanupStarted);
+      kill.phaseRemainingMs = Math.floor(browserDeadline - killStarted);
       try {
-        await within(
-          browserServer.kill(),
-          cleanupRemaining(profile === "query" ? 1_500 : 2_000, browserDeadline),
-          "Browser kill",
-        );
+        kill.budgetMs = cleanupRemaining(profile === "query" ? 1_500 : 2_000, browserDeadline);
+        kill.attempts = 1;
+        const actualKill = browserServer.kill();
+        const killOperation = actualKill.then(async () => {
+          if (killDelay)
+            await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, killDelay));
+          if (killMode === "hang") await new Promise<void>(() => {});
+          if (killMode === "reject") throw new Error("Injected browser kill rejection");
+        });
+        await within(killOperation, kill.budgetMs, "Browser kill");
+        kill.outcome = "completed";
       } catch (killError) {
+        kill.outcome =
+          killError instanceof Error && killError.message.includes("timed out")
+            ? "timed-out"
+            : "rejected";
         cleanupErrors.push(killError);
       }
+      kill.elapsedMs = Math.round(performance.now() - killStarted);
     }
+    graceful.elapsedMs = Math.round(performance.now() - gracefulStarted);
     const state = browserServer.process();
     if (state.exitCode === null && state.signalCode === null)
       cleanupErrors.push(new Error("Browser process exit was not observed"));
   }
   if (server.listening) {
+    const listenerStarted = performance.now();
+    listener.startedMs = Math.round(listenerStarted - cleanupStarted);
+    listener.phaseRemainingMs = Math.floor(cleanupDeadline - listenerStarted);
     server.closeAllConnections();
     try {
+      listener.budgetMs = cleanupRemaining(profile === "query" ? 750 : 2_000);
+      listener.attempts = 1;
       await within(
         new Promise<void>((resolveClose, reject) =>
           server.close((error) => (error ? reject(error) : resolveClose())),
         ),
-        cleanupRemaining(profile === "query" ? 750 : 2_000),
+        listener.budgetMs,
         "Fixture listener close",
       );
+      listener.outcome = "completed";
     } catch (error) {
+      listener.outcome =
+        error instanceof Error && error.message.includes("timed out") ? "timed-out" : "rejected";
       cleanupErrors.push(error);
     }
+    listener.elapsedMs = Math.round(performance.now() - listenerStarted);
   }
   cleanupEvidenceFinalized = true;
+  browserProcess?.off("exit", onBrowserExit);
+  const browserState = browserProcess ?? browserServer?.process();
   const cleanupEvidence = {
-    browserPid: browserServer?.process().pid ?? null,
-    browserExited: browserServer
-      ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null
+    schemaVersion: 1,
+    final: true,
+    caseId: evidenceOptions?.caseId ?? null,
+    runId: evidenceOptions?.runId ?? null,
+    sourceCommit: evidenceOptions?.sourceCommit ?? null,
+    sourceDirty: evidenceOptions?.sourceDirty ?? null,
+    profile,
+    primaryOutcome: primaryError ? "rejected" : "completed",
+    primaryErrorName:
+      primaryError instanceof Error ? primaryError.name : primaryError ? "unknown" : null,
+    browserPid: browserState?.pid ?? null,
+    browserExited: browserState
+      ? browserState.exitCode !== null || browserState.signalCode !== null
       : true,
+    browserExit: browserState
+      ? {
+          code: browserState.exitCode,
+          signal: browserState.signalCode,
+          observedMs: exitEvent ? Math.round(exitEvent.at - cleanupStarted) : null,
+        }
+      : null,
     listenerPort,
     listenerClosed: !server.listening,
+    graceful: { ...graceful },
+    kill: { ...kill },
+    listener: { ...listener },
     disposedPages,
     pages: pageCleanup.map((record) => ({
       ...record,
@@ -499,19 +625,25 @@ export async function withManagedBrowser<T>(
     cleanupElapsedMs: Math.round(performance.now() - cleanupStarted),
     elapsedMs: Math.round(performance.now() - workStarted),
   };
-  const evidencePath =
+  const legacyEvidencePath =
     profile === "environment"
       ? process.env.COVE_PROBE_CLEANUP_EVIDENCE
       : process.env.COVE_QUERY_CLEANUP_EVIDENCE;
-  if (evidencePath) {
+  const evidencePaths = [...new Set([evidenceOptions?.path, legacyEvidencePath].filter(Boolean))];
+  if (evidencePaths.length) {
     try {
       await within(
-        writeFile(evidencePath, `${JSON.stringify(cleanupEvidence)}\n`),
+        Promise.all(
+          evidencePaths.map((path) => writeFile(path!, `${JSON.stringify(cleanupEvidence)}\n`)),
+        ),
         cleanupRemaining(profile === "query" ? 250 : 1_000),
         "Browser cleanup evidence",
       );
     } catch (error) {
       cleanupErrors.push(error);
+      console.error(
+        `Browser cleanup evidence write failed: ${error instanceof Error ? error.name : "unknown"}`,
+      );
     }
   }
   if (profile === "environment" && process.env.COVE_PROBE_INJECT_CLEANUP_FAILURE === "1")

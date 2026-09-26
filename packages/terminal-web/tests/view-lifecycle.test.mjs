@@ -3,7 +3,20 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
-import { withViewPage } from "./view-browser-runner.mjs";
+import { readLastViewBrowserEvidence, withViewPage } from "./view-browser-runner.mjs";
+
+async function withQueryBrowserSeams(values, work) {
+  const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  try {
+    for (const [key, value] of Object.entries(values)) process.env[key] = String(value);
+    return await work();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 test("V1-L1 rejects wrong profile and changed private ownership before further admission", async () => {
   const result = await withViewPage(async (page) =>
@@ -63,6 +76,114 @@ test("V1-L1 rejects wrong profile and changed private ownership before further a
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("V1-L7 preserves a graceful timeout and proves the owned kill and listener outcome", async () => {
+  await withQueryBrowserSeams({ COVE_QUERY_TEST_BROWSER_CLOSE_HANG: "1" }, async () => {
+    let failure;
+    try {
+      await withViewPage((page) => page.evaluate(() => "ready"));
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.errors.map((error) => error.message)).toContain("Browser close timed out");
+    const cleanup = await readLastViewBrowserEvidence();
+    expect(cleanup).toMatchObject({
+      final: true,
+      browserExited: true,
+      listenerClosed: true,
+      graceful: { attempts: 1, outcome: "timed-out" },
+      kill: { attempts: 1, outcome: "completed" },
+    });
+    expect(cleanup.graceful.budgetMs).toBeLessThanOrEqual(2_000);
+    expect(cleanup.kill.budgetMs).toBeLessThanOrEqual(1_500);
+    expect(cleanup.browserExit.observedMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+test("V1-L8 records a single real close followed by a late test gate without erasing timeout", async () => {
+  await withQueryBrowserSeams(
+    {
+      COVE_QUERY_TEST_BROWSER_CLOSE_DELAY_MS: "2500",
+      COVE_QUERY_TEST_BROWSER_KILL_DELAY_MS: "750",
+    },
+    async () => {
+      let failure;
+      try {
+        await withViewPage((page) => page.evaluate(() => "ready"));
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure.errors.map((error) => error.message)).toContain("Browser close timed out");
+      const cleanup = await readLastViewBrowserEvidence();
+      expect(cleanup).toMatchObject({
+        final: true,
+        browserExited: true,
+        listenerClosed: true,
+        graceful: { attempts: 1, outcome: "timed-out" },
+        kill: { attempts: 1, outcome: "completed" },
+      });
+      expect(cleanup.graceful.lateOutcome).toBe("completed");
+    },
+  );
+});
+
+test("V1-L9 retains the primary failure when owned kill rejects after closing the process", async () => {
+  await withQueryBrowserSeams(
+    {
+      COVE_QUERY_INJECT_WORK_FAILURE: "1",
+      COVE_QUERY_TEST_BROWSER_CLOSE_HANG: "1",
+      COVE_QUERY_TEST_BROWSER_KILL_MODE: "reject",
+    },
+    async () => {
+      let failure;
+      try {
+        await withViewPage((page) => page.evaluate(() => "unused"));
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(AggregateError);
+      expect(failure.cause.message).toBe("Injected query work failure");
+      expect(failure.errors.map((error) => error.message)).toEqual([
+        "Injected query work failure",
+        "Browser close timed out",
+        "Injected browser kill rejection",
+      ]);
+      const cleanup = await readLastViewBrowserEvidence();
+      expect(cleanup).toMatchObject({
+        final: true,
+        primaryOutcome: "rejected",
+        browserExited: true,
+        listenerClosed: true,
+        graceful: { attempts: 1, outcome: "timed-out" },
+        kill: { attempts: 1, outcome: "rejected" },
+      });
+    },
+  );
+});
+
+test("V1-L10 clips graceful close to the remaining phase without borrowing kill reserve", async () => {
+  await withQueryBrowserSeams(
+    { COVE_QUERY_TEST_DISPOSE_DELAY_MS: "1500", COVE_QUERY_TEST_AFTER_DISPOSE_DELAY_MS: "2000" },
+    async () => {
+      let failure;
+      try {
+        await withViewPage((page) => page.evaluate(() => "ready"));
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(AggregateError);
+      const cleanup = await readLastViewBrowserEvidence();
+      expect(cleanup).toMatchObject({ final: true, browserExited: true, listenerClosed: true });
+      expect(cleanup.graceful.attempts).toBe(1);
+      expect(cleanup.graceful.phaseRemainingMs).toBeGreaterThan(0);
+      expect(cleanup.graceful.budgetMs).toBeGreaterThan(0);
+      expect(cleanup.graceful.budgetMs).toBeLessThan(2_000);
+      expect(cleanup.kill.attempts).toBe(0);
+    },
+  );
 });
 
 test("V1-L2 replacement generations settle old work once and admit only replacement input", async () => {
@@ -249,6 +370,16 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
   ]);
   expect(result.released.status).toBe("resolved");
   expect(result.released.evidence.inputs).toEqual(result.installingInput.evidence.inputs);
+  const cleanup = await readLastViewBrowserEvidence();
+  expect(cleanup).toMatchObject({
+    final: true,
+    browserExited: true,
+    listenerClosed: true,
+    graceful: { attempts: 1, outcome: "completed" },
+    kill: { attempts: 0, outcome: "not-started" },
+  });
+  expect(cleanup.graceful.budgetMs).toBeLessThanOrEqual(2_000);
+  expect(cleanup.browserExit.observedMs).toBeGreaterThanOrEqual(0);
 });
 
 test("V1-L5 validates appearance and rejects oversized input without truncating or losing the model", async () => {
