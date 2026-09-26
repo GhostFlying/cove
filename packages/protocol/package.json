@@ -4,6 +4,26 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
+    "./identity": {
+      "types": "./dist/identity.d.ts",
+      "import": "./dist/identity.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    },
+    "./profile": {
+      "types": "./dist/profile.d.ts",
+      "import": "./dist/profile.js"
+    },
+    "./budgets": {
+      "types": "./dist/budgets.d.ts",
+      "import": "./dist/budgets.js"
+    },
+    "./terminal": {
+      "types": "./dist/terminal.d.ts",
+      "import": "./dist/terminal.js"
+    },
     "./provisional/terminal": {
       "types": "./dist/provisional/terminal.d.ts",
       "import": "./dist/provisional/terminal.js"

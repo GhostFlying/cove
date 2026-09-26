@@ -94,6 +94,15 @@ test("query input browser suite is mandatory with ten acceptance rows", async ()
   );
 });
 
+test("supported terminal protocol suite is mandatory with compiled cases", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/protocol/tests/supported-terminal.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 14 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
+});
+
 test("recovery state suite is mandatory with actual discovered cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-state.test.mjs",
@@ -240,7 +249,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 15/);
+  ).toThrow(/needs 18/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {

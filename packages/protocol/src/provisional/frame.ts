@@ -65,7 +65,7 @@ function inspectHeader(
 }
 
 export function encodeFrame(
-  lane: 1 | 2,
+  lane: 1 | 2 | 3 | 4,
   revision: number,
   kind: FrameKind,
   metadata: Uint8Array,
@@ -103,7 +103,7 @@ export class FrameDecoder {
   private closed = false;
 
   constructor(
-    private readonly lane: 1 | 2,
+    private readonly lane: 1 | 2 | 3 | 4,
     private readonly revision: number,
   ) {}
 
