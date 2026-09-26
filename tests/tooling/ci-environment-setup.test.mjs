@@ -61,15 +61,17 @@ test("records timeout and spawn errors before propagating", async () => {
 test("native helper repair isolates the checkout from a hardlinked package source", async () => {
   const directory = await isolatedDirectory();
   const packageRoot = join(directory, "node_modules/.pnpm/node-pty@1.1.0/node_modules/node-pty");
-  const native = join(packageRoot, "prebuilds", "darwin-arm64", "pty.node");
-  const helper = join(packageRoot, "prebuilds", "darwin-arm64", "spawn-helper");
+  const native = join(packageRoot, "build", "Release", "pty.node");
+  const helper = join(packageRoot, "build", "Release", "spawn-helper");
   const source = join(directory, "store-helper");
-  await mkdir(join(packageRoot, "prebuilds", "darwin-arm64"), { recursive: true });
+  await mkdir(join(packageRoot, "build", "Release"), { recursive: true });
+  await mkdir(join(directory, "patches"));
+  await writeFile(join(directory, "patches/node-pty@1.1.0.patch"), "native fixture patch");
   await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "1.1.0" }));
   await writeFile(native, "native fixture");
   await writeFile(source, "helper fixture", { mode: 0o644 });
   await link(source, helper);
-  const lookup = () => ({});
+  const lookup = () => ({ native: { coveBoundedWriterVersion: 1 } });
   lookup.resolve = () => join(packageRoot, "package.json");
   lookup.cache = { [await realpath(native)]: {} };
   let result;
@@ -84,4 +86,19 @@ test("native helper repair isolates the checkout from a hardlinked package sourc
   expect(failure).toBeUndefined();
   expect((await stat(source)).mode & 0o777).toBe(0o644);
   expect((await stat(helper)).ino === (await stat(source)).ino).toBe(process.platform !== "darwin");
+  expect(result?.nativeSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(result?.patchSha256).toMatch(/^[0-9a-f]{64}$/);
+});
+
+test("native preparation rejects a stock addon before treating it as usable", async () => {
+  const directory = await isolatedDirectory();
+  const packageRoot = join(directory, "node_modules/.pnpm/node-pty@1.1.0/node_modules/node-pty");
+  const native = join(packageRoot, "prebuilds", "darwin-arm64", "pty.node");
+  await mkdir(join(packageRoot, "prebuilds", "darwin-arm64"), { recursive: true });
+  await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "1.1.0" }));
+  await writeFile(native, "stock addon fixture");
+  const lookup = () => ({ native: {} });
+  lookup.resolve = () => join(packageRoot, "package.json");
+  lookup.cache = { [await realpath(native)]: {} };
+  await expect(prepareNodePty(lookup, directory)).rejects.toThrow(/capability/);
 });

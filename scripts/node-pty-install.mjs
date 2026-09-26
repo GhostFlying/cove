@@ -17,7 +17,9 @@ export async function prepareNodePty(lookup = packageRequire, checkout = root) {
   if (manifest.version !== "1.1.0")
     throw new Error(`Unexpected node-pty version ${manifest.version}`);
   const packageRoot = await realpath(dirname(manifestPath));
-  lookup("node-pty");
+  const loadedPackage = lookup("node-pty");
+  if (loadedPackage.native?.coveBoundedWriterVersion !== 1)
+    throw new Error("node-pty bounded writer native capability is unavailable");
   const nativeBinary = Object.keys(lookup.cache).find(
     (path) => path.startsWith(`${packageRoot}${sep}`) && path.endsWith(".node"),
   );
@@ -28,10 +30,20 @@ export async function prepareNodePty(lookup = packageRequire, checkout = root) {
   const packageStore = join(await realpath(checkout), "node_modules", ".pnpm") + sep;
   if (!resolvedNative.startsWith(packageStore))
     throw new Error("Native binary is outside this checkout's install");
+  if (!resolvedNative.endsWith(`${sep}build${sep}Release${sep}pty.node`))
+    throw new Error("node-pty loaded an unpatched prebuild instead of the source-built addon");
+  const nativeSha256 = createHash("sha256")
+    .update(await readFile(resolvedNative))
+    .digest("hex");
+  const patchSha256 = createHash("sha256")
+    .update(await readFile(join(checkout, "patches/node-pty@1.1.0.patch")))
+    .digest("hex");
   if (process.platform === "linux") {
     return {
       version: manifest.version,
       nativeBinary: resolvedNative,
+      nativeSha256,
+      patchSha256,
       helper: null,
       helperMode: null,
       repaired: false,
@@ -63,6 +75,8 @@ export async function prepareNodePty(lookup = packageRequire, checkout = root) {
   return {
     version: manifest.version,
     nativeBinary: resolvedNative,
+    nativeSha256,
+    patchSha256,
     helper,
     helperMode: mode.toString(8),
     helperSha256,

@@ -30,7 +30,7 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 27 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 28 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 5 },
   {
@@ -107,6 +107,16 @@ export const requiredSuites = [
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-qualification.test.mjs",
     minimumTests: 4,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-write-owner.test.mjs",
+    minimumTests: 10,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-write-reuse.test.mjs",
+    minimumTests: 2,
   },
   {
     project: "terminal-web-probes",
