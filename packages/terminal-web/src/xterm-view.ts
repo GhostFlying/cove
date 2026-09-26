@@ -144,8 +144,9 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     failures.emit(error);
   };
 
-  const publishFocus = (focused: boolean) => {
-    if (state === "disposed" || focused === effectivelyFocused) return true;
+  const publishFocus = (focused: boolean, deliberateActivation = false) => {
+    if (state === "disposed" || (!deliberateActivation && focused === effectivelyFocused))
+      return true;
     if (focusSeq === Number.MAX_SAFE_INTEGER) {
       publishFailure(domainError("COUNTER_EXHAUSTED"), true);
       return false;
@@ -158,7 +159,10 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
 
   const publishInput = (bytes: Uint8Array, source: InputSource, targetIncarnation: number) => {
     if (targetIncarnation !== incarnation || state === "disposed" || state === "failed") return;
-    if (!publishFocus(true)) return;
+    // Local DOM focus does not prove that this client still owns server control. Every deliberate
+    // input therefore carries a fresh monotonic focus intent that a controller can stage before
+    // the bytes; ordinary blur remains transition-only.
+    if (!publishFocus(true, true)) return;
     inputs.emit({ viewGeneration, source, bytes: bytes.slice() });
   };
 

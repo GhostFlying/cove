@@ -127,21 +127,49 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
       window.coveView.setVisibility(false);
       window.coveView.setVisibility(true);
       window.coveView.setAppearance({ palette: [] });
+      window.coveView.selectAndCopy();
     });
     const box = await page.locator(".xterm-screen").boundingBox();
     await page.mouse.wheel(0, 100);
     const before = await page.evaluate(() => window.coveView.evidence());
     await page.evaluate(() => window.coveView.focus());
     await page.keyboard.type("x");
-    const afterInput = await page.evaluate(() => window.coveView.evidence());
+    const afterFirst = await page.evaluate(() => ({
+      evidence: window.coveView.evidence(),
+      control: window.coveView.controlEvidence(),
+    }));
+    const takeover = await page.evaluate(() => window.coveView.modelRemoteTakeover());
+    await page.keyboard.type("y");
+    const afterSecond = await page.evaluate(() => ({
+      evidence: window.coveView.evidence(),
+      control: window.coveView.controlEvidence(),
+    }));
     await page.evaluate(() => window.coveView.setVisibility(false));
     const afterHide = await page.evaluate(() => window.coveView.evidence());
-    return { before, afterInput, afterHide, box };
+    return { before, afterFirst, takeover, afterSecond, afterHide, box };
   });
   expect(result.before.focuses).toEqual([]);
-  expect(result.afterInput.focuses.map((item) => item.focused)).toEqual([true]);
-  expect(result.afterInput.inputs[0].bytes).toEqual([120]);
-  expect(result.afterHide.focuses.map((item) => item.focused)).toEqual([true, false]);
+  expect(result.before.inputs).toEqual([]);
+  expect(result.afterFirst.evidence.inputs[0].bytes).toEqual([120]);
+  expect(result.afterFirst.control.deliveries).toEqual([
+    { type: "focus", focused: true, focusSeq: 1 },
+    { type: "input", bytes: [120], focusSeq: 1 },
+  ]);
+  expect(result.takeover).toEqual({
+    consumerFocusSeq: null,
+    deliveries: result.afterFirst.control.deliveries,
+  });
+  expect(result.afterSecond.evidence.inputs.map((item) => item.bytes)).toEqual([[120], [121]]);
+  expect(result.afterSecond.control).toEqual({
+    consumerFocusSeq: 2,
+    deliveries: [
+      ...result.afterFirst.control.deliveries,
+      { type: "focus", focused: true, focusSeq: 2 },
+      { type: "input", bytes: [121], focusSeq: 2 },
+    ],
+  });
+  expect(result.afterSecond.evidence.focuses.map((item) => item.focused)).toEqual([true, true]);
+  expect(result.afterHide.focuses.map((item) => item.focused)).toEqual([true, true, false]);
 });
 
 test("V1-L5 validates appearance and rejects oversized input without truncating or losing the model", async () => {

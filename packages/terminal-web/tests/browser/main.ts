@@ -51,6 +51,11 @@ let currentGeometry: Geometry = { cols: 40, rows: 10 };
 let heldRelease: (() => void) | undefined;
 let heldOperation: Promise<void> | undefined;
 let heldStatus: "idle" | "pending" | "resolved" | "rejected" = "idle";
+let consumerFocusSeq: number | undefined;
+let controlDeliveries: Array<
+  | { type: "focus"; focused: boolean; focusSeq: number }
+  | { type: "input"; bytes: number[]; focusSeq: number | null }
+> = [];
 
 const ownedBytes = (bytes: Uint8Array) => Array.from(bytes);
 const serialInput = (intent: InputIntent) => ({ ...intent, bytes: ownedBytes(intent.bytes) });
@@ -98,9 +103,26 @@ async function initialize(geometry: Geometry = { cols: 40, rows: 10 }): Promise<
   inputs = [];
   focuses = [];
   failures = [];
+  consumerFocusSeq = undefined;
+  controlDeliveries = [];
   subscriptions = [
-    view.onInputIntent((intent) => inputs.push({ ...intent, bytes: intent.bytes.slice() })),
-    view.onFocusIntent((intent) => focuses.push(structuredClone(intent))),
+    view.onInputIntent((intent) => {
+      inputs.push({ ...intent, bytes: intent.bytes.slice() });
+      controlDeliveries.push({
+        type: "input",
+        bytes: ownedBytes(intent.bytes),
+        focusSeq: consumerFocusSeq ?? null,
+      });
+    }),
+    view.onFocusIntent((intent) => {
+      focuses.push(structuredClone(intent));
+      consumerFocusSeq = intent.focused ? intent.focusSeq : undefined;
+      controlDeliveries.push({
+        type: "focus",
+        focused: intent.focused,
+        focusSeq: intent.focusSeq,
+      });
+    }),
     view.onFailure((error) => failures.push(structuredClone(error))),
   ];
   generation++;
@@ -280,6 +302,26 @@ const fixture = {
   setVisibility(visible: boolean) {
     view!.setVisibility(visible);
     return evidence();
+  },
+  selectAndCopy() {
+    capturedTerminal?.select(0, 0, 1);
+    const data = new DataTransfer();
+    container
+      .querySelector<HTMLElement>(".xterm")
+      ?.dispatchEvent(
+        new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data }),
+      );
+    return this.controlEvidence();
+  },
+  modelRemoteTakeover() {
+    consumerFocusSeq = undefined;
+    return this.controlEvidence();
+  },
+  controlEvidence() {
+    return {
+      consumerFocusSeq: consumerFocusSeq ?? null,
+      deliveries: structuredClone(controlDeliveries),
+    };
   },
   paste(text: string) {
     const data = new DataTransfer();
