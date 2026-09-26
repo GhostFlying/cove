@@ -5,6 +5,7 @@ import {
   ADMISSION_STATUS,
   BootstrapFailureSchema,
   BootstrapRequestSchema,
+  BootstrapSuccessSchema,
   RendezvousSchema,
   WsBootstrapSchema,
   evaluateAdmission,
@@ -123,15 +124,48 @@ test("bootstrap identity and protocol mismatch never return run inventory", () =
   );
   const failure = negotiateBootstrap({ ...request, protocolVersion: 1 }, server);
   expect(BootstrapFailureSchema.safeParse(failure).success).toBe(true);
+  expect(failure.supportedVersions).toEqual({ bootstrap: [1], protocol: [2] });
   expect(BootstrapFailureSchema.safeParse({ ...failure, message: "secret path" }).success).toBe(
     false,
   );
+});
+
+test("bootstrap failures decode bounded peer protocol-version sets", () => {
+  const failure = negotiateBootstrap({ ...request, protocolVersion: 1 }, server);
+  for (const protocol of [[1], [1, 2], [1, 2, 3, 255]])
+    expect(
+      BootstrapFailureSchema.safeParse({
+        ...failure,
+        supportedVersions: { bootstrap: [1], protocol },
+      }).success,
+    ).toBe(true);
+
+  for (const protocol of [[], [0], [256], [1.5], ["2"], [1, 1], [1, 2, 3, 4, 5]])
+    expect(
+      BootstrapFailureSchema.safeParse({
+        ...failure,
+        supportedVersions: { bootstrap: [1], protocol },
+      }).success,
+    ).toBe(false);
+
   expect(
     BootstrapFailureSchema.safeParse({
       ...failure,
-      supportedVersions: { bootstrap: [1], protocol: [1, 2] },
+      supportedVersions: { bootstrap: [2], protocol: [1] },
     }).success,
   ).toBe(false);
+  expect(
+    BootstrapFailureSchema.safeParse({
+      ...failure,
+      supportedVersions: { bootstrap: [1, 2], protocol: [1] },
+    }).success,
+  ).toBe(false);
+});
+
+test("bootstrap success decoding remains strict at the local protocol version", () => {
+  const success = negotiateBootstrap(request, server);
+  expect(BootstrapSuccessSchema.safeParse(success).success).toBe(true);
+  expect(BootstrapSuccessSchema.safeParse({ ...success, protocolVersion: 1 }).success).toBe(false);
 });
 
 test("HTTP admission binds exact numeric authority, origin and authenticated verdict", () => {

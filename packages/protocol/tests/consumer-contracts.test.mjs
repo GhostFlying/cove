@@ -721,6 +721,26 @@ test("current v2 drops optional capability and explicitly refuses protocol v1", 
   ).toBe("PROTOCOL_MISMATCH");
 });
 
+test("current bootstrap reader decodes a historical experimental failure", async () => {
+  const journey = await fixture("admission-rpc.json");
+  const historical = journey.historicalExperimentalV1;
+  expect(historical.sourceRevision).toBe("6ccd5641bdc74eb4ada6b4a429b57a1cf2c1eaca");
+  expect(BootstrapRequestSchema.safeParse(historical.clientRequest).success).toBe(true);
+  expect(BootstrapFailureSchema.safeParse(historical.serverFailure).success).toBe(true);
+
+  const currentReply = negotiateBootstrap(historical.clientRequest, {
+    ...journey.server,
+    effectiveBudgets: M0_LIMITS,
+  });
+  expect(currentReply).toMatchObject({
+    type: "cove-bootstrap-error",
+    kind: "PROTOCOL_MISMATCH",
+    supportedVersions: { bootstrap: [1], protocol: [2] },
+  });
+  expect(BootstrapFailureSchema.safeParse(currentReply).success).toBe(true);
+  expect(historical.serverFailure.supportedVersions.protocol).toEqual([1]);
+});
+
 test("maximum baseline returns recorded chunk credit through progress and reserves control", async () => {
   const journey = await fixture("terminal-journey.json");
   const subscription = {
