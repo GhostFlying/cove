@@ -74,6 +74,7 @@ test("V1-I4 preserves SGR mouse press release and wheel with mouse origin", asyn
     });
     const box = await page.locator(".xterm-screen").boundingBox();
     await page.mouse.click(box.x + 40, box.y + 30);
+    await page.mouse.wheel(0, -120);
     const disabled = (await page.evaluate(() => window.coveView.evidence())).inputs;
     await page.evaluate(async (bytes) => {
       window.coveView.setSize(760, 420);
@@ -93,7 +94,12 @@ test("V1-I4 preserves SGR mouse press release and wheel with mouse origin", asyn
     const alternate = (await page.evaluate(() => window.coveView.evidence())).inputs.slice(
       normal.length,
     );
-    return { disabled, normal, alternate };
+    await page.evaluate((bytes) => window.coveView.output(bytes, 3), esc("\x1b[?1000l\x1b[?1006l"));
+    await page.mouse.wheel(0, -120);
+    const alternateWheel = (await page.evaluate(() => window.coveView.evidence())).inputs.slice(
+      normal.length + alternate.length,
+    );
+    return { disabled, normal, alternate, alternateWheel };
   });
   expect(result.disabled).toEqual([]);
   const expected = [esc("\x1b[<0;5;3M"), esc("\x1b[<0;5;3m"), esc("\x1b[<64;5;3M")];
@@ -101,6 +107,9 @@ test("V1-I4 preserves SGR mouse press release and wheel with mouse origin", asyn
     expect(inputs.map((item) => item.source)).toEqual(["mouse", "mouse", "mouse"]);
     expect(inputs.map((item) => item.bytes)).toEqual(expected);
   }
+  expect(result.alternateWheel).toEqual([
+    { viewGeneration: expect.any(Number), source: "mouse", bytes: esc("\x1b[A") },
+  ]);
 });
 
 test("V1-I5 preserves legacy high-coordinate binary bytes exactly once", async () => {

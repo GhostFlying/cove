@@ -17,7 +17,7 @@ test("V1-R1 continues raw UTF-8 CSI OSC and DCS tails after every interior cut",
       const observed = [];
       for (const sequence of sequences) {
         const bytes = encoder.encode(sequence.value);
-        for (let cut = 1; cut < Math.min(bytes.length, 8); cut++) {
+        for (let cut = 1; cut < bytes.length; cut++) {
           await window.coveView.reset();
           await window.coveView.baseline([[65, ...Array.from(bytes.slice(0, cut))]], cut);
           observed.push({
