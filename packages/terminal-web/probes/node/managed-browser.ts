@@ -51,6 +51,19 @@ interface BrowserLauncher {
   connect(endpoint: string, options: { timeout: number }): Promise<ProbeBrowser>;
 }
 
+interface PageCleanupRecord {
+  page: number;
+  shareMs: number | null;
+  dispose: { budgetMs: number; elapsedMs: number; outcome: string };
+  close: {
+    attempts: number;
+    budgetMs: number;
+    elapsedMs: number;
+    outcome: string;
+    lateOutcome?: "completed" | "rejected";
+  };
+}
+
 const defaultBuiltRoot = fileURLToPath(new URL("../../browser/", import.meta.url));
 const browsersPath = fileURLToPath(new URL("../../../.cache/playwright/", import.meta.url));
 
@@ -283,6 +296,8 @@ export async function withManagedBrowser<T>(
     primaryError = error;
   }
   const cleanupErrors: unknown[] = [];
+  const pageCleanup: PageCleanupRecord[] = [];
+  let cleanupEvidenceFinalized = false;
   const cleanupStarted = performance.now();
   const cleanupDeadline = cleanupStarted + 7_000;
   // Q1 reserves a forced-kill interval after graceful close and a final listener interval.
@@ -291,6 +306,11 @@ export async function withManagedBrowser<T>(
   const browserDeadline = profile === "query" ? cleanupDeadline - 1_000 : cleanupDeadline;
   const cleanupRemaining = (limit: number, phaseDeadline = cleanupDeadline) =>
     Math.max(1, Math.min(limit, Math.floor(phaseDeadline - performance.now())));
+  const pageRemaining = (phaseDeadline: number, label: string) => {
+    const left = Math.floor(Math.min(phaseDeadline, cleanupDeadline) - performance.now());
+    if (left <= 0) throw new Error(`${label} phase expired`);
+    return left;
+  };
   const disposeDelay = Number(process.env.COVE_QUERY_TEST_DISPOSE_DELAY_MS ?? 0);
   if (
     profile === "query" &&
@@ -300,19 +320,22 @@ export async function withManagedBrowser<T>(
   let disposedPages = 0;
   const pages = ownedPages.reverse();
   for (const [index, page] of pages.entries()) {
-    // Q1 shares page time; B0 retains its original 500 ms page-operation limits.
+    // Q1 shares its reserved page phase; B0 keeps its 500 ms page-operation limits.
     const pageShare =
       profile === "query"
-        ? Math.max(1, Math.floor((pageDeadline - performance.now()) / (pages.length - index)))
-        : undefined;
+        ? Math.floor((pageDeadline - performance.now()) / (pages.length - index))
+        : null;
     const pageEnd =
-      pageShare === undefined
+      pageShare === null
         ? cleanupDeadline
-        : Math.min(pageDeadline, performance.now() + pageShare);
-    const disposalBudget =
-      pageShare === undefined
-        ? cleanupRemaining(500)
-        : cleanupRemaining(Math.min(1_500, Math.max(1, pageShare - 500)), pageEnd);
+        : Math.min(pageDeadline, performance.now() + Math.max(0, pageShare));
+    const record: PageCleanupRecord = {
+      page: index + 1,
+      shareMs: pageShare,
+      dispose: { budgetMs: 0, elapsedMs: 0, outcome: "not-started" },
+      close: { attempts: 0, budgetMs: 0, elapsedMs: 0, outcome: "not-started" },
+    };
+    pageCleanup.push(record);
     const injectedHang =
       profile === "query" && process.env.COVE_QUERY_TEST_DISPOSE_HANG === "1" && index === 0;
     const disposalExpression = injectedHang
@@ -320,21 +343,100 @@ export async function withManagedBrowser<T>(
       : profile === "query" && disposeDelay > 0 && disposeDelay <= 1_500
         ? `new Promise((resolve) => setTimeout(() => { window.coveQuery?.dispose(); resolve(); }, ${disposeDelay}))`
         : "window.coveQuery?.dispose()";
+    const disposeStarted = performance.now();
     try {
+      const disposalBudget =
+        pageShare === null
+          ? cleanupRemaining(500)
+          : Math.min(
+              1_500,
+              pageRemaining(pageEnd, `Query fixture disposal page ${index + 1}`) - 500,
+            );
+      if (disposalBudget <= 0)
+        throw new Error(`Query fixture disposal page ${index + 1} has no reserved budget`);
+      record.dispose.budgetMs = disposalBudget;
       await within(
         page.evaluate<void>(disposalExpression),
         disposalBudget,
         `Query fixture disposal page ${index + 1}/${pages.length} (${disposalBudget} ms)`,
       );
+      record.dispose.outcome = "completed";
     } catch (error) {
+      record.dispose.outcome =
+        error instanceof Error && error.message.includes("phase expired")
+          ? "phase-expired"
+          : error instanceof Error && error.message.includes("timed out")
+            ? "timed-out"
+            : "error";
       cleanupErrors.push(error);
     }
+    record.dispose.elapsedMs = Math.round(performance.now() - disposeStarted);
+    const afterDisposeDelay = Number(process.env.COVE_QUERY_TEST_AFTER_DISPOSE_DELAY_MS ?? 0);
+    if (profile === "query" && index === 0 && afterDisposeDelay !== 0) {
+      if (
+        !Number.isSafeInteger(afterDisposeDelay) ||
+        afterDisposeDelay < 0 ||
+        afterDisposeDelay > 2_000
+      )
+        cleanupErrors.push(new Error("Invalid post-disposal delay injection"));
+      else await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, afterDisposeDelay));
+    }
+    const closeStarted = performance.now();
     try {
-      await within(page.close(), cleanupRemaining(500, pageEnd), "Browser page close");
+      const closeBudget =
+        pageShare === null
+          ? cleanupRemaining(500, pageEnd)
+          : pageRemaining(pageEnd, `Browser page close ${index + 1}`);
+      record.close.budgetMs = closeBudget;
+      const mode = profile === "query" ? process.env.COVE_QUERY_TEST_CLOSE_MODE : undefined;
+      const target = process.env.COVE_QUERY_TEST_CLOSE_PAGE ?? "1";
+      const inject = target === "all" || target === String(index + 1);
+      const delay = Number(process.env.COVE_QUERY_TEST_CLOSE_DELAY_MS ?? 0);
+      if (mode && !["delay", "hang", "reject"].includes(mode))
+        throw new Error("Invalid query close mode injection");
+      if (mode === "delay" && (!Number.isSafeInteger(delay) || delay < 0 || delay > 5_000))
+        throw new Error("Invalid query close delay injection");
+      record.close.attempts = 1;
+      const actualClose = page.close();
+      const closeOperation =
+        !inject || !mode
+          ? actualClose
+          : mode === "delay"
+            ? actualClose.then(
+                () => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, delay)),
+              )
+            : mode === "hang"
+              ? actualClose.then(() => new Promise<void>(() => {}))
+              : actualClose.then(() => {
+                  throw new Error("Injected query page close rejection");
+                });
+      void closeOperation.then(
+        () => {
+          if (record.close.outcome === "timed-out" && !cleanupEvidenceFinalized)
+            record.close.lateOutcome = "completed";
+        },
+        () => {
+          if (record.close.outcome === "timed-out" && !cleanupEvidenceFinalized)
+            record.close.lateOutcome = "rejected";
+        },
+      );
+      await within(
+        closeOperation,
+        closeBudget,
+        `Browser page close ${index + 1}/${pages.length} (${closeBudget} ms)`,
+      );
       disposedPages++;
+      record.close.outcome = "completed";
     } catch (error) {
+      record.close.outcome =
+        error instanceof Error && error.message.includes("phase expired")
+          ? "phase-expired"
+          : error instanceof Error && error.message.includes("timed out")
+            ? "timed-out"
+            : "error";
       cleanupErrors.push(error);
     }
+    record.close.elapsedMs = Math.round(performance.now() - closeStarted);
   }
   if (browserServer) {
     const injectedCloseHang =
@@ -378,6 +480,25 @@ export async function withManagedBrowser<T>(
       cleanupErrors.push(error);
     }
   }
+  cleanupEvidenceFinalized = true;
+  const cleanupEvidence = {
+    browserPid: browserServer?.process().pid ?? null,
+    browserExited: browserServer
+      ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null
+      : true,
+    listenerPort,
+    listenerClosed: !server.listening,
+    disposedPages,
+    pages: pageCleanup.map((record) => ({
+      ...record,
+      dispose: { ...record.dispose },
+      close: { ...record.close },
+    })),
+    workBudgetMs,
+    completedInjectedDelays,
+    cleanupElapsedMs: Math.round(performance.now() - cleanupStarted),
+    elapsedMs: Math.round(performance.now() - workStarted),
+  };
   const evidencePath =
     profile === "environment"
       ? process.env.COVE_PROBE_CLEANUP_EVIDENCE
@@ -385,10 +506,7 @@ export async function withManagedBrowser<T>(
   if (evidencePath) {
     try {
       await within(
-        writeFile(
-          evidencePath,
-          `${JSON.stringify({ browserPid: browserServer?.process().pid ?? null, browserExited: browserServer ? browserServer.process().exitCode !== null || browserServer.process().signalCode !== null : true, listenerPort, listenerClosed: !server.listening, disposedPages, workBudgetMs, completedInjectedDelays, cleanupElapsedMs: Math.round(performance.now() - cleanupStarted), elapsedMs: Math.round(performance.now() - workStarted) })}\n`,
-        ),
+        writeFile(evidencePath, `${JSON.stringify(cleanupEvidence)}\n`),
         cleanupRemaining(profile === "query" ? 250 : 1_000),
         "Browser cleanup evidence",
       );
@@ -404,12 +522,18 @@ export async function withManagedBrowser<T>(
     cleanupErrors.push(
       new Error(`Browser page errors: ${JSON.stringify(pageErrors.slice(checkedPageErrors))}`),
     );
+  const cleanupDiagnostic = JSON.stringify(cleanupEvidence);
   if (primaryError && cleanupErrors.length)
-    throw new AggregateError([primaryError, ...cleanupErrors], "Browser work and cleanup failed", {
-      cause: primaryError,
-    });
+    throw new AggregateError(
+      [primaryError, ...cleanupErrors],
+      `Browser work and cleanup failed: ${cleanupDiagnostic}`,
+      {
+        cause: primaryError,
+      },
+    );
   if (primaryError) throw primaryError;
-  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Browser cleanup failed");
+  if (cleanupErrors.length)
+    throw new AggregateError(cleanupErrors, `Browser cleanup failed: ${cleanupDiagnostic}`);
   if (result === undefined || !contextRecord) throw new Error("Browser probe produced no result");
   return { value: result, context: contextRecord };
 }
