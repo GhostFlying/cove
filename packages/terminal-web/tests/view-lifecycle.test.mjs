@@ -400,6 +400,7 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
   const evidence = join(directory, "cleanup.json");
   const previousFailure = process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE;
   const previousEvidence = process.env.COVE_QUERY_CLEANUP_EVIDENCE;
+  const previousCloseMode = process.env.COVE_QUERY_TEST_CLOSE_MODE;
   process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE = "1";
   process.env.COVE_QUERY_CLEANUP_EVIDENCE = evidence;
   try {
@@ -422,11 +423,31 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
     await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
       /fetch failed/,
     );
+
+    delete process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE;
+    process.env.COVE_QUERY_TEST_CLOSE_MODE = "hang";
+    process.env.COVE_QUERY_CLEANUP_EVIDENCE = join(directory, "hung-close.json");
+    let closeFailure;
+    try {
+      await withViewPage(async () => "work completed");
+    } catch (error) {
+      closeFailure = error;
+    }
+    expect(closeFailure).toBeInstanceOf(AggregateError);
+    expect(closeFailure.errors.map((error) => error.message)).toEqual([
+      expect.stringMatching(/Browser page close 1\/1 .*timed out/),
+    ]);
+    expect(closeFailure.message).toMatch(/"pages":/);
+    const hungClose = JSON.parse(await readFile(process.env.COVE_QUERY_CLEANUP_EVIDENCE, "utf8"));
+    expect(hungClose).toMatchObject({ browserExited: true, listenerClosed: true });
+    expect(hungClose.pages[0].close).toMatchObject({ attempts: 1, outcome: "timed-out" });
   } finally {
     if (previousFailure === undefined) delete process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE;
     else process.env.COVE_QUERY_INJECT_CLEANUP_FAILURE = previousFailure;
     if (previousEvidence === undefined) delete process.env.COVE_QUERY_CLEANUP_EVIDENCE;
     else process.env.COVE_QUERY_CLEANUP_EVIDENCE = previousEvidence;
+    if (previousCloseMode === undefined) delete process.env.COVE_QUERY_TEST_CLOSE_MODE;
+    else process.env.COVE_QUERY_TEST_CLOSE_MODE = previousCloseMode;
     await rm(directory, { recursive: true, force: true });
   }
 });

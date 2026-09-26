@@ -218,6 +218,88 @@ test("held parser timeout, late page errors, result bounds and thrown work close
   }
 });
 
+test("page close spends its fair phase once and preserves timeout, late and primary failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-query-close-"));
+  const runClose = async (name, scenario, extra) => {
+    const evidence = join(directory, `${name}.json`);
+    const result = spawnSync(process.execPath, [entry, scenario], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: { ...process.env, ...extra, COVE_QUERY_CLEANUP_EVIDENCE: evidence },
+    });
+    expect(result.error).toBeUndefined();
+    const cleanup = JSON.parse(await readFile(evidence, "utf8"));
+    expect(cleanup.browserExited).toBe(true);
+    expect(cleanup.listenerClosed).toBe(true);
+    expect(cleanup.cleanupElapsedMs).toBeLessThan(8_000);
+    await expect(fetch(`http://127.0.0.1:${cleanup.listenerPort}/`)).rejects.toThrow(
+      /fetch failed/,
+    );
+    return { result, cleanup };
+  };
+  try {
+    const delayed = await runClose("delayed", "cleanup-two-pages", {
+      COVE_QUERY_TEST_CLOSE_MODE: "delay",
+      COVE_QUERY_TEST_CLOSE_PAGE: "all",
+      COVE_QUERY_TEST_CLOSE_DELAY_MS: "700",
+    });
+    expect(delayed.result.status).toBe(0);
+    expect(delayed.cleanup.disposedPages).toBe(2);
+    for (const page of delayed.cleanup.pages) {
+      expect(page.shareMs).toBeGreaterThan(500);
+      expect(page.close).toMatchObject({ attempts: 1, outcome: "completed" });
+      expect(page.close.budgetMs).toBeGreaterThan(500);
+      expect(page.close.elapsedMs).toBeGreaterThan(500);
+    }
+
+    const hung = await runClose("hung", "cleanup-two-pages", {
+      COVE_QUERY_TEST_CLOSE_MODE: "hang",
+    });
+    expect(hung.result.status).not.toBe(0);
+    expect(hung.result.stderr).toMatch(/Browser page close 1\/2 .*timed out/);
+    expect(hung.cleanup.disposedPages).toBe(1);
+    expect(hung.cleanup.pages[0].close).toMatchObject({ attempts: 1, outcome: "timed-out" });
+    expect(hung.cleanup.pages[1].close).toMatchObject({ attempts: 1, outcome: "completed" });
+
+    const late = await runClose("late", "cleanup-two-pages", {
+      COVE_QUERY_TEST_CLOSE_MODE: "delay",
+      COVE_QUERY_TEST_CLOSE_DELAY_MS: "2000",
+      COVE_QUERY_TEST_BROWSER_CLOSE_HANG: "1",
+    });
+    expect(late.result.status).not.toBe(0);
+    expect(late.result.stderr).toMatch(/Browser page close 1\/2 .*timed out/);
+    expect(late.result.stderr).toMatch(/Browser close timed out/);
+    expect(late.cleanup.pages[0].close).toMatchObject({
+      attempts: 1,
+      outcome: "timed-out",
+      lateOutcome: "completed",
+    });
+    expect(late.cleanup.pages[1].close).toMatchObject({ attempts: 1, outcome: "completed" });
+
+    const expired = await runClose("expired", "cleanup-two-pages", {
+      COVE_QUERY_TEST_AFTER_DISPOSE_DELAY_MS: "2000",
+    });
+    expect(expired.result.status).not.toBe(0);
+    expect(expired.result.stderr).toMatch(/Browser page close 1 phase expired/);
+    expect(expired.cleanup.pages[0].close).toMatchObject({
+      attempts: 0,
+      outcome: "phase-expired",
+    });
+    expect(expired.cleanup.pages[1].close).toMatchObject({ attempts: 1, outcome: "completed" });
+
+    const rejected = await runClose("rejected", "held-timeout", {
+      COVE_QUERY_TEST_CLOSE_MODE: "reject",
+    });
+    expect(rejected.result.status).not.toBe(0);
+    expect(rejected.result.stderr).toMatch(/Intentional held parser timed out/);
+    expect(rejected.result.stderr).toMatch(/Injected query page close rejection/);
+    expect(rejected.cleanup.pages[0].close).toMatchObject({ attempts: 1, outcome: "error" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a changed bundled xterm manifest version fails before browser input admission", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cove-query-version-"));
   const browserOut = join(directory, "browser");

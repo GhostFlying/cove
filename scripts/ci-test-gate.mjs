@@ -116,7 +116,7 @@ export const requiredSuites = [
   {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/query-input.test.mjs",
-    minimumTests: 10,
+    minimumTests: 11,
   },
   {
     project: "terminal-web",

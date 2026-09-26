@@ -113,11 +113,11 @@ test("protocol registration and its actual test root are required", async () => 
   );
 });
 
-test("query input browser suite is mandatory with ten acceptance rows", async () => {
+test("query input browser suite is mandatory with eleven acceptance rows", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-web/probes/query-input.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "terminal-web-probes", minimumTests: 10 });
+  expect(suite).toMatchObject({ project: "terminal-web-probes", minimumTests: 11 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
     /Required suite terminal-web-probes:/,
