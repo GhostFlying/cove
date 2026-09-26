@@ -10,6 +10,7 @@ import {
   WsBootstrapSchema,
   RendezvousSchema,
   M0_CAPABILITIES,
+  PROTOCOL_VERSION,
   negotiateBootstrap,
 } from "@cove/protocol/bootstrap";
 import { DomainErrorSchema, domainError } from "@cove/protocol/errors";
@@ -33,6 +34,8 @@ import {
   validatePipeFrame,
   validatePipeReadiness,
   validatePipeResultForCommand,
+  PIPE_REVISION,
+  PIPE_VERSION,
 } from "@cove/protocol/pipe";
 import {
   PROFILE,
@@ -59,6 +62,7 @@ import {
 } from "@cove/protocol/rpc";
 import {
   TerminalCommandSchema,
+  ExternalTerminalEventSchema,
   TerminalEventSchema,
   TerminalResultSchema,
   TerminalErrorSchema,
@@ -73,6 +77,7 @@ import {
   HEADER_BYTES,
   MAX_FRAME_BYTES,
   MAX_METADATA_BYTES,
+  TERMINAL_REVISION,
 } from "@cove/protocol/terminal";
 
 const root = new URL("../../../tests/fixtures/protocol/m0/", import.meta.url);
@@ -108,6 +113,8 @@ test("profile fixture fixes supported queries and required versus diagnostic cla
 test("terminal fixture installs both-buffer checkpoint with exact tail and N plus one", async () => {
   const profile = await fixture("profile.json");
   const journey = await fixture("terminal-journey.json");
+  expect(journey.protocolVersion).toBe(PROTOCOL_VERSION);
+  expect(journey.terminalRevision).toBe(TERMINAL_REVISION);
   const subscription = {
     run: journey.run,
     connection: journey.connection,
@@ -115,6 +122,7 @@ test("terminal fixture installs both-buffer checkpoint with exact tail and N plu
     viewId: journey.viewId,
   };
   expect(SubscriptionRefSchema.safeParse(subscription).success).toBe(true);
+  expect(journey.reconnectSubscriptionId).not.toBe(journey.subscriptionId);
   const descriptor = {
     baselineId: journey.baseline.baselineId,
     run: journey.run,
@@ -165,7 +173,8 @@ test("terminal fixture installs both-buffer checkpoint with exact tail and N plu
   expect(
     validateTerminalFrame(
       frame(3, Uint8Array.from(journey.orderedPostBaseline[0].payload)),
-      events[0],
+      { type: "run-event", subscription, event: events[0] },
+      journey.connection,
     ).ok,
   ).toBe(true);
   expect(events[1]).toMatchObject({ type: "resize", requiresBaseline: true });
@@ -387,12 +396,49 @@ test("fixture consumer ACK ledger allows cumulative jumps and credits each event
   expect(applied).toBe(sentSeq);
 });
 
+test("scripted recovery trace rejects late delivery and old-ledger ACK credit", async () => {
+  const journey = await fixture("terminal-journey.json");
+  const checkTrace = (trace) => {
+    let currentAttempt = 1;
+    let markerSeen = false;
+    let creditedBytes = 0;
+    const retained = new Map();
+    for (const item of trace) {
+      if (item.kind === "recover") {
+        currentAttempt = item.attempt;
+        markerSeen = false;
+        retained.clear();
+      } else if (item.kind === "recover-result") {
+        if (item.attempt !== currentAttempt) return null;
+        markerSeen = true;
+      } else if (item.kind === "run-event") {
+        if (!markerSeen || item.attempt !== currentAttempt) return null;
+        retained.set(item.seq, item.retainedBytes);
+      } else if (item.kind === "applied-ack") {
+        if (item.attempt !== currentAttempt) return null;
+        for (const [seq, bytes] of retained) {
+          if (seq <= item.seq) {
+            creditedBytes += bytes;
+            retained.delete(seq);
+          }
+        }
+      }
+    }
+    return creditedBytes;
+  };
+  expect(checkTrace(journey.recovery.validTrace)).toBe(24);
+  expect(checkTrace(journey.recovery.lateOldDeliveryTrace)).toBeNull();
+  expect(checkTrace(journey.recovery.reusedAckTrace)).toBeNull();
+});
+
 test("pipe fixture binds ready, spawn payload, status and preview to one incarnation", async () => {
   const journey = await fixture("pipe-journey.json");
+  expect(journey.pipeVersion).toBe(PIPE_VERSION);
+  expect(journey.pipeRevision).toBe(PIPE_REVISION);
   const hello = {
     type: "hello",
     worker: journey.worker,
-    pipeVersion: 1,
+    pipeVersion: journey.pipeVersion,
     buildVersion: journey.helloBuild,
     effectiveBudgets: M0_LIMITS,
   };
@@ -433,6 +479,42 @@ test("pipe fixture binds ready, spawn payload, status and preview to one incarna
       },
     }),
   ).toBe(false);
+  const routed = {
+    type: "terminal-event",
+    worker: journey.worker,
+    run: journey.run,
+    subscription: journey.subscription,
+    terminal: { type: "output", run: journey.run, seq: journey.recovery.atSeq + 1 },
+  };
+  expect(validatePipeFrame(frame(3, Uint8Array.of(88)), routed).ok).toBe(true);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(88)), {
+      ...routed,
+      subscription: journey.secondSubscription,
+    }).ok,
+  ).toBe(true);
+  expect(
+    validatePipeFrame(frame(3, Uint8Array.of(88)), { ...routed, subscription: undefined }).ok,
+  ).toBe(false);
+  const recover = {
+    type: "recover",
+    worker: journey.worker,
+    run: journey.run,
+    requestId: journey.recovery.requestId,
+    subscription: journey.subscription,
+    appliedSeq: journey.recovery.appliedSeq,
+  };
+  const recovered = {
+    type: "result",
+    worker: journey.worker,
+    run: journey.run,
+    requestId: journey.recovery.requestId,
+    commandType: "recover",
+    outcome: "accepted",
+    recoveryMode: journey.recovery.recoveryMode,
+    atSeq: journey.recovery.atSeq,
+  };
+  expect(validatePipeResultForCommand(recover, recovered)).toBe(true);
   const preview = journey.preview;
   const previewBase = { worker: journey.worker, run: journey.run };
   const start = {
@@ -513,7 +595,7 @@ test("admission fixture compiles six method params and sanitized result shapes",
     if (method === "server.status")
       return {
         ...journey.server,
-        protocolVersion: 1,
+        protocolVersion: PROTOCOL_VERSION,
         profile: PROFILE,
         effectiveBudgets: M0_LIMITS,
         ...fields,
@@ -600,31 +682,31 @@ test("receipt fixture replays same intent and rejects conflict or exhausted new 
   expect(classifyReceiptAdmission(common)).toBe("busy");
 });
 
-test("literal base-v1 compatibility drops optional capability and refuses protocol drift", async () => {
+test("current v2 drops optional capability and explicitly refuses protocol v1", async () => {
   const journey = await fixture("admission-rpc.json");
-  expect(journey.literalBaseV1).toEqual({
+  expect(journey.currentV2).toEqual({
     bootstrapVersion: 1,
-    protocolVersion: 1,
+    protocolVersion: 2,
     profile: PROFILE,
     encoding: BASELINE_ENCODING,
-    requiredCapabilities: ["terminal-framing-v1", "logical-grid-recovery-v1"],
+    requiredCapabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
   });
   const request = {
     type: "cove-bootstrap",
-    bootstrapVersion: journey.literalBaseV1.bootstrapVersion,
-    protocolVersion: journey.literalBaseV1.protocolVersion,
+    bootstrapVersion: journey.currentV2.bootstrapVersion,
+    protocolVersion: journey.currentV2.protocolVersion,
     buildVersion: journey.clientBuild,
-    capabilities: [...journey.oldPeerCapabilities, journey.optionalExtension],
+    capabilities: [...journey.currentPeerCapabilities, journey.optionalExtension],
     profiles: [PROFILE],
     encodings: [BASELINE_ENCODING],
   };
   const result = negotiateBootstrap(request, { ...journey.server, effectiveBudgets: M0_LIMITS });
   expect(result.type).toBe("cove-bootstrap-result");
-  expect(result.capabilities).toEqual(journey.oldPeerCapabilities);
+  expect(result.capabilities).toEqual(journey.currentPeerCapabilities);
   expect(result.capabilities).not.toContain(journey.optionalExtension);
   const deliverExtension = (capability) => result.capabilities.includes(capability);
   expect(deliverExtension(journey.optionalExtension)).toBe(false);
-  expect(deliverExtension("terminal-framing-v1")).toBe(true);
+  expect(deliverExtension("terminal-framing-v2")).toBe(true);
   const sendOptionalField = (capability, metadata) =>
     deliverExtension(capability) ? metadata : null;
   expect(sendOptionalField(journey.optionalExtension, journey.optionalField)).toBeNull();
@@ -728,6 +810,7 @@ test("all public wire schemas produce finite JSON Schema projections", () => {
     TerminalCommandSchema,
     TerminalResultSchema,
     TerminalErrorSchema,
+    ExternalTerminalEventSchema,
     TerminalEventSchema,
     BaselineDescriptorSchema,
     BaselineChunkSchema,

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ERROR_CODES } from "./errors.js";
 import { validateEffectiveBudgets } from "./budgets.js";
-import { sameConnectionRef, sameRunRef, sameWorkerRef, workerMatchesRun } from "./identity.js";
+import { sameRunRef, sameSubscriptionRef, sameWorkerRef, workerMatchesRun } from "./identity.js";
 import { boundedJsonStructure } from "./terminal.js";
 import { validateBaselineDescriptor } from "./terminal-recovery.js";
 import { validateEventBinding } from "./terminal-events.js";
@@ -9,6 +9,7 @@ import { validateAppearance } from "./profile.js";
 import {
   encodeFrame,
   FrameDecoder,
+  MAX_METADATA_BYTES,
   MAX_PAYLOAD_BYTES,
   type ByteFrame,
 } from "./provisional/frame.js";
@@ -25,7 +26,7 @@ import {
 } from "./pipe-command.js";
 
 export const PIPE_LANE = 4;
-export const PIPE_REVISION = 1;
+export const PIPE_REVISION = 2;
 export const PIPE_FRAME_CLASSES = Object.freeze({ command: 1, result: 2, event: 3, error: 4 });
 export type PipeFrameClass = 1 | 2 | 3 | 4;
 
@@ -57,13 +58,10 @@ function validIdentity(value: PipeMetadata): boolean {
   if ("effectiveBudgets" in value && !validateEffectiveBudgets(value.effectiveBudgets))
     return false;
   if ("run" in value && !workerMatchesRun(value.worker, value.run)) return false;
-  if ("subscription" in value && !sameRunRef(value.run, value.subscription.run)) return false;
   if (
-    value.type === "recover" &&
-    (!sameRunRef(value.run, value.replacement.run) ||
-      !sameConnectionRef(value.subscription.connection, value.replacement.connection) ||
-      value.subscription.viewId !== value.replacement.viewId ||
-      value.subscription.subscriptionId === value.replacement.subscriptionId)
+    "subscription" in value &&
+    value.subscription !== undefined &&
+    !sameRunRef(value.run, value.subscription.run)
   )
     return false;
   if (
@@ -76,6 +74,15 @@ function validIdentity(value: PipeMetadata): boolean {
     value.type === "result" &&
     ((value.runStatus && !sameRunRef(value.run, value.runStatus.run)) ||
       (value.commandType === "status" && value.outcome === "accepted" && !value.runStatus) ||
+      ((value.commandType === "subscribe" || value.commandType === "recover") &&
+        value.outcome === "accepted" &&
+        (value.atSeq === undefined || value.recoveryMode === undefined)) ||
+      (value.commandType !== "subscribe" &&
+        value.commandType !== "recover" &&
+        value.recoveryMode !== undefined) ||
+      ((value.commandType === "subscribe" || value.commandType === "recover") &&
+        value.outcome !== "accepted" &&
+        value.recoveryMode !== undefined) ||
       (value.commandType === "input" &&
         value.outcome === "accepted" &&
         (value.inputSeq === undefined || value.writtenBytes === undefined)))
@@ -83,7 +90,27 @@ function validIdentity(value: PipeMetadata): boolean {
     return false;
   if (value.type === "terminal-event") {
     if (!sameRunRef(value.run, value.terminal.run)) return false;
-    if ("subscription" in value.terminal && !sameRunRef(value.run, value.terminal.subscription.run))
+    const embeddedSubscription =
+      value.terminal.type === "baseline-start"
+        ? value.terminal.descriptor.subscription
+        : value.terminal.type === "baseline-chunk" || value.terminal.type === "baseline-end"
+          ? value.terminal.subscription
+          : undefined;
+    const needsSubscription =
+      value.terminal.type === "output" ||
+      value.terminal.type === "resize" ||
+      value.terminal.type === "control" ||
+      value.terminal.type === "appearance" ||
+      value.terminal.type === "exit" ||
+      embeddedSubscription !== undefined;
+    // Preview is a run cache transfer, while ordinary and baseline delivery are
+    // per-subscription. Requiring exactly one convention prevents P2 from guessing routes.
+    if (needsSubscription !== (value.subscription !== undefined)) return false;
+    if (
+      value.subscription &&
+      (!sameRunRef(value.run, value.subscription.run) ||
+        (embeddedSubscription && !sameSubscriptionRef(value.subscription, embeddedSubscription)))
+    )
       return false;
     if (
       value.terminal.type === "baseline-start" &&
@@ -112,7 +139,11 @@ export function validatePipeFrame(
   frame: ByteFrame,
   metadata: unknown,
 ): ProtocolResult<PipeMetadata> {
-  if (!boundedJsonStructure(metadata) || frame.payload.byteLength > MAX_PAYLOAD_BYTES)
+  if (
+    frame.metadata.byteLength > MAX_METADATA_BYTES ||
+    frame.payload.byteLength > MAX_PAYLOAD_BYTES ||
+    !boundedJsonStructure(metadata)
+  )
     return failure("INVALID_METADATA");
   const parsed =
     frame.kind === 1
@@ -157,6 +188,30 @@ export function validatePipeResultForCommand(
     command.type !== result.commandType
   )
     return false;
+  if (result.type === "result") {
+    const recovery = command.type === "subscribe" || command.type === "recover";
+    if (
+      (recovery &&
+        result.outcome === "accepted" &&
+        (result.recoveryMode === undefined || result.atSeq === undefined)) ||
+      (!recovery && result.recoveryMode !== undefined) ||
+      (recovery && result.outcome !== "accepted" && result.recoveryMode !== undefined)
+    )
+      return false;
+    if (
+      command.type === "subscribe" &&
+      result.outcome === "accepted" &&
+      result.atSeq! < command.atSeq
+    )
+      return false;
+    if (
+      command.type === "recover" &&
+      result.outcome === "accepted" &&
+      command.appliedSeq !== undefined &&
+      result.atSeq! < command.appliedSeq
+    )
+      return false;
+  }
   if (command.type === "spawn" || command.type === "stop") {
     if (result.type === "result" && result.operationId !== command.operationId) return false;
   }

@@ -1,9 +1,9 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "files": {
     "profile.json": "85bdb168027df1e796d106ede7dccf255f565218b7f3fc42ff561969b8c61987",
-    "terminal-journey.json": "4e7624d80836f769d5b81ea76d2bd49159ee9971aa5b8a4bf6e8c1f85d0196b4",
-    "pipe-journey.json": "496a1d47d9bba3f05937bc7b9f9ea460e52df6738fc2a596ac2bb0a16883950d",
-    "admission-rpc.json": "83afcadb3dba69247b4823926716091aa8607e1eee4c976dd4dd92c2dfc5e6a9"
+    "terminal-journey.json": "b606cb587a9fe82844df9affc837ad55ea81d096a60b7e1096162aecb352479f",
+    "pipe-journey.json": "e952080f0d51e5b1ed4805badbb7eb4cae5ab3a6436eb0f489434f24eb23986e",
+    "admission-rpc.json": "1c0cd269e0d61babcb7785fb1c6c35a6515379148a8f2a3fe2da8f7e7b511b16"
   }
 }

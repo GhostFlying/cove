@@ -4,7 +4,7 @@ import { ConnectionRefSchema, OpaqueIdSchema } from "./identity.js";
 import { BASELINE_ENCODING, BaselineEncodingSchema, PROFILE, ProfileSchema } from "./profile.js";
 
 export const BOOTSTRAP_VERSION = 1;
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const LOCAL_PATHS = Object.freeze({
   bootstrap: "/bootstrap",
   rpc: "/rpc",
@@ -17,14 +17,14 @@ export const BUSINESS_HEADERS = Object.freeze([
   "Cove-Instance-Id",
 ] as const);
 export const M0_CAPABILITIES = Object.freeze([
-  "terminal-framing-v1",
+  "terminal-framing-v2",
   "logical-grid-recovery-v1",
-  "worker-pipe-v1",
+  "worker-pipe-v2",
   "terminal-preview-v1",
   "operation-receipts-v1",
 ] as const);
 export const REQUIRED_CAPABILITIES = Object.freeze([
-  "terminal-framing-v1",
+  "terminal-framing-v2",
   "logical-grid-recovery-v1",
 ] as const);
 

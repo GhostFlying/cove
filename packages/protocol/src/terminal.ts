@@ -1,8 +1,19 @@
 import { z } from "zod";
 import { M0_LIMITS } from "./budgets.js";
 import { ERROR_CODES } from "./errors.js";
-import { sameConnectionRef, sameRunRef, sameSubscriptionRef } from "./identity.js";
-import { encodeFrame, FrameDecoder, type ByteFrame } from "./provisional/frame.js";
+import {
+  type ConnectionRef,
+  sameConnectionRef,
+  sameRunRef,
+  sameSubscriptionRef,
+} from "./identity.js";
+import {
+  encodeFrame,
+  FrameDecoder,
+  MAX_METADATA_BYTES,
+  MAX_PAYLOAD_BYTES,
+  type ByteFrame,
+} from "./provisional/frame.js";
 import { failure, type ProtocolResult } from "./provisional/errors.js";
 import { validateAppearance } from "./profile.js";
 import {
@@ -12,17 +23,21 @@ import {
   type TerminalCommand,
   type TerminalResult,
 } from "./terminal-command.js";
-import { TerminalEventSchema, validateEventBinding } from "./terminal-events.js";
+import {
+  externalEventSubscription,
+  ExternalTerminalEventSchema,
+  validateExternalEventBinding,
+} from "./terminal-events.js";
 import { validateBaselineDescriptor } from "./terminal-recovery.js";
 
 export const TERMINAL_LANE = 3;
-export const TERMINAL_REVISION = 1;
+export const TERMINAL_REVISION = 2;
 export const TERMINAL_FRAME_CLASSES = Object.freeze({ command: 1, result: 2, event: 3, error: 4 });
 export type TerminalFrameClass = 1 | 2 | 3 | 4;
 export type TerminalMetadata =
   | z.infer<typeof TerminalCommandSchema>
   | z.infer<typeof TerminalResultSchema>
-  | z.infer<typeof TerminalEventSchema>
+  | z.infer<typeof ExternalTerminalEventSchema>
   | z.infer<typeof TerminalErrorSchema>;
 
 export function createTerminalDecoder(): FrameDecoder {
@@ -78,24 +93,46 @@ function payloadAllowed(
   if (frameClass === 1 && value.type === "input") return bytes.byteLength >= 1;
   if (
     frameClass === 3 &&
-    (value.type === "output" || value.type === "baseline-chunk" || value.type === "preview-chunk")
+    ((value.type === "run-event" && value.event.type === "output") ||
+      value.type === "baseline-chunk" ||
+      value.type === "preview-chunk")
   )
     return bytes.byteLength >= 1;
   return bytes.byteLength === 0;
 }
 
-function matchingRefs(value: TerminalMetadata): boolean {
-  if ("subscription" in value && !sameRunRef(value.run, value.subscription.run)) return false;
-  if (value.type === "recover-result" && !sameRunRef(value.run, value.replacement.run))
-    return false;
-  if (value.type === "baseline-start" && !validateBaselineDescriptor(value.descriptor))
+function matchingRefs(value: TerminalMetadata, connection?: ConnectionRef): boolean {
+  if (
+    "run" in value &&
+    "subscription" in value &&
+    value.subscription !== undefined &&
+    !sameRunRef(value.run, value.subscription.run)
+  )
     return false;
   if (
+    connection &&
+    "subscription" in value &&
+    value.subscription !== undefined &&
+    !sameConnectionRef(value.subscription.connection, connection)
+  )
+    return false;
+  if (
+    value.type === "run-event" ||
     value.type === "baseline-start" ||
     value.type === "baseline-chunk" ||
-    value.type === "baseline-end"
+    value.type === "baseline-end" ||
+    value.type === "preview-start" ||
+    value.type === "preview-chunk" ||
+    value.type === "preview-end"
   )
-    return validateEventBinding(value);
+    return (
+      (!externalEventSubscription(value) || connection !== undefined) &&
+      (value.type !== "baseline-start" || validateBaselineDescriptor(value.descriptor) !== null) &&
+      (value.type !== "run-event" ||
+        value.event.type !== "appearance" ||
+        validateAppearance(value.event.appearance) !== null) &&
+      validateExternalEventBinding(value, connection)
+    );
   if ("appearance" in value && !validateAppearance(value.appearance)) return false;
   if (
     value.type === "error" &&
@@ -110,21 +147,27 @@ function matchingRefs(value: TerminalMetadata): boolean {
 export function validateTerminalFrame(
   frame: ByteFrame,
   metadata: unknown,
+  connection?: ConnectionRef,
 ): ProtocolResult<TerminalMetadata> {
-  if (!boundedJsonStructure(metadata)) return failure("INVALID_METADATA");
+  if (
+    frame.metadata.byteLength > MAX_METADATA_BYTES ||
+    frame.payload.byteLength > MAX_PAYLOAD_BYTES ||
+    !boundedJsonStructure(metadata)
+  )
+    return failure("INVALID_METADATA");
   const parsed =
     frame.kind === 1
       ? TerminalCommandSchema.safeParse(metadata)
       : frame.kind === 2
         ? TerminalResultSchema.safeParse(metadata)
         : frame.kind === 3
-          ? TerminalEventSchema.safeParse(metadata)
+          ? ExternalTerminalEventSchema.safeParse(metadata)
           : frame.kind === 4
             ? TerminalErrorSchema.safeParse(metadata)
             : null;
   if (!parsed?.success) return failure("INVALID_METADATA");
   const value = parsed.data;
-  if (!payloadAllowed(value, frame.kind, frame.payload) || !matchingRefs(value))
+  if (!payloadAllowed(value, frame.kind, frame.payload) || !matchingRefs(value, connection))
     return failure("INVALID_METADATA");
   return { ok: true, value };
 }
@@ -153,12 +196,10 @@ export function validateTerminalResultForCommand(
   )
     return false;
   if (
-    command.type === "recover" &&
-    result.type === "recover-result" &&
-    (!sameRunRef(command.run, result.replacement.run) ||
-      !sameConnectionRef(command.subscription.connection, result.replacement.connection) ||
-      command.subscription.viewId !== result.replacement.viewId ||
-      command.subscription.subscriptionId === result.replacement.subscriptionId)
+    (command.type === "attach" || command.type === "recover") &&
+    (result.type === "attach-result" || result.type === "recover-result") &&
+    command.resume &&
+    result.atSeq < command.resume.appliedSeq
   )
     return false;
   if (command.type === "input" && result.type === "input-result")
@@ -183,10 +224,21 @@ export {
   TerminalResultSchema,
   TerminalErrorSchema,
 } from "./terminal-command.js";
-export { TerminalEventSchema } from "./terminal-events.js";
+export {
+  ExternalTerminalEventSchema,
+  externalEventSubscription,
+  RunEventDeliverySchema,
+  TerminalEventSchema,
+  validateExternalEventBinding,
+} from "./terminal-events.js";
 export type { TerminalCommand, TerminalResult, TerminalError } from "./terminal-command.js";
 export { RunEventSchema, validateContiguousEvents } from "./terminal-events.js";
-export type { RunEvent, TerminalEvent } from "./terminal-events.js";
+export type {
+  ExternalTerminalEvent,
+  RunEvent,
+  RunEventDelivery,
+  TerminalEvent,
+} from "./terminal-events.js";
 export {
   BaselineDescriptorSchema,
   BaselineStartSchema,
