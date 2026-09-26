@@ -241,6 +241,9 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
       const cycled = await window.coveView.cycle(20);
       const beforeDispose = document.querySelectorAll("[data-cove-terminal-view]").length;
       const timerCleanup = window.coveView.disposeAfterPasteWithTimerProbe();
+      await window.coveView.reset();
+      await window.coveView.ready();
+      const registration = window.coveView.disposedRegistrations();
       return {
         deadline,
         synchronousWrite,
@@ -250,6 +253,7 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
         afterDispose: document.querySelectorAll("[data-cove-terminal-view]").length,
         children: document.querySelector("#terminal").childElementCount,
         timerCleanup,
+        registration,
       };
     }),
   );
@@ -303,6 +307,15 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
   expect(result.children).toBe(0);
   expect(result.timerCleanup.children).toBe(0);
   expect(result.timerCleanup.cleared).toBeGreaterThan(0);
+  const registrationFailures = Array.from({ length: 3 }, () => ({
+    kind: "RESYNC_REQUIRED",
+    subscription: false,
+  }));
+  expect(result.registration).toEqual({
+    first: registrationFailures,
+    repeated: registrationFailures,
+    children: 0,
+  });
 
   const directory = await mkdtemp(join(tmpdir(), "cove-view-cleanup-"));
   const evidence = join(directory, "cleanup.json");
