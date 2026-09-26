@@ -35,7 +35,7 @@ export interface RuntimeTerminalPort {
   ackBaselineProgress(
     input: Extract<PipeCommand, { type: "baseline-progress" }>,
   ): Promise<RuntimeResult>;
-  getStatus(input: Extract<PipeCommand, { type: "status" }>): Promise<RunStatus>;
+  getStatus(input: Extract<PipeCommand, { type: "status" }>): Promise<RuntimeResult>;
   refreshPreview(input: Extract<PipeCommand, { type: "preview-refresh" }>): Promise<RuntimeResult>;
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void };
 }
