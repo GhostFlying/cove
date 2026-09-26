@@ -227,8 +227,15 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
       elapsedMs: 0,
       outcome: "completed",
     },
-    pages: [],
-    disposedPages: 0,
+    pages: [
+      {
+        page: 1,
+        shareMs: 3_499,
+        dispose: { budgetMs: 1_500, elapsedMs: 1, outcome: "completed" },
+        close: { attempts: 1, budgetMs: 3_499, elapsedMs: 1, outcome: "completed" },
+      },
+    ],
+    disposedPages: 1,
     cleanupElapsedMs: 14,
     workBudgetMs: 32_000,
   };
@@ -293,6 +300,17 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     { primaryErrorName: "secret" },
     { listenerPort: null },
     { pages: [{}], disposedPages: 1 },
+    { pages: [], disposedPages: 0 },
+    { browserExit: { code: 0, signal: null, observedMs: 15_000 } },
+    {
+      listener: {
+        ...record.listener,
+        startedMs: 7_000,
+        phaseRemainingMs: 0,
+        budgetMs: 1,
+        elapsedMs: 30_000,
+      },
+    },
     { invocationId: "42-2" },
   ]) {
     await writeFile(path, `${JSON.stringify({ ...record, ...changed })}\n`);
