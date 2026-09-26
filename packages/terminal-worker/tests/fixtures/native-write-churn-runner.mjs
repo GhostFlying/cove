@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { accessSync, closeSync, constants, readdirSync, fstatSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const nonce = process.argv[2] ?? randomUUID();
+assert.match(nonce, /^[0-9a-f-]{36}$/);
 const candidate = process.env.COVE_N1_PACKAGE_ROOT;
 const pty = candidate ? require(`${candidate}/lib/index.js`) : require("node-pty");
 const descriptorDirectory = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
@@ -22,13 +25,14 @@ function closed(fd) {
 }
 
 async function cycle(enabled) {
-  const terminal = pty.spawn(executable, [], {
+  const terminal = pty.spawn(executable, [nonce], {
     cols: 80,
     rows: 24,
     encoding: null,
     ...(enabled ? { boundedWrite: { maxAllocatedBytes: 1024, maxTasks: 2 } } : {}),
   });
   const reader = terminal.fd;
+  process.send?.({ nonce, pid: terminal.pid, executable });
   const writer = enabled ? terminal._writeStream._fd : reader;
   if (enabled) assert.notEqual(writer, reader);
   else {
@@ -49,7 +53,11 @@ async function cycle(enabled) {
     assert.deepEqual(exit, { exitCode: 0, signal: 0 });
   } finally {
     terminal.destroy();
-    if (enabled) assert.deepEqual(await terminal.boundedWriteCompletion, { kind: "closed" });
+    if (enabled) {
+      if (process.env.COVE_N1_CHURN_FAULT === "hang-completion")
+        await new Promise(() => setInterval(() => {}, 1_000));
+      assert.deepEqual(await terminal.boundedWriteCompletion, { kind: "closed" });
+    }
   }
   assert.equal(closed(reader), true);
   assert.equal(closed(writer), true);

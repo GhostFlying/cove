@@ -74,17 +74,23 @@ test("native duplicate and watcher failure phases leave no owned descriptors or 
     for (const pid of matchingProcesses(runner, nonce)) stopVerified(pid, runner, nonce);
     for (const pid of matchingProcesses(childFixture, nonce))
       stopVerified(pid, childFixture, nonce);
+    let exitWatchdog;
     try {
       await Promise.race([
         exit,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error("native rollback runner remained live")), 2_000),
-        ),
+        new Promise((_, reject) => {
+          exitWatchdog = setTimeout(
+            () => reject(new Error("native rollback runner remained live")),
+            2_000,
+          );
+        }),
       ]);
       assert.deepEqual(matchingProcesses(childFixture, nonce), []);
     } catch (error) {
       failure ??= error;
+    } finally {
+      clearTimeout(exitWatchdog);
     }
   }
   if (failure) throw failure;
-});
+}, 35_000);
