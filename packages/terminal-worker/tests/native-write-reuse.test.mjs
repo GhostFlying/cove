@@ -151,13 +151,18 @@ test("delayed bounded fs.write never reaches a reused reader descriptor", async 
   expect(result.sentinelBytes).toBe(0);
 });
 
-test.each([
-  ["after-spawn", /synthetic post-spawn failure/],
-  ["blocker", /synthetic blocker failure/],
-])("native reuse runner cleans its child and scratch after %s failure", async (fault, message) => {
+async function expectOwnedFaultCleanup(fault, message) {
   const { outcome, stderr, ownedPid, scratch } = await runReuse(fault);
   assert.deepEqual(outcome, { code: 1, signal: null });
   assert.match(stderr, message);
   assert.ok(Number.isSafeInteger(ownedPid) && ownedPid > 0);
   assert.ok(scratch);
+}
+
+test("native reuse runner cleans its child and scratch after post-spawn failure", async () => {
+  await expectOwnedFaultCleanup("after-spawn", /synthetic post-spawn failure/);
+});
+
+test("native reuse runner cleans its child and scratch after blocker rejection", async () => {
+  await expectOwnedFaultCleanup("blocker", /synthetic blocker failure/);
 });

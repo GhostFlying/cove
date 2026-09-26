@@ -39,73 +39,82 @@ function childAbsent(pid) {
   }
 }
 
-test.each(["before read adoption", "after read adoption", "after both adoptions"])(
-  "bounded constructor rollback retires both descriptors and its child %s",
-  async (phase) => {
-    const fork = pty.native.fork;
-    const read = tty.ReadStream;
-    const forward = UnixTerminal.prototype._forwardEvents;
-    const ownForward = Object.hasOwn(UnixTerminal.prototype, "_forwardEvents");
-    let nativeResult;
-    let unexpected;
-    let failure;
-    try {
-      pty.native.fork = (...args) => {
-        nativeResult = fork(...args);
-        return nativeResult;
+async function verifyRollback(phase) {
+  const fork = pty.native.fork;
+  const read = tty.ReadStream;
+  const forward = UnixTerminal.prototype._forwardEvents;
+  const ownForward = Object.hasOwn(UnixTerminal.prototype, "_forwardEvents");
+  let nativeResult;
+  let unexpected;
+  let failure;
+  try {
+    pty.native.fork = (...args) => {
+      nativeResult = fork(...args);
+      return nativeResult;
+    };
+    if (phase.includes("read adoption")) {
+      function FaultRead(fd) {
+        if (phase === "after read adoption") Reflect.apply(read, this, [fd]);
+        throw new Error(`synthetic ${phase}`);
+      }
+      FaultRead.prototype = Object.create(read.prototype);
+      tty.ReadStream = FaultRead;
+    } else {
+      UnixTerminal.prototype._forwardEvents = () => {
+        throw new Error(`synthetic ${phase}`);
       };
-      if (phase.includes("read adoption")) {
-        function FaultRead(fd) {
-          if (phase === "after read adoption") Reflect.apply(read, this, [fd]);
-          throw new Error(`synthetic ${phase}`);
-        }
-        FaultRead.prototype = Object.create(read.prototype);
-        tty.ReadStream = FaultRead;
-      } else {
-        UnixTerminal.prototype._forwardEvents = () => {
-          throw new Error(`synthetic ${phase}`);
-        };
-      }
-      try {
-        unexpected = pty.spawn(process.execPath, [fixture, randomUUID()], {
-          cols: 80,
-          rows: 24,
-          encoding: null,
-          boundedWrite: { maxAllocatedBytes: 8, maxTasks: 1 },
-        });
-      } catch (error) {
-        failure = error;
-      }
-    } finally {
-      pty.native.fork = fork;
-      tty.ReadStream = read;
-      if (ownForward) UnixTerminal.prototype._forwardEvents = forward;
-      else delete UnixTerminal.prototype._forwardEvents;
     }
-    let verificationError;
     try {
-      assert.match(String(failure), new RegExp(`synthetic ${phase}`));
-      assert.ok(nativeResult);
-      await until(() => closed(nativeResult.fd), "reader rollback close");
-      await until(() => closed(nativeResult.writeFd), "writer rollback close");
-      await until(() => childAbsent(nativeResult.pid), "rollback child reap");
-      assert.equal(nativeResult.stopOwnedChild(9), false);
+      unexpected = pty.spawn(process.execPath, [fixture, randomUUID()], {
+        cols: 80,
+        rows: 24,
+        encoding: null,
+        boundedWrite: { maxAllocatedBytes: 8, maxTasks: 1 },
+      });
     } catch (error) {
-      verificationError = error;
-    } finally {
-      if (unexpected) {
-        unexpected.destroy();
-        unexpected._boundedOwnedStop(9);
-      }
-      if (nativeResult && !childAbsent(nativeResult.pid)) {
-        try {
-          nativeResult.stopOwnedChild(9);
-          await until(() => childAbsent(nativeResult.pid), "faulted rollback child cleanup");
-        } catch (error) {
-          verificationError ??= error;
-        }
+      failure = error;
+    }
+  } finally {
+    pty.native.fork = fork;
+    tty.ReadStream = read;
+    if (ownForward) UnixTerminal.prototype._forwardEvents = forward;
+    else delete UnixTerminal.prototype._forwardEvents;
+  }
+  let verificationError;
+  try {
+    assert.match(String(failure), new RegExp(`synthetic ${phase}`));
+    assert.ok(nativeResult);
+    await until(() => closed(nativeResult.fd), "reader rollback close");
+    await until(() => closed(nativeResult.writeFd), "writer rollback close");
+    await until(() => childAbsent(nativeResult.pid), "rollback child reap");
+    assert.equal(nativeResult.stopOwnedChild(9), false);
+  } catch (error) {
+    verificationError = error;
+  } finally {
+    if (unexpected) {
+      unexpected.destroy();
+      unexpected._boundedOwnedStop(9);
+    }
+    if (nativeResult && !childAbsent(nativeResult.pid)) {
+      try {
+        nativeResult.stopOwnedChild(9);
+        await until(() => childAbsent(nativeResult.pid), "faulted rollback child cleanup");
+      } catch (error) {
+        verificationError ??= error;
       }
     }
-    if (verificationError) throw verificationError;
-  },
-);
+  }
+  if (verificationError) throw verificationError;
+}
+
+test("bounded constructor rollback before read adoption closes both descriptors and reaps", async () => {
+  await verifyRollback("before read adoption");
+});
+
+test("bounded constructor rollback after read adoption closes both descriptors and reaps", async () => {
+  await verifyRollback("after read adoption");
+});
+
+test("bounded constructor rollback after writer adoption closes both descriptors and reaps", async () => {
+  await verifyRollback("after both adoptions");
+});
