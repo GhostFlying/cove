@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { M0_LIMITS } from "./budgets.js";
+import { M0_LIMITS, validateEffectiveBudgets } from "./budgets.js";
 import { DomainErrorSchema, ERROR_CODES } from "./errors.js";
-import { OpaqueIdSchema } from "./identity.js";
+import { OpaqueIdSchema, sameRunRef, type RunRef } from "./identity.js";
 import { composeSpawnPayload } from "./pipe.js";
 import { boundedJsonStructure } from "./terminal.js";
 import {
@@ -184,7 +184,49 @@ export function validateRpcMethodResult(method: RpcMethod, input: unknown): bool
 export function composeRpcMethodResult(method: RpcMethod, input: unknown): unknown | null {
   if (!boundedJsonStructure(input)) return null;
   const parsed = RPC_METHODS[method].result.safeParse(input);
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  if (
+    method === "server.status" &&
+    !validateEffectiveBudgets((parsed.data as { effectiveBudgets: unknown }).effectiveBudgets)
+  )
+    return null;
+  if (
+    (method === "terminal.create" || method === "terminal.stop") &&
+    (parsed.data as { operation: OperationRecord }).operation.method !== method
+  )
+    return null;
+  return parsed.data;
+}
+
+export function validateRpcResultForCall(
+  method: RpcMethod,
+  params: unknown,
+  result: unknown,
+): boolean {
+  const call = validateRpcMethodParams(method, params);
+  const response = composeRpcMethodResult(method, result);
+  if (!call || !response) return false;
+  if (method === "terminal.get")
+    return sameRunRef(
+      (call.params as { run: RunRef }).run,
+      (response as { record: { run: RunRef } }).record.run,
+    );
+  if (method === "terminal.create" || method === "terminal.stop" || method === "operation.get") {
+    const input = call.params as {
+      operationId: string;
+      expectedRelayInstanceId: string;
+      run?: RunRef;
+    };
+    const operation = (response as { operation: OperationRecord }).operation;
+    if (
+      operation.operationId !== input.operationId ||
+      (operation.run && operation.run.relayInstanceId !== input.expectedRelayInstanceId)
+    )
+      return false;
+    if (method === "terminal.stop" && (!operation.run || !sameRunRef(input.run!, operation.run)))
+      return false;
+  }
+  return true;
 }
 
 function sorted(value: unknown): unknown | null {
@@ -279,5 +321,10 @@ export function validateOperationRecord(
     : null;
 }
 
-export { RPC_METHODS, OperationRecordSchema, RunRecordSchema } from "./rpc-methods.js";
+export {
+  RPC_METHODS,
+  OperationRecordSchema,
+  RunRecordSchema,
+  validateRpcMethodParams,
+} from "./rpc-methods.js";
 export type { OperationRecord, RunRecord, RpcMethod } from "./rpc-methods.js";

@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { sameRunRef } from "./identity.js";
+import { validateAppearance } from "./profile.js";
 import { EffectiveBudgetsSchema, M0_LIMITS } from "./budgets.js";
 import { DomainErrorSchema } from "./errors.js";
 import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./identity.js";
@@ -6,7 +8,7 @@ import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { RunStatusSchema, SpawnArgumentsSchema } from "./pipe.js";
 
 export const OperationMethodSchema = z.enum(["terminal.create", "terminal.stop"]);
-export const OperationRecordSchema = z.object({
+const OperationRecordFieldsSchema = z.object({
   operationId: OpaqueIdSchema,
   method: OperationMethodSchema,
   revision: SequenceSchema,
@@ -21,6 +23,11 @@ export const OperationRecordSchema = z.object({
     .optional(),
   error: DomainErrorSchema.optional(),
 });
+export const OperationRecordSchema = OperationRecordFieldsSchema.refine(
+  (value) =>
+    (!value.result?.run || (!!value.run && sameRunRef(value.run, value.result.run))) &&
+    (value.method !== "terminal.stop" || !!value.run),
+);
 export type OperationRecord = z.infer<typeof OperationRecordSchema>;
 
 export const RunRecordSchema = z.object({
@@ -139,5 +146,15 @@ export function validateRpcMethodParams(
   const known = method as RpcMethod;
   const parsed = RPC_METHODS[known].params.safeParse(input);
   if (!parsed.success) return null;
+  if (known === "terminal.stop") {
+    const stop = TerminalStopParamsSchema.safeParse(parsed.data);
+    if (!stop.success || stop.data.run.relayInstanceId !== stop.data.expectedRelayInstanceId)
+      return null;
+  }
+  if (known === "terminal.create") {
+    const create = TerminalCreateParamsSchema.safeParse(parsed.data);
+    if (!create.success || (create.data.appearance && !validateAppearance(create.data.appearance)))
+      return null;
+  }
   return { method: known, params: parsed.data };
 }
