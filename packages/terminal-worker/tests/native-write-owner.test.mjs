@@ -109,6 +109,49 @@ test("issued write retains descriptor and allocation until its callback, then cl
   expect(await stream.boundedWriteCompletion).toEqual({ kind: "closed" });
 });
 
+test("a stale callback cannot consume the next issued write or close its descriptor", async () => {
+  const io = new WriteIo();
+  const stream = bounded(io);
+  const settlements = [];
+  stream.writeBounded("abc", (value) => settlements.push(value));
+  stream.writeBounded("d", (value) => settlements.push(value));
+  io.turn();
+  const stale = io.writes[0].callback;
+  io.complete(1);
+  io.turn();
+  stale(null, 1);
+  expect(io.closes).toEqual([]);
+  expect(stream.getBoundedState()).toMatchObject({
+    state: "error",
+    tasks: 2,
+    writeInFlight: true,
+  });
+  io.complete(2);
+  expect(io.closes).toEqual([41]);
+  expect(settlements.map((value) => [value.status, value.writtenBytes])).toEqual([
+    ["written", 3],
+    ["error", 0],
+  ]);
+  expect(stream.getBoundedState()).toMatchObject({ tasks: 0, allocatedBytes: 0 });
+  expect(await stream.boundedWriteCompletion).toEqual({ kind: "closed" });
+});
+
+test("invalid completion after disposal still closes and settles the owner", async () => {
+  const io = new WriteIo();
+  const stream = bounded(io);
+  const settlements = [];
+  stream.writeBounded("ab", (value) => settlements.push(value));
+  io.turn();
+  stream.dispose();
+  io.complete(Number.NaN);
+  expect(io.closes).toEqual([41]);
+  expect(settlements).toMatchObject([
+    { status: "error", originalBytes: 2, writtenBytes: 0, remainingBytes: 2, errorCode: "EIO" },
+  ]);
+  expect(stream.getBoundedState()).toMatchObject({ tasks: 0, allocatedBytes: 0 });
+  expect(await stream.boundedWriteCompletion).toEqual({ kind: "closed" });
+});
+
 test("reentrant disposal cannot publish completion before the active settlement unwinds", async () => {
   const io = new WriteIo();
   const stream = bounded(io);
