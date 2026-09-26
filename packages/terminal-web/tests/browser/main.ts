@@ -61,6 +61,36 @@ const errorMessages = (error: unknown): string[] => {
   return [(error as Error)?.message ?? String(error)];
 };
 
+interface CoreServiceProbe {
+  triggerDataEvent(data: string, wasUserInput?: boolean): void;
+  triggerBinaryEvent(data: string): void;
+  _onUserInput?: { fire(): void };
+}
+
+function coreService(terminal = capturedTerminal): CoreServiceProbe {
+  return (terminal as unknown as { _core: { coreService: CoreServiceProbe } })._core.coreService;
+}
+
+function retiredEvidence(
+  terminal: Terminal,
+  wrappedData: CoreServiceProbe["triggerDataEvent"],
+  wrappedBinary: CoreServiceProbe["triggerBinaryEvent"],
+  disposeCalls: number,
+  removeCalls: number,
+) {
+  const core = coreService(terminal);
+  return {
+    children: container.childElementCount,
+    ownedRoots: container.querySelectorAll("[data-cove-terminal-view]").length,
+    wrappersRestored:
+      core.triggerDataEvent !== wrappedData && core.triggerBinaryEvent !== wrappedBinary,
+    disposeCalls,
+    removeCalls,
+    failures: failures.map((error) => error.kind),
+    inputs: inputs.map(serialInput),
+  };
+}
+
 async function initialize(geometry: Geometry = { cols: 40, rows: 10 }): Promise<void> {
   view?.dispose();
   container.replaceChildren();
@@ -293,6 +323,131 @@ const fixture = {
   releaseParse() {
     heldRelease?.();
     heldRelease = undefined;
+  },
+  async deadlineRetirement() {
+    const terminal = capturedTerminal!;
+    const core = coreService(terminal);
+    const wrappedData = core.triggerDataEvent;
+    const wrappedBinary = core.triggerBinaryEvent;
+    const originalDispose = terminal.dispose.bind(terminal);
+    const originalContainerRemove = container.removeEventListener.bind(container);
+    const originalDocumentRemove = document.removeEventListener.bind(document);
+    const textarea = terminal.textarea!;
+    const originalTextareaRemove = textarea.removeEventListener.bind(textarea);
+    const originalSet = globalThis.setTimeout;
+    const originalClear = globalThis.clearTimeout;
+    const delayedSourceTimers = new Set<number>();
+    let disposeCalls = 0;
+    let removeCalls = 0;
+    terminal.dispose = () => {
+      disposeCalls++;
+      originalDispose();
+    };
+    container.removeEventListener = ((
+      ...args: Parameters<typeof container.removeEventListener>
+    ) => {
+      removeCalls++;
+      originalContainerRemove(...args);
+    }) as typeof container.removeEventListener;
+    document.removeEventListener = ((...args: Parameters<typeof document.removeEventListener>) => {
+      removeCalls++;
+      originalDocumentRemove(...args);
+    }) as typeof document.removeEventListener;
+    textarea.removeEventListener = ((...args: Parameters<typeof textarea.removeEventListener>) => {
+      removeCalls++;
+      originalTextareaRemove(...args);
+    }) as typeof textarea.removeEventListener;
+    globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+      const timer = originalSet(handler, timeout === 0 ? 60_000 : timeout, ...args);
+      if (timeout === 0) delayedSourceTimers.add(timer);
+      return timer;
+    }) as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((timer?: number) => {
+      if (timer !== undefined) delayedSourceTimers.delete(timer);
+      return originalClear(timer);
+    }) as typeof globalThis.clearTimeout;
+    try {
+      container.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }));
+      this.holdNextParse();
+      this.startHeldOutput([27, 93, 55, 55, 55, 59, 120, 7]);
+      await this.awaitHeld();
+      const immediate = {
+        ...retiredEvidence(terminal, wrappedData, wrappedBinary, disposeCalls, removeCalls),
+        pendingSourceTimers: delayedSourceTimers.size,
+      };
+      const after = await this.attemptOutput([65]);
+      this.releaseParse();
+      await Promise.resolve();
+      await new Promise<void>((resolve) => originalSet(resolve, 0));
+      return {
+        immediate,
+        after,
+        late: retiredEvidence(terminal, wrappedData, wrappedBinary, disposeCalls, removeCalls),
+        status: heldStatus,
+      };
+    } finally {
+      container.removeEventListener = originalContainerRemove;
+      document.removeEventListener = originalDocumentRemove;
+      textarea.removeEventListener = originalTextareaRemove;
+      globalThis.setTimeout = originalSet;
+      globalThis.clearTimeout = originalClear;
+      for (const timer of delayedSourceTimers) originalClear(timer);
+    }
+  },
+  async synchronousWriteRetirement() {
+    const terminal = capturedTerminal!;
+    const core = coreService(terminal);
+    const wrappedData = core.triggerDataEvent;
+    const wrappedBinary = core.triggerBinaryEvent;
+    const originalDispose = terminal.dispose.bind(terminal);
+    const originalRemove = container.removeEventListener.bind(container);
+    let disposeCalls = 0;
+    let removeCalls = 0;
+    terminal.write = () => {
+      throw new Error("injected synchronous write failure");
+    };
+    terminal.dispose = () => {
+      disposeCalls++;
+      originalDispose();
+    };
+    container.removeEventListener = (...args: Parameters<typeof container.removeEventListener>) => {
+      removeCalls++;
+      originalRemove(...args);
+      if (removeCalls === 1) throw new Error("injected async-path cleanup failure");
+    };
+    let thrown: unknown;
+    try {
+      await output(Uint8Array.of(65));
+    } catch (error) {
+      thrown = error;
+    } finally {
+      container.removeEventListener = originalRemove;
+    }
+    const aggregate = thrown instanceof AggregateError ? thrown : undefined;
+    return {
+      immediate: retiredEvidence(terminal, wrappedData, wrappedBinary, disposeCalls, removeCalls),
+      cause: (aggregate?.cause as DomainError | undefined)?.kind ?? (thrown as DomainError)?.kind,
+      errors: errorMessages(thrown),
+      after: await this.attemptOutput([66]),
+    };
+  },
+  fatalInputOriginRetirement() {
+    const terminal = capturedTerminal!;
+    const core = coreService(terminal);
+    const wrappedData = core.triggerDataEvent;
+    const wrappedBinary = core.triggerBinaryEvent;
+    const originalDispose = terminal.dispose.bind(terminal);
+    const signal = core._onUserInput!;
+    const originalFire = signal.fire;
+    let disposeCalls = 0;
+    terminal.dispose = () => {
+      disposeCalls++;
+      originalDispose();
+    };
+    signal.fire = () => {};
+    terminal.input("x", true);
+    signal.fire = originalFire;
+    return retiredEvidence(terminal, wrappedData, wrappedBinary, disposeCalls, 0);
   },
   tamperOrigin() {
     const core = (

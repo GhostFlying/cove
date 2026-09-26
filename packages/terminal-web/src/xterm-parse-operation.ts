@@ -5,7 +5,7 @@ import { domainError, type DomainError } from "@cove/protocol/errors";
 interface PendingOperation {
   incarnation: number;
   timer: number;
-  reject(error: DomainError): void;
+  reject(error: unknown): void;
 }
 
 export class XtermParseOperation {
@@ -20,12 +20,12 @@ export class XtermParseOperation {
     bytes: Uint8Array,
     incarnation: number,
     isCurrent: () => boolean,
-    fail: (error: DomainError) => void,
+    fail: (error: DomainError) => unknown,
   ): Promise<void> {
     if (this.pending) return Promise.reject(domainError("BUSY"));
     return new Promise<void>((resolve, reject) => {
       let settled = false;
-      const settle = (error?: DomainError) => {
+      const settle = (error?: unknown) => {
         if (settled) return;
         settled = true;
         globalThis.clearTimeout(operation.timer);
@@ -33,12 +33,26 @@ export class XtermParseOperation {
         if (error) reject(error);
         else resolve();
       };
+      const failOperation = (error: DomainError) => {
+        if (settled) return;
+        // Detach before retiring the renderer. Retirement cancels any pending parse, and allowing
+        // that cancellation to re-enter this operation would discard teardown errors or settle
+        // the same write twice.
+        settled = true;
+        globalThis.clearTimeout(operation.timer);
+        if (this.pending === operation) this.pending = undefined;
+        let rejection: unknown = error;
+        try {
+          rejection = fail(error) ?? error;
+        } catch (failure) {
+          rejection = failure;
+        }
+        reject(rejection);
+      };
       const operation: PendingOperation = {
         incarnation,
         timer: globalThis.setTimeout(() => {
-          const error = domainError("RECOVERY_EXPIRED");
-          settle(error);
-          fail(error);
+          failOperation(domainError("RECOVERY_EXPIRED"));
         }, M0_LIMITS.recoveryDeadlineMs),
         reject: (error) => settle(error),
       };
@@ -50,9 +64,7 @@ export class XtermParseOperation {
           settle();
         });
       } catch {
-        const error = domainError("RECOVERY_UNAVAILABLE");
-        settle(error);
-        fail(error);
+        failOperation(domainError("RECOVERY_UNAVAILABLE"));
       }
     });
   }

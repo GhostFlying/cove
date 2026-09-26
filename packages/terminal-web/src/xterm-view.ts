@@ -177,6 +177,27 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     ]);
   };
 
+  const retireFatal = (error: unknown, targetIncarnation = incarnation): unknown => {
+    const failure = asDomainError(error);
+    if (
+      state === "disposed" ||
+      targetIncarnation !== incarnation ||
+      failurePublishedFor === targetIncarnation
+    )
+      return error instanceof AggregateError ? error : failure;
+    // Latch and detach the exact incarnation before notifying consumers. A failure listener may
+    // synchronously initialize a successor, which the retiring callback must never tear down.
+    failurePublishedFor = targetIncarnation;
+    state = "failed";
+    const cleanup = disposeBackend(failure);
+    failures.emit(failure);
+    return combineErrors(
+      error instanceof AggregateError ? error : failure,
+      cleanup,
+      "Terminal failure and cleanup failed",
+    );
+  };
+
   const constructBackend = (targetGeometry: Geometry, targetAppearance: Appearance): Backend => {
     const targetIncarnation = ++incarnation;
     let terminal: Terminal | undefined;
@@ -199,7 +220,10 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
         terminal,
         (fallback) => tracker?.current(fallback) ?? fallback,
         (bytes, source) => publishInput(bytes, source, targetIncarnation),
-        (error) => publishFailure(error, error.kind !== "INPUT_REJECTED", targetIncarnation),
+        (error) => {
+          if (error.kind === "INPUT_REJECTED") publishFailure(error, false, targetIncarnation);
+          else void retireFatal(error, targetIncarnation);
+        },
       );
       // A hidden logical view must not flash a replacement terminal between open() and the
       // element-level hidden attribute. Temporarily hide the host, restore its prior author style
@@ -229,14 +253,7 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
   };
 
   const failAndRetire = (error: unknown, targetIncarnation = incarnation): never => {
-    const failure = asDomainError(error);
-    publishFailure(failure, true, targetIncarnation);
-    const cleanup = disposeBackend(failure);
-    throw combineErrors(
-      error instanceof AggregateError ? error : failure,
-      cleanup,
-      "Terminal failure and cleanup failed",
-    );
+    throw retireFatal(error, targetIncarnation);
   };
 
   const requireBackend = (): Backend => {
@@ -270,7 +287,7 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
       owned,
       current.incarnation,
       () => backend === current && current.incarnation === incarnation && state !== "disposed",
-      (error) => publishFailure(error, true, current.incarnation),
+      (error) => retireFatal(error, current.incarnation),
     );
     pristine = false;
   };
