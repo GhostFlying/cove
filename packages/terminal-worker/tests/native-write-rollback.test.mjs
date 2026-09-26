@@ -4,7 +4,7 @@ import { fstatSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import tty from "node:tty";
-import { test } from "vitest";
+import { expect, test } from "vitest";
 
 const require = createRequire(import.meta.url);
 const pty = require("node-pty");
@@ -105,16 +105,33 @@ async function verifyRollback(phase) {
     }
   }
   if (verificationError) throw verificationError;
+  return {
+    readerClosed: closed(nativeResult.fd),
+    writerClosed: closed(nativeResult.writeFd),
+    childReaped: childAbsent(nativeResult.pid),
+  };
 }
 
 test("bounded constructor rollback before read adoption closes both descriptors and reaps", async () => {
-  await verifyRollback("before read adoption");
+  expect(await verifyRollback("before read adoption")).toEqual({
+    readerClosed: true,
+    writerClosed: true,
+    childReaped: true,
+  });
 });
 
 test("bounded constructor rollback after read adoption closes both descriptors and reaps", async () => {
-  await verifyRollback("after read adoption");
+  expect(await verifyRollback("after read adoption")).toEqual({
+    readerClosed: true,
+    writerClosed: true,
+    childReaped: true,
+  });
 });
 
 test("bounded constructor rollback after writer adoption closes both descriptors and reaps", async () => {
-  await verifyRollback("after both adoptions");
+  expect(await verifyRollback("after both adoptions")).toEqual({
+    readerClosed: true,
+    writerClosed: true,
+    childReaped: true,
+  });
 });

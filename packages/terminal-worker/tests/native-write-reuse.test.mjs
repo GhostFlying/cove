@@ -157,12 +157,18 @@ async function expectOwnedFaultCleanup(fault, message) {
   assert.match(stderr, message);
   assert.ok(Number.isSafeInteger(ownedPid) && ownedPid > 0);
   assert.ok(scratch);
+  return { outcome, ownedPid, scratch };
 }
 
 test("native reuse runner cleans its child and scratch after post-spawn failure", async () => {
-  await expectOwnedFaultCleanup("after-spawn", /synthetic post-spawn failure/);
+  const result = await expectOwnedFaultCleanup("after-spawn", /synthetic post-spawn failure/);
+  expect(result).toMatchObject({
+    outcome: { code: 1, signal: null },
+    ownedPid: expect.any(Number),
+  });
 });
 
 test("native reuse runner cleans its child and scratch after blocker rejection", async () => {
-  await expectOwnedFaultCleanup("blocker", /synthetic blocker failure/);
+  const result = await expectOwnedFaultCleanup("blocker", /synthetic blocker failure/);
+  expect(result).toMatchObject({ outcome: { code: 1, signal: null }, scratch: expect.any(String) });
 });
