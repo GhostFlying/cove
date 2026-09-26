@@ -5,6 +5,8 @@ import { afterEach, expect, test } from "vitest";
 import {
   readVitestOwnedTestFiles,
   recordedCommand,
+  prepareBrowserCleanupEvidence,
+  verifyBrowserCleanupEvidence,
   requiredSuites,
   verifyDiscovery,
   verifyInventory,
@@ -70,8 +72,9 @@ function report() {
 function growingViewReport() {
   const viewSuites = requiredSuites.filter((suite) => suite.project === "terminal-web");
   const files = viewSuites.map((suite) => suite.file);
+  const caseCount = (suiteIndex) => [7, 6, 10][suiteIndex];
   const discovered = viewSuites.flatMap((suite, suiteIndex) =>
-    Array.from({ length: suiteIndex === 0 ? 7 : 6 }, (_, index) => ({
+    Array.from({ length: caseCount(suiteIndex) }, (_, index) => ({
       projectName: suite.project,
       file: resolve(root, suite.file),
       name: `case ${index}`,
@@ -79,15 +82,15 @@ function growingViewReport() {
   );
   const execution = {
     success: true,
-    numTotalTests: 19,
-    numPassedTests: 19,
+    numTotalTests: 23,
+    numPassedTests: 23,
     numFailedTests: 0,
     numPendingTests: 0,
     numTodoTests: 0,
     testResults: viewSuites.map((suite, suiteIndex) => ({
       name: resolve(root, suite.file),
       status: "passed",
-      assertionResults: Array.from({ length: suiteIndex === 0 ? 7 : 6 }, (_, index) => ({
+      assertionResults: Array.from({ length: caseCount(suiteIndex) }, (_, index) => ({
         fullName: `case ${index}`,
         status: "passed",
       })),
@@ -129,15 +132,20 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   for (const name of ["view-input", "view-recovery", "view-lifecycle"]) {
     const file = `packages/terminal-web/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
-    expect(suite).toMatchObject({ project: "terminal-web", minimumTests: 6 });
+    const minimumTests = name === "view-lifecycle" ? 10 : 6;
+    expect(suite).toMatchObject({ project: "terminal-web", minimumTests });
     expect(files).toContain(file);
-    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests; needs 6/);
-    const short = Array.from({ length: 5 }, (_, index) => ({
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(
+      `discovered 0 tests; needs ${minimumTests}`,
+    );
+    const short = Array.from({ length: minimumTests - 1 }, (_, index) => ({
       projectName: "terminal-web",
       file: resolve(root, file),
       name: `${name} ${index}`,
     }));
-    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(/discovered 5 tests; needs 6/);
+    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(
+      `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
+    );
   }
 });
 
@@ -151,11 +159,87 @@ test("terminal-web package test runs both registered probe and view projects", a
   expect(projects).toEqual(["terminal-web-probes", "terminal-web"]);
 });
 
+test("browser cleanup evidence reset removes stale cases and binds the current source", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "cove-browser-cleanup-gate-"));
+  temporaryDirectories.push(directory);
+  await writeFile(resolve(directory, "stale.json"), '{"browserExited":true}\n');
+  const sourceCommit = "a".repeat(40);
+  await prepareBrowserCleanupEvidence(sourceCommit, "local-42-1", directory);
+  await expect(readFile(resolve(directory, "stale.json"), "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+  expect(JSON.parse(await readFile(resolve(directory, "run.json"), "utf8"))).toMatchObject({
+    sourceCommit,
+    runId: "local-42-1",
+  });
+  await expect(prepareBrowserCleanupEvidence("wrong", "local-42-2", directory)).rejects.toThrow(
+    /identity/,
+  );
+});
+
+test("browser cleanup artifact gate rejects incomplete, stale and unbounded records", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "cove-browser-cleanup-records-"));
+  temporaryDirectories.push(directory);
+  const sourceCommit = "b".repeat(40);
+  await prepareBrowserCleanupEvidence(sourceCommit, "local-43-1", directory);
+  const path = resolve(directory, "42-1.json");
+  const record = {
+    schemaVersion: 1,
+    final: true,
+    caseId: "view-lifecycle.test.mjs:123",
+    runId: "local-43-1",
+    sourceCommit,
+    sourceDirty: false,
+    browserPid: 42,
+    browserExited: true,
+    listenerClosed: true,
+    graceful: { attempts: 1, budgetMs: 2_000 },
+    kill: { budgetMs: 1_500 },
+  };
+  await writeFile(path, `${JSON.stringify(record)}\n`);
+  expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).toEqual({
+    runId: "local-43-1",
+    recordCount: 1,
+  });
+  await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 2)).rejects.toThrow(/count/);
+  await writeFile(path, `${JSON.stringify({ ...record, final: false })}\n`);
+  await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).rejects.toThrow(
+    /incomplete/,
+  );
+  await writeFile(path, `${JSON.stringify({ ...record, runId: "old-run" })}\n`);
+  await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).rejects.toThrow(
+    /incomplete/,
+  );
+  await writeFile(
+    path,
+    `${JSON.stringify({ ...record, graceful: { attempts: 1, budgetMs: 2_001 } })}\n`,
+  );
+  await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).rejects.toThrow(
+    /incomplete/,
+  );
+  await writeFile(path, `${JSON.stringify(record)}\n`);
+  const secondPath = resolve(directory, "42-2.json");
+  await writeFile(secondPath, `${JSON.stringify(record)}\n`);
+  const expectedCases = Array.from({ length: 2 }, () => ({
+    file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
+  }));
+  await expect(
+    verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases),
+  ).rejects.toThrow(/missing distinct cases/);
+  await writeFile(
+    secondPath,
+    `${JSON.stringify({ ...record, caseId: "view-lifecycle.test.mjs:124" })}\n`,
+  );
+  expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases)).toMatchObject({
+    recordCount: 2,
+  });
+});
+
 test("view evidence follows validated passing case growth above three suite floors", () => {
   const { viewSuites, files, discovered, execution } = growingViewReport();
   const inventory = verifyInventory(discovered, execution, files, viewSuites);
-  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 6]);
-  expect(viewEvidenceCases(execution, inventory)).toHaveLength(19);
+  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 10]);
+  expect(viewEvidenceCases(execution, inventory)).toHaveLength(23);
 });
 
 test("view evidence still rejects missing, short, pending, and mismatched suites", () => {
@@ -167,7 +251,7 @@ test("view evidence still rejects missing, short, pending, and mismatched suites
       files,
       viewSuites,
     ),
-  ).toThrow(/discovered 0 tests; needs 6/);
+  ).toThrow(/discovered 0 tests; needs 10/);
   expect(() =>
     verifyInventory(
       discovered.filter(
@@ -424,7 +508,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 28/);
+  ).toThrow(/needs 29/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
