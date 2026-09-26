@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
 import { spawnNativeQualificationPty } from "@cove/terminal-worker/qualification";
+import { ownedStalledCommand } from "./stalled-input-identity.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
 const child = resolve(import.meta.dirname, "fixtures/raw-child.mjs");
@@ -270,6 +271,38 @@ test("N03 owned child and helper identities are verified and cleaned separately"
   const absent = Object.assign(new Error("missing"), { code: "ESRCH" });
   expect(
     ownedCommand(123, "helper", nonce, inspectionFailed, () => {
+      throw absent;
+    }),
+  ).toBeNull();
+});
+
+test("stalled diagnostic requires its exact nonce and fails closed on live inspection errors", () => {
+  const nonce = `w1-stall-${randomUUID()}`;
+  const line = `${process.execPath} ${child} stall ${nonce}\n`;
+  const inspect = () => ({ status: 0, stdout: line });
+  expect(ownedStalledCommand(123, child, nonce, inspect, () => {})).toBe(line.trim());
+  expect(() => ownedStalledCommand(123, child, `${nonce}-other`, inspect, () => {})).toThrow(
+    /no longer matches/,
+  );
+  expect(() => ownedStalledCommand(123, `${child}-other`, nonce, inspect, () => {})).toThrow(
+    /no longer matches/,
+  );
+  expect(() =>
+    ownedStalledCommand(
+      123,
+      child,
+      nonce,
+      () => ({ status: 0, stdout: line.replace("stall", "helper") }),
+      () => {},
+    ),
+  ).toThrow(/no longer matches/);
+  const inspectionFailed = () => ({ status: null, error: new Error("ps failed") });
+  expect(() => ownedStalledCommand(123, child, nonce, inspectionFailed, () => {})).toThrow(
+    /identity could not be verified/,
+  );
+  const absent = Object.assign(new Error("missing"), { code: "ESRCH" });
+  expect(
+    ownedStalledCommand(123, child, nonce, inspectionFailed, () => {
       throw absent;
     }),
   ).toBeNull();
