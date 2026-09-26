@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MAX_FRAME_BYTES } from "./provisional/frame.js";
+import { HEADER_BYTES, MAX_FRAME_BYTES, MAX_METADATA_BYTES } from "./provisional/frame.js";
 
 export const M0_LIMITS = Object.freeze({
   maxRuns: 128,
@@ -67,6 +67,9 @@ export function validateEffectiveBudgets(input: unknown): EffectiveBudgets | nul
     return null;
   if (value.baselineChunks * 65_536 < value.baselineVtBytes + value.baselineTailBytes) return null;
   if (value.subscriptionCreditBytes < MAX_FRAME_BYTES) return null;
+  if (value.outboundConnectionBytes < value.subscriptionCreditBytes) return null;
+  if (value.reservedControlBytes < HEADER_BYTES + MAX_METADATA_BYTES) return null;
+  if (value.pipeQueuedBytes < MAX_FRAME_BYTES) return null;
   if (value.previewGlobalBytes < value.maxRuns * value.previewBytesPerRun) return null;
   if (value.maxRuns < 1 || value.listPage > value.maxRuns) return null;
   return value;

@@ -106,6 +106,9 @@ test("effective limits reject nonfinite, oversized and contradictory budgets", (
   ).toBeNull();
   expect(validateEffectiveBudgets({ ...M0_LIMITS, baselineChunks: 128 })).toBeNull();
   expect(validateEffectiveBudgets({ ...M0_LIMITS, subscriptionCreditBytes: 65_536 })).toBeNull();
+  expect(validateEffectiveBudgets({ ...M0_LIMITS, outboundConnectionBytes: 1 })).toBeNull();
+  expect(validateEffectiveBudgets({ ...M0_LIMITS, reservedControlBytes: 1 })).toBeNull();
+  expect(validateEffectiveBudgets({ ...M0_LIMITS, pipeQueuedBytes: 1 })).toBeNull();
   expect(validateEffectiveBudgets({ ...M0_LIMITS, previewGlobalBytes: 65_536 })).toBeNull();
 });
 
