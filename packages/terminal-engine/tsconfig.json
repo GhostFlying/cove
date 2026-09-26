@@ -1,12 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "rootDir": "probes",
-    "outDir": "dist/probes",
+    "rootDir": ".",
+    "outDir": "dist",
     "tsBuildInfoFile": "dist/terminal-engine.tsbuildinfo",
     "types": ["node"]
   },
-  "include": ["probes/**/*.ts"],
+  "include": ["probes/**/*.ts", "src/**/*.ts"],
   "exclude": ["probes/**/*.test.mjs"],
   "references": [{ "path": "../protocol" }]
 }

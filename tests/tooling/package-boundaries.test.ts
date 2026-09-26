@@ -23,9 +23,9 @@ function assertDependencyBoundary(
 ) {
   if (
     Object.keys(engineManifest.exports).sort().join() !==
-    "./probes/environment,./probes/recovery-boundaries"
+    ".,./probes/environment,./probes/recovery-boundaries"
   )
-    throw new Error("Engine exports more than its experiment");
+    throw new Error("Engine exports escaped the adapter and experiment boundary");
   if (
     Object.keys(webManifest.exports).sort().join() !== "./probes/environment,./probes/query-input"
   )
@@ -158,6 +158,12 @@ test("isolated compiled consumer sees supported exports and ES-only Cove declara
     }
   }
   await promoteDeclarations(join(protocol, "dist"), promotedM0);
+  const promotedEngine = join(declarations, "engine");
+  await mkdir(promotedEngine);
+  await writeFile(
+    join(promotedEngine, "terminal-model.ts"),
+    await readFile(join(engine, "dist/src/terminal-model.d.ts"), "utf8"),
+  );
   await writeFile(
     join(directory, "tsconfig.json"),
     JSON.stringify({
@@ -179,6 +185,7 @@ test("isolated compiled consumer sees supported exports and ES-only Cove declara
   await writeFile(
     join(directory, "consumer.mts"),
     `import type { EngineProbeResult } from '@cove/terminal-engine/probes/environment';
+import type { TerminalModel, EngineBaseline, EnginePreview, EngineState } from '@cove/terminal-engine';
 import type { WebProbeResult } from '@cove/terminal-web/probes/environment';
 import type { TerminalMetadata } from '@cove/protocol/provisional/terminal';
 import type { PipeMetadata } from '@cove/protocol/provisional/pipe';
@@ -193,6 +200,10 @@ import type { RuntimeTerminalPort } from '@cove/protocol/runtime';
 import type { TerminalMetadata as SupportedTerminalMetadata } from '@cove/protocol/terminal';
 import type { TerminalView } from '@cove/protocol/view';
 declare const engine: EngineProbeResult;
+declare const adapter: TerminalModel;
+declare const adapterResults: [EngineBaseline, EnginePreview, EngineState];
+void adapter;
+void adapterResults;
 declare const web: WebProbeResult;
 const tuple: [string, string] = [engine.roundTrip, web.input];
 declare const terminal: TerminalMetadata;
@@ -245,13 +256,14 @@ void tuple;
   await writeFile(
     join(directory, "consumer.mjs"),
     `import { runEnvironmentProbe as engine } from '@cove/terminal-engine/probes/environment';
+import { createTerminalModel } from '@cove/terminal-engine';
 import { runEnvironmentProbe as web } from '@cove/terminal-web/probes/environment';
 import { TerminalMetadataSchema } from '@cove/protocol/provisional/terminal';
 import { PipeMetadataSchema } from '@cove/protocol/provisional/pipe';
 import { BootstrapRequestSchema } from '@cove/protocol/bootstrap';
 import { PipeCommandSchema } from '@cove/protocol/pipe';
 import { RpcRequestSchema } from '@cove/protocol/rpc';
-if (typeof engine !== 'function' || typeof web !== 'function') throw new Error('Compiled exports missing');
+if (typeof engine !== 'function' || typeof web !== 'function' || typeof createTerminalModel !== 'function') throw new Error('Compiled exports missing');
 if (!TerminalMetadataSchema || !PipeMetadataSchema || !BootstrapRequestSchema || !PipeCommandSchema || !RpcRequestSchema) throw new Error('Protocol exports missing');
 for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-web/dist/probes/node/environment', '@cove/protocol', '@cove/protocol/src/provisional/identity']) {
   try { await import(name); throw new Error('Private import succeeded: ' + name); }
