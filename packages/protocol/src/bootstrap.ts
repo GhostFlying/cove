@@ -85,7 +85,7 @@ export const BootstrapSuccessSchema = z.object({
   connection: ConnectionRefSchema.optional(),
 });
 export type BootstrapSuccess = z.infer<typeof BootstrapSuccessSchema>;
-export const BootstrapFailureSchema = z.object({
+const BootstrapFailureFieldsSchema = z.object({
   type: z.literal("cove-bootstrap-error"),
   kind: z.enum([
     "BOOTSTRAP_UNSUPPORTED",
@@ -101,6 +101,14 @@ export const BootstrapFailureSchema = z.object({
     protocol: z.array(z.number().int()).max(4),
   }),
 });
+export const BootstrapFailureSchema = BootstrapFailureFieldsSchema.refine(
+  (value) =>
+    value.message === value.kind.replaceAll("_", " ") &&
+    value.supportedVersions.bootstrap.length === 1 &&
+    value.supportedVersions.bootstrap[0] === BOOTSTRAP_VERSION &&
+    value.supportedVersions.protocol.length === 1 &&
+    value.supportedVersions.protocol[0] === PROTOCOL_VERSION,
+);
 export type BootstrapFailure = z.infer<typeof BootstrapFailureSchema>;
 
 const failure = (kind: BootstrapFailure["kind"]): BootstrapFailure => ({
@@ -270,9 +278,8 @@ export function evaluateWsUpgrade(input: {
     input.path !== LOCAL_PATHS.terminal ||
     !/^(?:127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$/.test(input.boundAuthority) ||
     input.host !== input.boundAuthority ||
-    input.origin === undefined ||
-    input.origin === "null" ||
-    !input.allowedOrigins.includes(input.origin)
+    (input.origin !== undefined &&
+      (input.origin === "null" || !input.allowedOrigins.includes(input.origin)))
   )
     return "forbidden";
   return input.capacityAvailable ? "accepted" : "busy";
