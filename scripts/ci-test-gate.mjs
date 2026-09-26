@@ -111,12 +111,12 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-owner.test.mjs",
-    minimumTests: 10,
+    minimumTests: 12,
   },
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-reuse.test.mjs",
-    minimumTests: 2,
+    minimumTests: 4,
   },
   {
     project: "terminal-worker",
