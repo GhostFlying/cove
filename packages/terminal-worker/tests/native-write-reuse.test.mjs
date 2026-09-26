@@ -77,6 +77,11 @@ async function runReuse(fault, watchdogMs = 15_000) {
   let stderr = "";
   let ownedPid;
   let scratch;
+  let resolveHangReady;
+  let hangObserved = false;
+  const hangReady = new Promise((resolveReady) => {
+    resolveHangReady = resolveReady;
+  });
   child.on("message", (value) => {
     if (value?.nonce === nonce && Number.isSafeInteger(value.pid) && value.pid > 0) {
       ownedPid = value.pid;
@@ -85,6 +90,10 @@ async function runReuse(fault, watchdogMs = 15_000) {
         value.scratch.startsWith(join(tmpdir(), "cove-n1-reuse-"))
       ) {
         scratch = value.scratch;
+      }
+      if (value.phase === "hang-ready" && scratch) {
+        hangObserved = true;
+        resolveHangReady();
       }
     }
   });
@@ -95,6 +104,7 @@ async function runReuse(fault, watchdogMs = 15_000) {
     stderr += text;
   });
   let watchdog;
+  let phaseWatchdog;
   let failure;
   let outcome;
   const exit = new Promise((resolveExit, rejectExit) => {
@@ -102,6 +112,22 @@ async function runReuse(fault, watchdogMs = 15_000) {
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
   try {
+    if (fault === "hang" || fault === "hang-no-ack") {
+      await Promise.race([
+        hangReady,
+        exit.then(() => {
+          throw new Error("native reuse runner exited before hang phase");
+        }),
+        new Promise((_, reject) => {
+          phaseWatchdog = setTimeout(
+            () => reject(new Error("native reuse hang phase not observed")),
+            8_000,
+          );
+        }),
+      ]);
+      assert.ok(Number.isSafeInteger(ownedPid) && ownedPid > 0);
+      assert.ok(scratch && existsSync(scratch));
+    }
     outcome = await Promise.race([
       exit,
       new Promise((_, reject) => {
@@ -112,6 +138,7 @@ async function runReuse(fault, watchdogMs = 15_000) {
     failure = error;
   } finally {
     clearTimeout(watchdog);
+    clearTimeout(phaseWatchdog);
     if (child.exitCode === null && child.signalCode === null) {
       try {
         await stopOwnedProcess(child.pid, nonce, runner.pathname);
@@ -150,8 +177,10 @@ async function runReuse(fault, watchdogMs = 15_000) {
   if (failure) {
     failure.cleanup = {
       runnerAbsent: child.pid === undefined || absent(child.pid),
-      childAbsent: ownedPid === undefined || absent(ownedPid),
-      scratchAbsent: scratch === undefined || !existsSync(scratch),
+      hangObserved,
+      ownedObserved: Number.isSafeInteger(ownedPid) && ownedPid > 0 && Boolean(scratch),
+      childAbsent: ownedPid !== undefined && absent(ownedPid),
+      scratchAbsent: scratch !== undefined && !existsSync(scratch),
     };
     throw failure;
   }
@@ -200,6 +229,29 @@ test("hung reuse runner is retired before the framework deadline", async () => {
   }
   expect(failure).toMatchObject({
     message: "native reuse runner timed out",
-    cleanup: { runnerAbsent: true, childAbsent: true, scratchAbsent: true },
+    cleanup: {
+      hangObserved: true,
+      ownedObserved: true,
+      runnerAbsent: true,
+      childAbsent: true,
+      scratchAbsent: true,
+    },
+  });
+
+  let unacknowledged;
+  try {
+    await runReuse("hang-no-ack", 250);
+  } catch (error) {
+    unacknowledged = error;
+  }
+  expect(unacknowledged).toMatchObject({
+    message: "native reuse hang phase not observed",
+    cleanup: {
+      hangObserved: false,
+      ownedObserved: true,
+      runnerAbsent: true,
+      childAbsent: true,
+      scratchAbsent: true,
+    },
   });
 }, 35_000);
