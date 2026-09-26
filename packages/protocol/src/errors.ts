@@ -42,14 +42,13 @@ export const NextActionSchema = z.enum([
   "query-operation",
   "inspect-run",
 ]);
-export const DomainErrorSchema = z.object({
+const DomainErrorFieldsSchema = z.object({
   kind: z.enum(DOMAIN_ERROR_KINDS),
   code: z.number().int().min(1000).max(1020),
   message: z.string().max(256),
   acceptance: AcceptanceSchema,
   nextAction: NextActionSchema,
 });
-export type DomainError = z.infer<typeof DomainErrorSchema>;
 
 const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   UNAUTHENTICATED: "reauthenticate",
@@ -74,6 +73,14 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   WORKER_UNAVAILABLE: "inspect-run",
   COUNTER_EXHAUSTED: "new-subscription",
 };
+
+export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
+  (value) =>
+    value.code === ERROR_CODES[value.kind] &&
+    value.message === value.kind.replaceAll("_", " ") &&
+    value.nextAction === actions[value.kind],
+);
+export type DomainError = z.infer<typeof DomainErrorSchema>;
 
 // Fixed messages do not interpolate user paths, VT, credentials or command bytes.
 export function domainError(
