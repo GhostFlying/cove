@@ -1,6 +1,12 @@
 # W1 native input contract: bounded decision preparation
 
-Status: source analysis plus subsequently frozen macOS author and independent vendor-boundary evidence. The original preliminary analysis below is retained with its evidence boundary; the qualification update immediately below supersedes its pending-independent wording. The maintenance choice remains a user decision. No private adaptation, patch, pin change, test run, repository edit or backend choice is authorized or performed by this document. It supplements W1's first qualification slice; it does not lower acceptance.
+Status: **accepted maintenance route, 2026-09-26**. The user selected a minimal maintained node-pty patch (option B below). This supersedes the pending-route statements in the historical analysis. The existing dependency version and PTY backend remain the starting point; remedy implementation and qualification are not yet complete.
+
+## Accepted decision
+
+Maintain a narrow repository-owned node-pty 1.1.0 patch for bounded Unix input admission, truthful completion/error notification, and writer close/dispose behavior. Keep it behind W1's native adapter and manage its application and fingerprint through the sole dependency writer. Do not substitute private runtime overrides or switch backends under this decision. Begin with source/types/executed JavaScript; any necessary native ownership expansion must be explained explicitly before expanding scope.
+
+The patch must retain full allocated-buffer and task accounting, reject over-cap intents before copying, settle each admitted write once, preserve partial/uncertain outcomes without automatic input replay, and coordinate user input with automatic query replies. Kernel write completion does not prove application consumption. A concrete Astra-high patch plan precedes implementation; independent testing/review and macOS/Linux evidence remain required. The devbox capacity gate and milestone boundary are unchanged. P3 routing remains a separate pending discussion.
 
 ## Qualification update and pending decision
 
@@ -8,7 +14,7 @@ The coordinator subsequently received frozen author source `9864cd2a313a18f9c517
 
 Independent report `/tmp/cove-m0-w1-native-verification/report.md`, SHA256 `65669cc5c66e7e9877bb56f21130595f618cf19f0a046efce78488629450f2`, used its own strategy/child and the exact installed unpatched pin on macOS arm64, Node26.10/ABI147. A 16-byte raw input/output fixture containing NUL, high bytes and split UTF-8 matched the child digest and exited23. A distinct live raw-mode nonreading child received sixteen write calls of 64 KiB, reusing one caller buffer: all calls returned undefined, while diagnostic-only inspection found 1,048,576 pending and allocated native bytes immediately. After300ms, pending bytes were1,047,554 and allocated copied-buffer storage still1,048,576. After child exit17, natural EIO was logged and the queue cleared; that clearing is not delivery. Both recorded task-owned PIDs and task commands were absent afterward. No Linux behavior or W1 remedy is claimed.
 
-This independently reproduces the concrete native queue gap using a different finite workload partition from the author. Diagnostic private reads only observe the current dependency; they do not approve a production seam. Root has presented the user three maintenance choices: recommended narrow maintained patch, guarded private writer/lifecycle adapter, or further backend comparison. **No answer or option is adopted yet.** Continue unrelated V1 work, but stop W1 expansion at this decision. A selected remedy still needs its own bounded implementation plan, independent tests/review, both supported OSes and the later real-PTY capacity gate.
+This independently reproduces the concrete native queue gap using a different finite workload partition from the author. Diagnostic private reads only observe the current dependency; they do not approve a production seam. Root has presented the user three maintenance choices: recommended narrow maintained patch, guarded private writer/lifecycle adapter, or further backend comparison. This was the original pending decision; the accepted-route section above now selects option B. The selected remedy still needs its own bounded implementation plan, independent tests/review, both supported OSes and the later real-PTY capacity gate.
 
 ## Verified source and evidence boundary
 
