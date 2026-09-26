@@ -106,7 +106,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-qualification.test.mjs",
-    minimumTests: 3,
+    minimumTests: 4,
   },
   {
     project: "terminal-web-probes",

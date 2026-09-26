@@ -328,16 +328,16 @@ test("compiled terminal adapter suites are all mandatory", async () => {
 test("compiled native worker qualification cannot disappear or become empty", async () => {
   const file = "packages/terminal-worker/tests/native-qualification.test.mjs";
   const suite = requiredSuites.find((item) => item.file === file);
-  expect(suite).toMatchObject({ project: "terminal-worker", minimumTests: 3 });
+  expect(suite).toMatchObject({ project: "terminal-worker", minimumTests: 4 });
   expect(await readVitestOwnedTestFiles()).toContain(file);
-  expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests; needs 3/);
+  expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests; needs 4/);
   expect(() =>
     verifyDiscovery(
       [{ projectName: "terminal-worker", file: resolve(root, file), name: "one" }],
       [file],
       [suite],
     ),
-  ).toThrow(/discovered 1 tests; needs 3/);
+  ).toThrow(/discovered 1 tests; needs 4/);
 });
 
 test("rejects a test file excluded by the Vitest project", () => {
