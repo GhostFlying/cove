@@ -90,6 +90,21 @@ interface ManagedBrowserEvidenceOptions {
   sourceDirty: boolean;
 }
 
+export function observeLateBrowserClose(
+  operation: Promise<void>,
+  phase: BrowserCleanupPhase,
+  isFinalized: () => boolean,
+): void {
+  void operation.then(
+    () => {
+      if (phase.outcome === "timed-out" && !isFinalized()) phase.lateOutcome = "completed";
+    },
+    () => {
+      if (phase.outcome === "timed-out" && !isFinalized()) phase.lateOutcome = "rejected";
+    },
+  );
+}
+
 const defaultBuiltRoot = fileURLToPath(new URL("../../browser/", import.meta.url));
 const browsersPath = fileURLToPath(new URL("../../../.cache/playwright/", import.meta.url));
 
@@ -516,16 +531,7 @@ export async function withManagedBrowser<T>(
             () => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, closeDelay)),
           )
         : actualClose;
-      void closeOperation.then(
-        () => {
-          if (graceful.outcome === "timed-out" && !cleanupEvidenceFinalized)
-            graceful.lateOutcome = "completed";
-        },
-        () => {
-          if (graceful.outcome === "timed-out" && !cleanupEvidenceFinalized)
-            graceful.lateOutcome = "rejected";
-        },
-      );
+      observeLateBrowserClose(closeOperation, graceful, () => cleanupEvidenceFinalized);
       await within(closeOperation, graceful.budgetMs, "Browser close");
       graceful.outcome = "completed";
     } catch (error) {
