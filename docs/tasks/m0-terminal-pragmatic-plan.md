@@ -57,7 +57,7 @@ Allow one implementation pass and one minimized **general repair per demonstrate
 
 ## Result vocabulary and evidence preservation
 
-Every result carries exact tested SHA/pins/platform, `contract` (`strict-retained-v1` or `pragmatic-logical-grid-v1`), case ID, observation/continuation, `classification`, and `outcome`:
+Evidence for each result links the exact tested SHA/pins/platform, `contract` (`strict-retained-v1` or `pragmatic-logical-grid-v1`), case ID, observation/continuation, `classification`, and `outcome`. Completed case IDs, committed assertions, bounded CI failure logs and the shared environment/pin artifact may jointly carry these fields; a duplicate per-cut report schema is not required:
 
 - `required`: `pass` or `fail`; any generation/install/bounds/harness error or missing observation is fail.
 - `diagnostic`: `match` or `divergence`, with precise approved limitation or semantic equivalence. Neither is a recovery pass.
