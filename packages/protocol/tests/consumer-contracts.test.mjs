@@ -226,10 +226,18 @@ test("terminal fixture fences stale focus and uncertain input without extra writ
   expect(journey.stalePreview.currentVersion).toBeGreaterThan(journey.stalePreview.knownVersion);
 });
 
-test("fixture consumer ledger rejects stale focus, blur and duplicate or future input", async () => {
+test("fixture consumer ledger accepts monotonic gaps but rejects stale control and input", async () => {
   const journey = await fixture("terminal-journey.json");
   const { olderFocusSeq, newerFocusSeq, olderEpoch, newerEpoch } = journey.focusRace;
-  const { futureFocusSeq, futureInputSeq, viewGeneration, lateViewGeneration } = journey.ordering;
+  const {
+    skippedFocusSeq,
+    skippedInputSeq,
+    viewGeneration,
+    lateViewGeneration,
+    initialAppliedSeq,
+    nextAppliedSeq,
+    grantAtSeq,
+  } = journey.ordering;
   const subscription = {
     run: journey.run,
     connection: journey.connection,
@@ -237,7 +245,16 @@ test("fixture consumer ledger rejects stale focus, blur and duplicate or future 
     viewId: journey.viewId,
   };
   const base = { run: journey.run, subscription };
-  const state = { focusSeq: 0, epoch: 0, holder: false, inputSeq: 0, viewGeneration };
+  const state = {
+    focusSeq: 0,
+    epoch: 0,
+    holder: false,
+    inputSeq: 0,
+    appliedSeq: initialAppliedSeq,
+    grantAtSeq: initialAppliedSeq,
+    viewGeneration,
+  };
+  const seenFocus = new Map();
   const focus = (focusSeq, epoch, requestId) => {
     const command = {
       type: "focus",
@@ -246,24 +263,31 @@ test("fixture consumer ledger rejects stale focus, blur and duplicate or future 
       focusSeq,
       geometry: { cols: 80, rows: 24 },
     };
-    const result = { type: "focus-result", ...base, requestId, epoch, atSeq: 3 };
+    const result = { type: "focus-result", ...base, requestId, epoch, atSeq: grantAtSeq };
     if (
       !TerminalCommandSchema.safeParse(command).success ||
       !TerminalResultSchema.safeParse(result).success ||
       !validateTerminalResultForCommand(command, result)
     )
-      return false;
-    if (focusSeq !== state.focusSeq + 1 || epoch !== state.epoch + 1) return false;
+      return "invalid";
+    const prior = seenFocus.get(focusSeq);
+    if (prior)
+      return prior.requestId === requestId && prior.epoch === epoch ? "existing" : "conflict";
+    if (focusSeq <= state.focusSeq) return "stale";
+    if (epoch !== state.epoch + 1) return "invalid-epoch";
+    seenFocus.set(focusSeq, { requestId, epoch });
     state.focusSeq = focusSeq;
     state.epoch = epoch;
     state.holder = true;
-    return true;
+    state.grantAtSeq = focusSeq === newerFocusSeq ? grantAtSeq : initialAppliedSeq;
+    return "accepted";
   };
-  expect(focus(olderFocusSeq, olderEpoch, "focus-old")).toBe(true);
-  expect(focus(newerFocusSeq, newerEpoch, "focus-new")).toBe(true);
-  expect(focus(newerFocusSeq, newerEpoch, "focus-new")).toBe(false);
-  expect(focus(olderFocusSeq, olderEpoch, "focus-old")).toBe(false);
-  expect(focus(futureFocusSeq, newerEpoch + 1, "focus-future")).toBe(false);
+  expect(focus(olderFocusSeq, olderEpoch, "focus-old")).toBe("accepted");
+  expect(focus(newerFocusSeq, newerEpoch, "focus-new")).toBe("accepted");
+  expect(focus(newerFocusSeq, newerEpoch, "focus-new")).toBe("existing");
+  expect(focus(newerFocusSeq, newerEpoch, "focus-conflict")).toBe("conflict");
+  expect(focus(olderFocusSeq, olderEpoch, "focus-old")).toBe("existing");
+  expect(state.epoch).toBe(newerEpoch);
   const input = (inputSeq, epoch, generation) => {
     const command = { type: "input", ...base, requestId: `input-${inputSeq}`, inputSeq, epoch };
     if (!TerminalCommandSchema.safeParse(command).success) return false;
@@ -271,7 +295,8 @@ test("fixture consumer ledger rejects stale focus, blur and duplicate or future 
       !state.holder ||
       generation !== state.viewGeneration ||
       epoch !== state.epoch ||
-      inputSeq !== state.inputSeq + 1
+      state.appliedSeq < state.grantAtSeq ||
+      inputSeq <= state.inputSeq
     )
       return false;
     state.inputSeq = inputSeq;
@@ -279,9 +304,13 @@ test("fixture consumer ledger rejects stale focus, blur and duplicate or future 
   };
   expect(input(journey.inputOutcome.inputSeq, olderEpoch, viewGeneration)).toBe(false);
   expect(input(journey.inputOutcome.inputSeq, newerEpoch, lateViewGeneration)).toBe(false);
-  expect(input(futureInputSeq, newerEpoch, viewGeneration)).toBe(false);
+  expect(input(journey.inputOutcome.inputSeq, newerEpoch + 1, viewGeneration)).toBe(false);
+  expect(input(journey.inputOutcome.inputSeq, newerEpoch, viewGeneration)).toBe(false);
+  state.appliedSeq = nextAppliedSeq;
   expect(input(journey.inputOutcome.inputSeq, newerEpoch, viewGeneration)).toBe(true);
   expect(input(journey.inputOutcome.inputSeq, newerEpoch, viewGeneration)).toBe(false);
+  expect(input(skippedInputSeq, newerEpoch, viewGeneration)).toBe(true);
+  expect(input(journey.inputOutcome.inputSeq + 1, newerEpoch, viewGeneration)).toBe(false);
   const blur = (epoch) => {
     const command = { type: "blur", ...base, requestId: `blur-${epoch}`, epoch };
     if (!TerminalCommandSchema.safeParse(command).success || !state.holder || epoch !== state.epoch)
@@ -291,10 +320,14 @@ test("fixture consumer ledger rejects stale focus, blur and duplicate or future 
   };
   expect(blur(olderEpoch)).toBe(false);
   expect(blur(newerEpoch)).toBe(true);
-  expect(input(journey.inputOutcome.inputSeq + 1, newerEpoch, viewGeneration)).toBe(false);
+  expect(input(skippedInputSeq + 1, newerEpoch, viewGeneration)).toBe(false);
+  expect(focus(skippedFocusSeq, newerEpoch + 2, "focus-gap")).toBe("invalid-epoch");
+  expect(focus(skippedFocusSeq, newerEpoch + 1, "focus-gap")).toBe("accepted");
+  expect(focus(skippedFocusSeq - 1, newerEpoch + 2, "focus-stale")).toBe("stale");
+  expect(state.epoch).toBe(newerEpoch + 1);
 });
 
-test("fixture consumer ACK ledger credits only new contiguous applied sequences", async () => {
+test("fixture consumer ACK ledger allows cumulative jumps and credits each event once", async () => {
   const journey = await fixture("terminal-journey.json");
   const { initialAppliedSeq, nextAppliedSeq, sentSeq, futureAppliedSeq } = journey.ordering;
   const subscription = {
@@ -304,6 +337,14 @@ test("fixture consumer ACK ledger credits only new contiguous applied sequences"
     viewId: journey.viewId,
   };
   let applied = initialAppliedSeq;
+  const recordedBytes = new Map(
+    journey.orderedPostBaseline.map(({ payload = [], ...metadata }) => [
+      metadata.seq,
+      HEADER_BYTES +
+        encoder(JSON.stringify({ ...metadata, run: journey.run })).byteLength +
+        payload.length,
+    ]),
+  );
   const ack = (appliedSeq) => {
     const command = {
       type: "applied-ack",
@@ -323,18 +364,26 @@ test("fixture consumer ACK ledger credits only new contiguous applied sequences"
       !TerminalCommandSchema.safeParse(command).success ||
       !TerminalResultSchema.safeParse(result).success ||
       !validateTerminalResultForCommand(command, result) ||
-      appliedSeq <= applied ||
       appliedSeq > sentSeq
     )
-      return false;
+      return { status: "invalid", creditedBytes: 0 };
+    if (appliedSeq <= applied)
+      return { status: appliedSeq === applied ? "duplicate" : "stale", creditedBytes: 0 };
+    const creditedBytes = [...recordedBytes]
+      .filter(([seq]) => seq > applied && seq <= appliedSeq)
+      .reduce((total, [, bytes]) => total + bytes, 0);
     applied = appliedSeq;
-    return true;
+    return { status: "advanced", creditedBytes };
   };
-  expect(ack(futureAppliedSeq)).toBe(false);
-  expect(ack(nextAppliedSeq)).toBe(true);
-  expect(ack(nextAppliedSeq)).toBe(false);
-  expect(ack(initialAppliedSeq)).toBe(false);
-  expect(ack(sentSeq)).toBe(true);
+  expect(ack(futureAppliedSeq)).toEqual({ status: "invalid", creditedBytes: 0 });
+  const cumulative = ack(sentSeq);
+  expect(cumulative).toEqual({
+    status: "advanced",
+    creditedBytes: recordedBytes.get(nextAppliedSeq) + recordedBytes.get(sentSeq),
+  });
+  expect(ack(sentSeq)).toEqual({ status: "duplicate", creditedBytes: 0 });
+  expect(ack(nextAppliedSeq)).toEqual({ status: "stale", creditedBytes: 0 });
+  expect(ack(initialAppliedSeq)).toEqual({ status: "stale", creditedBytes: 0 });
   expect(applied).toBe(sentSeq);
 });
 

@@ -27,8 +27,9 @@
     "nextAppliedSeq": 4,
     "sentSeq": 5,
     "futureAppliedSeq": 6,
-    "futureFocusSeq": 4,
-    "futureInputSeq": 3,
+    "skippedFocusSeq": 4,
+    "skippedInputSeq": 3,
+    "grantAtSeq": 4,
     "viewGeneration": 1,
     "lateViewGeneration": 0
   },
