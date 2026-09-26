@@ -1,6 +1,6 @@
 # M0 W1 native qualification integration
 
-Status: pre-code integration allocation; the historical qualification does not establish a bounded native input writer.
+Status: corrected QI candidate integrated; source review approved, native independent verification and final documentation review pending. This diagnostic qualification does not establish a bounded native input writer or W1 acceptance.
 
 Owner: `/root/m0_t1_impl`, GPT-6 Sol high, is the sole primary-checkout integration and shared-registration writer. The assigned checkout is `/Users/luchengxuan/WORKSPACE/cove`, branch `p/luchengxuan/m0-16-native-input-decision`, clean pre-code head `b612b8124cd1d26e61bfecc2b28fc96529470191` on V1-merged main predecessor `489f3466d55009b2730a8fa70b86c54e44abbb3c`. The source to preserve is the committed W1 qualification branch `a5f874f06ff02f5ad5771d26a2618fad7f3e8233`; its package files and qualification result are historical inputs, not authority to overwrite newer shared tooling. The accepted corrected W1 sequence is QI → N1 → N2. N1 production patch work cannot start until QI is accepted and the registrar grants its boundary.
 
