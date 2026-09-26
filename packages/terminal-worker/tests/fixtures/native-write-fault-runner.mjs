@@ -51,7 +51,12 @@ function stopVerified(pid, phase) {
 
 async function runFault(phase) {
   const baseline = descriptorCount();
+  let nativeExitCallbacks = 0;
   let exitCallbacks = 0;
+  let resolveObservedExit;
+  const observedExit = new Promise((resolveObservation) => {
+    resolveObservedExit = resolveObservation;
+  });
   let returned;
   try {
     assert.throws(
@@ -68,7 +73,14 @@ async function runFault(phase) {
           true,
           helper,
           () => {
-            exitCallbacks++;
+            nativeExitCallbacks++;
+            const observe = () => {
+              exitCallbacks++;
+              resolveObservedExit();
+            };
+            // Delay only the fixture's observation to expose fixed-sleep oracles.
+            if (phase === "after-watcher") setTimeout(observe, 175);
+            else observe();
           },
           true,
           phase,
@@ -78,10 +90,32 @@ async function runFault(phase) {
         ? /Could not duplicate bounded writer fd/
         : new RegExp(`Injected failure ${phase.replace("-", " owned ")}`),
     );
+    if (phase === "after-watcher") {
+      let callbackWatchdog;
+      try {
+        await Promise.race([
+          observedExit,
+          new Promise((_, reject) => {
+            callbackWatchdog = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `after-watcher exit callback not observed within 3000 ms (native=${nativeExitCallbacks})`,
+                  ),
+                ),
+              3_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(callbackWatchdog);
+      }
+    }
     await sleep(100);
     assert.equal(descriptorCount(), baseline, `${phase} retained a parent descriptor`);
     assert.deepEqual(ownedChildren(phase), [], `${phase} retained an owned child`);
-    assert.equal(exitCallbacks, phase === "after-watcher" ? 1 : 0);
+    assert.equal(nativeExitCallbacks, phase === "after-watcher" ? 1 : 0);
+    assert.equal(exitCallbacks, nativeExitCallbacks);
   } finally {
     if (returned) {
       returned.stopOwnedChild(9);
