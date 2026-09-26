@@ -697,6 +697,42 @@ const fixture = {
     }
     return { cleared, children: container.childElementCount };
   },
+  disposedRegistrations() {
+    const live = [
+      view!.onInputIntent(() => {}),
+      view!.onFocusIntent(() => {}),
+      view!.onFailure(() => {}),
+    ];
+    for (const subscription of live) {
+      subscription.dispose();
+      subscription.dispose();
+    }
+    view!.dispose();
+    const first = [
+      () => view!.onInputIntent(() => {}),
+      () => view!.onFocusIntent(() => {}),
+      () => view!.onFailure(() => {}),
+    ].map((register) => {
+      try {
+        return { kind: "returned", subscription: Boolean(register()) };
+      } catch (error) {
+        return { kind: (error as DomainError).kind ?? "unknown", subscription: false };
+      }
+    });
+    view!.dispose();
+    const repeated = [
+      () => view!.onInputIntent(() => {}),
+      () => view!.onFocusIntent(() => {}),
+      () => view!.onFailure(() => {}),
+    ].map((register) => {
+      try {
+        return { kind: "returned", subscription: Boolean(register()) };
+      } catch (error) {
+        return { kind: (error as DomainError).kind ?? "unknown", subscription: false };
+      }
+    });
+    return { first, repeated, children: container.childElementCount };
+  },
   async cycle(count: number) {
     for (let index = 0; index < count; index++) {
       await initialize();

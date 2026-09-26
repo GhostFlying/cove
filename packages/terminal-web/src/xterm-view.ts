@@ -133,6 +133,10 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
   const inputs = new ListenerSet<InputIntent>();
   const focuses = new ListenerSet<FocusIntent>();
   const failures = new ListenerSet<DomainError>();
+  const register = <T>(listeners: ListenerSet<T>, listener: Listener<T>) => {
+    if (state === "disposed") throw domainError("RESYNC_REQUIRED");
+    return listeners.add(listener);
+  };
 
   const publishFailure = (error: DomainError, fatal: boolean, targetIncarnation = incarnation) => {
     if (state === "disposed") return;
@@ -460,9 +464,9 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
       }
     },
 
-    onInputIntent: (listener) => inputs.add(listener),
-    onFocusIntent: (listener) => focuses.add(listener),
-    onFailure: (listener) => failures.add(listener),
+    onInputIntent: (listener) => register(inputs, listener),
+    onFocusIntent: (listener) => register(focuses, listener),
+    onFailure: (listener) => register(failures, listener),
 
     dispose(): void {
       if (state === "disposed") return;
