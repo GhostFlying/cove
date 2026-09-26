@@ -203,15 +203,20 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
     page.evaluate(async () => {
       await window.coveView.reset();
       await window.coveView.ready();
-      window.coveView.holdNextParse();
-      window.coveView.startHeldOutput([27, 93, 55, 55, 55, 59, 120, 7]);
-      await window.coveView.awaitHeld();
-      const deadline = window.coveView.evidence().failures.map((error) => error.kind);
+      const deadline = await window.coveView.deadlineRetirement();
+      await window.coveView.reset();
+      await window.coveView.ready();
+      const synchronousWrite = await window.coveView.synchronousWriteRetirement();
+      await window.coveView.reset();
+      await window.coveView.ready();
+      const inputOrigin = window.coveView.fatalInputOriginRetirement();
       const cycled = await window.coveView.cycle(20);
       const beforeDispose = document.querySelectorAll("[data-cove-terminal-view]").length;
       const timerCleanup = window.coveView.disposeAfterPasteWithTimerProbe();
       return {
         deadline,
+        synchronousWrite,
+        inputOrigin,
         cycled,
         beforeDispose,
         afterDispose: document.querySelectorAll("[data-cove-terminal-view]").length,
@@ -220,7 +225,50 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
       };
     }),
   );
-  expect(result.deadline).toEqual(["RECOVERY_EXPIRED"]);
+  expect(result.deadline.immediate).toMatchObject({
+    children: 0,
+    ownedRoots: 0,
+    wrappersRestored: true,
+    disposeCalls: 1,
+    failures: ["RECOVERY_EXPIRED"],
+    inputs: [],
+    pendingSourceTimers: 0,
+  });
+  expect(result.deadline.immediate.removeCalls).toBeGreaterThan(0);
+  expect(result.deadline.after).toBe("RESYNC_REQUIRED");
+  expect(result.deadline.status).toBe("rejected");
+  expect(result.deadline.late).toEqual({
+    children: 0,
+    ownedRoots: 0,
+    wrappersRestored: true,
+    disposeCalls: 1,
+    removeCalls: result.deadline.immediate.removeCalls,
+    failures: ["RECOVERY_EXPIRED"],
+    inputs: [],
+  });
+  expect(result.synchronousWrite.immediate).toMatchObject({
+    children: 0,
+    ownedRoots: 0,
+    wrappersRestored: true,
+    disposeCalls: 1,
+    failures: ["RECOVERY_UNAVAILABLE"],
+    inputs: [],
+  });
+  expect(result.synchronousWrite.immediate.removeCalls).toBeGreaterThan(1);
+  expect(result.synchronousWrite.cause).toBe("RECOVERY_UNAVAILABLE");
+  expect(result.synchronousWrite.errors).toEqual([
+    "RECOVERY_UNAVAILABLE",
+    "injected async-path cleanup failure",
+  ]);
+  expect(result.synchronousWrite.after).toBe("RESYNC_REQUIRED");
+  expect(result.inputOrigin).toMatchObject({
+    children: 0,
+    ownedRoots: 0,
+    wrappersRestored: true,
+    disposeCalls: 1,
+    failures: ["PROFILE_UNSUPPORTED"],
+    inputs: [],
+  });
   expect(result.cycled.children).toBe(1);
   expect(result.beforeDispose).toBe(1);
   expect(result.afterDispose).toBe(0);
