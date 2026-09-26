@@ -1,5 +1,7 @@
 # T1 recovery decision after J/G
 
+> Decision update, 2026-09-26: the user approved the pragmatic Orca-like first-release recovery profile in [terminal architecture §3.2.1](../terminal-architecture.md#321-首发恢复精度与验收2026-09-26-用户已确认). The maintained installation API and inverse-reflow generator are paused. Earlier experiments, failures and proposals below remain historical evidence, not current approval or a complete-equivalence merge gate. Preserve budgeted normal+alternate, ordinary visible/input/continuation behavior and all ordering/query/parser/resource constraints. Actual initial agent targets are Codex, TraeX and Claude Code. A revised executable T1 plan follows this decision; no existing failure is relabeled as success.
+
 2026-09-26. Bounded Astra-high analysis by `/root/m0_p1a_plan`; no implementation, tests or dispatch. Sources inspected: J `fb8f8243434993556f2be5bd83f17b966c6c8569`, plan `3368457af4ad765399dcf713cbf5b24ffa466fe9`, G `b5fe64d2d6f8e6735dc6a85c2db069fe1000e545` (coordinator-integrated equivalent `f58e7f7975b081b03c53d5389f38d0ee4ad467a5`), immutable pinned vendor source and the preceding three decision notes. No uncommitted review fixes were read.
 
 ## Recommendation
