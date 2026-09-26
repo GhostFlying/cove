@@ -156,3 +156,23 @@ Checks on the frozen source used pinned Node 26.10.0 and pnpm 12.6.0:
 | One final external scoped V1 run                      | pass, 3 files / 18 tests, 40.33 s Vitest duration (40.50 s wall) |
 
 No failed candidate or driver correction occurred. The worktree was clean at source/test freeze, and a targeted scan found no owned Chromium, V1 runner or Vite process. These are author-scoped external-config results; root full gate, Linux/dual-OS, independent reentry execution/review, GitHub exact-head qualification and merge remain separate and are not claimed. Retained Q1 was not rerun because its source/fixture/runner did not change, and the independent corpus was not read. No protocol/P3/controller, shared/root file, W1/native, server/PTY/product, GPU/performance or GitHub operation was performed.
+
+## Final input-observation predicate correction
+
+Independent Sol review approved source `e5377119a69d850938ccbb17ef091aa70c868b01` for qualification in `/tmp/cove-m0-v1-code-review.md`, verified at SHA-256 `b86dedfca19378b8e46d66f5fa4ae62874fb34beaf827c9f8dcc7e91b581376e`. Root mapped this source as `6aea173`. This approval closes the unintended ready-only admission regression and requested reentry controls; it is source-review approval for qualification, not merge or task acceptance.
+
+The correction replaces the `ready`-only checks introduced at `2991acf` with a shared exact-incarnation predicate evaluated both before and immediately after synchronous focus listeners. A genuine provenance-qualified input remains observable whenever its captured incarnation still identifies the current backend and lifecycle state is neither `disposed` nor `failed`, including `initialized`, `installing`, and a held baseline parse. The post-listener fence additionally requires effective focus, so synchronous successor initialization, hide/blur, failure, or disposal still suppresses stale or withdrawn bytes without replay or generation relabeling. P3 alone retains server recovery/control admission; this adapter observation is not authorization to send input to a PTY.
+
+L4 now observes exact focus-before-input ordering for real keyboard input while a baseline parse callback is held, then releases and completes that parse without duplicating the input. It retains successor-initialize and hide/blur reentry controls and adds synchronous focus-listener disposal, requiring zero stale input and zero owned DOM after disposal. The registered inventory remains three suites and 18 cases.
+
+The first scoped build failed before browser execution with TypeScript `TS2367`: control-flow narrowing treated direct post-callback `disposed` and `failed` comparisons as unreachable even though synchronous listeners can mutate the captured state. Moving the identical runtime predicate into `acceptsInputFrom` forces each pre/post call to reread closure state. The corrected scoped evidence at frozen tree `1866775a0c36506aa6cba9b40d719b30fc4d146c` is:
+
+| Check                                                                | Result                                                         |
+| -------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Terminal-web build/typecheck and both Vite bundles                   | pass after the predicate-expression correction                 |
+| Prettier over allocated production/browser/lifecycle files           | pass                                                           |
+| Oxlint `--deny-warnings` over the same paths                         | pass                                                           |
+| Focused L4 held-recovery and initialize/hide/dispose reentry control | pass, 1/1 in 1.38 s Vitest duration (1.55 s wall)              |
+| Complete lifecycle suite                                             | pass, 1 file / 6 tests, 24.71 s Vitest duration (24.88 s wall) |
+
+No full external 18-case suite was run at `e537711`; the coordinator intentionally held broader execution until source review. The 18/18 result above belongs to prior source `2991acf` and is historical, not evidence for this final correction. Root's independent verifier is separately running its bounded strategy and one full 267-test gate, and CI remains pending; neither result is claimed here. No source/test, Q1, protocol/P3, root/shared, lock/pin, W1/native, GitHub, or other-checkout change is included in this documentation-only handoff.
