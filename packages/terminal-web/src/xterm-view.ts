@@ -1,6 +1,6 @@
 import { Terminal } from "@xterm/xterm";
 import { M0_LIMITS } from "@cove/protocol/budgets";
-import { domainError, type DomainError } from "@cove/protocol/errors";
+import { DomainErrorSchema, domainError, type DomainError } from "@cove/protocol/errors";
 import {
   GeometrySchema,
   PROFILE,
@@ -83,6 +83,37 @@ function sameGeometry(left: Geometry, right: Geometry): boolean {
   return left.cols === right.cols && left.rows === right.rows;
 }
 
+function asDomainError(error: unknown): DomainError {
+  const direct = DomainErrorSchema.safeParse(error);
+  if (direct.success) return direct.data;
+  if (error instanceof AggregateError) {
+    const cause = DomainErrorSchema.safeParse(error.cause);
+    if (cause.success) return cause.data;
+    for (const item of error.errors) {
+      const nested = DomainErrorSchema.safeParse(item);
+      if (nested.success) return nested.data;
+    }
+  }
+  return domainError("RECOVERY_UNAVAILABLE");
+}
+
+function combineErrors(primary: unknown, cleanup: unknown[], message: string): unknown {
+  if (!cleanup.length) return primary;
+  return new AggregateError([primary, ...cleanup], message, { cause: primary });
+}
+
+function cleanupAll(actions: Array<() => void>): unknown[] {
+  const errors: unknown[] = [];
+  for (const action of actions) {
+    try {
+      action();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
+}
+
 export function createXtermTerminalView(container: HTMLElement): TerminalView {
   let state: ViewState = "new";
   let backend: Backend | undefined;
@@ -130,71 +161,104 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     inputs.emit({ viewGeneration, source, bytes: bytes.slice() });
   };
 
-  const disposeBackend = (reason = domainError("RESYNC_REQUIRED")) => {
+  const disposeBackend = (reason = domainError("RESYNC_REQUIRED")): unknown[] => {
     incarnation++;
     parser.cancel(reason);
     const retired = backend;
     backend = undefined;
     baseline = undefined;
     pristine = false;
-    retired?.tracker.dispose();
-    retired?.origin.dispose();
-    retired?.terminal.dispose();
+    if (!retired) return [];
+    return cleanupAll([
+      () => retired.tracker.dispose(),
+      () => retired.origin.dispose(),
+      () => retired.terminal.dispose(),
+    ]);
   };
 
   const constructBackend = (targetGeometry: Geometry, targetAppearance: Appearance): Backend => {
-    const terminal = new Terminal({
-      cols: targetGeometry.cols,
-      rows: targetGeometry.rows,
-      scrollback: M0_LIMITS.historyLines,
-      convertEol: false,
-      cursorBlink: false,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-      fontSize: 14,
-      lineHeight: 1,
-      letterSpacing: 0,
-      theme: xtermTheme(targetAppearance),
-    });
     const targetIncarnation = ++incarnation;
+    let terminal: Terminal | undefined;
     let tracker: BrowserInputTracker | undefined;
     let origin: InputOriginAttachment | undefined;
     try {
+      terminal = new Terminal({
+        cols: targetGeometry.cols,
+        rows: targetGeometry.rows,
+        scrollback: M0_LIMITS.historyLines,
+        convertEol: false,
+        cursorBlink: false,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+        fontSize: 14,
+        lineHeight: 1,
+        letterSpacing: 0,
+        theme: xtermTheme(targetAppearance),
+      });
       origin = attachInputOrigin(
         terminal,
         (fallback) => tracker?.current(fallback) ?? fallback,
         (bytes, source) => publishInput(bytes, source, targetIncarnation),
         (error) => publishFailure(error, error.kind !== "INPUT_REJECTED", targetIncarnation),
       );
-      terminal.open(container);
+      // A hidden logical view must not flash a replacement terminal between open() and the
+      // element-level hidden attribute. Temporarily hide the host, restore its prior author style
+      // only after the new xterm root is hidden, and also restore it when open() throws.
+      const previousHostVisibility = container.style.visibility;
+      if (!visible) container.style.visibility = "hidden";
+      try {
+        terminal.open(container);
+        if (!visible) terminal.element?.setAttribute("hidden", "");
+      } finally {
+        if (!visible) container.style.visibility = previousHostVisibility;
+      }
       tracker = trackBrowserInput(container, terminal, () => {
         if (targetIncarnation === incarnation && effectivelyFocused) publishFocus(false);
       });
       terminal.element?.setAttribute("data-cove-terminal-view", "xterm-dom-v1");
       return { terminal, origin, tracker, incarnation: targetIncarnation };
     } catch (error) {
-      tracker?.dispose();
-      origin?.dispose();
-      terminal.dispose();
-      if (typeof error === "object" && error !== null && "kind" in error) throw error;
-      throw domainError("RECOVERY_UNAVAILABLE");
+      const primary = asDomainError(error);
+      const cleanup = cleanupAll([
+        () => tracker?.dispose(),
+        () => origin?.dispose(),
+        () => terminal?.dispose(),
+      ]);
+      throw combineErrors(primary, cleanup, "Terminal construction and cleanup failed");
     }
+  };
+
+  const failAndRetire = (error: unknown, targetIncarnation = incarnation): never => {
+    const failure = asDomainError(error);
+    publishFailure(failure, true, targetIncarnation);
+    const cleanup = disposeBackend(failure);
+    throw combineErrors(
+      error instanceof AggregateError ? error : failure,
+      cleanup,
+      "Terminal failure and cleanup failed",
+    );
   };
 
   const requireBackend = (): Backend => {
     if (state === "disposed" || state === "failed" || !backend)
       throw domainError("RESYNC_REQUIRED");
-    if (!backend.origin.ownsSurface()) {
-      const error = domainError("PROFILE_UNSUPPORTED");
-      publishFailure(error, true, backend.incarnation);
-      throw error;
-    }
+    if (!backend.origin.ownsSurface())
+      failAndRetire(domainError("PROFILE_UNSUPPORTED"), backend.incarnation);
     return backend;
   };
 
   const replaceBackend = () => {
-    disposeBackend();
-    backend = constructBackend(geometry, appearance);
-    pristine = true;
+    const cleanup = disposeBackend();
+    if (cleanup.length) {
+      const failure = domainError("RECOVERY_UNAVAILABLE");
+      publishFailure(failure, true);
+      throw combineErrors(failure, cleanup, "Terminal replacement cleanup failed");
+    }
+    try {
+      backend = constructBackend(geometry, appearance);
+      pristine = true;
+    } catch (error) {
+      failAndRetire(error);
+    }
   };
 
   const parse = async (bytes: Uint8Array) => {
@@ -221,7 +285,12 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
       assertGeneration(input.viewGeneration);
       if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
         throw domainError("RESYNC_REQUIRED");
-      disposeBackend();
+      const cleanup = disposeBackend();
+      if (cleanup.length) {
+        const failure = domainError("RECOVERY_UNAVAILABLE");
+        publishFailure(failure, true);
+        throw combineErrors(failure, cleanup, "Terminal initialization cleanup failed");
+      }
       viewGeneration = input.viewGeneration;
       geometry = { ...input.geometry };
       proposedGeometry = geometry;
@@ -232,16 +301,10 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
       try {
         backend = constructBackend(geometry, appearance);
       } catch (error) {
-        const failure =
-          typeof error === "object" && error !== null && "kind" in error
-            ? (error as DomainError)
-            : domainError("RECOVERY_UNAVAILABLE");
-        publishFailure(failure, true);
-        throw error;
+        failAndRetire(error);
       }
       pristine = true;
       state = "initialized";
-      if (!visible) backend.terminal.element?.setAttribute("hidden", "");
     },
 
     async beginBaseline(descriptor: BaselineDescriptor): Promise<void> {
@@ -308,10 +371,8 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
         if (!sameGeometry(event.geometry, geometry)) {
           try {
             current.terminal.resize(event.geometry.cols, event.geometry.rows);
-          } catch {
-            const error = domainError("RECOVERY_UNAVAILABLE");
-            publishFailure(error, true, current.incarnation);
-            throw error;
+          } catch (error) {
+            failAndRetire(error, current.incarnation);
           }
           geometry = { ...event.geometry };
         }
@@ -322,8 +383,13 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
         return;
       }
       if (event.type === "appearance") {
+        const theme = xtermTheme(event.appearance);
+        try {
+          current.terminal.options.theme = theme;
+        } catch (error) {
+          failAndRetire(error, current.incarnation);
+        }
         appearance = event.appearance;
-        current.terminal.options.theme = xtermTheme(appearance);
         return;
       }
       if (event.type === "exit") return;
@@ -338,9 +404,15 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
 
     setAppearance(nextAppearance: Appearance): void {
       const theme = xtermTheme(nextAppearance);
+      const current = backend;
+      if (current && state !== "disposed" && state !== "failed") {
+        try {
+          current.terminal.options.theme = theme;
+        } catch (error) {
+          failAndRetire(error, current.incarnation);
+        }
+      }
       appearance = nextAppearance;
-      if (backend && state !== "disposed" && state !== "failed")
-        backend.terminal.options.theme = theme;
     },
 
     setVisibility(nextVisible: boolean): void {
@@ -348,15 +420,20 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
       visible = nextVisible;
       const element = backend?.terminal.element;
       if (element) {
-        if (visible) {
-          element.removeAttribute("hidden");
-          backend?.terminal.refresh(0, Math.max(0, backend.terminal.rows - 1));
-        } else {
-          element.setAttribute("hidden", "");
-          if (effectivelyFocused) {
-            backend?.terminal.blur();
-            publishFocus(false);
+        const current = backend!;
+        try {
+          if (visible) {
+            element.removeAttribute("hidden");
+            current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
+          } else {
+            element.setAttribute("hidden", "");
+            if (effectivelyFocused) {
+              current.terminal.blur();
+              publishFocus(false);
+            }
           }
+        } catch (error) {
+          failAndRetire(error, current.incarnation);
         }
       }
     },
@@ -368,10 +445,11 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     dispose(): void {
       if (state === "disposed") return;
       state = "disposed";
-      disposeBackend();
+      const cleanup = disposeBackend();
       inputs.clear();
       focuses.clear();
       failures.clear();
+      if (cleanup.length) throw new AggregateError(cleanup, "Terminal view cleanup failed");
     },
   };
 }

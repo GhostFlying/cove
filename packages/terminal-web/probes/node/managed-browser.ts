@@ -51,9 +51,7 @@ interface BrowserLauncher {
   connect(endpoint: string, options: { timeout: number }): Promise<ProbeBrowser>;
 }
 
-const builtRoot = resolve(
-  process.env.COVE_QUERY_BROWSER_ROOT ?? fileURLToPath(new URL("../../browser/", import.meta.url)),
-);
+const defaultBuiltRoot = fileURLToPath(new URL("../../browser/", import.meta.url));
 const browsersPath = fileURLToPath(new URL("../../../.cache/playwright/", import.meta.url));
 
 export async function within<T>(
@@ -92,6 +90,7 @@ export interface ManagedBrowserContext {
 export async function withManagedBrowser<T>(
   work: (context: ManagedBrowserContext) => Promise<T>,
   profile: "query" | "environment" = "query",
+  requestedBuiltRoot?: string,
 ): Promise<{
   value: T;
   context: Omit<
@@ -99,6 +98,11 @@ export async function withManagedBrowser<T>(
     "browser" | "remaining" | "stage" | "trackPage" | "reportPageError" | "assertPageErrors"
   >;
 }> {
+  // Q1 retains its environment override for isolated version tests. V1 passes a dedicated root
+  // explicitly so both fixtures share this one bounded browser and listener lifecycle.
+  const builtRoot = resolve(
+    requestedBuiltRoot ?? process.env.COVE_QUERY_BROWSER_ROOT ?? defaultBuiltRoot,
+  );
   if (!(await stat(join(builtRoot, "index.html")).catch(() => null)))
     throw new Error("Built browser fixture is absent");
   process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
@@ -169,6 +173,11 @@ export async function withManagedBrowser<T>(
   const server = createServer(async (request, response) => {
     try {
       const pathname = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
+      if (pathname === "/favicon.ico") {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
       const relative = pathname === "/" ? "index.html" : decodeURIComponent(pathname).slice(1);
       const candidate = normalize(join(builtRoot, relative));
       if (!candidate.startsWith(`${builtRoot}${sep}`))
@@ -403,6 +412,46 @@ export async function withManagedBrowser<T>(
   if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Browser cleanup failed");
   if (result === undefined || !contextRecord) throw new Error("Browser probe produced no result");
   return { value: result, context: contextRecord };
+}
+
+export async function openManagedPage(
+  context: ManagedBrowserContext,
+  path = "/",
+): Promise<ProbePage> {
+  const page = await within(
+    context.browser.newPage(),
+    context.remaining(5_000, "page creation"),
+    "page creation",
+  );
+  context.trackPage(page);
+  page.setDefaultTimeout(context.remaining(5_000, "browser action"));
+  for (const event of ["console", "pageerror", "requestfailed"])
+    page.on(event, (value) => {
+      if (typeof value !== "object" || value === null) return;
+      const item = value as {
+        type?: () => string;
+        text?: () => string;
+        message?: string;
+        url?: () => string;
+      };
+      if (event === "console" && item.type?.() === "error")
+        context.reportPageError(item.text?.() ?? "console error");
+      if (event === "pageerror") context.reportPageError(item.message ?? "page error");
+      if (event === "requestfailed") context.reportPageError(`Failed request: ${item.url?.()}`);
+    });
+  page.on("request", (request) => {
+    const url = (request as { url(): string }).url();
+    if (!url.startsWith(context.url)) context.reportPageError(`External request: ${url}`);
+  });
+  const url = new URL(path, context.url);
+  if (url.origin !== new URL(context.url).origin) throw new Error("Managed page escaped fixture");
+  const response = await page.goto(url.href, {
+    waitUntil: "networkidle",
+    timeout: context.remaining(10_000, "navigation"),
+  });
+  if (!response?.ok()) throw new Error(`Fixture navigation failed: ${response?.status()}`);
+  context.assertPageErrors();
+  return page;
 }
 
 export async function openQueryPage(

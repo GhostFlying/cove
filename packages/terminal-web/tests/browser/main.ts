@@ -55,6 +55,12 @@ let heldStatus: "idle" | "pending" | "resolved" | "rejected" = "idle";
 
 const ownedBytes = (bytes: Uint8Array) => Array.from(bytes);
 const serialInput = (intent: InputIntent) => ({ ...intent, bytes: ownedBytes(intent.bytes) });
+const errorMessages = (error: unknown): string[] => {
+  if (error instanceof AggregateError) return error.errors.flatMap(errorMessages);
+  if (typeof error === "object" && error !== null && "kind" in error)
+    return [(error as DomainError).kind];
+  return [(error as Error)?.message ?? String(error)];
+};
 
 async function initialize(geometry: Geometry = { cols: 40, rows: 10 }): Promise<void> {
   view?.dispose();
@@ -129,12 +135,24 @@ function rows(): string[] {
   );
 }
 
+function allRows(): string[] {
+  if (!capturedTerminal) return [];
+  const buffer = capturedTerminal.buffer.active;
+  return Array.from(
+    { length: buffer.length },
+    (_, index) => buffer.getLine(index)?.translateToString(true) ?? "",
+  );
+}
+
 function evidence() {
   return {
     inputs: inputs.map(serialInput),
     focuses: structuredClone(focuses),
     failures: structuredClone(failures),
     rows: rows(),
+    allRows: allRows(),
+    hidden: capturedTerminal?.element?.hasAttribute("hidden") ?? false,
+    ownedRoots: container.querySelectorAll("[data-cove-terminal-view]").length,
     logical: {
       cols: capturedTerminal?.cols,
       rows: capturedTerminal?.rows,
@@ -305,6 +323,14 @@ const fixture = {
       return (error as DomainError).kind ?? "unknown";
     }
   },
+  async attemptReset() {
+    try {
+      await initialize();
+      return { kind: "ok", evidence: evidence() };
+    } catch (error) {
+      return { kind: (error as DomainError).kind ?? "unknown", evidence: evidence() };
+    }
+  },
   async attemptOutput(bytes: number[]) {
     try {
       await output(Uint8Array.from(bytes));
@@ -345,6 +371,119 @@ const fixture = {
       candidate.dispose();
     }
     return { kind, failures: observed.map((error) => error.kind) };
+  },
+  async attemptReplacementConstructionFailure() {
+    await ready(encoder.encode("DIRTY"));
+    const original = Terminal.prototype.open;
+    Terminal.prototype.open = () => {
+      throw new Error("injected replacement open failure");
+    };
+    let kind = "ok";
+    try {
+      await view!.beginBaseline(descriptor(1));
+    } catch (error) {
+      kind = (error as DomainError).kind ?? "unknown";
+    } finally {
+      Terminal.prototype.open = original;
+    }
+    let after = "ok";
+    try {
+      await output(Uint8Array.of(65));
+    } catch (error) {
+      after = (error as DomainError).kind ?? "unknown";
+    }
+    return { kind, after, evidence: evidence() };
+  },
+  async hiddenReplacement() {
+    await ready(encoder.encode("OLD"));
+    view!.setVisibility(false);
+    const before = evidence();
+    await baseline([encoder.encode("NEW")]);
+    const replaced = evidence();
+    view!.setVisibility(true);
+    return { before, replaced, shown: evidence() };
+  },
+  async fullMaximumBaseline() {
+    const markers: number[] = [];
+    capturedTerminal?.parser.registerOscHandler(778, (value) => {
+      markers.push(Number(value));
+      return true;
+    });
+    const chunks = Array.from({ length: 129 }, (_, index) => {
+      const prefix = encoder.encode(`\x1b]778;${index}\x07\rMARKER-${index}`);
+      const chunk = new Uint8Array(65536);
+      chunk.set(prefix);
+      return chunk;
+    });
+    await baseline(chunks, 65536);
+    return { markers, evidence: evidence() };
+  },
+  attemptRuntimeThemeFailure(withCleanupFailure = false) {
+    const terminal = capturedTerminal!;
+    const options = terminal.options as { theme?: unknown };
+    Object.defineProperty(options, "theme", {
+      configurable: true,
+      set: () => {
+        throw new Error("injected theme failure");
+      },
+    });
+    let disposeCalls = 0;
+    let removeCalls = 0;
+    const originalRemove = container.removeEventListener.bind(container);
+    if (withCleanupFailure) {
+      container.removeEventListener = (
+        ...args: Parameters<typeof container.removeEventListener>
+      ) => {
+        removeCalls++;
+        originalRemove(...args);
+        if (removeCalls === 1) throw new Error("injected tracker cleanup failure");
+      };
+    }
+    const originalDispose = terminal.dispose.bind(terminal);
+    terminal.dispose = () => {
+      disposeCalls++;
+      originalDispose();
+    };
+    let thrown: unknown;
+    try {
+      view!.setAppearance({ palette: [] });
+    } catch (error) {
+      thrown = error;
+    } finally {
+      container.removeEventListener = originalRemove;
+    }
+    const aggregate = thrown instanceof AggregateError ? thrown : undefined;
+    let repeated = "ok";
+    try {
+      view!.dispose();
+    } catch {
+      repeated = "threw";
+    }
+    return {
+      kind: (aggregate?.cause as DomainError | undefined)?.kind ?? (thrown as DomainError)?.kind,
+      errors: errorMessages(thrown),
+      disposeCalls,
+      removeCalls,
+      repeated,
+      failures: failures.map((error) => error.kind),
+      children: container.childElementCount,
+    };
+  },
+  disposeAfterPasteWithTimerProbe() {
+    let cleared = 0;
+    const originalClear = globalThis.clearTimeout;
+    globalThis.clearTimeout = ((timer: number) => {
+      cleared++;
+      return originalClear(timer);
+    }) as typeof globalThis.clearTimeout;
+    try {
+      this.paste("timer");
+      view!.dispose();
+      view!.dispose();
+    } finally {
+      globalThis.clearTimeout = originalClear;
+    }
+    return { cleared, children: container.childElementCount };
   },
   async cycle(count: number) {
     for (let index = 0; index < count; index++) {

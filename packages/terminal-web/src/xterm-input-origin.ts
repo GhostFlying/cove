@@ -108,10 +108,24 @@ export function attachInputOrigin(
     dispose() {
       if (disposed) return;
       disposed = true;
-      if (core.triggerDataEvent === dataWrapper) core.triggerDataEvent = originalData;
-      if (core.triggerBinaryEvent === binaryWrapper) core.triggerBinaryEvent = originalBinary;
-      userSignal.dispose();
-      attached.delete(terminal);
+      const errors: unknown[] = [];
+      for (const action of [
+        () => {
+          if (core.triggerDataEvent === dataWrapper) core.triggerDataEvent = originalData;
+        },
+        () => {
+          if (core.triggerBinaryEvent === binaryWrapper) core.triggerBinaryEvent = originalBinary;
+        },
+        () => userSignal.dispose(),
+        () => attached.delete(terminal),
+      ]) {
+        try {
+          action();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length) throw new AggregateError(errors, "Input origin cleanup failed");
     },
   };
 }

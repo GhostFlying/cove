@@ -76,28 +76,30 @@ test("V1-I4 preserves SGR mouse press release and wheel with mouse origin", asyn
     await page.mouse.click(box.x + 40, box.y + 30);
     const disabled = (await page.evaluate(() => window.coveView.evidence())).inputs;
     await page.evaluate(async (bytes) => {
-      await window.coveView.reset();
+      window.coveView.setSize(760, 420);
+      await window.coveView.reset({ cols: 40, rows: 10 });
       await window.coveView.ready();
       await window.coveView.output(bytes);
     }, esc("\x1b[?1000h\x1b[?1006h"));
-    await page.mouse.click(box.x + 40, box.y + 30);
-    await page.mouse.move(box.x + 40, box.y + 30);
-    await page.mouse.wheel(0, 100);
+    const activeBox = await page.locator(".xterm-screen").boundingBox();
+    const x = activeBox.x + activeBox.width * (4.5 / 40);
+    const y = activeBox.y + activeBox.height * (2.5 / 10);
+    await page.mouse.click(x, y);
+    await page.mouse.wheel(0, -120);
     const normal = (await page.evaluate(() => window.coveView.evidence())).inputs;
     await page.evaluate((bytes) => window.coveView.output(bytes, 2), esc("\x1b[?1049h"));
-    await page.mouse.click(box.x + 40, box.y + 30);
-    await page.mouse.wheel(0, -100);
+    await page.mouse.click(x, y);
+    await page.mouse.wheel(0, -120);
     const alternate = (await page.evaluate(() => window.coveView.evidence())).inputs.slice(
       normal.length,
     );
     return { disabled, normal, alternate };
   });
   expect(result.disabled).toEqual([]);
-  expect(result.normal.length).toBeGreaterThanOrEqual(3);
-  expect(result.alternate.length).toBeGreaterThanOrEqual(3);
+  const expected = [esc("\x1b[<0;5;3M"), esc("\x1b[<0;5;3m"), esc("\x1b[<64;5;3M")];
   for (const inputs of [result.normal, result.alternate]) {
-    expect(inputs.map((item) => item.source)).toEqual(inputs.map(() => "mouse"));
-    expect(inputs.every((item) => item.bytes[0] === 27 && item.bytes[1] === 91)).toBe(true);
+    expect(inputs.map((item) => item.source)).toEqual(["mouse", "mouse", "mouse"]);
+    expect(inputs.map((item) => item.bytes)).toEqual(expected);
   }
 });
 
@@ -113,9 +115,10 @@ test("V1-I5 preserves legacy high-coordinate binary bytes exactly once", async (
     await page.mouse.click(box.x + box.width * (99.5 / 120), box.y + box.height * (3.5 / 10));
     return (await page.evaluate(() => window.coveView.evidence())).inputs;
   });
-  expect(inputs).toHaveLength(2);
-  expect(inputs.every((item) => item.source === "mouse")).toBe(true);
-  expect(inputs.flatMap((item) => item.bytes).some((byte) => byte > 127)).toBe(true);
+  expect(inputs.map((item) => ({ source: item.source, bytes: item.bytes }))).toEqual([
+    { source: "mouse", bytes: [27, 91, 77, 32, 132, 36] },
+    { source: "mouse", bytes: [27, 91, 77, 35, 132, 36] },
+  ]);
 });
 
 test("V1-I6 never grammar-classifies reply-shaped genuine input", async () => {
