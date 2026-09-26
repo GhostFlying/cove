@@ -50,18 +50,67 @@ function assertSpawnError(error, causePattern) {
   return error;
 }
 
-function spawnFault(phase, nonce, childFixture = fixture) {
+function spawnFault(phase, nonce, onNativeExit = () => {}) {
   const originalFork = pty.native.fork;
   try {
-    pty.native.fork = (...args) => originalFork(...args.slice(0, -1), phase, args.at(-1));
+    pty.native.fork = (...args) => {
+      const forwarded = args.slice(0, -1);
+      const originalExit = forwarded[10];
+      forwarded[10] = (...exitArgs) => {
+        try {
+          onNativeExit(...exitArgs);
+        } finally {
+          originalExit(...exitArgs);
+        }
+      };
+      return originalFork(...forwarded, phase, args.at(-1));
+    };
     try {
-      pty.spawn(process.execPath, [childFixture, nonce], options);
+      pty.spawn(process.execPath, [fixture, nonce], options);
     } catch (error) {
       return assertSpawnError(error, /Could not duplicate|Injected failure/);
     }
     assert.fail(`Native fault ${phase} unexpectedly returned a PTY`);
   } finally {
     pty.native.fork = originalFork;
+  }
+}
+
+function stopVerifiedOwnedChild(pid, nonce) {
+  const inspected = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+    timeout: 1_000,
+  });
+  if (inspected.status !== 0) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      throw error;
+    }
+    throw new Error(`Owned spawn helper ${pid} identity is unverifiable`);
+  }
+  if (!inspected.stdout.includes(fixture) || !inspected.stdout.includes(nonce)) {
+    throw new Error(`Owned spawn helper ${pid} identity changed`);
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
+async function observeWithin(observation, milliseconds, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      observation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -328,23 +377,71 @@ test("pending rollback holds capacity and a late reap cannot release uncertainty
   assert.ok(ticket);
   const nonce = randomUUID();
   const start = Date.now();
-  const failure = spawnFault("before-watcher-held", nonce);
-  ledger.observe(ticket, failure);
-  assert.ok(Date.now() - start < 500, "spawn must return before the cleanup deadline");
-  const pending = await Promise.race([
-    failure.cleanup.then(() => false),
-    new Promise((resolveWait) => setTimeout(() => resolveWait(true), 50)),
-  ]);
-  assert.equal(pending, true);
-  assert.equal(ledger.used, 1);
-  assert.equal(ledger.reserve(), undefined);
-  const result = await failure.cleanup;
-  assert.deepEqual(result, { kind: "cleanup-uncertain", reason: "timeout" });
-  assert.ok(Date.now() - start >= 2_900);
-  await assertNoOwnedChild(nonce);
-  assert.deepEqual(await failure.cleanup, result);
-  assert.equal(ledger.used, 1);
-  assert.equal(ledger.reserve(), undefined);
+  let nativeExitCallbacks = 0;
+  let resolveNativeExit;
+  const nativeExit = new Promise((resolveExit) => {
+    resolveNativeExit = resolveExit;
+  });
+  let failure;
+  let firstFailure;
+  try {
+    failure = spawnFault("before-watcher-held", nonce, () => {
+      nativeExitCallbacks++;
+      resolveNativeExit();
+    });
+    ledger.observe(ticket, failure);
+    assert.ok(Date.now() - start < 500, "spawn must return before the cleanup deadline");
+    const pending = await Promise.race([
+      failure.cleanup.then(() => false),
+      new Promise((resolveWait) => setTimeout(() => resolveWait(true), 50)),
+    ]);
+    assert.equal(pending, true);
+    assert.equal(ledger.used, 1);
+    assert.equal(ledger.reserve(), undefined);
+    const result = await failure.cleanup;
+    assert.deepEqual(result, { kind: "cleanup-uncertain", reason: "timeout" });
+    assert.ok(Date.now() - start >= 2_900);
+    assert.equal(nativeExitCallbacks, 0, "the watcher must reap after the receipt deadline");
+    await observeWithin(nativeExit, 2_000, "late owned watcher callback did not arrive");
+    assert.equal(nativeExitCallbacks, 1);
+    await assertNoOwnedChild(nonce);
+    assert.deepEqual(await failure.cleanup, result);
+    assert.equal(ledger.used, 1);
+    assert.equal(ledger.reserve(), undefined);
+  } catch (error) {
+    firstFailure = error;
+  } finally {
+    let pids = [];
+    try {
+      pids = ownedChildren(nonce);
+    } catch (error) {
+      firstFailure ??= error;
+    }
+    for (const pid of pids) {
+      try {
+        stopVerifiedOwnedChild(pid, nonce);
+      } catch (error) {
+        firstFailure ??= error;
+      }
+    }
+    try {
+      await observeWithin(
+        nativeExit,
+        Math.max(1, start + 5_500 - Date.now()),
+        "owned watcher did not confirm reap after cleanup",
+      );
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      assert.equal(nativeExitCallbacks, 1);
+    } catch (error) {
+      firstFailure ??= error;
+    }
+    try {
+      await assertNoOwnedChild(nonce);
+    } catch (error) {
+      firstFailure ??= error;
+    }
+  }
+  if (firstFailure) throw firstFailure;
 }, 8_000);
 
 test("reader and writer close ambiguity each retain finite capacity", async () => {
