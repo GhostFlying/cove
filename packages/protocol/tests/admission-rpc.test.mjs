@@ -24,6 +24,8 @@ import {
   rpcHttpSuccessStatus,
   validateOperationRecord,
   validateRpcMethodResult,
+  validateRpcMethodParams,
+  validateRpcResultForCall,
   validateRpcResponse,
 } from "@cove/protocol/rpc";
 
@@ -431,4 +433,90 @@ test("operation records remain bounded and read results carry no preview VT", ()
   expect(composeRpcMethodResult("terminal.get", { record: { ...visible, vt: "secret" } })).toEqual({
     record: visible,
   });
+});
+
+test("RPC params and result identities bind target instance, method and run", () => {
+  const stop = { operationId: "stop-1", expectedRelayInstanceId: "i1", run };
+  expect(
+    validateRpcMethodParams("terminal.stop", { ...stop, run: { ...run, relayInstanceId: "i2" } }),
+  ).toBeNull();
+  expect(
+    canonicalOperationIntent(
+      "terminal.stop",
+      { ...stop, run: { ...run, relayInstanceId: "i2" } },
+      encoder,
+    ),
+  ).toBeNull();
+  expect(
+    validateRpcMethodParams("terminal.create", {
+      ...create,
+      appearance: {
+        palette: [
+          { index: 1, rgb: "ffff/ffff/ffff" },
+          { index: 1, rgb: "0000/0000/0000" },
+        ],
+      },
+    }),
+  ).toBeNull();
+  const createOperation = {
+    operationId: "o1",
+    method: "terminal.create",
+    revision: 1,
+    state: "succeeded",
+    run,
+    result: { run },
+  };
+  expect(
+    validateOperationRecord(
+      { ...createOperation, result: { run: { ...run, runId: "r2" } } },
+      encoder,
+    ),
+  ).toBeNull();
+  expect(validateRpcMethodResult("terminal.stop", { operation: createOperation })).toBe(false);
+  expect(composeRpcMethodResult("terminal.stop", { operation: createOperation })).toBeNull();
+  expect(validateRpcResultForCall("terminal.create", create, { operation: createOperation })).toBe(
+    true,
+  );
+  expect(
+    validateRpcResultForCall(
+      "terminal.create",
+      { ...create, operationId: "o2" },
+      { operation: createOperation },
+    ),
+  ).toBe(false);
+  const stopOperation = {
+    operationId: "stop-1",
+    method: "terminal.stop",
+    revision: 1,
+    state: "accepted",
+    run,
+  };
+  expect(validateRpcResultForCall("terminal.stop", stop, { operation: stopOperation })).toBe(true);
+  expect(
+    validateRpcResultForCall("terminal.stop", stop, {
+      operation: { ...stopOperation, run: { ...run, runId: "r2" } },
+    }),
+  ).toBe(false);
+});
+
+test("status result cannot advertise budgets rejected by the shared policy", () => {
+  const status = {
+    serverId: "s1",
+    relayInstanceId: "i1",
+    buildVersion: "b1",
+    protocolVersion: 1,
+    profile: "pragmatic-logical-grid-v1",
+    effectiveBudgets: M0_LIMITS,
+    workerCount: 1,
+    runCount: 1,
+    admission: "ready",
+    health: "live",
+  };
+  expect(validateRpcMethodResult("server.status", status)).toBe(true);
+  expect(
+    validateRpcMethodResult("server.status", {
+      ...status,
+      effectiveBudgets: { ...M0_LIMITS, subscriptionCreditBytes: 1 },
+    }),
+  ).toBe(false);
 });
