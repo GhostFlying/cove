@@ -10,7 +10,7 @@ import { expect, test } from "vitest";
 const require = createRequire(import.meta.url);
 const pty = require("node-pty");
 
-test("stale native addon capability refuses bounded spawn before creating a child", () => {
+test("stale native addon capability refuses bounded spawn before creating a child", async () => {
   const marker = pty.native.coveBoundedWriterVersion;
   const fork = pty.native.fork;
   let forkCalls = 0;
@@ -20,11 +20,17 @@ test("stale native addon capability refuses bounded spawn before creating a chil
       forkCalls++;
       return fork(...args);
     };
-    expect(() =>
+    let failure;
+    try {
       pty.spawn("/bin/false", [], {
         boundedWrite: { maxAllocatedBytes: 1, maxTasks: 1 },
-      }),
-    ).toThrow(/native capability/);
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(pty.BoundedPtySpawnError);
+    expect(String(failure.cause)).toMatch(/Bounded PTY support unavailable/);
+    expect(await failure.cleanup).toEqual({ kind: "confirmed-clean" });
     expect(forkCalls).toBe(0);
   } finally {
     pty.native.coveBoundedWriterVersion = marker;

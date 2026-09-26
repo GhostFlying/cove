@@ -139,6 +139,11 @@ export const requiredSuites = [
     minimumTests: 2,
   },
   {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-write-spawn-contract.test.mjs",
+    minimumTests: 7,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
