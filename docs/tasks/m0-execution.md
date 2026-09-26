@@ -270,3 +270,9 @@ traex_resume_exit_code=$?
 
 tail -n 30 "$out/events.jsonl"
 ```
+
+## Current QI and R1 candidate checkpoint
+
+The earlier `a5f874f` qualification branch remains preserved; its six package files are now integrated byte-for-byte in the primary QI candidate `487d8b0ce93bc907e79883f69e4fde9fe377e632`, not merged or accepted. [QI integration evidence](m0-worker-qualification-integration.md) records its semantic shared registration, unchanged V1 evidence checks, initial missing-Chromium setup failure and successful author macOS full gate (31 required files / 274 tests, zero skipped). Separate source review, independent verification and hosted CI remain gates before N1 production patch allocation. The public native input bound remains unproved.
+
+The reviewed [P3 routed stable-recovery plan](m0-routed-stable-recovery-contract-plan.md) was committed at `c32a775b7e1ca297b2b60d6061a91200063172f3` after independent plan review `/tmp/cove-m0-next-plans-independent-review.md` SHA-256 `a7739c8084efab4d51ae1e57c5042eba15b0bb8b5a437056a2038447192e1175`. R1 was allocated in the existing clean `m0-terminal-recovery` checkout at `6ccd5641bdc74eb4ada6b4a429b57a1cf2c1eaca`, branch `p/luchengxuan/m0-19-routed-protocol`. Local warmpool launched TraeX GPT-5.6 Sol xhigh session `01a0de0b-c164-7331-8288-1b9559d4cac5` with prompt `/tmp/cove-m0-p3-r1/prompt.md` (SHA-256 `9bcc4f2deede0158cd8854d97d6f3f13dac3c090f9559f726cf6a99881c3b53c`), JSONL `/tmp/cove-m0-p3-r1/events.jsonl`, stderr and final result in the same task-owned directory. Its protocol-only source remains author-owned and unaccepted. Root separately allocated scratch-only W1 N0; no production worker patch or devbox task was dispatched here.
