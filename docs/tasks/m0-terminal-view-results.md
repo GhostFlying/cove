@@ -115,3 +115,24 @@ Checks on the frozen repair used the pinned Node 26.10.0/pnpm 12.6.0 toolchain:
 | One final external scoped V1 run                                 | pass, 3 files / 18 tests, 40.80 s Vitest duration (40.97 s wall) |
 
 The final worktree was clean at the frozen source/test head, and a targeted post-run scan found no owned Chromium, V1 runner or Vite process. Retained Q1 was not rerun because this batch changed neither Q1 source/fixture nor the accepted managed runner. These are author-scoped external-config results; root `pnpm check`, renewed independent review/execution, integrated macOS/Linux and GitHub exact-head qualification remain for the coordinator and are not claimed. The withheld corpus was not read. No shared/root gate/config/manifest/lock/pin, protocol/schema/wire/P3, native/W1, PTY/server/product, GPU/performance or GitHub operation was performed.
+
+## Final focus and disposed-registration repair
+
+The additional independent review appendix was read in full and verified at SHA-256 `ba0ba3bd1e0e29cda3dd7e81041cb0c7d4d9a28e542599c90c7fba0cf23b1567`. Root had integrated the preceding CSS/fatal repair as `aa2463e2f3ba4c81bbbace5de03e49a3aa41bbd5`; its C1/F1/F2/F3, full 267 and dual-OS results predate this batch and are not carried forward as exact-head evidence. PR 38 remained unmerged. The pre-code allocation is `f3c2e8b`; the frozen new source/test head is `399c4da2cfd45fdb1bd119299468678e297d1537`, tree `2875cad2dd4b48d52bdc1b417dd6f67f27f6d334`, comprising focus commit `4fdcbfb` and disposed-registration commit `399c4da`.
+
+Every provenance-qualified genuine input now publishes a fresh checked monotonic `focused: true` intent synchronously before its bytes, even when local DOM focus did not transition. This supplies a new activation token after an unobservable remote takeover while leaving ownership/grants/coalescing to the future P3 controller. Blur stays transition-only. L4 performs two genuine Playwright keyboard actions without blur: its lightweight consumer accepts `focusSeq=1` before `x`, invalidates that token to model intervening takeover, and then observes higher `focusSeq=2` immediately before `y`. Its prior visibility, appearance and scroll controls plus new selection/copy control remain free of focus/input intents until deliberate input.
+
+All three public listener registrations now check disposed state before adding a callback and throw typed `RESYNC_REQUIRED` after disposal. L6 verifies live subscriptions can still be disposed repeatedly, then attempts `onInputIntent`, `onFocusIntent` and `onFailure` after first disposal and after a repeated disposal; every call rejects and none returns a subscription. Its earlier real-timeout, synchronous-write, fatal-origin, timer, wrapper/listener, DOM and repeated cleanup assertions remain in the same case. The shared registered inventory remains three suites and 18 cases.
+
+Checks on the frozen repair used pinned Node 26.10.0 and pnpm 12.6.0:
+
+| Check                                                 | Result                                                           |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| Terminal-web build/typecheck and both Vite bundles    | pass after each defect and at final source                       |
+| Affected L4 focus/takeover control                    | pass, 1/1 in 2.87 s after build                                  |
+| Affected L6 disposed-registration/lifecycle control   | pass, 1/1 in 17.67 s after build                                 |
+| Final-source Prettier and Oxlint with warnings denied | pass over allocated source/browser/lifecycle paths               |
+| Complete lifecycle suite                              | pass, 1 file / 6 tests, 24.68 s Vitest duration (24.84 s wall)   |
+| One final external scoped V1 run                      | pass, 3 files / 18 tests, 40.26 s Vitest duration (40.42 s wall) |
+
+No failed candidate or driver-correction run occurred in this batch. The source/test worktree was clean at freeze, and a targeted process scan found no owned Chromium, V1 runner or Vite process. Retained Q1 was not rerun because its source, fixture and managed runner were unchanged. These remain author-scoped external-config results; root integration, renewed independent review/testing, full gate, Linux/dual-OS and GitHub exact-head qualification remain separate and are not claimed. No independent corpus, shared/root registration/config/lock/pin, protocol/schema/wire/P3, native/W1, PTY/server/product, GPU/performance or GitHub operation was touched.
