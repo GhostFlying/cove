@@ -8,6 +8,7 @@ import {
   requiredSuites,
   verifyDiscovery,
   verifyInventory,
+  viewEvidenceCases,
 } from "../../scripts/ci-test-gate.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
@@ -66,6 +67,35 @@ function report() {
   };
 }
 
+function growingViewReport() {
+  const viewSuites = requiredSuites.filter((suite) => suite.project === "terminal-web");
+  const files = viewSuites.map((suite) => suite.file);
+  const discovered = viewSuites.flatMap((suite, suiteIndex) =>
+    Array.from({ length: suiteIndex === 0 ? 7 : 6 }, (_, index) => ({
+      projectName: suite.project,
+      file: resolve(root, suite.file),
+      name: `case ${index}`,
+    })),
+  );
+  const execution = {
+    success: true,
+    numTotalTests: 19,
+    numPassedTests: 19,
+    numFailedTests: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    testResults: viewSuites.map((suite, suiteIndex) => ({
+      name: resolve(root, suite.file),
+      status: "passed",
+      assertionResults: Array.from({ length: suiteIndex === 0 ? 7 : 6 }, (_, index) => ({
+        fullName: `case ${index}`,
+        status: "passed",
+      })),
+    })),
+  };
+  return { viewSuites, files, discovered, execution };
+}
+
 test("rejects a required suite removed from discovery", () => {
   expect(() => verifyDiscovery(discoveredCases.slice(0, 2), [first], suites)).toThrow(
     /Required suite/,
@@ -112,9 +142,53 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
 });
 
 test("terminal-web package test runs both registered probe and view projects", async () => {
-  const pkg = JSON.parse(await readFile(resolve(root, "packages/terminal-web/package.json"), "utf8"));
-  const projects = [...pkg.scripts.test.matchAll(/(?:^|\s)--project\s+(\S+)/g)].map((match) => match[1]);
+  const pkg = JSON.parse(
+    await readFile(resolve(root, "packages/terminal-web/package.json"), "utf8"),
+  );
+  const projects = [...pkg.scripts.test.matchAll(/(?:^|\s)--project\s+(\S+)/g)].map(
+    (match) => match[1],
+  );
   expect(projects).toEqual(["terminal-web-probes", "terminal-web"]);
+});
+
+test("view evidence follows validated passing case growth above three suite floors", () => {
+  const { viewSuites, files, discovered, execution } = growingViewReport();
+  const inventory = verifyInventory(discovered, execution, files, viewSuites);
+  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 6]);
+  expect(viewEvidenceCases(execution, inventory)).toHaveLength(19);
+});
+
+test("view evidence still rejects missing, short, pending, and mismatched suites", () => {
+  const { viewSuites, files, discovered, execution } = growingViewReport();
+  expect(() =>
+    verifyInventory(
+      discovered.filter((testCase) => testCase.file !== resolve(root, files[2])),
+      execution,
+      files,
+      viewSuites,
+    ),
+  ).toThrow(/discovered 0 tests; needs 6/);
+  expect(() =>
+    verifyInventory(
+      discovered.filter(
+        (testCase) => testCase.file !== resolve(root, files[1]) || testCase.name !== "case 5",
+      ),
+      execution,
+      files,
+      viewSuites,
+    ),
+  ).toThrow(/discovered 5 tests; needs 6/);
+  const pending = structuredClone(execution);
+  pending.testResults[0].assertionResults[0].status = "pending";
+  expect(() => verifyInventory(discovered, pending, files, viewSuites)).toThrow(/skipped, pending/);
+  const inventory = verifyInventory(discovered, execution, files, viewSuites);
+  expect(() => viewEvidenceCases(execution, inventory.slice(1))).toThrow(/suite evidence/);
+  expect(() =>
+    viewEvidenceCases(
+      execution,
+      inventory.map((suite, index) => (index === 0 ? { ...suite, passed: 6 } : suite)),
+    ),
+  ).toThrow(/suite evidence/);
 });
 
 test("supported terminal protocol suite is mandatory with compiled cases", async () => {
@@ -318,7 +392,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 24/);
+  ).toThrow(/needs 26/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
