@@ -97,7 +97,13 @@ function matchingRefs(value: TerminalMetadata): boolean {
   )
     return validateEventBinding(value);
   if ("appearance" in value && !validateAppearance(value.appearance)) return false;
-  if (value.type === "error" && value.error.code !== ERROR_CODES[value.error.kind]) return false;
+  if (
+    value.type === "error" &&
+    (value.error.code !== ERROR_CODES[value.error.kind] ||
+      (value.commandType === "input" && value.error.kind === "RESULT_UNKNOWN") !==
+        (value.error.subject === "input"))
+  )
+    return false;
   return true;
 }
 

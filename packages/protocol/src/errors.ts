@@ -48,6 +48,7 @@ const DomainErrorFieldsSchema = z.object({
   message: z.string().max(256),
   acceptance: AcceptanceSchema,
   nextAction: NextActionSchema,
+  subject: z.literal("input").optional(),
 });
 
 const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
@@ -78,7 +79,9 @@ export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
   (value) =>
     value.code === ERROR_CODES[value.kind] &&
     value.message === value.kind.replaceAll("_", " ") &&
-    value.nextAction === actions[value.kind],
+    (value.subject === undefined ||
+      (value.kind === "RESULT_UNKNOWN" && value.acceptance === "unknown")) &&
+    value.nextAction === (value.subject === "input" ? "inspect-run" : actions[value.kind]),
 );
 export type DomainError = z.infer<typeof DomainErrorSchema>;
 
@@ -86,13 +89,17 @@ export type DomainError = z.infer<typeof DomainErrorSchema>;
 export function domainError(
   kind: DomainErrorKind,
   acceptance: z.infer<typeof AcceptanceSchema> = "not-accepted",
+  subject?: "input",
 ): DomainError {
+  if (subject && (kind !== "RESULT_UNKNOWN" || acceptance !== "unknown"))
+    throw new Error("Input subject requires unknown result");
   return {
     kind,
     code: ERROR_CODES[kind],
     message: kind.replaceAll("_", " "),
     acceptance,
-    nextAction: actions[kind],
+    nextAction: subject === "input" ? "inspect-run" : actions[kind],
+    ...(subject ? { subject } : {}),
   };
 }
 

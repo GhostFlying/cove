@@ -177,6 +177,8 @@ test("WS upgrade checks present Origin and authenticates every first message", (
   };
   expect(evaluateWsUpgrade(upgrade)).toBe("accepted");
   expect(evaluateWsUpgrade({ ...upgrade, origin: undefined })).toBe("accepted");
+  expect(evaluateWsUpgrade({ ...upgrade, origin: "http://127.0.0.1:9999" })).toBe("forbidden");
+  expect(evaluateWsUpgrade({ ...upgrade, origin: "null" })).toBe("forbidden");
   expect(evaluateWsUpgrade({ ...upgrade, host: "localhost:4096" })).toBe("forbidden");
   expect(evaluateWsUpgrade({ ...upgrade, path: "/rpc" })).toBe("forbidden");
   expect(WsBootstrapSchema.safeParse({ ...request, secret: "x".repeat(43) }).success).toBe(true);
