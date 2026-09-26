@@ -94,6 +94,23 @@ test("query input browser suite is mandatory with ten acceptance rows", async ()
   );
 });
 
+test("all three V1 browser suites reject missing and empty discovery", async () => {
+  const files = await readVitestOwnedTestFiles();
+  for (const name of ["view-input", "view-recovery", "view-lifecycle"]) {
+    const file = `packages/terminal-web/tests/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "terminal-web", minimumTests: 6 });
+    expect(files).toContain(file);
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests; needs 6/);
+    const short = Array.from({ length: 5 }, (_, index) => ({
+      projectName: "terminal-web",
+      file: resolve(root, file),
+      name: `${name} ${index}`,
+    }));
+    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(/discovered 5 tests; needs 6/);
+  }
+});
+
 test("supported terminal protocol suite is mandatory with compiled cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/supported-terminal.test.mjs",
@@ -295,7 +312,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 22/);
+  ).toThrow(/needs 23/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
@@ -306,6 +323,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/terminal-web/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
@@ -313,12 +331,14 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/tests/engine.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
+  await writeFile(resolve(checkout, "packages/terminal-web/tests/view-input.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
     "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",
     "packages/terminal-engine/tests/engine.test.mjs",
     "packages/terminal-web/probes/browser.test.mjs",
+    "packages/terminal-web/tests/view-input.test.mjs",
     "tests/tooling/excluded.spec.ts",
     "tests/tooling/registered.test.ts",
   ]);

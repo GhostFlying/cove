@@ -27,9 +27,10 @@ function assertDependencyBoundary(
   )
     throw new Error("Engine exports escaped the adapter and experiment boundary");
   if (
-    Object.keys(webManifest.exports).sort().join() !== "./probes/environment,./probes/query-input"
+    Object.keys(webManifest.exports).sort().join() !==
+    "./probes/environment,./probes/query-input,./xterm-view"
   )
-    throw new Error("Web exports more than its experiment");
+    throw new Error("Web exports escaped the view and experiment boundary");
   if (
     Object.keys(engineManifest.dependencies).sort().join() !==
     "@cove/protocol,@xterm/addon-serialize,@xterm/headless"
@@ -78,6 +79,12 @@ test("real package manifests stay within their execution environments", async ()
   const browserAssets = await readdir(join(web, "dist/browser/assets"));
   expect(browserAssets.some((asset) => asset.endsWith(".js"))).toBe(true);
   expect(browserAssets.some((asset) => asset.endsWith(".css"))).toBe(true);
+  const viewAssets = await readdir(join(web, "dist/view-browser/assets"));
+  expect(viewAssets.some((asset) => asset.endsWith(".js"))).toBe(true);
+  expect(viewAssets.some((asset) => asset.endsWith(".css"))).toBe(true);
+  expect(await readFile(join(web, "dist/src/xterm-view.d.ts"), "utf8")).toContain(
+    "createXtermTerminalView",
+  );
 });
 
 test("Vite rejects side-effect, dynamic, native, and transitive Node imports in isolated builds", async () => {
@@ -278,6 +285,47 @@ for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-we
   });
   if (runtime.status !== 0) throw new Error(runtime.stderr || runtime.stdout);
   expect(runtime.status).toBe(0);
+});
+
+test("isolated browser consumer compiles the public xterm view export", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-view-consumer-"));
+  directories.push(directory);
+  const scope = join(directory, "node_modules/@cove");
+  await mkdir(scope, { recursive: true });
+  await symlink(web, join(scope, "terminal-web"), "dir");
+  await symlink(protocol, join(scope, "protocol"), "dir");
+  await writeFile(
+    join(directory, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        target: "ES2024",
+        lib: ["ES2024", "DOM"],
+        strict: true,
+        types: [],
+        skipLibCheck: true,
+        noEmit: true,
+      },
+      include: ["consumer.mts"],
+    }),
+  );
+  await writeFile(
+    join(directory, "consumer.mts"),
+    `import { createXtermTerminalView } from '@cove/terminal-web/xterm-view';
+import type { TerminalView } from '@cove/protocol/view';
+declare const container: HTMLElement;
+const view: TerminalView = createXtermTerminalView(container);
+void view;
+`,
+  );
+  const result = spawnSync(
+    process.execPath,
+    [join(root, "node_modules/typescript/bin/tsc"), "-p", directory],
+    { cwd: directory, encoding: "utf8", timeout: 20_000 },
+  );
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+  expect(result.status).toBe(0);
 });
 
 test("compiled export removal fails in an isolated consumer", async () => {
