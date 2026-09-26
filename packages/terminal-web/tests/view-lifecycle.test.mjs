@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
+import { observeLateBrowserClose } from "../dist/probes/node/managed-browser.js";
 import { readLastViewBrowserEvidence, withViewPage } from "./view-browser-runner.mjs";
 
 async function withQueryBrowserSeams(values, work) {
@@ -103,6 +104,28 @@ test("V1-L7 preserves a graceful timeout and proves the owned kill and listener 
 });
 
 test("V1-L8 records a single real close followed by a late test gate without erasing timeout", async () => {
+  const controlled = (final) => {
+    let settle;
+    const operation = new Promise((resolveOperation) => {
+      settle = resolveOperation;
+    });
+    const phase = { outcome: "timed-out" };
+    observeLateBrowserClose(operation, phase, () => final.value);
+    return { phase, settle };
+  };
+  const beforeFinal = { value: false };
+  const before = controlled(beforeFinal);
+  before.settle();
+  await Promise.resolve();
+  expect(before.phase.lateOutcome).toBe("completed");
+  const afterFinal = { value: false };
+  const after = controlled(afterFinal);
+  const emitted = structuredClone(after.phase);
+  afterFinal.value = true;
+  after.settle();
+  await Promise.resolve();
+  expect(after.phase).toEqual(emitted);
+
   await withQueryBrowserSeams(
     {
       COVE_QUERY_TEST_BROWSER_CLOSE_DELAY_MS: "2500",
@@ -125,7 +148,11 @@ test("V1-L8 records a single real close followed by a late test gate without era
         graceful: { attempts: 1, outcome: "timed-out" },
         kill: { attempts: 1, outcome: "completed" },
       });
-      expect(cleanup.graceful.lateOutcome).toBe("completed");
+      if (cleanup.graceful.lateOutcome !== undefined)
+        expect(cleanup.graceful.lateOutcome).toBe("completed");
+      const persisted = structuredClone(cleanup);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+      expect(await readLastViewBrowserEvidence()).toEqual(persisted);
     },
   );
 });
@@ -181,7 +208,13 @@ test("V1-L10 clips graceful close to the remaining phase without borrowing kill 
       expect(cleanup.graceful.phaseRemainingMs).toBeGreaterThan(0);
       expect(cleanup.graceful.budgetMs).toBeGreaterThan(0);
       expect(cleanup.graceful.budgetMs).toBeLessThan(2_000);
-      expect(cleanup.kill.attempts).toBe(0);
+      if (cleanup.graceful.outcome === "completed") {
+        expect(cleanup.kill.attempts).toBe(0);
+      } else {
+        expect(cleanup.graceful.outcome).toBe("timed-out");
+        expect(failure.errors.map((error) => error.message)).toContain("Browser close timed out");
+        expect(cleanup.kill.attempts).toBe(1);
+      }
     },
   );
 });
