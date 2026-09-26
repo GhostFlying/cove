@@ -148,8 +148,7 @@ test("V1-L8 records a single real close followed by a late test gate without era
         graceful: { attempts: 1, outcome: "timed-out" },
         kill: { attempts: 1, outcome: "completed" },
       });
-      if (cleanup.graceful.lateOutcome !== undefined)
-        expect(cleanup.graceful.lateOutcome).toBe("completed");
+      expect([undefined, "completed"]).toContain(cleanup.graceful.lateOutcome);
       const persisted = structuredClone(cleanup);
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
       expect(await readLastViewBrowserEvidence()).toEqual(persisted);
@@ -208,13 +207,12 @@ test("V1-L10 clips graceful close to the remaining phase without borrowing kill 
       expect(cleanup.graceful.phaseRemainingMs).toBeGreaterThan(0);
       expect(cleanup.graceful.budgetMs).toBeGreaterThan(0);
       expect(cleanup.graceful.budgetMs).toBeLessThan(2_000);
-      if (cleanup.graceful.outcome === "completed") {
-        expect(cleanup.kill.attempts).toBe(0);
-      } else {
-        expect(cleanup.graceful.outcome).toBe("timed-out");
-        expect(failure.errors.map((error) => error.message)).toContain("Browser close timed out");
-        expect(cleanup.kill.attempts).toBe(1);
-      }
+      expect(["completed", "timed-out"]).toContain(cleanup.graceful.outcome);
+      const timedOut = cleanup.graceful.outcome === "timed-out";
+      expect(cleanup.kill.attempts).toBe(timedOut ? 1 : 0);
+      expect(failure.errors.some((error) => error.message === "Browser close timed out")).toBe(
+        timedOut,
+      );
     },
   );
 });
