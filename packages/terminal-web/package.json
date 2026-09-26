@@ -4,6 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
+    "./xterm-view": {
+      "types": "./dist/src/xterm-view.d.ts",
+      "import": "./dist/src/xterm-view.js"
+    },
     "./probes/environment": {
       "types": "./dist/probes/node/environment.d.ts",
       "import": "./dist/probes/node/environment.js"
@@ -15,11 +19,11 @@
   },
   "scripts": {
     "build": "tsc -b && pnpm build:browser",
-    "build:browser": "vite build --config probes/vite.config.mjs",
+    "build:browser": "vite build --config probes/vite.config.mjs && vite build --config tests/browser/vite.config.mjs",
     "browser:install": "node probes/install-browser.mjs",
     "test": "pnpm build && pnpm --dir ../.. exec vitest run --project terminal-web-probes",
     "clean": "tsc -b --clean && pnpm clean:browser",
-    "clean:browser": "node --input-type=module -e \"import {rm} from 'node:fs/promises'; await rm('dist/browser',{recursive:true,force:true})\""
+    "clean:browser": "node --input-type=module -e \"import {rm} from 'node:fs/promises'; await Promise.all(['dist/browser','dist/view-browser'].map(path=>rm(path,{recursive:true,force:true})))\""
   },
   "dependencies": {
     "@cove/protocol": "workspace:*",
