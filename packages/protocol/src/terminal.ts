@@ -197,11 +197,13 @@ export function validateTerminalResultForCommand(
     return false;
   if (
     (command.type === "attach" || command.type === "recover") &&
-    (result.type === "attach-result" || result.type === "recover-result") &&
-    command.resume &&
-    result.atSeq < command.resume.appliedSeq
+    (result.type === "attach-result" || result.type === "recover-result")
   )
-    return false;
+    if (
+      (result.mode === "replay" && !command.resume) ||
+      (command.resume && result.atSeq < command.resume.appliedSeq)
+    )
+      return false;
   if (command.type === "input" && result.type === "input-result")
     return result.inputSeq === command.inputSeq && result.epoch === command.epoch;
   if (
