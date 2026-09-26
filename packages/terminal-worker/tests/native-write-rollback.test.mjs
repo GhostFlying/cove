@@ -82,7 +82,9 @@ async function verifyRollback(phase) {
   }
   let verificationError;
   try {
-    assert.match(String(failure), new RegExp(`synthetic ${phase}`));
+    assert.ok(failure instanceof pty.BoundedPtySpawnError);
+    assert.match(String(failure.cause), new RegExp(`synthetic ${phase}`));
+    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
     assert.ok(nativeResult);
     await until(() => closed(nativeResult.fd), "reader rollback close");
     await until(() => closed(nativeResult.writeFd), "writer rollback close");

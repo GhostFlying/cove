@@ -184,7 +184,7 @@ catalogs:
       version: 4.6.5
 
 patchedDependencies:
-  node-pty@1.1.0: 0c02825596f1f11782bd374e62cfc1e89792b1bc5cdeef496dbb3d844a5ee39d
+  node-pty@1.1.0: a904be27fe4c6a0f23fe91b7af31442c4ceaac9c72d609ea0372177229416003
 
 importers:
 
@@ -235,7 +235,7 @@ importers:
         version: 26.6.2
       node-pty:
         specifier: 'catalog:'
-        version: 1.1.0(patch_hash=0c02825596f1f11782bd374e62cfc1e89792b1bc5cdeef496dbb3d844a5ee39d)
+        version: 1.1.0(patch_hash=a904be27fe4c6a0f23fe91b7af31442c4ceaac9c72d609ea0372177229416003)
 
   packages/terminal-web:
     dependencies:
@@ -260,7 +260,7 @@ importers:
     dependencies:
       node-pty:
         specifier: 'catalog:'
-        version: 1.1.0(patch_hash=0c02825596f1f11782bd374e62cfc1e89792b1bc5cdeef496dbb3d844a5ee39d)
+        version: 1.1.0(patch_hash=a904be27fe4c6a0f23fe91b7af31442c4ceaac9c72d609ea0372177229416003)
     devDependencies:
       '@types/node':
         specifier: 26.6.2
@@ -1338,7 +1338,7 @@ snapshots:
       undici: 6.29.0
       which: 6.0.1
 
-  node-pty@1.1.0(patch_hash=0c02825596f1f11782bd374e62cfc1e89792b1bc5cdeef496dbb3d844a5ee39d):
+  node-pty@1.1.0(patch_hash=a904be27fe4c6a0f23fe91b7af31442c4ceaac9c72d609ea0372177229416003):
     dependencies:
       node-addon-api: 7.1.1
 

@@ -1,8 +1,230 @@
+diff --git a/lib/boundedPtySpawn.js b/lib/boundedPtySpawn.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..6eec5e896ee0808d0dd100e4232a070aa2565164
+--- /dev/null
++++ b/lib/boundedPtySpawn.js
+@@ -0,0 +1,112 @@
++"use strict";
++var __extends = (this && this.__extends) || (function () {
++    var extendStatics = function (d, b) {
++        extendStatics = Object.setPrototypeOf ||
++            ({ __proto__: [] } instanceof Array && function (d, b) { d.__proto__ = b; }) ||
++            function (d, b) { for (var p in b) if (Object.prototype.hasOwnProperty.call(b, p)) d[p] = b[p]; };
++        return extendStatics(d, b);
++    };
++    return function (d, b) {
++        if (typeof b !== "function" && b !== null)
++            throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
++        extendStatics(d, b);
++        function __() { this.constructor = d; }
++        d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
++    };
++})();
++Object.defineProperty(exports, "__esModule", { value: true });
++exports.BoundedPtySpawnAttempt = exports.BoundedPtySpawnError = void 0;
++var BoundedPtySpawnError = /** @class */ (function (_super) {
++    __extends(BoundedPtySpawnError, _super);
++    function BoundedPtySpawnError(cause, cleanup) {
++        var _this = _super.call(this, 'Bounded PTY spawn failed') || this;
++        _this.cause = cause;
++        _this.cleanup = cleanup;
++        _this.code = 'COVE_BOUNDED_PTY_SPAWN_FAILED';
++        Object.setPrototypeOf(_this, BoundedPtySpawnError.prototype);
++        _this.name = 'BoundedPtySpawnError';
++        return _this;
++    }
++    return BoundedPtySpawnError;
++}(Error));
++exports.BoundedPtySpawnError = BoundedPtySpawnError;
++var BoundedPtySpawnAttempt = /** @class */ (function () {
++    function BoundedPtySpawnAttempt() {
++        var _this = this;
++        this.enteredNative = false;
++        this._failed = false;
++        this._settled = false;
++        this._native = 'unknown';
++        this._reaped = false;
++        this._reader = 'none';
++        this._writer = 'none';
++        this.cleanup = new Promise(function (resolve) { _this._resolve = resolve; });
++    }
++    BoundedPtySpawnAttempt.prototype.beginNative = function () {
++        this.enteredNative = true;
++    };
++    BoundedPtySpawnAttempt.prototype.nativeRollback = function (result) {
++        if (result === 'uncertain')
++            this.uncertain('native-rollback');
++        else
++            this._native = result;
++        this._maybeSettle();
++    };
++    BoundedPtySpawnAttempt.prototype.nativeReturned = function () {
++        this._native = 'pending-reap';
++        this._reader = 'pending';
++        this._writer = 'pending';
++    };
++    BoundedPtySpawnAttempt.prototype.childReaped = function () {
++        this._reaped = true;
++        this._maybeSettle();
++    };
++    BoundedPtySpawnAttempt.prototype.readerClosed = function () {
++        this._reader = 'closed';
++        this._maybeSettle();
++    };
++    BoundedPtySpawnAttempt.prototype.writerClosed = function () {
++        this._writer = 'closed';
++        this._maybeSettle();
++    };
++    BoundedPtySpawnAttempt.prototype.uncertain = function (reason) {
++        if (!this._uncertain)
++            this._uncertain = reason;
++        this._maybeSettle();
++    };
++    BoundedPtySpawnAttempt.prototype.fail = function (cause) {
++        var _this = this;
++        if (!this._failed) {
++            this._failed = true;
++            if (!this.enteredNative)
++                this._native = 'clean';
++            else
++                this._deadline = setTimeout(function () { return _this._settle({ kind: 'cleanup-uncertain', reason: 'timeout' }); }, 3000);
++            this._maybeSettle();
++        }
++        return new BoundedPtySpawnError(cause, this.cleanup);
++    };
++    BoundedPtySpawnAttempt.prototype._maybeSettle = function () {
++        if (!this._failed || this._settled)
++            return;
++        if (this._uncertain) {
++            this._settle({ kind: 'cleanup-uncertain', reason: this._uncertain });
++        }
++        else if (this._native === 'clean' ||
++            (this._native === 'pending-reap' && this._reaped &&
++                this._reader !== 'pending' && this._writer !== 'pending')) {
++            this._settle({ kind: 'confirmed-clean' });
++        }
++    };
++    BoundedPtySpawnAttempt.prototype._settle = function (result) {
++        if (this._settled)
++            return;
++        this._settled = true;
++        if (this._deadline)
++            clearTimeout(this._deadline);
++        this._resolve(result);
++    };
++    return BoundedPtySpawnAttempt;
++}());
++exports.BoundedPtySpawnAttempt = BoundedPtySpawnAttempt;
++//# sourceMappingURL=boundedPtySpawn.js.map
+\ No newline at end of file
+diff --git a/lib/boundedPtySpawn.js.map b/lib/boundedPtySpawn.js.map
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ae6a935990d49e25c1274498030b95ad1e52e4b
+--- /dev/null
++++ b/lib/boundedPtySpawn.js.map
+@@ -0,0 +1 @@
++{"version":3,"file":"boundedPtySpawn.js","sourceRoot":"","sources":["../src/boundedPtySpawn.ts"],"names":[],"mappings":"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"}
+\ No newline at end of file
+diff --git a/lib/index.js b/lib/index.js
+index 1527069b2e039e006cdb6398d44b8fba38cc0ca1..292c0b9f3b5d2d881a2f12082bbc7108e356a308 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -5,8 +5,11 @@
+  * Copyright (c) 2018, Microsoft Corporation (MIT License).
+  */
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.native = exports.open = exports.createTerminal = exports.fork = exports.spawn = void 0;
++exports.checkBoundedPtySupport = exports.native = exports.open = exports.createTerminal = exports.fork = exports.spawn = exports.BoundedPtySpawnError = void 0;
+ var utils_1 = require("./utils");
++var boundedPtySpawn_1 = require("./boundedPtySpawn");
++var boundedPtySpawn_2 = require("./boundedPtySpawn");
++Object.defineProperty(exports, "BoundedPtySpawnError", { enumerable: true, get: function () { return boundedPtySpawn_2.BoundedPtySpawnError; } });
+ var terminalCtor;
+ if (process.platform === 'win32') {
+     terminalCtor = require('./windowsTerminal').WindowsTerminal;
+@@ -27,17 +30,31 @@ else {
+  * @see GetCommandLine https://msdn.microsoft.com/en-us/library/windows/desktop/ms683156.aspx
+  */
+ function spawn(file, args, opt) {
+-    return new terminalCtor(file, args, opt);
++    var bounded = opt && 'boundedWrite' in opt && opt.boundedWrite !== undefined;
++    if (!bounded)
++        return new terminalCtor(file, args, opt);
++    var attempt = new boundedPtySpawn_1.BoundedPtySpawnAttempt();
++    var support = checkBoundedPtySupport();
++    if (!support.supported)
++        throw attempt.fail(new Error("Bounded PTY support unavailable: ".concat(support.reason)));
++    try {
++        return new terminalCtor(file, args, opt, attempt);
++    }
++    catch (error) {
++        if (error instanceof boundedPtySpawn_1.BoundedPtySpawnError)
++            throw error;
++        throw attempt.fail(error);
++    }
+ }
+ exports.spawn = spawn;
+ /** @deprecated */
+ function fork(file, args, opt) {
+-    return new terminalCtor(file, args, opt);
++    return spawn(file, args, opt);
+ }
+ exports.fork = fork;
+ /** @deprecated */
+ function createTerminal(file, args, opt) {
+-    return new terminalCtor(file, args, opt);
++    return spawn(file, args, opt);
+ }
+ exports.createTerminal = createTerminal;
+ function open(options) {
+@@ -48,5 +65,18 @@ exports.open = open;
+  * Expose the native API when not Windows, note that this is not public API and
+  * could be removed at any time.
+  */
+-exports.native = (process.platform !== 'win32' ? utils_1.loadNativeModule('pty').module : null);
++exports.native = (process.platform !== 'win32' ? (0, utils_1.loadNativeModule)('pty').module : null);
++function checkBoundedPtySupport() {
++    if (process.platform !== 'darwin' && process.platform !== 'linux') {
++        return { supported: false, reason: 'unsupported-platform' };
++    }
++    if (!exports.native || typeof exports.native.fork !== 'function') {
++        return { supported: false, reason: 'binding-unavailable' };
++    }
++    if (exports.native.coveBoundedWriterVersion !== 2) {
++        return { supported: false, reason: 'binding-mismatch' };
++    }
++    return { supported: true, contractVersion: 2 };
++}
++exports.checkBoundedPtySupport = checkBoundedPtySupport;
+ //# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/lib/index.js.map b/lib/index.js.map
+index e1c33164acc0f5783b8bee05695a16700c44489a..623fe94051317637ee00361afd6e10b88f5a92e7 100644
+--- a/lib/index.js.map
++++ b/lib/index.js.map
+@@ -1 +1 @@
+-{"version":3,"file":"index.js","sourceRoot":"","sources":["../src/index.ts"],"names":[],"mappings":";AAAA;;;;GAIG;;;AAIH,iCAA2C;AAE3C,IAAI,YAAiB,CAAC;AACtB,IAAI,OAAO,CAAC,QAAQ,KAAK,OAAO,EAAE;IAChC,YAAY,GAAG,OAAO,CAAC,mBAAmB,CAAC,CAAC,eAAe,CAAC;CAC7D;KAAM;IACL,YAAY,GAAG,OAAO,CAAC,gBAAgB,CAAC,CAAC,YAAY,CAAC;CACvD;AAED;;;;;;;;;;;GAWG;AACH,SAAgB,KAAK,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IAC3G,OAAO,IAAI,YAAY,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;AAC3C,CAAC;AAFD,sBAEC;AAED,kBAAkB;AAClB,SAAgB,IAAI,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IAC1G,OAAO,IAAI,YAAY,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;AAC3C,CAAC;AAFD,oBAEC;AAED,kBAAkB;AAClB,SAAgB,cAAc,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IACpH,OAAO,IAAI,YAAY,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;AAC3C,CAAC;AAFD,wCAEC;AAED,SAAgB,IAAI,CAAC,OAAwB;IAC3C,OAAO,YAAY,CAAC,IAAI,CAAC,OAAO,CAAC,CAAC;AACpC,CAAC;AAFD,oBAEC;AAED;;;GAGG;AACU,QAAA,MAAM,GAAG,CAAC,OAAO,CAAC,QAAQ,KAAK,OAAO,CAAC,CAAC,CAAC,wBAAgB,CAAC,KAAK,CAAC,CAAC,MAAM,CAAC,CAAC,CAAC,IAAI,CAAC,CAAC"}
+\ No newline at end of file
++{"version":3,"file":"index.js","sourceRoot":"","sources":["../src/index.ts"],"names":[],"mappings":";AAAA;;;;GAIG;;;AAIH,iCAA2C;AAC3C,qDAAiF;AACjF,qDAAyD;AAAhD,uHAAA,oBAAoB,OAAA;AAG7B,IAAI,YAAiB,CAAC;AACtB,IAAI,OAAO,CAAC,QAAQ,KAAK,OAAO,EAAE;IAChC,YAAY,GAAG,OAAO,CAAC,mBAAmB,CAAC,CAAC,eAAe,CAAC;CAC7D;KAAM;IACL,YAAY,GAAG,OAAO,CAAC,gBAAgB,CAAC,CAAC,YAAY,CAAC;CACvD;AAED;;;;;;;;;;;GAWG;AACH,SAAgB,KAAK,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IAC3G,IAAM,OAAO,GAAG,GAAG,IAAI,cAAc,IAAI,GAAG,IAAI,GAAG,CAAC,YAAY,KAAK,SAAS,CAAC;IAC/E,IAAI,CAAC,OAAO;QAAE,OAAO,IAAI,YAAY,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;IACvD,IAAM,OAAO,GAAG,IAAI,wCAAsB,EAAE,CAAC;IAC7C,IAAM,OAAO,GAAG,sBAAsB,EAAE,CAAC;IACzC,IAAI,CAAC,OAAO,CAAC,SAAS;QAAE,MAAM,OAAO,CAAC,IAAI,CAAC,IAAI,KAAK,CAAC,2CAAoC,OAAO,CAAC,MAAM,CAAE,CAAC,CAAC,CAAC;IAC5G,IAAI;QACF,OAAO,IAAI,YAAY,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,EAAE,OAAO,CAAC,CAAC;KACnD;IAAC,OAAO,KAAK,EAAE;QACd,IAAI,KAAK,YAAY,sCAAoB;YAAE,MAAM,KAAK,CAAC;QACvD,MAAM,OAAO,CAAC,IAAI,CAAC,KAAK,CAAC,CAAC;KAC3B;AACH,CAAC;AAZD,sBAYC;AAED,kBAAkB;AAClB,SAAgB,IAAI,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IAC1G,OAAO,KAAK,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;AAChC,CAAC;AAFD,oBAEC;AAED,kBAAkB;AAClB,SAAgB,cAAc,CAAC,IAAa,EAAE,IAAwB,EAAE,GAA8C;IACpH,OAAO,KAAK,CAAC,IAAI,EAAE,IAAI,EAAE,GAAG,CAAC,CAAC;AAChC,CAAC;AAFD,wCAEC;AAED,SAAgB,IAAI,CAAC,OAAwB;IAC3C,OAAO,YAAY,CAAC,IAAI,CAAC,OAAO,CAAC,CAAC;AACpC,CAAC;AAFD,oBAEC;AAED;;;GAGG;AACU,QAAA,MAAM,GAAG,CAAC,OAAO,CAAC,QAAQ,KAAK,OAAO,CAAC,CAAC,CAAC,IAAA,wBAAgB,EAAC,KAAK,CAAC,CAAC,MAAM,CAAC,CAAC,CAAC,IAAI,CAAC,CAAC;AAE7F,SAAgB,sBAAsB;IAGpC,IAAI,OAAO,CAAC,QAAQ,KAAK,QAAQ,IAAI,OAAO,CAAC,QAAQ,KAAK,OAAO,EAAE;QACjE,OAAO,EAAE,SAAS,EAAE,KAAK,EAAE,MAAM,EAAE,sBAAsB,EAAE,CAAC;KAC7D;IACD,IAAI,CAAC,cAAM,IAAI,OAAO,cAAM,CAAC,IAAI,KAAK,UAAU,EAAE;QAChD,OAAO,EAAE,SAAS,EAAE,KAAK,EAAE,MAAM,EAAE,qBAAqB,EAAE,CAAC;KAC5D;IACD,IAAI,cAAM,CAAC,wBAAwB,KAAK,CAAC,EAAE;QACzC,OAAO,EAAE,SAAS,EAAE,KAAK,EAAE,MAAM,EAAE,kBAAkB,EAAE,CAAC;KACzD;IACD,OAAO,EAAE,SAAS,EAAE,IAAI,EAAE,eAAe,EAAE,CAAC,EAAE,CAAC;AACjD,CAAC;AAbD,wDAaC"}
+\ No newline at end of file
 diff --git a/lib/unixTerminal.js b/lib/unixTerminal.js
-index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aab48f09dc 100644
+index 1ec12f796a822c78fba9ad7f6448c3987e325c23..1d19259237dbf25948c5814e7175f3c59d63c8f5 100644
 --- a/lib/unixTerminal.js
 +++ b/lib/unixTerminal.js
-@@ -13,7 +13,7 @@ var __extends = (this && this.__extends) || (function () {
+@@ -3,17 +3,19 @@ var __extends = (this && this.__extends) || (function () {
+     var extendStatics = function (d, b) {
+         extendStatics = Object.setPrototypeOf ||
+             ({ __proto__: [] } instanceof Array && function (d, b) { d.__proto__ = b; }) ||
+-            function (d, b) { for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p]; };
++            function (d, b) { for (var p in b) if (Object.prototype.hasOwnProperty.call(b, p)) d[p] = b[p]; };
+         return extendStatics(d, b);
+     };
+     return function (d, b) {
++        if (typeof b !== "function" && b !== null)
++            throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
+         extendStatics(d, b);
+         function __() { this.constructor = d; }
+         d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
      };
  })();
  Object.defineProperty(exports, "__esModule", { value: true });
@@ -11,7 +233,16 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
  /**
   * Copyright (c) 2012-2015, Christopher Jeffrey (MIT License)
   * Copyright (c) 2016, Daniel Imms (MIT License).
-@@ -33,6 +33,9 @@ helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked
+@@ -24,7 +26,7 @@ var path = require("path");
+ var tty = require("tty");
+ var terminal_1 = require("./terminal");
+ var utils_1 = require("./utils");
+-var native = utils_1.loadNativeModule('pty');
++var native = (0, utils_1.loadNativeModule)('pty');
+ var pty = native.module;
+ var helperPath = native.dir + '/spawn-helper';
+ helperPath = path.resolve(__dirname, helperPath);
+@@ -33,11 +35,15 @@ helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked
  var DEFAULT_FILE = 'sh';
  var DEFAULT_NAME = 'xterm';
  var DESTROY_SOCKET_TIMEOUT_MS = 200;
@@ -20,8 +251,16 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +var BOUNDED_WRITE_RETRY_DELAY_MS = 1;
  var UnixTerminal = /** @class */ (function (_super) {
      __extends(UnixTerminal, _super);
-     function UnixTerminal(file, args, opt) {
-@@ -47,6 +50,7 @@ var UnixTerminal = /** @class */ (function (_super) {
+-    function UnixTerminal(file, args, opt) {
++    function UnixTerminal(file, args, opt, spawnAttempt) {
++        var _this = this;
+         var _a, _b;
+-        var _this = _super.call(this, opt) || this;
++        _this = _super.call(this, opt) || this;
+         _this._boundClose = false;
+         _this._emittedClose = false;
+         if (typeof args === 'string') {
+@@ -47,12 +53,13 @@ var UnixTerminal = /** @class */ (function (_super) {
          args = args || [];
          file = file || DEFAULT_FILE;
          opt = opt || {};
@@ -29,12 +268,20 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
          opt.env = opt.env || process.env;
          _this._cols = opt.cols || terminal_1.DEFAULT_COLS;
          _this._rows = opt.rows || terminal_1.DEFAULT_ROWS;
-@@ -62,7 +66,13 @@ var UnixTerminal = /** @class */ (function (_super) {
+         var uid = (_a = opt.uid) !== null && _a !== void 0 ? _a : -1;
+         var gid = (_b = opt.gid) !== null && _b !== void 0 ? _b : -1;
+-        var env = utils_1.assign({}, opt.env);
++        var env = (0, utils_1.assign)({}, opt.env);
+         if (opt.env === process.env) {
+             _this._sanitizeEnv(env);
+         }
+@@ -62,7 +69,14 @@ var UnixTerminal = /** @class */ (function (_super) {
          env.TERM = name;
          var parsedEnv = _this._parseEnv(env);
          var encoding = (opt.encoding === undefined ? 'utf8' : opt.encoding);
 +        var adoptionFailed = false;
          var onexit = function (code, signal) {
++            spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.childReaped();
 +            if (adoptionFailed)
 +                return;
 +            if (_this._writeStream) {
@@ -43,7 +290,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
              // XXX Sometimes a data event is emitted after exit. Wait til socket is
              // destroyed.
              if (!_this._emittedClose) {
-@@ -88,58 +98,131 @@ var UnixTerminal = /** @class */ (function (_super) {
+@@ -88,58 +102,184 @@ var UnixTerminal = /** @class */ (function (_super) {
              }
              _this.emit('exit', code, signal);
          };
@@ -59,20 +306,46 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 -            // NOTE: fs.ReadStream gets EAGAIN twice at first:
 -            if (err.code) {
 -                if (~err.code.indexOf('EAGAIN')) {
-+        if (boundedWrite && pty.coveBoundedWriterVersion !== 1) {
++        if (boundedWrite && pty.coveBoundedWriterVersion !== 2) {
 +            throw new Error('Bounded writer native capability is unavailable');
 +        }
-+        var term = boundedWrite
-+            ? pty.fork(file, args, parsedEnv, cwd, _this._cols, _this._rows, uid, gid, encoding === 'utf8', helperPath, onexit, true)
-+            : pty.fork(file, args, parsedEnv, cwd, _this._cols, _this._rows, uid, gid, encoding === 'utf8', helperPath, onexit);
++        if (boundedWrite && (typeof file !== 'string' || !Array.isArray(args) ||
++            args.some(function (arg) { return typeof arg !== 'string'; }) || typeof cwd !== 'string')) {
++            throw new TypeError('Invalid bounded PTY spawn arguments');
++        }
++        var term;
++        if (boundedWrite) {
++            spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.beginNative();
++            try {
++                term = pty.fork(file, args, parsedEnv, cwd, _this._cols, _this._rows, uid, gid, encoding === 'utf8', helperPath, onexit, true, function (result) {
++                    if (result === 'clean' || result === 'pending-reap' || result === 'uncertain') {
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.nativeRollback(result);
++                    }
++                    else {
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('native-rollback');
++                    }
++                });
++            }
++            catch (error) {
++                adoptionFailed = true;
++                throw spawnAttempt ? spawnAttempt.fail(error) : error;
++            }
++        }
++        else {
++            term = pty.fork(file, args, parsedEnv, cwd, _this._cols, _this._rows, uid, gid, encoding === 'utf8', helperPath, onexit);
++        }
 +        var readOwner;
 +        var writerOwner;
 +        var readAdopted = false;
 +        try {
 +            if (boundedWrite && (!Number.isSafeInteger(term.fd) || term.fd < 0 ||
-+                !Number.isSafeInteger(term.writeFd) || term.writeFd < 0 ||
-+                term.writeFd === term.fd || typeof term.stopOwnedChild !== 'function'))
++                typeof term.writeFd !== 'number' || !Number.isSafeInteger(term.writeFd) || term.writeFd < 0 ||
++                term.writeFd === term.fd || typeof term.stopOwnedChild !== 'function')) {
++                spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('native-result');
 +                throw new Error('Invalid bounded writer native ownership result');
++            }
++            if (boundedWrite)
++                spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.nativeReturned();
 +            if (boundedWrite)
 +                _this._boundedOwnedStop = term.stopOwnedChild;
 +            // Retain the partial owner if Node's ReadStream constructor fails after adoption.
@@ -97,6 +370,8 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +            _this._writeStream = writerOwner;
 +            // setup
 +            _this._socket.on('error', function (err) {
++                if (adoptionFailed)
++                    return;
 +                // NOTE: fs.ReadStream gets EAGAIN twice at first:
 +                if (err.code) {
 +                    if (~err.code.indexOf('EAGAIN')) {
@@ -135,6 +410,8 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +            _this._readable = true;
 +            _this._writable = true;
 +            _this._socket.on('close', function () {
++                if (adoptionFailed)
++                    return;
 +                if (_this._emittedClose) {
                      return;
                  }
@@ -165,35 +442,58 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +                adoptionFailed = true;
 +                var cleanupErrors = [];
 +                try {
-+                    if (writerOwner)
++                    if (writerOwner) {
++                        writerOwner.boundedWriteCompletion.then(function (result) { return result.kind === 'closed'
++                            ? spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.writerClosed()
++                            : spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('writer-close'); }, function () { return spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('writer-close'); });
 +                        writerOwner.dispose('closed');
-+                    else if (Number.isSafeInteger(term.writeFd) && term.writeFd >= 0 && term.writeFd !== term.fd)
++                    }
++                    else if (typeof term.writeFd === 'number' && Number.isSafeInteger(term.writeFd) &&
++                        term.writeFd >= 0 && term.writeFd !== term.fd) {
 +                        fs.closeSync(term.writeFd);
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.writerClosed();
++                    }
++                    else
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('native-result');
                  }
 +                catch (cleanupError) {
 +                    cleanupErrors.push(cleanupError);
++                    spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('writer-close');
 +                }
 +                try {
-+                    if (readOwner)
++                    if (readOwner) {
++                        readOwner.on('error', function () { });
++                        readOwner.once('close', function () { return spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.readerClosed(); });
 +                        readOwner.destroy();
-+                    else if (!readAdopted && Number.isSafeInteger(term.fd) && term.fd >= 0)
++                    }
++                    else if (!readAdopted && Number.isSafeInteger(term.fd) && term.fd >= 0) {
 +                        fs.closeSync(term.fd);
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.readerClosed();
++                    }
++                    else
++                        spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('native-result');
 +                }
 +                catch (cleanupError) {
 +                    cleanupErrors.push(cleanupError);
++                    spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('reader-close');
 +                }
 +                try {
 +                    if (!term.stopOwnedChild || !term.stopOwnedChild(9)) {
 +                        // A recorded reap is safe; absence of the stop closure is not.
-+                        if (!term.stopOwnedChild)
++                        if (!term.stopOwnedChild) {
 +                            cleanupErrors.push(new Error('Owned child stop unavailable'));
++                            spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('child-stop');
++                        }
 +                    }
 +                }
 +                catch (cleanupError) {
 +                    cleanupErrors.push(cleanupError);
++                    spawnAttempt === null || spawnAttempt === void 0 ? void 0 : spawnAttempt.uncertain('child-stop');
 +                }
++                if (spawnAttempt)
++                    throw spawnAttempt.fail(error);
 +                if (cleanupErrors.length)
-+                    throw new Error("Bounded PTY adoption failed with " + cleanupErrors.length + " cleanup error(s): " + String(error));
++                    throw new Error("Bounded PTY adoption failed with ".concat(cleanupErrors.length, " cleanup error(s): ").concat(String(error)));
              }
 -            // throw anything else
 -            if (_this.listeners('error').length < 2) {
@@ -221,7 +521,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
          return _this;
      }
      Object.defineProperty(UnixTerminal.prototype, "master", {
-@@ -155,6 +238,39 @@ var UnixTerminal = /** @class */ (function (_super) {
+@@ -155,6 +295,39 @@ var UnixTerminal = /** @class */ (function (_super) {
      UnixTerminal.prototype._write = function (data) {
          this._writeStream.write(data);
      };
@@ -261,7 +561,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
      Object.defineProperty(UnixTerminal.prototype, "fd", {
          /* Accessors */
          get: function () { return this._fd; },
-@@ -214,6 +330,9 @@ var UnixTerminal = /** @class */ (function (_super) {
+@@ -214,6 +387,9 @@ var UnixTerminal = /** @class */ (function (_super) {
      };
      UnixTerminal.prototype.destroy = function () {
          var _this = this;
@@ -271,7 +571,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
          this._close();
          // Need to close the read stream so node stops reading a dead file
          // descriptor. Then we can safely SIGHUP the shell.
-@@ -221,7 +340,6 @@ var UnixTerminal = /** @class */ (function (_super) {
+@@ -221,7 +397,6 @@ var UnixTerminal = /** @class */ (function (_super) {
              _this.kill('SIGHUP');
          });
          this._socket.destroy();
@@ -279,7 +579,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
      };
      UnixTerminal.prototype.kill = function (signal) {
          try {
-@@ -273,74 +391,361 @@ var UnixTerminal = /** @class */ (function (_super) {
+@@ -273,74 +448,361 @@ var UnixTerminal = /** @class */ (function (_super) {
      return UnixTerminal;
  }(terminal_1.Terminal));
  exports.UnixTerminal = UnixTerminal;
@@ -300,10 +600,10 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +        throw new Error('boundedWrite must be an object');
 +    }
 +    if (!Number.isSafeInteger(options.maxAllocatedBytes) || options.maxAllocatedBytes <= 0 || options.maxAllocatedBytes > MAX_BOUNDED_WRITE_BYTES) {
-+        throw new Error("boundedWrite.maxAllocatedBytes must be a positive safe integer no greater than " + MAX_BOUNDED_WRITE_BYTES);
++        throw new Error("boundedWrite.maxAllocatedBytes must be a positive safe integer no greater than ".concat(MAX_BOUNDED_WRITE_BYTES));
 +    }
 +    if (!Number.isSafeInteger(options.maxTasks) || options.maxTasks <= 0 || options.maxTasks > MAX_BOUNDED_WRITE_TASKS) {
-+        throw new Error("boundedWrite.maxTasks must be a positive safe integer no greater than " + MAX_BOUNDED_WRITE_TASKS);
++        throw new Error("boundedWrite.maxTasks must be a positive safe integer no greater than ".concat(MAX_BOUNDED_WRITE_TASKS));
 +    }
 +    return {
 +        maxAllocatedBytes: options.maxAllocatedBytes,
@@ -318,8 +618,8 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
  var CustomWriteStream = /** @class */ (function () {
 -    function CustomWriteStream(_fd, _encoding) {
 +    function CustomWriteStream(_fd, _encoding, _boundedOptions, _io) {
-+        var _this = this;
 +        if (_io === void 0) { _io = DEFAULT_WRITE_IO; }
++        var _this = this;
          this._fd = _fd;
          this._encoding = _encoding;
 +        this._boundedOptions = _boundedOptions;
@@ -373,8 +673,8 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +        if (this._boundedOptions) {
 +            var admission = this.writeBounded(data, NOOP_SETTLEMENT);
 +            if (!admission.accepted) {
-+                var error = new Error("Bounded pty write rejected: " + admission.reason);
-+                error.code = "PTY_WRITE_" + String(admission.reason).toUpperCase().replace('-', '_');
++                var error = new Error("Bounded pty write rejected: ".concat(admission.reason));
++                error.code = "PTY_WRITE_".concat(String(admission.reason).toUpperCase().replace('-', '_'));
 +                throw error;
 +            }
 +            return;
@@ -478,7 +778,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +                        _this.dispose('error', invalid);
 +                    }
 +                    return;
-+                }
+                 }
 +                _this._activeIssue = undefined;
 +                _this._writeInFlight = false;
 +                _this._onWriteComplete(task, err, written);
@@ -496,7 +796,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +                else {
 +                    this._writeQueue.length = 0;
 +                    console.error('Unhandled pty write error', writeError);
-                 }
++                }
 +            }
 +            else {
 +                throw error;
@@ -541,7 +841,7 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
 +        }
 +        if (!err) {
 +            if (!Number.isSafeInteger(written) || written < 0 || written > task.buffer.byteLength - task.offset) {
-+                var invalid = new Error("Invalid fs.write byte count: " + written);
++                var invalid = new Error("Invalid fs.write byte count: ".concat(written));
 +                invalid.code = 'EIO';
 +                if (this._state === 'open')
 +                    this.dispose('error', invalid);
@@ -682,13 +982,13 @@ index 1ec12f796a822c78fba9ad7f6448c3987e325c23..9f35d15513cdfbe41b06391946c442aa
  //# sourceMappingURL=unixTerminal.js.map
 \ No newline at end of file
 diff --git a/lib/unixTerminal.js.map b/lib/unixTerminal.js.map
-index 6e4bdc12dc4c1d2f113f608f4aa3e215e3f746a4..0565fe481b976bf374a579464e8882489380a326 100644
+index 6e4bdc12dc4c1d2f113f608f4aa3e215e3f746a4..7cf78137e404bad19388dd2f4369790919a11cd1 100644
 --- a/lib/unixTerminal.js.map
 +++ b/lib/unixTerminal.js.map
 @@ -1 +1 @@
 -{"version":3,"file":"unixTerminal.js","sourceRoot":"","sources":["../src/unixTerminal.ts"],"names":[],"mappings":"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"}
 \ No newline at end of file
-+{"version":3,"file":"unixTerminal.js","sourceRoot":"","sources":["../src/unixTerminal.ts"],"names":[],"mappings":"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"}
++{"version":3,"file":"unixTerminal.js","sourceRoot":"","sources":["../src/unixTerminal.ts"],"names":[],"mappings":"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"}
 \ No newline at end of file
 diff --git a/scripts/prebuild.js b/scripts/prebuild.js
 index 17f1d980e62e017d77058627a7a15c4c29f9470c..0646e37b0e30323f1983da9b799246f35648e98d 100644
@@ -707,6 +1007,182 @@ index 17f1d980e62e017d77058627a7a15c4c29f9470c..0646e37b0e30323f1983da9b799246f3
  // Do not use prebuilds when npm_config_build_from_source is set
  if (process.env.npm_config_build_from_source === 'true') {
    console.log('\x1b[33m> Removing prebuilds and rebuilding because npm_config_build_from_source is set\x1b[0m');
+diff --git a/src/boundedPtySpawn.ts b/src/boundedPtySpawn.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..14af9b0c6d9d2008748a235f376bcdeb31fe97ac
+--- /dev/null
++++ b/src/boundedPtySpawn.ts
+@@ -0,0 +1,106 @@
++export type BoundedPtyCleanupResult =
++  | { kind: 'confirmed-clean' }
++  | { kind: 'cleanup-uncertain'; reason: BoundedPtyCleanupReason };
++
++export type BoundedPtyCleanupReason =
++  | 'native-rollback'
++  | 'native-result'
++  | 'descriptor-close'
++  | 'child-stop'
++  | 'reader-close'
++  | 'writer-close'
++  | 'timeout';
++
++export class BoundedPtySpawnError extends Error {
++  public readonly code = 'COVE_BOUNDED_PTY_SPAWN_FAILED';
++
++  constructor(public readonly cause: unknown, public readonly cleanup: Promise<BoundedPtyCleanupResult>) {
++    super('Bounded PTY spawn failed');
++    Object.setPrototypeOf(this, BoundedPtySpawnError.prototype);
++    this.name = 'BoundedPtySpawnError';
++  }
++}
++
++type OwnerState = 'none' | 'pending' | 'closed';
++
++export class BoundedPtySpawnAttempt {
++  public readonly cleanup: Promise<BoundedPtyCleanupResult>;
++  public enteredNative = false;
++  private _resolve!: (result: BoundedPtyCleanupResult) => void;
++  private _failed = false;
++  private _settled = false;
++  private _native: 'unknown' | 'clean' | 'pending-reap' = 'unknown';
++  private _reaped = false;
++  private _reader: OwnerState = 'none';
++  private _writer: OwnerState = 'none';
++  private _uncertain: BoundedPtyCleanupReason | undefined;
++  private _deadline: NodeJS.Timeout | undefined;
++
++  constructor() {
++    this.cleanup = new Promise(resolve => { this._resolve = resolve; });
++  }
++
++  public beginNative(): void {
++    this.enteredNative = true;
++  }
++
++  public nativeRollback(result: 'clean' | 'pending-reap' | 'uncertain'): void {
++    if (result === 'uncertain') this.uncertain('native-rollback');
++    else this._native = result;
++    this._maybeSettle();
++  }
++
++  public nativeReturned(): void {
++    this._native = 'pending-reap';
++    this._reader = 'pending';
++    this._writer = 'pending';
++  }
++
++  public childReaped(): void {
++    this._reaped = true;
++    this._maybeSettle();
++  }
++
++  public readerClosed(): void {
++    this._reader = 'closed';
++    this._maybeSettle();
++  }
++
++  public writerClosed(): void {
++    this._writer = 'closed';
++    this._maybeSettle();
++  }
++
++  public uncertain(reason: BoundedPtyCleanupReason): void {
++    if (!this._uncertain) this._uncertain = reason;
++    this._maybeSettle();
++  }
++
++  public fail(cause: unknown): BoundedPtySpawnError {
++    if (!this._failed) {
++      this._failed = true;
++      if (!this.enteredNative) this._native = 'clean';
++      else this._deadline = setTimeout(() => this._settle({ kind: 'cleanup-uncertain', reason: 'timeout' }), 3_000);
++      this._maybeSettle();
++    }
++    return new BoundedPtySpawnError(cause, this.cleanup);
++  }
++
++  private _maybeSettle(): void {
++    if (!this._failed || this._settled) return;
++    if (this._uncertain) {
++      this._settle({ kind: 'cleanup-uncertain', reason: this._uncertain });
++    } else if (this._native === 'clean' ||
++        (this._native === 'pending-reap' && this._reaped &&
++          this._reader !== 'pending' && this._writer !== 'pending')) {
++      this._settle({ kind: 'confirmed-clean' });
++    }
++  }
++
++  private _settle(result: BoundedPtyCleanupResult): void {
++    if (this._settled) return;
++    this._settled = true;
++    if (this._deadline) clearTimeout(this._deadline);
++    this._resolve(result);
++  }
++}
+diff --git a/src/index.ts b/src/index.ts
+index 8a7e95051ead1cbcaa7dffa010c35affcb7be10c..debf2bbbc9d51bf5a8143e6dd59e680e3fa107ef 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -7,6 +7,9 @@
+ import { ITerminal, IPtyOpenOptions, IPtyForkOptions, IWindowsPtyForkOptions } from './interfaces';
+ import { ArgvOrCommandLine } from './types';
+ import { loadNativeModule } from './utils';
++import { BoundedPtySpawnAttempt, BoundedPtySpawnError } from './boundedPtySpawn';
++export { BoundedPtySpawnError } from './boundedPtySpawn';
++export { BoundedPtyCleanupResult } from './boundedPtySpawn';
+ 
+ let terminalCtor: any;
+ if (process.platform === 'win32') {
+@@ -28,17 +31,27 @@ if (process.platform === 'win32') {
+  * @see GetCommandLine https://msdn.microsoft.com/en-us/library/windows/desktop/ms683156.aspx
+  */
+ export function spawn(file?: string, args?: ArgvOrCommandLine, opt?: IPtyForkOptions | IWindowsPtyForkOptions): ITerminal {
+-  return new terminalCtor(file, args, opt);
++  const bounded = opt && 'boundedWrite' in opt && opt.boundedWrite !== undefined;
++  if (!bounded) return new terminalCtor(file, args, opt);
++  const attempt = new BoundedPtySpawnAttempt();
++  const support = checkBoundedPtySupport();
++  if (!support.supported) throw attempt.fail(new Error(`Bounded PTY support unavailable: ${support.reason}`));
++  try {
++    return new terminalCtor(file, args, opt, attempt);
++  } catch (error) {
++    if (error instanceof BoundedPtySpawnError) throw error;
++    throw attempt.fail(error);
++  }
+ }
+ 
+ /** @deprecated */
+ export function fork(file?: string, args?: ArgvOrCommandLine, opt?: IPtyForkOptions | IWindowsPtyForkOptions): ITerminal {
+-  return new terminalCtor(file, args, opt);
++  return spawn(file, args, opt);
+ }
+ 
+ /** @deprecated */
+ export function createTerminal(file?: string, args?: ArgvOrCommandLine, opt?: IPtyForkOptions | IWindowsPtyForkOptions): ITerminal {
+-  return new terminalCtor(file, args, opt);
++  return spawn(file, args, opt);
+ }
+ 
+ export function open(options: IPtyOpenOptions): ITerminal {
+@@ -50,3 +63,18 @@ export function open(options: IPtyOpenOptions): ITerminal {
+  * could be removed at any time.
+  */
+ export const native = (process.platform !== 'win32' ? loadNativeModule('pty').module : null);
++
++export function checkBoundedPtySupport():
++    { supported: true; contractVersion: 2 } |
++    { supported: false; reason: 'unsupported-platform' | 'binding-unavailable' | 'binding-mismatch' } {
++  if (process.platform !== 'darwin' && process.platform !== 'linux') {
++    return { supported: false, reason: 'unsupported-platform' };
++  }
++  if (!native || typeof native.fork !== 'function') {
++    return { supported: false, reason: 'binding-unavailable' };
++  }
++  if (native.coveBoundedWriterVersion !== 2) {
++    return { supported: false, reason: 'binding-mismatch' };
++  }
++  return { supported: true, contractVersion: 2 };
++}
 diff --git a/src/interfaces.ts b/src/interfaces.ts
 index a269e77bd2acf31c762b0fd8e13e6bf435fd7d07..e62dd82e030f580b5ee4af60e79c65c4db4cec03 100644
 --- a/src/interfaces.ts
@@ -790,7 +1266,7 @@ index a269e77bd2acf31c762b0fd8e13e6bf435fd7d07..e62dd82e030f580b5ee4af60e79c65c4
  
  export interface IWindowsPtyForkOptions extends IBasePtyForkOptions {
 diff --git a/src/native.d.ts b/src/native.d.ts
-index c53e086b4968d6fb0bf601ace3a813809433fedb..4088e4b509648694a7f075aea9663c1005eccd65 100644
+index c53e086b4968d6fb0bf601ace3a813809433fedb..d5c644c80a116ca4b9a7b1b497122d408b9b202c 100644
 --- a/src/native.d.ts
 +++ b/src/native.d.ts
 @@ -19,7 +19,8 @@ interface IWinptyNative {
@@ -799,7 +1275,7 @@ index c53e086b4968d6fb0bf601ace3a813809433fedb..4088e4b509648694a7f075aea9663c10
  interface IUnixNative {
 -  fork(file: string, args: string[], parsedEnv: string[], cwd: string, cols: number, rows: number, uid: number, gid: number, useUtf8: boolean, helperPath: string, onExitCallback: (code: number, signal: number) => void): IUnixProcess;
 +  coveBoundedWriterVersion?: number;
-+  fork(file: string, args: string[], parsedEnv: string[], cwd: string, cols: number, rows: number, uid: number, gid: number, useUtf8: boolean, helperPath: string, onExitCallback: (code: number, signal: number) => void, boundedWriter?: boolean): IUnixProcess;
++  fork(file: string, args: string[], parsedEnv: string[], cwd: string, cols: number, rows: number, uid: number, gid: number, useUtf8: boolean, helperPath: string, onExitCallback: (code: number, signal: number) => void, boundedWriter?: boolean, onRollback?: (state: 'clean' | 'pending-reap' | 'uncertain') => void): IUnixProcess;
    open(cols: number, rows: number): IUnixOpenProcess;
    process(fd: number, pty?: string): string;
    resize(fd: number, cols: number, rows: number): void;
@@ -813,7 +1289,7 @@ index c53e086b4968d6fb0bf601ace3a813809433fedb..4088e4b509648694a7f075aea9663c10
    pty: string;
  }
 diff --git a/src/unix/pty.cc b/src/unix/pty.cc
-index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c811a3b9319 100644
+index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..eb61135415791067e193dacac6b93c4513a07874 100644
 --- a/src/unix/pty.cc
 +++ b/src/unix/pty.cc
 @@ -24,6 +24,9 @@
@@ -826,7 +1302,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
  #include <thread>
  
  #include <sys/types.h>
-@@ -110,6 +113,60 @@ struct ExitEvent {
+@@ -110,6 +113,78 @@ struct ExitEvent {
    int exit_code = 0, signal_code = 0;
  };
  
@@ -836,6 +1312,24 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
 +  pid_t pid;
 +  bool reaped = false;
 +};
++
++bool CoveCloseOwnedFd(int fd) {
++  return fd < 0 || close(fd) == 0;
++}
++
++bool CoveRollbackBeforeWatcher(pid_t pid, int master, int writer = -1) {
++  const bool writer_closed = CoveCloseOwnedFd(writer);
++  const bool master_closed = CoveCloseOwnedFd(master);
++  const int stop_result = kill(pid, SIGKILL);
++  const int stop_errno = errno;
++  int status = 0;
++  int reaped;
++  do {
++    reaped = waitpid(pid, &status, 0);
++  } while (reaped == -1 && errno == EINTR);
++  return writer_closed && master_closed &&
++         (stop_result == 0 || stop_errno == ESRCH) && reaped == pid;
++}
 +
 +void SetupCoveOwnedExitCallback(Napi::Env env, Napi::Function cb,
 +                                std::shared_ptr<CoveOwnedChild> child) {
@@ -887,7 +1381,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
  void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
    std::thread *th = new std::thread;
    // Don't use Napi::AsyncWorker which is limited by UV_THREADPOOL_SIZE.
-@@ -167,6 +224,8 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
+@@ -167,6 +242,8 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
          }
        }
      }
@@ -896,61 +1390,102 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
  #else
      while (true) {
        errno = 0;
-@@ -262,7 +321,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -243,7 +320,8 @@ pty_posix_spawn(char** argv, char** env,
+                 const struct winsize *winp,
+                 int* master,
+                 pid_t* pid,
+-                int* err);
++                int* err,
++                bool* cleanup_clean);
+ #endif
+ 
+ struct DelBuf {
+@@ -262,7 +340,8 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
    Napi::Env napiEnv(info.Env());
    Napi::HandleScope scope(napiEnv);
  
 -  if (info.Length() != 11 ||
-+  if ((info.Length() != 11 && info.Length() != 12 && info.Length() != 13) ||
++  if ((info.Length() != 11 && info.Length() != 12 &&
++       info.Length() != 13 && info.Length() != 14) ||
        !info[0].IsString() ||
        !info[1].IsArray() ||
        !info[2].IsArray() ||
-@@ -273,9 +332,22 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -273,9 +352,32 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        !info[7].IsNumber() ||
        !info[8].IsBoolean() ||
        !info[9].IsString() ||
 -      !info[10].IsFunction()) {
 +      !info[10].IsFunction() ||
 +      (info.Length() >= 12 && !info[11].IsBoolean()) ||
-+      (info.Length() == 13 && !info[12].IsString())) {
++      (info.Length() == 13 && !info[12].IsString() && !info[12].IsFunction()) ||
++      (info.Length() == 14 && (!info[12].IsString() || !info[13].IsFunction()))) {
      throw Napi::Error::New(napiEnv, "Usage: pty.fork(file, args, env, cwd, cols, rows, uid, gid, utf8, helperPath, onexit)");
    }
 +  const bool bounded_writer = info.Length() >= 12 && info[11].As<Napi::Boolean>().Value();
++  const int rollback_callback_index = info.Length() == 14 ? 13 :
++      (info.Length() == 13 && info[12].IsFunction() ? 12 : -1);
++  const auto report_rollback = [&](const char* state) {
++    if (rollback_callback_index >= 0) {
++      info[rollback_callback_index].As<Napi::Function>().Call({Napi::String::New(napiEnv, state)});
++    }
++  };
 +  // The extra argument is only for package-local rollback tests.
 +  std::string test_fault;
-+  if (info.Length() == 13) {
++  if (info.Length() >= 13 && info[12].IsString()) {
 +    if (!bounded_writer) throw Napi::TypeError::New(napiEnv, "Native fault requires bounded writer");
 +    test_fault = info[12].As<Napi::String>().Utf8Value();
 +    if (test_fault != "duplicate" && test_fault != "before-watcher" &&
-+        test_fault != "after-watcher") {
++        test_fault != "after-watcher" &&
++        test_fault != "rollback-close-report" &&
++        test_fault != "rollback-stop-report") {
 +      throw Napi::TypeError::New(napiEnv, "Unknown bounded writer test fault");
 +    }
 +  }
  
    // file
    std::string file = info[0].As<Napi::String>();
-@@ -373,6 +445,12 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -352,7 +454,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+   std::string helper_path = info[9].As<Napi::String>();
+ 
+   pid_t pid;
+-  int master;
++  int master = -1;
+ #if defined(__APPLE__)
+   int argc = argv_.Length();
+   int argl = argc + 4;
+@@ -368,11 +470,17 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+   }
+ 
+   int err = -1;
+-  pty_posix_spawn(argv, env, term, &winp, &master, &pid, &err);
++  bool spawn_cleanup_clean = true;
++  pty_posix_spawn(argv, env, term, &winp, &master, &pid, &err,
++                  &spawn_cleanup_clean);
+   if (err != 0) {
++    if (bounded_writer) report_rollback(pid == -1 && spawn_cleanup_clean ? "clean" : "uncertain");
      throw Napi::Error::New(napiEnv, "posix_spawnp failed.");
    }
    if (pty_nonblock(master) == -1) {
 +    if (bounded_writer) {
-+      close(master);
-+      kill(pid, SIGKILL);
-+      int ignored_status;
-+      while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
++      report_rollback(CoveRollbackBeforeWatcher(pid, master) ? "clean" : "uncertain");
 +    }
      throw Napi::Error::New(napiEnv, "Could not set master fd to nonblocking.");
    }
  #else
-@@ -443,11 +521,85 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -413,6 +521,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+ 
+   switch (pid) {
+     case -1:
++      if (bounded_writer) report_rollback(CoveCloseOwnedFd(master) ? "clean" : "uncertain");
+       throw Napi::Error::New(napiEnv, "forkpty(3) failed.");
+     case 0:
+       if (strlen(cwd_.c_str())) {
+@@ -443,11 +552,93 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        }
      default:
        if (pty_nonblock(master) == -1) {
 +        if (bounded_writer) {
-+          close(master);
-+          kill(pid, SIGKILL);
-+          int ignored_status;
-+          while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
++          report_rollback(CoveRollbackBeforeWatcher(pid, master) ? "clean" : "uncertain");
 +        }
          throw Napi::Error::New(napiEnv, "Could not set master fd to nonblocking.");
        }
@@ -959,18 +1494,12 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
  
 +  if (bounded_writer) {
 +#if !defined(__APPLE__) && !defined(__linux__)
-+    close(master);
-+    kill(pid, SIGKILL);
-+    int ignored_status;
-+    while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
++    report_rollback(CoveRollbackBeforeWatcher(pid, master) ? "clean" : "uncertain");
 +    throw Napi::Error::New(napiEnv, "Bounded writer is unsupported on this platform.");
 +#else
 +    const int write_fd = test_fault == "duplicate" ? -1 : fcntl(master, F_DUPFD_CLOEXEC, 3);
 +    if (write_fd == -1) {
-+      close(master);
-+      kill(pid, SIGKILL);
-+      int ignored_status;
-+      while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
++      report_rollback(CoveRollbackBeforeWatcher(pid, master) ? "clean" : "uncertain");
 +      throw Napi::Error::New(napiEnv, "Could not duplicate bounded writer fd.");
 +    }
 +    std::shared_ptr<CoveOwnedChild> child;
@@ -1005,20 +1534,37 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
 +      }
 +      SetupCoveOwnedExitCallback(napiEnv, info[10].As<Napi::Function>(), child);
 +      watcher_started = true;
-+      if (test_fault == "after-watcher") {
++      if (test_fault == "after-watcher" ||
++          test_fault == "rollback-close-report" ||
++          test_fault == "rollback-stop-report") {
 +        throw Napi::Error::New(napiEnv, "Injected failure after owned watcher");
 +      }
 +      return obj;
 +    } catch (...) {
-+      close(write_fd);
-+      close(master);
++      const bool writer_closed = CoveCloseOwnedFd(write_fd);
++      const bool master_closed = CoveCloseOwnedFd(master);
 +      if (watcher_started && child) {
 +        std::lock_guard<std::mutex> lock(child->mutex);
-+        if (!child->reaped) kill(child->pid, SIGKILL);
++        bool stopped = true;
++        if (!child->reaped && kill(child->pid, SIGKILL) != 0 && errno != ESRCH) stopped = false;
++        // Fault seams preserve cleanup, then exercise ambiguous close/stop reports.
++        const bool reported_closed = writer_closed && master_closed &&
++                                     test_fault != "rollback-close-report";
++        const bool reported_stopped = stopped &&
++                                      test_fault != "rollback-stop-report";
++        report_rollback(reported_closed && reported_stopped ?
++                        (child->reaped ? "clean" : "pending-reap") : "uncertain");
 +      } else {
-+        kill(pid, SIGKILL);
-+        int ignored_status;
-+        while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
++        const int stop_result = kill(pid, SIGKILL);
++        const int stop_errno = errno;
++        int status = 0;
++        int reaped;
++        do {
++          reaped = waitpid(pid, &status, 0);
++        } while (reaped == -1 && errno == EINTR);
++        report_rollback(writer_closed && master_closed &&
++                        (stop_result == 0 || stop_errno == ESRCH) && reaped == pid ?
++                        "clean" : "uncertain");
 +      }
 +      throw;
 +    }
@@ -1028,10 +1574,11 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
    Napi::Object obj = Napi::Object::New(napiEnv);
    obj.Set("fd", Napi::Number::New(napiEnv, master));
    obj.Set("pid", Napi::Number::New(napiEnv, pid));
-@@ -691,95 +843,105 @@ pty_posix_spawn(char** argv, char** env,
+@@ -690,96 +881,110 @@ pty_posix_spawn(char** argv, char** env,
+                 const struct winsize *winp,
                  int* master,
                  pid_t* pid,
-                 int* err) {
+-                int* err) {
 -  int low_fds[3];
 -  size_t count = 0;
 -
@@ -1082,6 +1629,8 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
 -    }
 -  }
 -
++                int* err,
++                bool* cleanup_clean) {
 +  int low_fds[3] = {-1, -1, -1};
 +  size_t low_count = 0;
 +  int slave = -1;
@@ -1112,6 +1661,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
 +  *master = -1;
 +  *pid = -1;
 +  *err = 0;
++  *cleanup_clean = true;
 +
 +  do {
 +    // Reserve closed stdio numbers so PTY master/slave never become 0, 1 or 2.
@@ -1207,30 +1757,32 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c81
 +    } while (*err == EINTR);
 +  } while (false);
 +
-+  if (attrs_initialized) posix_spawnattr_destroy(&attrs);
-+  if (actions_initialized) posix_spawn_file_actions_destroy(&acts);
++  if (attrs_initialized && posix_spawnattr_destroy(&attrs) != 0) *cleanup_clean = false;
++  if (actions_initialized && posix_spawn_file_actions_destroy(&acts) != 0) *cleanup_clean = false;
 +  // Child file actions do not release descriptors retained by this parent.
-+  if (slave >= 0) close(slave);
-+  for (size_t index = 0; index < low_count; index++) close(low_fds[index]);
++  if (slave >= 0 && close(slave) != 0) *cleanup_clean = false;
++  for (size_t index = 0; index < low_count; index++) {
++    if (close(low_fds[index]) != 0) *cleanup_clean = false;
++  }
 +  if (*err != 0 && *master >= 0) {
-+    close(*master);
++    if (close(*master) != 0) *cleanup_clean = false;
 +    *master = -1;
    }
  }
  #endif
-@@ -789,6 +951,7 @@ done:
+@@ -789,6 +994,7 @@ done:
   */
  
  Napi::Object init(Napi::Env env, Napi::Object exports) {
-+  exports.Set("coveBoundedWriterVersion", Napi::Number::New(env, 1));
++  exports.Set("coveBoundedWriterVersion", Napi::Number::New(env, 2));
    exports.Set("fork",    Napi::Function::New(env, PtyFork));
    exports.Set("open",    Napi::Function::New(env, PtyOpen));
    exports.Set("resize",  Napi::Function::New(env, PtyResize));
 diff --git a/src/unixTerminal.ts b/src/unixTerminal.ts
-index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b7e3bc7e5 100644
+index 98733dc0cd752b554bd94e45904ca341ad141bba..69d9a2ffdfec911709999be7f0014bd6cb79a620 100644
 --- a/src/unixTerminal.ts
 +++ b/src/unixTerminal.ts
-@@ -8,7 +8,17 @@ import * as net from 'net';
+@@ -8,9 +8,20 @@ import * as net from 'net';
  import * as path from 'path';
  import * as tty from 'tty';
  import { Terminal, DEFAULT_COLS, DEFAULT_ROWS } from './terminal';
@@ -1248,8 +1800,11 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +} from './interfaces';
  import { ArgvOrCommandLine, IDisposable } from './types';
  import { assign, loadNativeModule } from './utils';
++import { BoundedPtySpawnAttempt } from './boundedPtySpawn';
  
-@@ -22,6 +32,10 @@ helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked
+ const native = loadNativeModule('pty');
+ const pty: IUnixNative = native.module;
+@@ -22,6 +33,10 @@ helperPath = helperPath.replace('node_modules.asar', 'node_modules.asar.unpacked
  const DEFAULT_FILE = 'sh';
  const DEFAULT_NAME = 'xterm';
  const DESTROY_SOCKET_TIMEOUT_MS = 200;
@@ -1260,7 +1815,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
  
  export class UnixTerminal extends Terminal {
    protected _fd: number;
-@@ -36,7 +50,8 @@ export class UnixTerminal extends Terminal {
+@@ -36,7 +51,8 @@ export class UnixTerminal extends Terminal {
    private _boundClose: boolean = false;
    private _emittedClose: boolean = false;
  
@@ -1270,7 +1825,16 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
  
    private _master: net.Socket | undefined;
    private _slave: net.Socket | undefined;
-@@ -55,6 +70,7 @@ export class UnixTerminal extends Terminal {
+@@ -44,7 +60,7 @@ export class UnixTerminal extends Terminal {
+   public get master(): net.Socket | undefined { return this._master; }
+   public get slave(): net.Socket | undefined { return this._slave; }
+ 
+-  constructor(file?: string, args?: ArgvOrCommandLine, opt?: IPtyForkOptions) {
++  constructor(file?: string, args?: ArgvOrCommandLine, opt?: IPtyForkOptions, spawnAttempt?: BoundedPtySpawnAttempt) {
+     super(opt);
+ 
+     if (typeof args === 'string') {
+@@ -55,6 +71,7 @@ export class UnixTerminal extends Terminal {
      args = args || [];
      file = file || DEFAULT_FILE;
      opt = opt || {};
@@ -1278,12 +1842,13 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
      opt.env = opt.env || process.env;
  
      this._cols = opt.cols || DEFAULT_COLS;
-@@ -75,7 +91,12 @@ export class UnixTerminal extends Terminal {
+@@ -75,7 +92,13 @@ export class UnixTerminal extends Terminal {
  
      const encoding = (opt.encoding === undefined ? 'utf8' : opt.encoding);
  
 +    let adoptionFailed = false;
      const onexit = (code: number, signal: number): void => {
++      spawnAttempt?.childReaped();
 +      if (adoptionFailed) return;
 +      if (this._writeStream) {
 +        this._writeStream.dispose('closed');
@@ -1291,7 +1856,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
        // XXX Sometimes a data event is emitted after exit. Wait til socket is
        // destroyed.
        if (!this._emittedClose) {
-@@ -102,14 +123,44 @@ export class UnixTerminal extends Terminal {
+@@ -102,17 +125,76 @@ export class UnixTerminal extends Terminal {
        this.emit('exit', code, signal);
      };
  
@@ -1301,22 +1866,50 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 -    this._socket = new tty.ReadStream(term.fd);
 -    if (encoding !== null) {
 -      this._socket.setEncoding(encoding);
-+    if (boundedWrite && pty.coveBoundedWriterVersion !== 1) {
++    if (boundedWrite && pty.coveBoundedWriterVersion !== 2) {
 +      throw new Error('Bounded writer native capability is unavailable');
++    }
++    if (boundedWrite && (typeof file !== 'string' || !Array.isArray(args) ||
++        args.some(arg => typeof arg !== 'string') || typeof cwd !== 'string')) {
++      throw new TypeError('Invalid bounded PTY spawn arguments');
++    }
++    let term: IUnixProcess;
++    if (boundedWrite) {
++      spawnAttempt?.beginNative();
++      try {
++        term = pty.fork(
++          file, args, parsedEnv, cwd, this._cols, this._rows, uid, gid,
++          encoding === 'utf8', helperPath, onexit, true,
++          (result: 'clean' | 'pending-reap' | 'uncertain') => {
++            if (result === 'clean' || result === 'pending-reap' || result === 'uncertain') {
++              spawnAttempt?.nativeRollback(result);
++            } else {
++              spawnAttempt?.uncertain('native-rollback');
++            }
++          }
++        );
++      } catch (error) {
++        adoptionFailed = true;
++        throw spawnAttempt ? spawnAttempt.fail(error) : error;
++      }
++    } else {
++      term = pty.fork(file, args, parsedEnv, cwd, this._cols, this._rows, uid, gid,
++        encoding === 'utf8', helperPath, onexit);
      }
 -    this._writeStream = new CustomWriteStream(term.fd, (encoding || undefined) as BufferEncoding);
-+    const term = boundedWrite
-+      ? pty.fork(file, args, parsedEnv, cwd, this._cols, this._rows, uid, gid, encoding === 'utf8', helperPath, onexit, true)
-+      : pty.fork(file, args, parsedEnv, cwd, this._cols, this._rows, uid, gid, encoding === 'utf8', helperPath, onexit);
 +    let readOwner: tty.ReadStream | undefined;
 +    let writerOwner: CustomWriteStream | undefined;
 +    let readAdopted = false;
 +    try {
 +      if (boundedWrite && (
 +        !Number.isSafeInteger(term.fd) || term.fd < 0 ||
-+        !Number.isSafeInteger(term.writeFd) || term.writeFd! < 0 ||
++        typeof term.writeFd !== 'number' || !Number.isSafeInteger(term.writeFd) || term.writeFd < 0 ||
 +        term.writeFd === term.fd || typeof term.stopOwnedChild !== 'function'
-+      )) throw new Error('Invalid bounded writer native ownership result');
++      )) {
++        spawnAttempt?.uncertain('native-result');
++        throw new Error('Invalid bounded writer native ownership result');
++      }
++      if (boundedWrite) spawnAttempt?.nativeReturned();
 +      if (boundedWrite) this._boundedOwnedStop = term.stopOwnedChild;
 +
 +      // Retain the partial owner if Node's ReadStream constructor fails after adoption.
@@ -1343,7 +1936,11 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
  
      // setup
      this._socket.on('error', (err: any) => {
-@@ -120,6 +171,11 @@ export class UnixTerminal extends Terminal {
++      if (adoptionFailed) return;
+       // NOTE: fs.ReadStream gets EAGAIN twice at first:
+       if (err.code) {
+         if (~err.code.indexOf('EAGAIN')) {
+@@ -120,6 +202,11 @@ export class UnixTerminal extends Terminal {
          }
        }
  
@@ -1355,7 +1952,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
        // close
        this._close();
        // EIO on exit from fs.ReadStream:
-@@ -132,10 +188,8 @@ export class UnixTerminal extends Terminal {
+@@ -132,10 +219,8 @@ export class UnixTerminal extends Terminal {
        // the terminal.
        // node < 0.6.14: errno 5
        // node >= 0.6.14: read EIO
@@ -1368,7 +1965,12 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
        }
  
        // throw anything else
-@@ -159,15 +213,73 @@ export class UnixTerminal extends Terminal {
+@@ -155,19 +240,108 @@ export class UnixTerminal extends Terminal {
+     this._writable = true;
+ 
+     this._socket.on('close', () => {
++      if (adoptionFailed) return;
+       if (this._emittedClose) {
          return;
        }
        this._emittedClose = true;
@@ -1386,19 +1988,49 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +        adoptionFailed = true;
 +        const cleanupErrors: unknown[] = [];
 +        try {
-+          if (writerOwner) writerOwner.dispose('closed');
-+          else if (Number.isSafeInteger(term.writeFd) && term.writeFd! >= 0 && term.writeFd !== term.fd) fs.closeSync(term.writeFd!);
-+        } catch (cleanupError) { cleanupErrors.push(cleanupError); }
++          if (writerOwner) {
++            writerOwner.boundedWriteCompletion!.then(
++              result => result.kind === 'closed'
++                ? spawnAttempt?.writerClosed()
++                : spawnAttempt?.uncertain('writer-close'),
++              () => spawnAttempt?.uncertain('writer-close')
++            );
++            writerOwner.dispose('closed');
++          } else if (typeof term.writeFd === 'number' && Number.isSafeInteger(term.writeFd) &&
++              term.writeFd >= 0 && term.writeFd !== term.fd) {
++            fs.closeSync(term.writeFd);
++            spawnAttempt?.writerClosed();
++          } else spawnAttempt?.uncertain('native-result');
++        } catch (cleanupError) {
++          cleanupErrors.push(cleanupError);
++          spawnAttempt?.uncertain('writer-close');
++        }
 +        try {
-+          if (readOwner) readOwner.destroy();
-+          else if (!readAdopted && Number.isSafeInteger(term.fd) && term.fd >= 0) fs.closeSync(term.fd);
-+        } catch (cleanupError) { cleanupErrors.push(cleanupError); }
++          if (readOwner) {
++            readOwner.on('error', () => {});
++            readOwner.once('close', () => spawnAttempt?.readerClosed());
++            readOwner.destroy();
++          } else if (!readAdopted && Number.isSafeInteger(term.fd) && term.fd >= 0) {
++            fs.closeSync(term.fd);
++            spawnAttempt?.readerClosed();
++          } else spawnAttempt?.uncertain('native-result');
++        } catch (cleanupError) {
++          cleanupErrors.push(cleanupError);
++          spawnAttempt?.uncertain('reader-close');
++        }
 +        try {
 +          if (!term.stopOwnedChild || !term.stopOwnedChild(9)) {
 +            // A recorded reap is safe; absence of the stop closure is not.
-+            if (!term.stopOwnedChild) cleanupErrors.push(new Error('Owned child stop unavailable'));
++            if (!term.stopOwnedChild) {
++              cleanupErrors.push(new Error('Owned child stop unavailable'));
++              spawnAttempt?.uncertain('child-stop');
++            }
 +          }
-+        } catch (cleanupError) { cleanupErrors.push(cleanupError); }
++        } catch (cleanupError) {
++          cleanupErrors.push(cleanupError);
++          spawnAttempt?.uncertain('child-stop');
++        }
++        if (spawnAttempt) throw spawnAttempt.fail(error);
 +        if (cleanupErrors.length) throw new Error(`Bounded PTY adoption failed with ${cleanupErrors.length} cleanup error(s): ${String(error)}`);
 +      }
 +      throw error;
@@ -1444,7 +2076,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
    }
  
    /* Accessors */
-@@ -234,6 +346,9 @@ export class UnixTerminal extends Terminal {
+@@ -234,6 +408,9 @@ export class UnixTerminal extends Terminal {
    }
  
    public destroy(): void {
@@ -1454,7 +2086,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
      this._close();
  
      // Need to close the read stream so node stops reading a dead file
-@@ -243,7 +358,6 @@ export class UnixTerminal extends Terminal {
+@@ -243,7 +420,6 @@ export class UnixTerminal extends Terminal {
      });
  
      this._socket.destroy();
@@ -1462,7 +2094,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
    }
  
    public kill(signal?: string): void {
-@@ -304,6 +418,50 @@ interface IWriteTask {
+@@ -304,6 +480,50 @@ interface IWriteTask {
    buffer: Buffer;
    /** The current offset of not yet written data. */
    offset: number;
@@ -1513,7 +2145,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
  }
  
  /**
-@@ -312,77 +470,308 @@ interface IWriteTask {
+@@ -312,77 +532,308 @@ interface IWriteTask {
   * issues that can occur when using the standard APIs in Node.
   */
  class CustomWriteStream implements IDisposable {
@@ -1752,7 +2384,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +          this._finishRetirement();
 +        }
 +        return;
-       }
++      }
 +      task.offset += written;
 +      this._remainingBytes -= written;
 +    }
@@ -1768,7 +2400,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +        const callbackError = error instanceof Error ? error as NodeJS.ErrnoException : new Error(String(error));
 +        try { this.dispose('error', callbackError); }
 +        finally { throw error; }
-+      }
+       }
 +    }
 +    if (this._state === 'open') {
 +      if (err || written === 0) this._scheduleRetry();
@@ -1819,7 +2451,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +      this._closingOut = false;
 +      this._maybeComplete();
 +    }
-   }
++  }
 +
 +  private _settleAndRelease(task: IWriteTask, status: 'written' | 'error' | 'closed', error?: NodeJS.ErrnoException): void {
 +    if (task.ticket === undefined || task.settled) return;
@@ -1847,7 +2479,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +      this._settlementDepth--;
 +      this._maybeComplete();
 +    }
-+  }
+   }
 +
 +  private _maybeComplete(): void {
 +    if (this._ownerResult && !this._closingOut && !this._writeInFlight &&
@@ -1869,10 +2501,31 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..2ef698f511218941d0ba8f682bae132b
 +  return new CustomWriteStream(fd, encoding, validateBoundedWriteOptions(options), io);
  }
 diff --git a/typings/node-pty.d.ts b/typings/node-pty.d.ts
-index 6f050ff1d97b8d3477be7ee95d2af516bd9517b7..f4a8799e2d288cf9ce320f8b9f81931fc7f0dda4 100644
+index 6f050ff1d97b8d3477be7ee95d2af516bd9517b7..4fa050bad5f1a10d894eeab4c915a38cc8204d42 100644
 --- a/typings/node-pty.d.ts
 +++ b/typings/node-pty.d.ts
-@@ -76,6 +76,53 @@ declare module 'node-pty' {
+@@ -17,6 +17,20 @@ declare module 'node-pty' {
+    */
+   export function spawn(file: string, args: string[] | string, options: IPtyForkOptions | IWindowsPtyForkOptions): IPty;
+ 
++  export type BoundedPtyCleanupResult =
++    | { kind: 'confirmed-clean' }
++    | { kind: 'cleanup-uncertain'; reason: 'native-rollback' | 'native-result' | 'descriptor-close' | 'child-stop' | 'reader-close' | 'writer-close' | 'timeout' };
++
++  export class BoundedPtySpawnError extends Error {
++    readonly code: 'COVE_BOUNDED_PTY_SPAWN_FAILED';
++    readonly cause: unknown;
++    readonly cleanup: Promise<BoundedPtyCleanupResult>;
++  }
++
++  export function checkBoundedPtySupport():
++    | { supported: true; contractVersion: 2 }
++    | { supported: false; reason: 'unsupported-platform' | 'binding-unavailable' | 'binding-mismatch' };
++
+   export interface IBasePtyForkOptions {
+ 
+     /**
+@@ -76,6 +90,53 @@ declare module 'node-pty' {
      flowControlResume?: string;
    }
  
@@ -1926,7 +2579,7 @@ index 6f050ff1d97b8d3477be7ee95d2af516bd9517b7..f4a8799e2d288cf9ce320f8b9f81931f
    export interface IPtyForkOptions extends IBasePtyForkOptions {
      /**
       * Security warning: use this option with great caution,
-@@ -83,6 +130,9 @@ declare module 'node-pty' {
+@@ -83,6 +144,9 @@ declare module 'node-pty' {
       */
      uid?: number;
      gid?: number;
@@ -1936,7 +2589,7 @@ index 6f050ff1d97b8d3477be7ee95d2af516bd9517b7..f4a8799e2d288cf9ce320f8b9f81931f
    }
  
    export interface IWindowsPtyForkOptions extends IBasePtyForkOptions {
-@@ -175,6 +225,21 @@ declare module 'node-pty' {
+@@ -175,6 +239,21 @@ declare module 'node-pty' {
       */
      write(data: string | Buffer): void;
  
