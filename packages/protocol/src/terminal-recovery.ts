@@ -4,6 +4,7 @@ import {
   RunRefSchema,
   SequenceSchema,
   SubscriptionRefSchema,
+  sameRunRef,
   sameSubscriptionRef,
 } from "./identity.js";
 import {
@@ -39,6 +40,7 @@ export const BaselineStartSchema = z.object({
 });
 export const BaselineChunkSchema = z.object({
   type: z.literal("baseline-chunk"),
+  run: RunRefSchema,
   baselineId: OpaqueIdSchema,
   subscription: SubscriptionRefSchema,
   ordinal: z
@@ -49,6 +51,7 @@ export const BaselineChunkSchema = z.object({
 });
 export const BaselineEndSchema = z.object({
   type: z.literal("baseline-end"),
+  run: RunRefSchema,
   baselineId: OpaqueIdSchema,
   subscription: SubscriptionRefSchema,
   chunkCount: z.number().int().min(1).max(M0_LIMITS.baselineChunks),
@@ -90,7 +93,8 @@ export function validateBaselineDescriptor(
     value.coverage.normal.historyLines > historyLimit
   )
     return null;
-  if (value.chunkCount !== Math.ceil((value.vtBytes + value.tailBytes) / 65_536)) return null;
+  const totalBytes = value.vtBytes + value.tailBytes;
+  if (value.chunkCount > totalBytes || value.chunkCount * 65_536 < totalBytes) return null;
   return value;
 }
 
@@ -106,6 +110,7 @@ export function validateBaselineTransfer(
   if (!parsedEnd.success) return false;
   const finish = parsedEnd.data;
   if (
+    !sameRunRef(finish.run, descriptor.run) ||
     finish.baselineId !== descriptor.baselineId ||
     !sameSubscriptionRef(finish.subscription, descriptor.subscription) ||
     finish.atSeq !== descriptor.atSeq ||
@@ -119,6 +124,7 @@ export function validateBaselineTransfer(
     const parsed = BaselineChunkSchema.safeParse(item.metadata);
     if (
       !parsed.success ||
+      !sameRunRef(parsed.data.run, descriptor.run) ||
       parsed.data.ordinal !== index ||
       parsed.data.baselineId !== descriptor.baselineId ||
       !sameSubscriptionRef(parsed.data.subscription, descriptor.subscription) ||

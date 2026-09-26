@@ -157,6 +157,13 @@ export function validateTerminalResultForCommand(
     return false;
   if (command.type === "input" && result.type === "input-result")
     return result.inputSeq === command.inputSeq && result.epoch === command.epoch;
+  if (
+    (command.type === "blur" || command.type === "resize" || command.type === "appearance") &&
+    "epoch" in result
+  )
+    return result.epoch === command.epoch;
+  if (command.type === "applied-ack" && result.type === "applied-ack-result")
+    return result.appliedSeq === command.appliedSeq;
   if (command.type === "baseline-progress" && result.type === "baseline-progress-result")
     return (
       result.baselineId === command.baselineId &&

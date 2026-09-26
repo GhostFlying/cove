@@ -5,7 +5,12 @@ import {
   nextCounter,
   sameSubscriptionRef,
 } from "@cove/protocol/identity";
-import { DOMAIN_ERROR_KINDS, ERROR_CODES, domainError } from "@cove/protocol/errors";
+import {
+  DOMAIN_ERROR_KINDS,
+  DomainErrorSchema,
+  ERROR_CODES,
+  domainError,
+} from "@cove/protocol/errors";
 import { M0_LIMITS, validateEffectiveBudgets } from "@cove/protocol/budgets";
 import { DEFAULT_APPEARANCE, QUERY_SUPPORT, validateAppearance } from "@cove/protocol/profile";
 import {
@@ -100,6 +105,8 @@ test("effective limits reject nonfinite, oversized and contradictory budgets", (
     validateEffectiveBudgets({ ...M0_LIMITS, parseLowBytes: M0_LIMITS.parseHighBytes }),
   ).toBeNull();
   expect(validateEffectiveBudgets({ ...M0_LIMITS, baselineChunks: 128 })).toBeNull();
+  expect(validateEffectiveBudgets({ ...M0_LIMITS, subscriptionCreditBytes: 65_536 })).toBeNull();
+  expect(validateEffectiveBudgets({ ...M0_LIMITS, previewGlobalBytes: 65_536 })).toBeNull();
 });
 
 test("domain codes are complete and sequential without interpolating user bytes", () => {
@@ -113,6 +120,15 @@ test("domain codes are complete and sequential without interpolating user bytes"
     nextAction: "query-operation",
   });
   expect(JSON.stringify(domainError("INPUT_REJECTED"))).not.toContain("secret-marker");
+});
+
+test("error fields reject injected detail and mismatched next action", () => {
+  const valid = domainError("UNAUTHENTICATED");
+  expect(DomainErrorSchema.safeParse(valid).success).toBe(true);
+  expect(DomainErrorSchema.safeParse({ ...valid, message: "credential secret" }).success).toBe(
+    false,
+  );
+  expect(DomainErrorSchema.safeParse({ ...valid, nextAction: "none" }).success).toBe(false);
 });
 
 test("frozen lane and class header cannot enter provisional decoder", () => {
@@ -195,6 +211,27 @@ test("result correlation rejects stale request, run, subscription and input sequ
     expect(validateTerminalResultForCommand(command, changed)).toBe(false);
 });
 
+test("control and cumulative acknowledgment results bind original epoch or sequence", () => {
+  const fields = { requestId: "q1", run, subscription };
+  for (const type of ["blur", "resize", "appearance"]) {
+    const command = {
+      type,
+      ...fields,
+      epoch: 2,
+      geometry: { cols: 12, rows: 4 },
+      appearance: DEFAULT_APPEARANCE,
+    };
+    const result = { type: `${type}-result`, ...fields, epoch: 3, atSeq: 4 };
+    expect(validateTerminalResultForCommand(command, result)).toBe(false);
+  }
+  expect(
+    validateTerminalResultForCommand(
+      { type: "applied-ack", ...fields, appliedSeq: 4 },
+      { type: "applied-ack-result", ...fields, appliedSeq: 5 },
+    ),
+  ).toBe(false);
+});
+
 test("baseline descriptor binds N, geometry, both buffers and budgeted normal history", () => {
   expect(validateBaselineDescriptor(descriptor)).not.toBeNull();
   expect(validateBaselineDescriptor({ ...descriptor, checkpointSeq: 4 })).toBeNull();
@@ -236,6 +273,27 @@ test("baseline transfer rejects reordered, duplicate, missing and overfull chunk
     atSeq: 3,
   };
   expect(validateBaselineTransfer(descriptor, [chunk], end)).toBe(true);
+  expect(
+    validateBaselineTransfer(
+      descriptor,
+      [
+        {
+          ...chunk,
+          metadata: {
+            ...chunk.metadata,
+            run: { ...run, runId: "r2" },
+          },
+        },
+      ],
+      end,
+    ),
+  ).toBe(false);
+  expect(
+    validateBaselineTransfer(descriptor, [chunk], {
+      ...end,
+      run: { ...run, relayInstanceId: "i2" },
+    }),
+  ).toBe(false);
   expect(validateBaselineTransfer(descriptor, [chunk, chunk], end)).toBe(false);
   expect(validateBaselineTransfer(descriptor, [], end)).toBe(false);
   expect(
@@ -252,6 +310,26 @@ test("baseline transfer rejects reordered, duplicate, missing and overfull chunk
       end,
     ),
   ).toBe(false);
+});
+
+test("baseline accepts any exact ordered bounded nonempty chunk partition", () => {
+  const three = { ...descriptor, vtBytes: 3, tailBytes: 3, chunkCount: 3 };
+  const chunks = [2, 3, 1].map((length, ordinal) => ({
+    metadata: { type: "baseline-chunk", run, subscription, baselineId: "b1", ordinal },
+    payload: new Uint8Array(length),
+  }));
+  const end = {
+    type: "baseline-end",
+    run,
+    subscription,
+    baselineId: "b1",
+    atSeq: 3,
+    totalBytes: 6,
+    chunkCount: 3,
+  };
+  expect(validateBaselineDescriptor(three)).not.toBeNull();
+  expect(validateBaselineTransfer(three, chunks, end)).toBe(true);
+  expect(validateBaselineDescriptor({ ...three, chunkCount: 7 })).toBeNull();
 });
 
 test("baseline start rejects mismatched run and never carries opaque cells", () => {
