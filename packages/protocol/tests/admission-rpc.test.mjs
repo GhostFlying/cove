@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import {
   ADMISSION_STATUS,
   BootstrapFailureSchema,
@@ -11,6 +12,20 @@ import {
   negotiateBootstrap,
   validateWsFirstMessage,
 } from "@cove/protocol/bootstrap";
+import {
+  RPC_METHODS,
+  STANDARD_RPC_ERRORS,
+  canonicalOperationIntent,
+  classifyReceiptAdmission,
+  classifyRpcEnvelope,
+  classifyRpcItem,
+  composeRpcMethodResult,
+  composeRpcResponse,
+  rpcHttpSuccessStatus,
+  validateOperationRecord,
+  validateRpcMethodResult,
+  validateRpcResponse,
+} from "@cove/protocol/rpc";
 
 const request = {
   type: "cove-bootstrap",
@@ -33,6 +48,16 @@ const server = {
   effectiveBudgets: M0_LIMITS,
 };
 const allowedOrigins = ["http://127.0.0.1:4173"];
+const encoder = (text) => new TextEncoder().encode(text);
+const run = { serverId: "s1", relayInstanceId: "i1", runId: "r1" };
+const create = {
+  operationId: "o1",
+  expectedRelayInstanceId: "i1",
+  executable: "/bin/sh",
+  argv: ["-c", "echo ok"],
+  cwd: "/tmp",
+  geometry: { cols: 80, rows: 24 },
+};
 const admission = {
   method: "POST",
   path: "/bootstrap",
@@ -176,4 +201,234 @@ test("rendezvous carries numeric loopback endpoint and bounded harness secret", 
     RendezvousSchema.safeParse({ ...rendezvous, endpoint: "http://localhost:4096" }).success,
   ).toBe(false);
   expect(BootstrapRequestSchema.safeParse(request).success).toBe(true);
+});
+
+test("six closed RPC methods publish params, results, permissions and CLI routes", () => {
+  expect(Object.keys(RPC_METHODS)).toEqual([
+    "server.status",
+    "terminal.list",
+    "terminal.get",
+    "terminal.create",
+    "terminal.stop",
+    "operation.get",
+  ]);
+  expect(
+    Object.values(RPC_METHODS).every(
+      (spec) =>
+        spec.permission === "local-principal" &&
+        spec.params &&
+        spec.result &&
+        spec.capability &&
+        spec.cli,
+    ),
+  ).toBe(true);
+  expect(RPC_METHODS["terminal.create"].class).toBe("write");
+  expect(RPC_METHODS["terminal.get"].class).toBe("read");
+});
+
+test("JSON-RPC classifies standard parse, invalid request, method and params failures", () => {
+  expect(classifyRpcEnvelope(null, true)[0].response.error.code).toBe(STANDARD_RPC_ERRORS.parse);
+  expect(
+    classifyRpcItem({ jsonrpc: "1.0", method: "server.status", id: 1 }).response.error.code,
+  ).toBe(STANDARD_RPC_ERRORS.invalidRequest);
+  expect(classifyRpcItem({ jsonrpc: "2.0", method: "future", id: 1 }).response.error.code).toBe(
+    STANDARD_RPC_ERRORS.methodNotFound,
+  );
+  expect(
+    classifyRpcItem({ jsonrpc: "2.0", method: "terminal.list", params: [], id: 1 }).response.error
+      .code,
+  ).toBe(STANDARD_RPC_ERRORS.invalidParams);
+  expect(
+    classifyRpcItem({ jsonrpc: "2.0", method: "terminal.list", params: { limit: 129 }, id: 1 })
+      .response.error.code,
+  ).toBe(STANDARD_RPC_ERRORS.invalidParams);
+});
+
+test("mixed batch preserves IDs and suppresses every valid notification response", () => {
+  const items = classifyRpcEnvelope([
+    { jsonrpc: "2.0", method: "server.status", id: "q1", params: {} },
+    { jsonrpc: "2.0", method: "terminal.create", params: create },
+    { jsonrpc: "2.0", method: "future", params: {} },
+    42,
+  ]);
+  expect(items.map((item) => item.kind)).toEqual(["call", "notification", "notification", "error"]);
+  expect(items[0].id).toBe("q1");
+  expect(items[3].response.id).toBeNull();
+  expect(classifyRpcEnvelope([])[0].response.error.code).toBe(STANDARD_RPC_ERRORS.invalidRequest);
+  expect(
+    classifyRpcEnvelope(Array(17).fill({ jsonrpc: "2.0", method: "server.status" })),
+  ).toHaveLength(1);
+  expect(rpcHttpSuccessStatus(items)).toBe(200);
+  expect(rpcHttpSuccessStatus([classifyRpcItem({ jsonrpc: "2.0", method: "server.status" })])).toBe(
+    204,
+  );
+});
+
+test("RPC response enforces result/error exclusivity and fixed public error text", () => {
+  expect(validateRpcResponse({ jsonrpc: "2.0", id: 0, result: {} })).not.toBeNull();
+  expect(
+    validateRpcResponse({
+      jsonrpc: "2.0",
+      id: null,
+      error: {
+        code: -32602,
+        message: "Invalid params",
+      },
+    }),
+  ).not.toBeNull();
+  expect(
+    composeRpcResponse({ jsonrpc: "2.0", id: "q", result: "x".repeat(300_000) }, encoder),
+  ).toBeNull();
+  expect(
+    validateRpcResponse({
+      jsonrpc: "2.0",
+      id: 1,
+      result: {},
+      error: {
+        code: -32602,
+        message: "Invalid params",
+      },
+    }),
+  ).toBeNull();
+  expect(
+    validateRpcResponse({
+      jsonrpc: "2.0",
+      id: 1,
+      error: {
+        code: -32602,
+        message: "secret path",
+      },
+    }),
+  ).toBeNull();
+  const domain = domainError("RESULT_UNKNOWN", "unknown");
+  expect(
+    validateRpcResponse({
+      jsonrpc: "2.0",
+      id: "q",
+      error: {
+        code: domain.code,
+        message: domain.message,
+        data: domain,
+      },
+    }),
+  ).not.toBeNull();
+});
+
+test("canonical operation intent ignores network ID and unknown fields but binds target and argv", () => {
+  const one = canonicalOperationIntent(
+    "terminal.create",
+    { ...create, future: "ignored" },
+    encoder,
+  );
+  const reordered = canonicalOperationIntent(
+    "terminal.create",
+    {
+      geometry: { rows: 24, cols: 80 },
+      cwd: "/tmp",
+      executable: "/bin/sh",
+      argv: ["-c", "echo ok"],
+      expectedRelayInstanceId: "i1",
+      operationId: "o2",
+    },
+    encoder,
+  );
+  expect(one).toBe(reordered);
+  expect(one).not.toContain("operationId");
+  expect(
+    canonicalOperationIntent("terminal.create", { ...create, argv: ["echo ok", "-c"] }, encoder),
+  ).not.toBe(one);
+  expect(
+    canonicalOperationIntent(
+      "terminal.create",
+      { ...create, expectedRelayInstanceId: "i2" },
+      encoder,
+    ),
+  ).not.toBe(one);
+  expect(
+    canonicalOperationIntent(
+      "terminal.stop",
+      { operationId: "o1", expectedRelayInstanceId: "i1", run },
+      encoder,
+    ),
+  ).not.toBe(one);
+});
+
+test("unframable create cannot acquire a canonical write intent", () => {
+  expect(
+    canonicalOperationIntent("terminal.create", { ...create, argv: ["é".repeat(4096)] }, encoder),
+  ).toBeNull();
+  expect(
+    canonicalOperationIntent(
+      "terminal.create",
+      { ...create, geometry: { cols: 121, rows: 24 } },
+      encoder,
+    ),
+  ).toBeNull();
+});
+
+test("receipt replay precedes capacity while conflicting intent and new work fail safely", () => {
+  const key = { serverId: "s1", relayInstanceId: "i1", principalId: "local", operationId: "o1" };
+  const intent = canonicalOperationIntent("terminal.create", create, encoder);
+  const record = {
+    operationId: "o1",
+    method: "terminal.create",
+    revision: 0,
+    state: "accepted",
+    run,
+  };
+  const common = {
+    key,
+    canonicalIntent: intent,
+    receiptCount: 1,
+    receiptLimit: 1,
+    encodeUtf8: encoder,
+  };
+  expect(
+    classifyReceiptAdmission({ ...common, existing: { key, canonicalIntent: intent, record } }),
+  ).toBe("existing");
+  expect(
+    classifyReceiptAdmission({
+      ...common,
+      existing: { key, canonicalIntent: intent + "x", record },
+    }),
+  ).toBe("conflict");
+  expect(classifyReceiptAdmission(common)).toBe("busy");
+  expect(classifyReceiptAdmission({ ...common, receiptCount: 0 })).toBe("reserve");
+  expect(
+    classifyReceiptAdmission({
+      ...common,
+      existing: { key: { ...key, relayInstanceId: "i2" }, canonicalIntent: intent, record },
+    }),
+  ).toBe("invalid");
+});
+
+test("operation records remain bounded and read results carry no preview VT", () => {
+  const record = {
+    operationId: "o1",
+    method: "terminal.create",
+    revision: 1,
+    state: "succeeded",
+    run,
+    result: { run },
+  };
+  expect(validateOperationRecord(record, encoder)).toEqual(record);
+  expect(
+    validateOperationRecord(
+      { ...record, error: { ...domainError("BUSY"), message: "private cwd" } },
+      encoder,
+    ),
+  ).toBeNull();
+  expect(validateRpcMethodResult("terminal.create", { operation: record })).toBe(true);
+  expect(validateRpcMethodResult("terminal.create", { run })).toBe(false);
+  const visible = {
+    run,
+    status: "live",
+    geometry: create.geometry,
+    controlEpoch: 0,
+    controlHolder: null,
+    preview: { version: null, generatedAtMs: null, checkedAtMs: null, stale: true, byteLength: 0 },
+  };
+  expect(composeRpcMethodResult("terminal.get", { record: { ...visible, vt: "secret" } })).toEqual({
+    record: visible,
+  });
 });

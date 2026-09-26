@@ -116,7 +116,7 @@ test("local admission and RPC suite is mandatory with compiled cases", async () 
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/admission-rpc.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 9 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 17 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
