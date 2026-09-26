@@ -8,6 +8,25 @@ Replay old integration commits `2c5f297..49f4916` in order, excluding only the s
 
 Run pinned scoped protocol checks and one combined `pnpm check` after a buildable freeze. Independent integration review and test must confirm source equality and current shared-state reconciliation before a new draft PR. That PR requires exact-head macOS/Linux artifacts, rebase-only merge with full commit/message/tree/single-parent audit, then final-main artifacts. Only a reviewable replacement may supersede old PR43. This package proves pure R1 contracts, not W2/P2/P3 runtime, N1b, N2, or real agents. Root schedules independent roles; the integration owner writes this branch and GitHub state.
 
+### G0-base replay result, before combined gates
+
+At replay head `b312a8d1f50ce10ddadc142ee7a6518f520bcb13`, ten old integration commits map in original order with identical full messages and changed-path sets. Nine pairs have identical changed-file Git objects. The final pair differs only in this task-local integration document, where the G0-base allocation above was retained together with the historical PR43 evidence below; `docs/tasks/m0-supported-protocol-plan.md` and every production/test/fixture blob remain identical. The only replay conflict was that exact document; it was resolved by retaining both the new G0-base allocation and the old checkpoint facts, rather than taking either whole side. Old shared-handoff commit `56e567d` was deliberately skipped and its current R1 facts are reconciled separately against accepted G0 main.
+
+| Old PR43 integration                       | New G0-base replay                         | Changed-file objects                                                |
+| ------------------------------------------ | ------------------------------------------ | ------------------------------------------------------------------- |
+| `2c5f297c8401ffb43911ec0e7edc451663f80fa4` | `558858fa0cc2e8e7a639dfb814014efffd6d2a96` | Equal                                                               |
+| `67abace32b90aa134a480057db2aba9e16291204` | `92baa9d1026a8404d2685cedd4475a7851d440ef` | Equal                                                               |
+| `d76fee73a0b4fd799e13a061410dd8387fc9fcbd` | `a17f6b374297429b23d1ad8551967ab0ab64a667` | Equal                                                               |
+| `e0b90cc15241984c7e34bde67a8a38d45054c672` | `3d90998aa787922f2b24221b039ef4e51de87cb7` | Equal                                                               |
+| `833e5c718c60ce6fbbce15d540458b4fb1fbba12` | `26d43d86807a3fec4d17e8a9f8f4f0650d211c8e` | Equal                                                               |
+| `1faf77f59e1430426f49e28d277f5ef8ba1973f0` | `0cc419a32b0293ff27ed1354d3ffe39ff5caa6d1` | Equal                                                               |
+| `6c76ebcaa7de1fc129ce8101255a297ae191996b` | `a8de0b44910c1e3fbd2dcd269054e06a1fbac741` | Equal                                                               |
+| `69e8909a1039226f107eea0bd06ab050ea5877b7` | `0cda88dcd565d784957ec9f18b3ba874cce0f269` | Equal                                                               |
+| `00fa6f1a572863e7a0ab6cae035cd40c8a7e30f7` | `25413e451085704e462837aaa4e8f1506ef297e9` | Equal                                                               |
+| `49f49164d33cc402cd5b9864f2272440522159f9` | `b312a8d1f50ce10ddadc142ee7a6518f520bcb13` | This integration document differs; the other changed blob is equal. |
+
+Final source/test/fixture Git trees match old reviewed PR43 exactly: `packages/protocol/src` `f26914707235f148ebd5c17f4b8795916d31efda`, `packages/protocol/tests` `3bcd846e4c64a23b885fb1f2c1b99044f9f0058b`, and `tests/fixtures/protocol/m0` `fc07fcc3127aac76a4677575c91cae6ff05bcfbf`. The accepted G0/N1 lock, native patch, and required-suite gate are unchanged from main `3472ea9`. This mapping is replay evidence, not a combined runtime or hosted acceptance claim.
+
 Status: frozen local integration checkpoint, 2026-09-27. Accepted-main base `77de10a2f91fb3eb0fc42c7fc27dd5270ce56704` was integrated on branch `p/luchengxuan/m0-19-routed-protocol-integration`. The exact functionally tested parent is `56e567d85fade02d1baedc5dc0dcf6229ed8640c`, tree `28f7791f7ae23022ca9148eb4f57ef31e788739f`; its complete binary diff from the accepted base has SHA-256 `acbdf19be59bce75d36ea3489082a5c668b03a77990ce0cb4f4e27c6572cb77b`. The immediate successor is documentation-only and is identified by exact head/tree in the external correction report so this commit does not contain a self-reference. The completed author branch remains at `7e7cbeb6496b8eff6d86afe6bf1f86045fadd864` and must not be rewritten.
 
 ## Transplant mapping and conflict record
