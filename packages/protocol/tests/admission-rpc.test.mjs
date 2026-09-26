@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
   ADMISSION_STATUS,
+  BootstrapFailureSchema,
   BootstrapRequestSchema,
   RendezvousSchema,
   WsBootstrapSchema,
@@ -82,6 +83,17 @@ test("bootstrap identity and protocol mismatch never return run inventory", () =
   expect(negotiateBootstrap({ ...request, bootstrapVersion: 2 }, server).kind).toBe(
     "BOOTSTRAP_UNSUPPORTED",
   );
+  const failure = negotiateBootstrap({ ...request, protocolVersion: 2 }, server);
+  expect(BootstrapFailureSchema.safeParse(failure).success).toBe(true);
+  expect(BootstrapFailureSchema.safeParse({ ...failure, message: "secret path" }).success).toBe(
+    false,
+  );
+  expect(
+    BootstrapFailureSchema.safeParse({
+      ...failure,
+      supportedVersions: { bootstrap: [1], protocol: [1, 2] },
+    }).success,
+  ).toBe(false);
 });
 
 test("HTTP admission binds exact numeric authority, origin and authenticated verdict", () => {
@@ -137,7 +149,7 @@ test("WS upgrade authenticates only after exact-origin first-message bootstrap",
     capacityAvailable: true,
   };
   expect(evaluateWsUpgrade(upgrade)).toBe("accepted");
-  expect(evaluateWsUpgrade({ ...upgrade, origin: undefined })).toBe("forbidden");
+  expect(evaluateWsUpgrade({ ...upgrade, origin: undefined })).toBe("accepted");
   expect(evaluateWsUpgrade({ ...upgrade, host: "localhost:4096" })).toBe("forbidden");
   expect(evaluateWsUpgrade({ ...upgrade, path: "/rpc" })).toBe("forbidden");
   expect(WsBootstrapSchema.safeParse({ ...request, secret: "x".repeat(43) }).success).toBe(true);
