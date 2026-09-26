@@ -13,17 +13,17 @@
 
 The pre-code plan is `d61f95ccaf5feb40c0cf9c9c39b7790ca4131b25`. All ten source commits replayed in order without a textual conflict. Git auto-merged the two shared gate files while retaining G0's tooling suite minimum 30 and N1b's spawn-contract suite minimum 11; R1's protocol registrations remain present. Original → mapped commits:
 
-| Original | Integrated | Scope |
-| --- | --- | --- |
-| `26ee4c8` | `5f2a881` | Initial N1b plan |
-| `547abcb` | `ca2753f` | Public contract, native patch, lock, tests, registration |
-| `5024658` | `27066f6` | Initial author evidence |
-| `7bd3c4d` | `b01441a` | Rollback correction plan |
-| `627d97b` | `17c8395` | Bounded rollback correction and registered tests |
-| `8328130` | `566e857` | Corrected author evidence |
-| `1cb211a` | `5c4fdbd` | Late-watcher test correction plan |
-| `357a296` | `b70c5f8` | Late-watcher callback test |
-| `2dc1748` | `ce7183c` | Adoption fixture correction plan |
-| `bc413b1` | `c291a0c` | Adoption fixture cleanup test |
+| Original  | Integrated | Scope                                                    |
+| --------- | ---------- | -------------------------------------------------------- |
+| `26ee4c8` | `5f2a881`  | Initial N1b plan                                         |
+| `547abcb` | `ca2753f`  | Public contract, native patch, lock, tests, registration |
+| `5024658` | `27066f6`  | Initial author evidence                                  |
+| `7bd3c4d` | `b01441a`  | Rollback correction plan                                 |
+| `627d97b` | `17c8395`  | Bounded rollback correction and registered tests         |
+| `8328130` | `566e857`  | Corrected author evidence                                |
+| `1cb211a` | `5c4fdbd`  | Late-watcher test correction plan                        |
+| `357a296` | `b70c5f8`  | Late-watcher callback test                               |
+| `2dc1748` | `ce7183c`  | Adoption fixture correction plan                         |
+| `bc413b1` | `c291a0c`  | Adoption fixture cleanup test                            |
 
 Each mapped commit has one parent, an identical full message and changed-path list to its original. Full Git tree IDs differ because main advanced through G0 and R1; the final native patch, lockfile, registered spawn-contract test, and isolated TypeScript consumer blobs exactly match their reviewed `bc413b1` counterparts. The combined candidate still requires its own independent review, full gate, hosted dual-OS readback and final-main acceptance. The handoff's current section is reconciled separately from its retained historical records.
