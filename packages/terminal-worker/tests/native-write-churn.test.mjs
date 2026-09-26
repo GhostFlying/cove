@@ -25,6 +25,6 @@ test("finite real PTY churn closes bounded and legacy parent descriptors", async
   expect(counts.bounded.after).toBe(counts.bounded.baseline);
   expect(counts.legacy.after).toBe(counts.legacy.baseline);
   if (process.platform === "darwin") {
-    expect(counts.failedSpawn.after).toBe(counts.failedSpawn.baseline);
+    assert.equal(counts.failedSpawn.after, counts.failedSpawn.baseline);
   }
 });
