@@ -22,7 +22,7 @@ export interface LogicalGridCheckpoint extends RecoveryCheckpoint {
 }
 
 const BASELINE_CAP = 8 * 1024 * 1024;
-const CELL_CAP = 2 * 120 * 1040;
+const CELL_CAP = 2 * 120 * (1040 + 40);
 const encoder = new TextEncoder();
 
 type PublicLine = NonNullable<ReturnType<Terminal["buffer"]["normal"]["getLine"]>>;
@@ -32,8 +32,8 @@ function cellAttr(cell: PublicCell): AttributeState {
   const fgMode = cell.getFgColorMode();
   const bgMode = cell.getBgColorMode();
   return {
-    fg: fgMode === 0 ? 0 : fgMode * 0x1000000 + cell.getFgColor(),
-    bg: bgMode === 0 ? 0 : bgMode * 0x1000000 + cell.getBgColor(),
+    fg: fgMode === 0 ? 0 : fgMode + cell.getFgColor(),
+    bg: bgMode === 0 ? 0 : bgMode + cell.getBgColor(),
     bold: !!cell.isBold(),
     dim: !!cell.isDim(),
     italic: !!cell.isItalic(),
@@ -42,7 +42,7 @@ function cellAttr(cell: PublicCell): AttributeState {
     inverse: !!cell.isInverse(),
     invisible: !!cell.isInvisible(),
     strikethrough: !!cell.isStrikethrough(),
-    overline: false,
+    overline: !!cell.isOverline(),
   };
 }
 
@@ -95,9 +95,7 @@ function finalPrint(
   const glyph = rejectedWide ? "中" : cell.getChars();
   const before = terminal.modes.insertMode
     ? `\u001b[${cell.getWidth()}P`
-    : rejectedWide
-      ? ""
-      : `\u001b[${cell.getWidth()}X`;
+    : `\u001b[${cell.getWidth()}X`;
   const y = terminal.modes.originMode ? active.y - active.scrollTop : active.y;
   if (y < 0 || y >= terminal.rows)
     throw new Error("Logical-grid final print location is outside the visible grid");
@@ -142,6 +140,8 @@ export function createLogicalGridCheckpoint(
     chunks.push(chunk);
   };
   const render = (buffer: Terminal["buffer"]["normal"]): void => {
+    if (buffer.length > terminal.rows + (buffer.type === "normal" ? 1000 : 0))
+      throw new Error(`Logical-grid ${buffer.type} history exceeds profile`);
     if (buffer.getLine(0)?.isWrapped) {
       append("D".repeat(terminal.cols));
       disposableRows++;
@@ -150,6 +150,21 @@ export function createLogicalGridCheckpoint(
       const line = buffer.getLine(y);
       if (!line) throw new Error(`Missing logical-grid ${buffer.type} line ${y}`);
       if (y > 0 && !line.isWrapped) append("\r\n");
+      let empty = !buffer.getLine(y + 1)?.isWrapped;
+      for (let x = 0; x < terminal.cols; x++) {
+        if (++scannedCells > CELL_CAP) throw new Error("Logical-grid cell scan exceeds cap");
+        const cell = line.getCell(x);
+        if (!cell) throw new Error(`Missing logical-grid ${buffer.type} cell ${x},${y}`);
+        const attr = cellAttr(cell);
+        if (
+          cell.getChars() ||
+          attr.fg ||
+          attr.bg ||
+          Object.values(attr).some((value) => value === true)
+        )
+          empty = false;
+      }
+      if (empty) continue;
       let vt = "";
       let attr: AttributeState | undefined;
       for (let x = 0; x < terminal.cols; x++) {

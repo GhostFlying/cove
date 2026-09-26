@@ -1,4 +1,5 @@
 import type { Terminal } from "@xterm/headless";
+import { readPrivateRecoveryState } from "./xterm-recovery-state.js";
 
 export interface CellObservation {
   readonly chars: string;
@@ -6,6 +7,7 @@ export interface CellObservation {
   readonly fg: number;
   readonly bg: number;
   readonly flags: readonly boolean[];
+  readonly overline?: boolean;
 }
 
 export interface BufferObservation {
@@ -29,6 +31,7 @@ export interface RecoveryObservation {
 
 export interface LogicalGridObservation {
   readonly active: "normal" | "alternate";
+  readonly cursorHidden: boolean;
   readonly normal: BufferObservation;
   readonly alternate: BufferObservation;
   readonly modes: Readonly<Terminal["modes"]>;
@@ -38,17 +41,22 @@ function logicalBuffer(buffer: Terminal["buffer"]["normal"], cols: number): Buff
   const exact = observeBuffer(buffer);
   return {
     ...exact,
-    lines: exact.lines.map((line) => ({
+    lines: exact.lines.map((line, y) => ({
       wrapped: line.wrapped,
-      cells: line.cells.slice(0, cols).map((cell) => {
+      cells: line.cells.slice(0, cols).map((cell, x) => {
+        const actual = buffer.getLine(y)?.getCell(x);
+        if (!actual) throw new Error(`Missing logical-grid ${buffer.type} cell ${x},${y}`);
         const chars = cell.chars || " ";
+        const overline = !!actual.isOverline();
         const visuallyBlank =
-          chars === " " && !cell.flags[3] && !cell.flags[5] && !cell.flags[7];
+          chars === " " && !cell.flags[3] && !cell.flags[5] && !cell.flags[7] && !overline;
         return {
           ...cell,
           chars,
-          fg: visuallyBlank ? 0 : cell.fg,
+          fg: visuallyBlank ? 0 : actual.getFgColorMode() + actual.getFgColor(),
+          bg: actual.getBgColorMode() + actual.getBgColor(),
           flags: visuallyBlank ? cell.flags.map(() => false) : cell.flags,
+          overline: visuallyBlank ? false : overline,
         };
       }),
     })),
@@ -59,6 +67,7 @@ function logicalBuffer(buffer: Terminal["buffer"]["normal"], cols: number): Buff
 export function observeLogicalGrid(terminal: Terminal): LogicalGridObservation {
   return {
     active: terminal.buffer.active.type,
+    cursorHidden: readPrivateRecoveryState(terminal).cursorHidden,
     normal: logicalBuffer(terminal.buffer.normal, terminal.cols),
     alternate: logicalBuffer(terminal.buffer.alternate, terminal.cols),
     modes: { ...terminal.modes },
