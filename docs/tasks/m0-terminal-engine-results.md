@@ -1,6 +1,6 @@
 # M0 T2 terminal engine adapter: author evidence
 
-Status: first compiled source candidate; independent verification, review, merge and dual-OS CI remain open. This record describes the author checkout, not T2 acceptance or a live PTY/agent integration.
+Status: corrected compiled source candidate; independent delta verification, review, merge and dual-OS CI remain open. This record describes the author checkout, not T2 acceptance or a live PTY/agent integration.
 
 ## Source and ownership
 
@@ -26,3 +26,11 @@ The final author `pnpm check` exited 0 after native preparation, formatting, lin
 Independent tester strategy was frozen before this candidate (strategy SHA-256 `db407bd105699292b76b9974a5cee0105c4c01827b601b1dca4b4191265e6859`, sentinel digest `1a638fd670af20314678dcfdb9e8bd9f053e3051c627ae13943afc45f361f55e`). It has not yet been run against this source. The independent reviewer is examining the frozen source. A review counterexample is already open: OSC 110/111/104 currently reset to static default appearance, whereas a later explicit appearance replacement may need to be the reset target. The author gate above does not close that issue. Root coordinates any bounded correction and then renews affected evidence before merge.
 
 No live PTY, real Codex/TraeX/Claude Code flow, browser installation, SSH host or Linux CI was exercised by this T2 author run. Those are downstream and coordinator gates, not implied by the local green tests.
+
+## Bounded review correction
+
+The first-source review report `/tmp/cove-m0-t2-code-review.md` has SHA-256 `a4bb443527674815a8200e53f969e7de2bf8681db79690e4b5af1028ecc4d93f`. Corrective source `5f17c502264c4b4232d7652bbb37c8d4edf8cfa3` (tree `2207db9d59177c0e847c61719a17f406a5560fe4`) makes OSC 110/111/104 reset live overrides against the latest explicitly pushed appearance, including unknown colors and palette indices. It reports queue utilization after settling the completed operation. Once the automatic-output sink faults, later admitted operations settle as typed faulted results without parsing them. No probe, protocol, pin or lock file changed.
+
+Finite compiled-adapter regressions now include custom foreground/background/palette resets and a split reset tail; exact queue byte/count admission and a final completion below low water; disposal during a held write with a late callback; split UTF-8 across a real resize; in-memory private-shape and isolated version-guard negatives; and failed checkpoint construction under a small VT cap preserving the earlier checkpoint with exact raw tail. The registered engine suite floors are now 11, 9, 9, 11 and 6 respectively, 46 tests total. The independent verifier's separate withheld cases are not treated as author evidence here.
+
+At `5f17c50`, author `pnpm lint`, engine build, 46/46 adapter tests, 22/22 CI registration tests, and `pnpm format:check` exited 0. One corrected-source `pnpm check` also exited 0 with 27 required suites and 247/247 tests: protocol 80, tooling 31, engine 46, unchanged historical engine probes 75, browser probes 15. Its ignored local JSON report SHA-256 is `b03f0f7332434cfa5ce2c22116266a22732a5fb8e270ad731b0c559798240eee`; JUnit SHA-256 is `6db97af5a4c81fa074a104f465b4cfde66b1d08ce6c7aea46a7924d81e6974b6`. The earlier 238/238 run above remains evidence for `cfe5fa1` only. Independent review and execution must assess the corrected source before acceptance.
