@@ -40,13 +40,16 @@ decisions without concrete evidence or a user request.
 
 ## Coordinate concurrent agents
 
-- The coordinator assembles each milestone's task dependency graph before dispatch.
-  Module plans use GPT-6 Astra high. Implementation and independent testing use
-  separate GPT-6 Sol high or GPT-6 Luna max agents. Review always uses a separate
-  GPT-6 Sol high agent that did not implement the change or author its tests.
-  Dependency and conflict resolution may be assigned to GPT-6 Sol high.
-- Local TraeX GPT-5.6 Sol high may implement or independently test through
-  `warmpool run -- traex ...`; explicitly set model and high reasoning effort.
+- The coordinator schedules against a reviewed milestone dependency graph and
+  tracks ownership, dependencies and gates only; delegate
+  documentation, integration, GitHub operations and conflict resolution to an
+  explicitly assigned non-plan owner. GPT-6 Astra high writes plans only.
+  Allocate implementation, testing, review and operations separately from
+  GPT-6 Sol high, GPT-6 Luna max or local TraeX GPT-5.6 Sol high. Prefer TraeX
+  for bounded non-plan work when the task fits. Review must be independent of
+  implementation and test authorship.
+- Route local TraeX through `warmpool run -- traex ...` with explicit
+  `gpt-5.6-sol` and high reasoning effort.
   Do not use the delegation plugin. Warm hits are an optimization, not an
   admission requirement: dispatch through warmpool even when warm=0 or no warm
   session is selected; execution may queue briefly or start immediately. Record
@@ -54,7 +57,7 @@ decisions without concrete evidence or a user request.
   models or modify/restart shared pool services. Use `ssh devbox` for Linux work.
 - Limit active task agents and task worktrees to five each, including external
   CLI/remote workers and test/review checkouts; obey lower runtime limits too.
-  The coordinator retains the primary checkout. Count nested dispatch centrally;
+  Assign primary-checkout writes to one owner. Count nested dispatch centrally;
   an agent may not start more workers without a coordinator allocation.
 - Record plans, dependency changes, conflicts, decisions and handoffs in task
   documents and GitHub Issues/PRs. Record roles, models, effort, task identities,
@@ -93,8 +96,8 @@ decisions without concrete evidence or a user request.
 - Use `p/luchengxuan/<milestone>-<issue>-<topic>` branches. Main is protected and
   linear: only GitHub rebase & merge, never squash, merge commits, direct pushes,
   force pushes or deletion. The empty-repository bootstrap is already complete.
-- The coordinator may merge without per-PR user confirmation after independent
-  testing, independent GPT-6 Sol review and all required CI checks succeed.
+- An assigned integration owner may merge without per-PR user confirmation after
+  independent testing, independent review and all required CI checks succeed.
   Missing, skipped, cancelled or pending evidence does not satisfy this gate.
   This authority does not grant deployments, releases or milestone transitions.
 - Review findings go back to the implementer. If a reviewer implements a fix,

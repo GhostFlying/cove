@@ -255,3 +255,18 @@ Separately, bounded W1 harness verification546cb58af1417ddc1f86df0afb4e518a6d193
 Allocation entry before edits, 2026-09-26: `/root/m0_t1_impl`, GPT-6 Sol high, temporarily acts as the integration/operations and shared-governance document writer in the primary `/Users/luchengxuan/WORKSPACE/cove` checkout, branch `p/luchengxuan/m0-16-native-input-decision`, clean base `babdf3d24aca8ad7a46ee0cd769d6841a30a229b` (main predecessor `489f3466d55009b2730a8fa70b86c54e44abbb3c`). The W1 qualification branch `a5f874f` and parked V1 external checkout remain untouched. Writable scope is repository `AGENTS.md`, `docs/engineering-plan.md`, `docs/handoff.md`, and this existing execution record; the task may record its own documentation result in this section. The coordinator delegates these edits and GitHub/integration operations rather than doing them itself. Astra high remains plan-only; independent non-plan roles use explicitly allocated GPT-6 Sol high, GPT-6 Luna max, or local TraeX GPT-5.6 Sol high through warmpool, preferring TraeX when a bounded task fits. No agent dispatch, worktree creation, generated global-rule edit, architecture-plan authorship, worker/PTY/protocol code, devbox retry, PR merge or milestone transition belongs to this allocation.
 
 Before edits, local checkout and worktree inventory, PR #38 / Issue #20, final-main run `36240528166`, and task-relevant processes were inspected. This record will correct only the current governance and stale handoff next-step wording, preserving historical failure and verification evidence. Validate formatting, links and the bounded diff; obtain separate Sol-high review and required CI before any PR merge. TraeX CLI/warmpool help and the parked V1 session will be read only to supply exact future dispatch/resume/monitor commands, not to launch a turn.
+
+Read-only state: PR #38 is merged at `489f3466d55009b2730a8fa70b86c54e44abbb3c`, Issue #20 is closed, and final-main run `36240528166` succeeded at that SHA. Four worktrees exist (primary, independent verifier, parked W1 author and parked V1 author). The task-path process scan found no V1/W1 checkout-specific TraeX invocation; unrelated global TraeX processes and the shared warmpool daemon are active, so this is not a blanket process-idle claim. Local `warmpool status` showed zero warm GPT-5.6 Sol sessions at inspection time, which is not a dispatch blocker. No agent or SSH task was launched.
+
+For a future **allocated** non-plan TraeX turn, prepare task-owned `checkout`, `out` and `prompt.md`, verify the branch/cleanliness/slot budget, then use the help-verified CLI form below. A resume requires the exact assigned session ID and its original checkout; never use `--last` to guess an owner. The `status` command is local and read-only; inspect JSONL and the final message before reporting success. These are templates, not execution evidence for a new task.
+
+```sh
+warmpool status --json
+warmpool run -- traex exec -C "$checkout" -m gpt-5.6-sol -c 'model_reasoning_effort="high"' -s workspace-write --json -o "$out/final.md" - < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/stderr.log"
+traex_exit_code=$?
+
+(cd "$checkout" && warmpool run -- traex exec resume -m gpt-5.6-sol -c 'model_reasoning_effort="high"' --json -o "$out/final.md" "$session_id" - < "$out/prompt.md" > "$out/events.jsonl" 2> "$out/stderr.log")
+traex_resume_exit_code=$?
+
+tail -n 30 "$out/events.jsonl"
+```
