@@ -49,7 +49,7 @@ function assertDependencyBoundary(
     throw new Error("Protocol runtime dependency escaped pure boundary");
   if (
     Object.keys(protocolManifest.exports).sort().join() !==
-    "./budgets,./errors,./identity,./pipe,./profile,./provisional/pipe,./provisional/terminal,./runtime,./terminal"
+    "./bootstrap,./budgets,./errors,./identity,./pipe,./profile,./provisional/pipe,./provisional/terminal,./runtime,./terminal,./view"
   )
     throw new Error("Protocol exports escaped the supported contract boundary");
 }
