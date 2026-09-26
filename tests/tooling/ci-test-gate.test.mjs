@@ -607,9 +607,18 @@ test("records spawn and timeout failures before propagating them", async () => {
 
 test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
-  expect(() =>
-    verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 29/);
+  const complete = [
+    ...discoveredCases.slice(0, 2),
+    ...Array.from({ length: 30 }, (_, index) => ({
+      projectName: "tooling",
+      file: resolve(root, second),
+      name: `gate ${index}`,
+    })),
+  ];
+  expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
+  expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
+    /discovered 29 tests; needs 30/,
+  );
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
