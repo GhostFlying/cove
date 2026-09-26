@@ -340,6 +340,23 @@ test("compiled native worker qualification cannot disappear or become empty", as
   ).toThrow(/discovered 1 tests; needs 4/);
 });
 
+test("bounded native writer owner and fd-reuse suites cannot disappear or shrink", async () => {
+  for (const [name, minimumTests] of [
+    ["native-write-owner", 12],
+    ["native-write-reuse", 5],
+    ["native-write-lifecycle", 2],
+    ["native-write-rollback", 3],
+    ["native-write-fault", 1],
+    ["native-write-churn", 2],
+  ]) {
+    const file = `packages/terminal-worker/tests/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "terminal-worker", minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(file);
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/Required suite terminal-worker:/);
+  }
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
@@ -407,7 +424,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 27/);
+  ).toThrow(/needs 28/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
