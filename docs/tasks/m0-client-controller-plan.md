@@ -1,6 +1,6 @@
 # P3: platform-independent M0 client controller
 
-Status: executable implementation plan, 2026-09-26; Issue [#19](https://github.com/GhostFlying/cove/issues/19). Commit as `docs/tasks/m0-client-controller-plan.md` before implementation. **Dispatch waits for the single external event-routing decision below.** This document proposes client APIs and implementation slices; it does not report implemented behavior or change the accepted recovery profile.
+Status: the user endorsed explicit subscription identity together with stable-ID in-place recovery on 2026-09-26. The [subscription recovery clarification](m0-subscription-recovery-clarification.md) records that direction and the proposed required barriers. It supersedes this original plan's blanket new-subscription-on-recover assumption and its claim that the pipe contract can remain unchanged. The architecture choice is no longer pending; the targeted contract/fixture and plan reconciliation must be reviewed and integrated before P3 implementation dispatch. The historical options and plan below are retained for provenance, not alternative instructions to implement unchanged.
 
 ## Entry, evidence and ownership
 
