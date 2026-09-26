@@ -7,9 +7,15 @@ import {
   createFinalGlyphCheckpoint,
   BoundedRecoveryTail,
 } from "./recovery-checkpoint.js";
-import { observeRecovery, writeParsed, type RecoveryObservation } from "./recovery-observation.js";
+import {
+  observeRecovery,
+  observeLogicalGrid,
+  writeParsed,
+  type RecoveryObservation,
+} from "./recovery-observation.js";
 import { assertPinnedRecoveryPackages, readPrivateRecoveryState } from "./xterm-recovery-state.js";
 import { createSourceDerivedRecovery } from "./source-derived-recovery.js";
+import { createLogicalGridCheckpoint } from "./logical-grid-recovery.js";
 
 const require = createRequire(import.meta.url);
 
@@ -195,7 +201,9 @@ export {
   createRecoveryCheckpoint,
   createFinalGlyphCheckpoint,
   createSourceDerivedRecovery,
+  createLogicalGridCheckpoint,
   observeRecovery,
+  observeLogicalGrid,
   readPrivateRecoveryState,
   writeParsed,
 };

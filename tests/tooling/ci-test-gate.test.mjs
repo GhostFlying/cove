@@ -162,6 +162,17 @@ test("source-derived recovery diagnostic suite is mandatory", async () => {
   );
 });
 
+test("pragmatic logical-grid recovery suite is mandatory", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/terminal-engine/probes/recovery-pragmatic.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "terminal-engine-probes", minimumTests: 3 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(
+    /Required suite terminal-engine-probes:/,
+  );
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),

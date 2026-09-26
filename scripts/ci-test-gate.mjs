@@ -60,6 +60,11 @@ export const requiredSuites = [
     minimumTests: 5,
   },
   {
+    project: "terminal-engine-probes",
+    file: "packages/terminal-engine/probes/recovery-pragmatic.test.mjs",
+    minimumTests: 3,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,

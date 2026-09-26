@@ -27,6 +27,44 @@ export interface RecoveryObservation {
   readonly modes: Readonly<Terminal["modes"]>;
 }
 
+export interface LogicalGridObservation {
+  readonly active: "normal" | "alternate";
+  readonly normal: BufferObservation;
+  readonly alternate: BufferObservation;
+  readonly modes: Readonly<Terminal["modes"]>;
+}
+
+function logicalBuffer(buffer: Terminal["buffer"]["normal"], cols: number): BufferObservation {
+  const exact = observeBuffer(buffer);
+  return {
+    ...exact,
+    lines: exact.lines.map((line) => ({
+      wrapped: line.wrapped,
+      cells: line.cells.slice(0, cols).map((cell) => {
+        const chars = cell.chars || " ";
+        const visuallyBlank =
+          chars === " " && !cell.flags[3] && !cell.flags[5] && !cell.flags[7];
+        return {
+          ...cell,
+          chars,
+          fg: visuallyBlank ? 0 : cell.fg,
+          flags: visuallyBlank ? cell.flags.map(() => false) : cell.flags,
+        };
+      }),
+    })),
+  };
+}
+
+// Null and literal unstyled spaces are equivalent at the current grid; background remains visible.
+export function observeLogicalGrid(terminal: Terminal): LogicalGridObservation {
+  return {
+    active: terminal.buffer.active.type,
+    normal: logicalBuffer(terminal.buffer.normal, terminal.cols),
+    alternate: logicalBuffer(terminal.buffer.alternate, terminal.cols),
+    modes: { ...terminal.modes },
+  };
+}
+
 function observeBuffer(buffer: Terminal["buffer"]["normal"]): BufferObservation {
   const lines: { wrapped: boolean; cells: CellObservation[] }[] = [];
   for (let y = 0; y < buffer.length; y++) {

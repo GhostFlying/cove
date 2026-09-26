@@ -1,5 +1,11 @@
 # T1 terminal recovery feasibility spike
 
+## Pragmatic logical-grid trial (2026-09-26)
+
+The user approved the revised `pragmatic-logical-grid-v1` contract in [the implementation plan](m0-terminal-pragmatic-plan.md). A new compiled `createLogicalGridCheckpoint` candidate reads source cells only within the current logical columns and emits bounded VT for normal then alternate content, saved position, current pen/charset/modes and an online final-print suffix. It never resizes or writes to the source. The separate `observeLogicalGrid` oracle keeps both buffers, current-grid cells, history, cursor and modes while normalizing visually inert null/default blanks. Original strict results below remain diagnostic under their original contract.
+
+The first registered slice has three required cases: normal saved position/current pen, active alternate with hidden normal exit, and a split CSI query tail with separate reply sinks. Local macOS compiled probe and these three cases pass at the implementation stage; the full sixteen-family matrix, 20 fresh long-stream checkpoints, and independent verification are still pending. A green historical strict negative control does not count as a pragmatic recovery pass.
+
 2026-09-26. Owner: `/root/m0_t1_impl`. Branch: `p/luchengxuan/m0-13-recovery`; source base `55c59b1`, Q1 registration incorporated as `435615c`, Q1 final probe and results as `47eb2c6` and `c8375b6`. The separate Q1 inventory correction is `50e7137`. This document records an **incomplete** T1 experiment, not an accepted recovery profile. Issue #13 and the P1b gate remain open.
 
 ## Exact runtime and method
