@@ -467,6 +467,15 @@ test("RPC params and result identities bind target instance, method and run", ()
     result: { run },
   };
   expect(
+    composeRpcMethodResult("terminal.create", {
+      operation: {
+        ...createOperation,
+        state: "accepted",
+        run: undefined,
+      },
+    }),
+  ).toBeNull();
+  expect(
     validateOperationRecord(
       { ...createOperation, result: { run: { ...run, runId: "r2" } } },
       encoder,

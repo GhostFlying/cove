@@ -24,9 +24,7 @@ const OperationRecordFieldsSchema = z.object({
   error: DomainErrorSchema.optional(),
 });
 export const OperationRecordSchema = OperationRecordFieldsSchema.refine(
-  (value) =>
-    (!value.result?.run || (!!value.run && sameRunRef(value.run, value.result.run))) &&
-    (value.method !== "terminal.stop" || !!value.run),
+  (value) => !!value.run && (!value.result?.run || sameRunRef(value.run, value.result.run)),
 );
 export type OperationRecord = z.infer<typeof OperationRecordSchema>;
 
