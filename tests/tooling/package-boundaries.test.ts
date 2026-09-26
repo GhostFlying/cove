@@ -49,9 +49,9 @@ function assertDependencyBoundary(
     throw new Error("Protocol runtime dependency escaped pure boundary");
   if (
     Object.keys(protocolManifest.exports).sort().join() !==
-    "./provisional/pipe,./provisional/terminal"
+    "./budgets,./errors,./identity,./profile,./provisional/pipe,./provisional/terminal,./terminal"
   )
-    throw new Error("Protocol exports escaped provisional boundary");
+    throw new Error("Protocol exports escaped the supported contract boundary");
 }
 
 test("real package manifests stay within their execution environments", async () => {
