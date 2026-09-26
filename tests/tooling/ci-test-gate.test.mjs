@@ -111,6 +111,12 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   }
 });
 
+test("terminal-web package test runs both registered probe and view projects", async () => {
+  const pkg = JSON.parse(await readFile(resolve(root, "packages/terminal-web/package.json"), "utf8"));
+  const projects = [...pkg.scripts.test.matchAll(/(?:^|\s)--project\s+(\S+)/g)].map((match) => match[1]);
+  expect(projects).toEqual(["terminal-web-probes", "terminal-web"]);
+});
+
 test("supported terminal protocol suite is mandatory with compiled cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/supported-terminal.test.mjs",
@@ -312,7 +318,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   expect(() =>
     verifyDiscovery(discoveredCases.slice(0, -1), [first, second], requiredGateSuites),
-  ).toThrow(/needs 23/);
+  ).toThrow(/needs 24/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {

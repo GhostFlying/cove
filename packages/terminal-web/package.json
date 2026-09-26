@@ -21,7 +21,7 @@
     "build": "tsc -b && pnpm build:browser",
     "build:browser": "vite build --config probes/vite.config.mjs && vite build --config tests/browser/vite.config.mjs",
     "browser:install": "node probes/install-browser.mjs",
-    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project terminal-web-probes",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project terminal-web-probes --project terminal-web",
     "clean": "tsc -b --clean && pnpm clean:browser",
     "clean:browser": "node --input-type=module -e \"import {rm} from 'node:fs/promises'; await Promise.all(['dist/browser','dist/view-browser'].map(path=>rm(path,{recursive:true,force:true})))\""
   },
