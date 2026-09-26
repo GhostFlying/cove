@@ -275,6 +275,13 @@ test("recover keeps one complete subscription and accepted result marks the barr
   };
   expect(validatePipeFrame(frame(2), result).ok).toBe(true);
   expect(validatePipeResultForCommand(command, result)).toBe(true);
+  expect(validatePipeResultForCommand({ ...command, appliedSeq: undefined }, result)).toBe(false);
+  expect(
+    validatePipeResultForCommand(
+      { ...command, appliedSeq: undefined },
+      { ...result, recoveryMode: "baseline" },
+    ),
+  ).toBe(true);
   expect(validatePipeFrame(frame(2), { ...result, recoveryMode: undefined }).ok).toBe(false);
   expect(validatePipeFrame(frame(2), { ...result, atSeq: undefined }).ok).toBe(false);
   expect(validatePipeResultForCommand(command, { ...result, atSeq: 2 })).toBe(false);

@@ -262,7 +262,15 @@ test("new attach gets a fresh ID while recovery keeps the complete existing ref"
     mode: "replay",
     atSeq: 4,
   };
-  expect(validateTerminalResultForCommand(attach, reattached)).toBe(true);
+  expect(validateTerminalResultForCommand(attach, reattached)).toBe(false);
+  expect(validateTerminalResultForCommand(attach, { ...reattached, mode: "baseline" })).toBe(true);
+  const retained = {
+    appliedSeq: 4,
+    profile: attach.profile,
+    encoding: attach.encoding,
+    geometry: { cols: 12, rows: 4 },
+  };
+  expect(validateTerminalResultForCommand({ ...attach, resume: retained }, reattached)).toBe(true);
   expect(reattached.subscription.subscriptionId).not.toBe(subscription.subscriptionId);
 
   const command = {
@@ -287,6 +295,13 @@ test("new attach gets a fresh ID while recovery keeps the complete existing ref"
     atSeq: 4,
   };
   expect(validateTerminalResultForCommand(command, result)).toBe(true);
+  expect(validateTerminalResultForCommand({ ...command, resume: undefined }, result)).toBe(false);
+  expect(
+    validateTerminalResultForCommand(
+      { ...command, resume: undefined },
+      { ...result, mode: "baseline" },
+    ),
+  ).toBe(true);
   expect(validateTerminalResultForCommand(command, { ...result, atSeq: 3 })).toBe(false);
   expect(
     validateTerminalResultForCommand(command, {
