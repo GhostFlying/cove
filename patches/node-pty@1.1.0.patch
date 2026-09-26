@@ -813,7 +813,7 @@ index c53e086b4968d6fb0bf601ace3a813809433fedb..4088e4b509648694a7f075aea9663c10
    pty: string;
  }
 diff --git a/src/unix/pty.cc b/src/unix/pty.cc
-index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570ce2b271e2 100644
+index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8fb6db827a07035d4f08c84eb36f0c811a3b9319 100644
 --- a/src/unix/pty.cc
 +++ b/src/unix/pty.cc
 @@ -24,6 +24,9 @@
@@ -901,24 +901,35 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
    Napi::HandleScope scope(napiEnv);
  
 -  if (info.Length() != 11 ||
-+  if ((info.Length() != 11 && info.Length() != 12) ||
++  if ((info.Length() != 11 && info.Length() != 12 && info.Length() != 13) ||
        !info[0].IsString() ||
        !info[1].IsArray() ||
        !info[2].IsArray() ||
-@@ -273,9 +332,11 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -273,9 +332,22 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        !info[7].IsNumber() ||
        !info[8].IsBoolean() ||
        !info[9].IsString() ||
 -      !info[10].IsFunction()) {
 +      !info[10].IsFunction() ||
-+      (info.Length() == 12 && !info[11].IsBoolean())) {
++      (info.Length() >= 12 && !info[11].IsBoolean()) ||
++      (info.Length() == 13 && !info[12].IsString())) {
      throw Napi::Error::New(napiEnv, "Usage: pty.fork(file, args, env, cwd, cols, rows, uid, gid, utf8, helperPath, onexit)");
    }
-+  const bool bounded_writer = info.Length() == 12 && info[11].As<Napi::Boolean>().Value();
++  const bool bounded_writer = info.Length() >= 12 && info[11].As<Napi::Boolean>().Value();
++  // The extra argument is only for package-local rollback tests.
++  std::string test_fault;
++  if (info.Length() == 13) {
++    if (!bounded_writer) throw Napi::TypeError::New(napiEnv, "Native fault requires bounded writer");
++    test_fault = info[12].As<Napi::String>().Utf8Value();
++    if (test_fault != "duplicate" && test_fault != "before-watcher" &&
++        test_fault != "after-watcher") {
++      throw Napi::TypeError::New(napiEnv, "Unknown bounded writer test fault");
++    }
++  }
  
    // file
    std::string file = info[0].As<Napi::String>();
-@@ -373,6 +434,12 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -373,6 +445,12 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
      throw Napi::Error::New(napiEnv, "posix_spawnp failed.");
    }
    if (pty_nonblock(master) == -1) {
@@ -931,7 +942,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
      throw Napi::Error::New(napiEnv, "Could not set master fd to nonblocking.");
    }
  #else
-@@ -443,11 +510,79 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -443,11 +521,85 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        }
      default:
        if (pty_nonblock(master) == -1) {
@@ -954,7 +965,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
 +    while (waitpid(pid, &ignored_status, 0) == -1 && errno == EINTR) {}
 +    throw Napi::Error::New(napiEnv, "Bounded writer is unsupported on this platform.");
 +#else
-+    const int write_fd = fcntl(master, F_DUPFD_CLOEXEC, 3);
++    const int write_fd = test_fault == "duplicate" ? -1 : fcntl(master, F_DUPFD_CLOEXEC, 3);
 +    if (write_fd == -1) {
 +      close(master);
 +      kill(pid, SIGKILL);
@@ -989,8 +1000,14 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
 +            if (errno == ESRCH) return Napi::Boolean::New(env, false);
 +            throw Napi::Error::New(env, "Owned child stop failed");
 +          }));
++      if (test_fault == "before-watcher") {
++        throw Napi::Error::New(napiEnv, "Injected failure before owned watcher");
++      }
 +      SetupCoveOwnedExitCallback(napiEnv, info[10].As<Napi::Function>(), child);
 +      watcher_started = true;
++      if (test_fault == "after-watcher") {
++        throw Napi::Error::New(napiEnv, "Injected failure after owned watcher");
++      }
 +      return obj;
 +    } catch (...) {
 +      close(write_fd);
@@ -1011,7 +1028,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
    Napi::Object obj = Napi::Object::New(napiEnv);
    obj.Set("fd", Napi::Number::New(napiEnv, master));
    obj.Set("pid", Napi::Number::New(napiEnv, pid));
-@@ -691,95 +826,105 @@ pty_posix_spawn(char** argv, char** env,
+@@ -691,95 +843,105 @@ pty_posix_spawn(char** argv, char** env,
                  int* master,
                  pid_t* pid,
                  int* err) {
@@ -1201,7 +1218,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..ebae7526886c3b95cf24782de107570c
    }
  }
  #endif
-@@ -789,6 +934,7 @@ done:
+@@ -789,6 +951,7 @@ done:
   */
  
  Napi::Object init(Napi::Env env, Napi::Object exports) {
