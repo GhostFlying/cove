@@ -362,7 +362,24 @@ const fixture = {
     const withdrawn = evidence();
     view!.setVisibility(true);
     capturedTerminal!.input("v", true);
-    return { successor, successorFresh, withdrawn, shownFresh: evidence() };
+    const shownFresh = evidence();
+
+    await initialize();
+    await ready();
+    let disposeListener: { dispose(): void };
+    disposeListener = view!.onFocusIntent((intent) => {
+      if (!intent.focused) return;
+      disposeListener.dispose();
+      view!.dispose();
+    });
+    capturedTerminal!.input("d", true);
+    return {
+      successor,
+      successorFresh,
+      withdrawn,
+      shownFresh,
+      disposed: { evidence: evidence(), children: container.childElementCount },
+    };
   },
   paste(text: string) {
     const data = new DataTransfer();
@@ -395,6 +412,20 @@ const fixture = {
         heldStatus = "rejected";
       },
     );
+  },
+  async startHeldBaseline(bytes: number[]) {
+    await view!.beginBaseline(descriptor(bytes.length));
+    heldStatus = "pending";
+    heldOperation = view!.writeBaselineChunk(Uint8Array.from(bytes)).then(
+      async () => {
+        await view!.finishBaseline();
+        heldStatus = "resolved";
+      },
+      () => {
+        heldStatus = "rejected";
+      },
+    );
+    await Promise.resolve();
   },
   heldStatus() {
     return heldStatus;

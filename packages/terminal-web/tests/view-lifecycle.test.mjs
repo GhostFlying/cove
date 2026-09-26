@@ -147,7 +147,34 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
     await page.evaluate(() => window.coveView.setVisibility(false));
     const afterHide = await page.evaluate(() => window.coveView.evidence());
     const reentry = await page.evaluate(() => window.coveView.inputReentry());
-    return { before, afterFirst, takeover, afterSecond, afterHide, reentry, box };
+    await page.evaluate(async () => {
+      await window.coveView.reset();
+      window.coveView.holdNextParse();
+      await window.coveView.startHeldBaseline([27, 93, 55, 55, 55, 59, 120, 7]);
+      window.coveView.focus();
+    });
+    await page.keyboard.type("b");
+    const installingInput = await page.evaluate(() => ({
+      status: window.coveView.heldStatus(),
+      evidence: window.coveView.evidence(),
+      control: window.coveView.controlEvidence(),
+    }));
+    await page.evaluate(() => window.coveView.releaseParse());
+    const released = await page.evaluate(async () => ({
+      status: await window.coveView.awaitHeld(),
+      evidence: window.coveView.evidence(),
+    }));
+    return {
+      before,
+      afterFirst,
+      takeover,
+      afterSecond,
+      afterHide,
+      reentry,
+      installingInput,
+      released,
+      box,
+    };
   });
   expect(result.before.focuses).toEqual([]);
   expect(result.before.inputs).toEqual([]);
@@ -205,6 +232,23 @@ test("V1-L4 publishes focus before input but not for selection scrolling appeara
     false,
     true,
   ]);
+  expect(result.reentry.disposed).toMatchObject({
+    evidence: { inputs: [], ownedRoots: 0 },
+    children: 0,
+  });
+  expect(result.reentry.disposed.evidence.focuses).toEqual([
+    expect.objectContaining({ focused: true, focusSeq: 1 }),
+  ]);
+  expect(result.installingInput.status).toBe("pending");
+  expect(result.installingInput.evidence.inputs).toEqual([
+    expect.objectContaining({ source: "keyboard", bytes: [98] }),
+  ]);
+  expect(result.installingInput.control.deliveries).toEqual([
+    { type: "focus", focused: true, focusSeq: 1 },
+    { type: "input", bytes: [98], focusSeq: 1 },
+  ]);
+  expect(result.released.status).toBe("resolved");
+  expect(result.released.evidence.inputs).toEqual(result.installingInput.evidence.inputs);
 });
 
 test("V1-L5 validates appearance and rejects oversized input without truncating or losing the model", async () => {
