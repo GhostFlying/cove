@@ -90,31 +90,29 @@ async function runFault(phase) {
         ? /Could not duplicate bounded writer fd/
         : new RegExp(`Injected failure ${phase.replace("-", " owned ")}`),
     );
-    if (phase === "after-watcher") {
-      let callbackWatchdog;
-      try {
-        await Promise.race([
-          observedExit,
-          new Promise((_, reject) => {
-            callbackWatchdog = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `after-watcher exit callback not observed within 3000 ms (native=${nativeExitCallbacks})`,
-                  ),
+    let callbackWatchdog;
+    try {
+      await Promise.race([
+        observedExit,
+        new Promise((_, reject) => {
+          callbackWatchdog = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `${phase} exit callback not observed within 3000 ms (native=${nativeExitCallbacks})`,
                 ),
-              3_000,
-            );
-          }),
-        ]);
-      } finally {
-        clearTimeout(callbackWatchdog);
-      }
+              ),
+            3_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(callbackWatchdog);
     }
     await sleep(100);
     assert.equal(descriptorCount(), baseline, `${phase} retained a parent descriptor`);
     assert.deepEqual(ownedChildren(phase), [], `${phase} retained an owned child`);
-    assert.equal(nativeExitCallbacks, phase === "after-watcher" ? 1 : 0);
+    assert.equal(nativeExitCallbacks, 1);
     assert.equal(exitCallbacks, nativeExitCallbacks);
   } finally {
     if (returned) {

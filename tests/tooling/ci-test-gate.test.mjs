@@ -533,7 +533,7 @@ test("bounded native writer owner and fd-reuse suites cannot disappear or shrink
     ["native-write-rollback", 3],
     ["native-write-fault", 1],
     ["native-write-churn", 2],
-    ["native-write-spawn-contract", 7],
+    ["native-write-spawn-contract", 11],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);

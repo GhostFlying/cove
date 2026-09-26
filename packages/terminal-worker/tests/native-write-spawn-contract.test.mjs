@@ -20,7 +20,7 @@ const options = {
 const descriptorDirectory = process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
 const descriptorCount = () => readdirSync(descriptorDirectory).length;
 
-function ownedChildren(nonce) {
+function ownedChildren(nonce, ownedFixture = fixture) {
   const inspected = spawnSync("ps", ["-axo", "pid=,command="], {
     encoding: "utf8",
     timeout: 1_000,
@@ -28,7 +28,7 @@ function ownedChildren(nonce) {
   assert.equal(inspected.status, 0, String(inspected.error ?? inspected.stderr));
   return inspected.stdout
     .split("\n")
-    .filter((line) => line.includes(fixture) && line.includes(nonce))
+    .filter((line) => line.includes(ownedFixture) && line.includes(nonce))
     .map((line) => Number.parseInt(line.trim(), 10));
 }
 
@@ -48,6 +48,53 @@ function assertSpawnError(error, causePattern) {
   assert.match(String(error.cause), causePattern);
   assert.ok(error.cleanup instanceof Promise);
   return error;
+}
+
+function spawnFault(phase, nonce, childFixture = fixture) {
+  const originalFork = pty.native.fork;
+  try {
+    pty.native.fork = (...args) => originalFork(...args.slice(0, -1), phase, args.at(-1));
+    try {
+      pty.spawn(process.execPath, [childFixture, nonce], options);
+    } catch (error) {
+      return assertSpawnError(error, /Could not duplicate|Injected failure/);
+    }
+    assert.fail(`Native fault ${phase} unexpectedly returned a PTY`);
+  } finally {
+    pty.native.fork = originalFork;
+  }
+}
+
+function finiteLedger(capacity) {
+  const held = new Set();
+  return {
+    get used() {
+      return held.size;
+    },
+    reserve() {
+      if (held.size >= capacity) return undefined;
+      const ticket = { released: false };
+      held.add(ticket);
+      return ticket;
+    },
+    observe(ticket, error) {
+      error.cleanup.then((result) => {
+        if (result.kind === "confirmed-clean" && !ticket.released) {
+          ticket.released = true;
+          held.delete(ticket);
+        }
+      });
+    },
+  };
+}
+
+async function assertNoOwnedChild(nonce, childFixture = fixture) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (ownedChildren(nonce, childFixture).length === 0) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  assert.deepEqual(ownedChildren(nonce, childFixture), []);
 }
 
 test("public preflight and pre-entry failures are side-effect-free", async () => {
@@ -247,3 +294,89 @@ test("adoption stop failure is uncertain and never silently frees the owner", as
   }
   assert.deepEqual(await failure.cleanup, { kind: "cleanup-uncertain", reason: "child-stop" });
 }, 7_000);
+
+test("finite admission releases confirmed failures exactly once after zero-cost preflight", async () => {
+  const ledger = finiteLedger(2);
+  assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 2 });
+  assert.equal(ledger.used, 0);
+  let invalid;
+  try {
+    pty.spawn(process.execPath, "unsupported argv", options);
+  } catch (error) {
+    invalid = assertSpawnError(error, /args as a string is not supported/);
+  }
+  assert.deepEqual(await invalid.cleanup, { kind: "confirmed-clean" });
+  assert.equal(ledger.used, 0);
+
+  for (const phase of ["duplicate", "before-watcher", "after-watcher"]) {
+    const ticket = ledger.reserve();
+    assert.ok(ticket);
+    const nonce = randomUUID();
+    const failure = spawnFault(phase, nonce);
+    ledger.observe(ticket, failure);
+    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" }, phase);
+    assert.equal(ledger.used, 0, phase);
+    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" }, phase);
+    assert.equal(ledger.used, 0, phase);
+    await assertNoOwnedChild(nonce);
+  }
+});
+
+test("pending rollback holds capacity and a late reap cannot release uncertainty", async () => {
+  const ledger = finiteLedger(1);
+  const ticket = ledger.reserve();
+  assert.ok(ticket);
+  const nonce = randomUUID();
+  const start = Date.now();
+  const failure = spawnFault("before-watcher-held", nonce);
+  ledger.observe(ticket, failure);
+  assert.ok(Date.now() - start < 500, "spawn must return before the cleanup deadline");
+  const pending = await Promise.race([
+    failure.cleanup.then(() => false),
+    new Promise((resolveWait) => setTimeout(() => resolveWait(true), 50)),
+  ]);
+  assert.equal(pending, true);
+  assert.equal(ledger.used, 1);
+  assert.equal(ledger.reserve(), undefined);
+  const result = await failure.cleanup;
+  assert.deepEqual(result, { kind: "cleanup-uncertain", reason: "timeout" });
+  assert.ok(Date.now() - start >= 2_900);
+  await assertNoOwnedChild(nonce);
+  assert.deepEqual(await failure.cleanup, result);
+  assert.equal(ledger.used, 1);
+  assert.equal(ledger.reserve(), undefined);
+}, 8_000);
+
+test("reader and writer close ambiguity each retain finite capacity", async () => {
+  const ledger = finiteLedger(2);
+  for (const phase of ["rollback-reader-close-report", "rollback-writer-close-report"]) {
+    const ticket = ledger.reserve();
+    assert.ok(ticket);
+    const nonce = randomUUID();
+    const baseline = descriptorCount();
+    const failure = spawnFault(phase, nonce);
+    ledger.observe(ticket, failure);
+    assert.deepEqual(await failure.cleanup, {
+      kind: "cleanup-uncertain",
+      reason: "native-rollback",
+    });
+    assert.equal(descriptorCount(), baseline);
+    await assertNoOwnedChild(nonce);
+  }
+  assert.equal(ledger.used, 2);
+  assert.equal(ledger.reserve(), undefined);
+});
+
+test("earlier parent cleanup ambiguity survives duplicate and watcher rollback", async () => {
+  for (const phase of ["auxiliary-close-then-duplicate", "auxiliary-close-after-watcher"]) {
+    const nonce = randomUUID();
+    const baseline = descriptorCount();
+    const failure = spawnFault(phase, nonce);
+    assert.deepEqual(await failure.cleanup, {
+      kind: "cleanup-uncertain",
+      reason: "native-rollback",
+    });
+    assert.equal(descriptorCount(), baseline);
+    await assertNoOwnedChild(nonce);
+  }
+});
