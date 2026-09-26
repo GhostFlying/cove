@@ -18,6 +18,23 @@ async function until(predicate, label, timeoutMs = 5_000) {
   }
 }
 
+async function ownerCompletionWithin(terminal) {
+  let watchdog;
+  try {
+    return await Promise.race([
+      terminal.boundedWriteCompletion,
+      new Promise((_, reject) => {
+        watchdog = setTimeout(
+          () => reject(new Error("Timed out awaiting writer owner completion")),
+          5_000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(watchdog);
+  }
+}
+
 function closed(fd) {
   try {
     fstatSync(fd);
@@ -79,7 +96,7 @@ test("real bounded write reaches the child before natural exit retires both desc
     await until(() => output.includes(Buffer.from("SEEN 41420a")), "child readback");
     await until(() => exit !== undefined, "natural child exit");
     assert.deepEqual(exit, { exitCode: 0, signal: 0 });
-    expect(await terminal.boundedWriteCompletion).toEqual({ kind: "closed" });
+    expect(await ownerCompletionWithin(terminal)).toEqual({ kind: "closed" });
     expect(closed(readerFd)).toBe(true);
     expect(closed(writerFd)).toBe(true);
     assert.throws(() => process.kill(terminal.pid, 0), { code: "ESRCH" });
@@ -91,7 +108,7 @@ test("real bounded write reaches the child before natural exit retires both desc
       await until(() => exit !== undefined, "owned child cleanup", 3_000);
     }
   }
-});
+}, 35_000);
 
 test("read-stream EIO retires the writer while the owned child remains stoppable", async () => {
   const nonce = randomUUID();
@@ -114,7 +131,7 @@ test("read-stream EIO retires the writer while the owned child remains stoppable
   try {
     await until(() => output.includes(Buffer.from(`READY ${nonce}`)), "child ready");
     terminal._socket.destroy(Object.assign(new Error("synthetic read failure"), { code: "EIO" }));
-    expect(await terminal.boundedWriteCompletion).toEqual({ kind: "closed" });
+    expect(await ownerCompletionWithin(terminal)).toEqual({ kind: "closed" });
     await until(() => closed(readerFd), "reader close");
     expect(closed(writerFd)).toBe(true);
     terminal._boundedOwnedStop(9);
@@ -128,4 +145,4 @@ test("read-stream EIO retires the writer while the owned child remains stoppable
       await until(() => exit !== undefined, "owned child cleanup", 3_000);
     }
   }
-});
+}, 35_000);

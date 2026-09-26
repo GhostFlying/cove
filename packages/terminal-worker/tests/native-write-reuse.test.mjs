@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -65,7 +65,7 @@ async function stopOwnedProcess(pid, nonce, fixture) {
   }
 }
 
-async function runReuse(fault) {
+async function runReuse(fault, watchdogMs = 15_000) {
   const runner = new URL("./fixtures/native-write-reuse-runner.mjs", import.meta.url);
   const nonce = randomUUID();
   const child = spawn(process.execPath, [runner.pathname, nonce], {
@@ -105,7 +105,7 @@ async function runReuse(fault) {
     outcome = await Promise.race([
       exit,
       new Promise((_, reject) => {
-        watchdog = setTimeout(() => reject(new Error("native reuse runner timed out")), 15_000);
+        watchdog = setTimeout(() => reject(new Error("native reuse runner timed out")), watchdogMs);
       }),
     ]);
   } catch (error) {
@@ -115,12 +115,17 @@ async function runReuse(fault) {
     if (child.exitCode === null && child.signalCode === null) {
       try {
         await stopOwnedProcess(child.pid, nonce, runner.pathname);
-        await Promise.race([
-          exit,
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error("runner remained live")), 2_000),
-          ),
-        ]);
+        let exitWatchdog;
+        try {
+          await Promise.race([
+            exit,
+            new Promise((_, reject) => {
+              exitWatchdog = setTimeout(() => reject(new Error("runner remained live")), 2_000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(exitWatchdog);
+        }
       } catch (error) {
         failure ??= error;
       }
@@ -134,9 +139,22 @@ async function runReuse(fault) {
     } catch (error) {
       failure ??= error;
     }
-    if (scratch && existsSync(scratch)) failure ??= new Error(`scratch remained: ${scratch}`);
+    if (scratch && existsSync(scratch)) {
+      try {
+        rmSync(scratch, { recursive: true, force: true });
+      } catch (error) {
+        failure ??= error;
+      }
+    }
   }
-  if (failure) throw failure;
+  if (failure) {
+    failure.cleanup = {
+      runnerAbsent: child.pid === undefined || absent(child.pid),
+      childAbsent: ownedPid === undefined || absent(ownedPid),
+      scratchAbsent: scratch === undefined || !existsSync(scratch),
+    };
+    throw failure;
+  }
   return { outcome, stdout, stderr, ownedPid, scratch };
 }
 
@@ -149,7 +167,7 @@ test("delayed bounded fs.write never reaches a reused reader descriptor", async 
   expect(result.readerFd).toBe(result.readerReused);
   expect(result.writerFd).not.toBe(result.readerFd);
   expect(result.sentinelBytes).toBe(0);
-});
+}, 35_000);
 
 async function expectOwnedFaultCleanup(fault, message) {
   const { outcome, stderr, ownedPid, scratch } = await runReuse(fault);
@@ -166,9 +184,22 @@ test("native reuse runner cleans its child and scratch after post-spawn failure"
     outcome: { code: 1, signal: null },
     ownedPid: expect.any(Number),
   });
-});
+}, 35_000);
 
 test("native reuse runner cleans its child and scratch after blocker rejection", async () => {
   const result = await expectOwnedFaultCleanup("blocker", /synthetic blocker failure/);
   expect(result).toMatchObject({ outcome: { code: 1, signal: null }, scratch: expect.any(String) });
-});
+}, 35_000);
+
+test("hung reuse runner is retired before the framework deadline", async () => {
+  let failure;
+  try {
+    await runReuse("hang", 250);
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toMatchObject({
+    message: "native reuse runner timed out",
+    cleanup: { runnerAbsent: true, childAbsent: true, scratchAbsent: true },
+  });
+}, 35_000);

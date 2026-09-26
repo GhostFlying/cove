@@ -343,11 +343,11 @@ test("compiled native worker qualification cannot disappear or become empty", as
 test("bounded native writer owner and fd-reuse suites cannot disappear or shrink", async () => {
   for (const [name, minimumTests] of [
     ["native-write-owner", 12],
-    ["native-write-reuse", 4],
+    ["native-write-reuse", 5],
     ["native-write-lifecycle", 2],
     ["native-write-rollback", 3],
     ["native-write-fault", 1],
-    ["native-write-churn", 1],
+    ["native-write-churn", 2],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);

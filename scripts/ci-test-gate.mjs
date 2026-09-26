@@ -116,7 +116,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-reuse.test.mjs",
-    minimumTests: 4,
+    minimumTests: 5,
   },
   {
     project: "terminal-worker",
@@ -136,7 +136,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-churn.test.mjs",
-    minimumTests: 1,
+    minimumTests: 2,
   },
   {
     project: "terminal-web-probes",
