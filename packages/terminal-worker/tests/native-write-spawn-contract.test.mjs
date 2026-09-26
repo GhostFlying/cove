@@ -146,6 +146,34 @@ async function assertNoOwnedChild(nonce, childFixture = fixture) {
   assert.deepEqual(ownedChildren(nonce, childFixture), []);
 }
 
+async function cleanupAdoptionOwner(nonce, ownedStop, recordFailure) {
+  if (ownedStop) {
+    try {
+      ownedStop(9);
+    } catch (error) {
+      recordFailure(error);
+    }
+  }
+  let pids = [];
+  try {
+    pids = ownedChildren(nonce);
+  } catch (error) {
+    recordFailure(error);
+  }
+  for (const pid of pids) {
+    try {
+      stopVerifiedOwnedChild(pid, nonce);
+    } catch (error) {
+      recordFailure(error);
+    }
+  }
+  try {
+    await assertNoOwnedChild(nonce);
+  } catch (error) {
+    recordFailure(error);
+  }
+}
+
 test("public preflight and pre-entry failures are side-effect-free", async () => {
   const baseline = descriptorCount();
   assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 2 });
@@ -266,31 +294,47 @@ test("native ambiguous close and stop reports retain an uncertain receipt", asyn
 test("public adoption rollback waits for reader, writer and sole reaper", async () => {
   const originalFork = pty.native.fork;
   const originalForward = UnixTerminal.prototype._forwardEvents;
+  const nonce = randomUUID();
   let result;
+  let ownedStop;
   let failure;
+  let firstFailure;
   try {
-    pty.native.fork = (...args) => {
-      result = originalFork(...args);
-      return result;
-    };
-    UnixTerminal.prototype._forwardEvents = () => {
-      throw new Error("injected adoption failure");
-    };
     try {
-      pty.spawn(process.execPath, [fixture, randomUUID()], options);
-    } catch (error) {
-      failure = assertSpawnError(error, /injected adoption failure/);
+      pty.native.fork = (...args) => {
+        result = originalFork(...args);
+        ownedStop = result.stopOwnedChild;
+        return result;
+      };
+      UnixTerminal.prototype._forwardEvents = () => {
+        throw new Error("injected adoption failure");
+      };
+      try {
+        pty.spawn(process.execPath, [fixture, nonce], options);
+      } catch (error) {
+        failure = assertSpawnError(error, /injected adoption failure/);
+      }
+    } finally {
+      pty.native.fork = originalFork;
+      UnixTerminal.prototype._forwardEvents = originalForward;
     }
+    assert.ok(result);
+    assert.deepEqual(
+      await observeWithin(failure.cleanup, 4_000, "adoption cleanup did not settle"),
+      { kind: "confirmed-clean" },
+    );
+    expect(closed(result.fd)).toBe(true);
+    expect(closed(result.writeFd)).toBe(true);
+    expect(result.stopOwnedChild(9)).toBe(false);
+  } catch (error) {
+    firstFailure = error;
   } finally {
-    pty.native.fork = originalFork;
-    UnixTerminal.prototype._forwardEvents = originalForward;
+    await cleanupAdoptionOwner(nonce, ownedStop, (error) => {
+      firstFailure ??= error;
+    });
   }
-  assert.ok(result);
-  assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
-  expect(closed(result.fd)).toBe(true);
-  expect(closed(result.writeFd)).toBe(true);
-  expect(result.stopOwnedChild(9)).toBe(false);
-});
+  if (firstFailure) throw firstFailure;
+}, 10_000);
 
 test("an unreported native entry times out uncertain rather than claiming clean", async () => {
   const originalFork = pty.native.fork;
@@ -317,32 +361,45 @@ test("an unreported native entry times out uncertain rather than claiming clean"
 test("adoption stop failure is uncertain and never silently frees the owner", async () => {
   const originalFork = pty.native.fork;
   const originalForward = UnixTerminal.prototype._forwardEvents;
+  const nonce = randomUUID();
   let ownedStop;
   let failure;
+  let firstFailure;
   try {
-    pty.native.fork = (...args) => {
-      const result = originalFork(...args);
-      ownedStop = result.stopOwnedChild;
-      result.stopOwnedChild = () => {
-        throw new Error("synthetic owned stop failure");
-      };
-      return result;
-    };
-    UnixTerminal.prototype._forwardEvents = () => {
-      throw new Error("synthetic setup failure");
-    };
     try {
-      pty.spawn(process.execPath, [fixture, randomUUID()], options);
-    } catch (error) {
-      failure = assertSpawnError(error, /synthetic setup failure/);
+      pty.native.fork = (...args) => {
+        const result = originalFork(...args);
+        ownedStop = result.stopOwnedChild;
+        result.stopOwnedChild = () => {
+          throw new Error("synthetic owned stop failure");
+        };
+        return result;
+      };
+      UnixTerminal.prototype._forwardEvents = () => {
+        throw new Error("synthetic setup failure");
+      };
+      try {
+        pty.spawn(process.execPath, [fixture, nonce], options);
+      } catch (error) {
+        failure = assertSpawnError(error, /synthetic setup failure/);
+      }
+    } finally {
+      pty.native.fork = originalFork;
+      UnixTerminal.prototype._forwardEvents = originalForward;
     }
+    assert.deepEqual(
+      await observeWithin(failure.cleanup, 4_000, "adoption stop cleanup did not settle"),
+      { kind: "cleanup-uncertain", reason: "child-stop" },
+    );
+  } catch (error) {
+    firstFailure = error;
   } finally {
-    pty.native.fork = originalFork;
-    UnixTerminal.prototype._forwardEvents = originalForward;
-    if (ownedStop) ownedStop(9);
+    await cleanupAdoptionOwner(nonce, ownedStop, (error) => {
+      firstFailure ??= error;
+    });
   }
-  assert.deepEqual(await failure.cleanup, { kind: "cleanup-uncertain", reason: "child-stop" });
-}, 7_000);
+  if (firstFailure) throw firstFailure;
+}, 10_000);
 
 test("finite admission releases confirmed failures exactly once after zero-cost preflight", async () => {
   const ledger = finiteLedger(2);
