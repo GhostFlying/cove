@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": [],
+    "rootDir": "tests/browser",
+    "outDir": "dist/tests/browser-types",
+    "tsBuildInfoFile": "dist/terminal-web-tests.tsbuildinfo"
+  },
+  "include": ["tests/browser/**/*.ts", "tests/browser/**/*.d.ts"],
+  "references": [{ "path": "./tsconfig.production.json" }, { "path": "../protocol" }]
+}
