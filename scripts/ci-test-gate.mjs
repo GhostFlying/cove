@@ -120,6 +120,16 @@ export const requiredSuites = [
   },
   {
     project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-write-lifecycle.test.mjs",
+    minimumTests: 2,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-write-rollback.test.mjs",
+    minimumTests: 3,
+  },
+  {
+    project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-churn.test.mjs",
     minimumTests: 1,
   },

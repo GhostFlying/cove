@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { accessSync, constants, readdirSync, fstatSync } from "node:fs";
+import { accessSync, closeSync, constants, readdirSync, fstatSync } from "node:fs";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -30,6 +30,11 @@ async function cycle(enabled) {
   });
   const reader = terminal.fd;
   const writer = enabled ? terminal._writeStream._fd : reader;
+  if (enabled) assert.notEqual(writer, reader);
+  else {
+    assert.equal(terminal._writeStream._fd, reader);
+    assert.equal(terminal.getBoundedWriteState(), undefined);
+  }
   try {
     const exit = await new Promise((resolve, reject) => {
       const watchdog = setTimeout(
@@ -68,6 +73,20 @@ for (const [name, enabled] of [
   assert.equal(after, baseline, `${name} parent descriptors accumulated: ${baseline} -> ${after}`);
   counts[name] = { baseline, after };
 }
+
+const openBaseline = await settledCount();
+const opened = pty.native.open(80, 24);
+try {
+  assert.equal("writeFd" in opened, false);
+  assert.equal(closed(opened.master), false);
+  assert.equal(closed(opened.slave), false);
+} finally {
+  closeSync(opened.master);
+  closeSync(opened.slave);
+}
+assert.equal(closed(opened.master), true);
+assert.equal(closed(opened.slave), true);
+assert.equal(await settledCount(), openBaseline, "native open retained an extra descriptor");
 
 if (process.platform === "darwin") {
   const failSpawn = () =>
