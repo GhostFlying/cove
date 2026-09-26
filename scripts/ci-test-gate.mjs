@@ -561,8 +561,14 @@ function validBrowserCleanupRecord(record) {
     validBrowserCleanupPhase(record.listener, 7_000, 750) &&
     record.listener.attempts === 1 &&
     browserEvidenceInteger(record.cleanupElapsedMs, 0, 30_000) &&
+    browserEvidenceInteger(exit.observedMs, 0, record.cleanupElapsedMs + 2) &&
+    [record.graceful, record.kill, record.listener].every(
+      (phase) =>
+        phase.attempts === 0 || phase.startedMs + phase.elapsedMs <= record.cleanupElapsedMs + 2,
+    ) &&
     browserEvidenceInteger(record.workBudgetMs, 500, 32_000) &&
     Array.isArray(record.pages) &&
+    (record.primaryOutcome !== "completed" || record.pages.length > 0) &&
     record.pages.every(validBrowserPageRecord) &&
     record.disposedPages ===
       record.pages.filter((page) => page.close.outcome === "completed").length
