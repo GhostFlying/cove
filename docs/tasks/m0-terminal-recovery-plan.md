@@ -1,5 +1,7 @@
 # T1 terminal recovery and continuation probe
 
+> Decision update, 2026-09-26: the user approved the pragmatic Orca-like first-release recovery profile in [terminal architecture §3.2.1](../terminal-architecture.md#321-首发恢复精度与验收2026-09-26-用户已确认). The maintained installation API and inverse-reflow generator are paused. Earlier experiments, failures and proposals below remain historical evidence, not current approval or a complete-equivalence merge gate. Preserve budgeted normal+alternate, ordinary visible/input/continuation behavior and all ordering/query/parser/resource constraints. Actual initial agent targets are Codex, TraeX and Claude Code. A revised executable T1 plan follows this decision; no existing failure is relabeled as success.
+
 ## Implementer entry (2026-09-26)
 
 - Owner: `/root/m0_t1_impl`, GPT-6 Sol high. Checkout `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-terminal-recovery`, branch `p/luchengxuan/m0-13-recovery`, base `55c59b107f82a6a1e68d260c0f4366d4550bfedc`; clean at entry.
