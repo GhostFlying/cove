@@ -509,6 +509,7 @@ function validBrowserCleanupPhase(phase, deadline, maximumBudget) {
     browserEvidenceInteger(phase.phaseRemainingMs, -30_000, deadline) &&
     Math.abs(phase.startedMs + phase.phaseRemainingMs - deadline) <= 2 &&
     browserEvidenceInteger(phase.budgetMs, 1, maximumBudget) &&
+    phase.budgetMs <= Math.max(1, Math.min(maximumBudget, phase.phaseRemainingMs)) &&
     browserEvidenceInteger(phase.elapsedMs, 0, 30_000) &&
     ["completed", "timed-out", "rejected"].includes(phase.outcome) &&
     (phase.lateOutcome === undefined ||

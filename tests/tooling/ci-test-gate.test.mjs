@@ -282,6 +282,7 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     { graceful: { ...record.graceful, outcome: "unknown" } },
     { graceful: { ...record.graceful, phaseDeadlineMs: 4_501 } },
     { graceful: { ...record.graceful, startedMs: 1_000, phaseRemainingMs: 4_500 } },
+    { graceful: { ...record.graceful, startedMs: 3_500, phaseRemainingMs: 1_000 } },
     { kill: undefined },
     { kill: { ...record.kill, attempts: 1 } },
     { listener: undefined },
