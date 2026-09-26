@@ -125,7 +125,7 @@ test("compiled protocol consumer journey suite is mandatory", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/consumer-contracts.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 9 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 12 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });

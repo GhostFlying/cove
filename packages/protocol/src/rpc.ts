@@ -40,6 +40,7 @@ const rpcError = z
     if (standard) return value.message === standard && value.data === undefined;
     return (
       !!value.data &&
+      value.data.subject === undefined &&
       value.code === ERROR_CODES[value.data.kind] &&
       value.message === value.data.message
     );

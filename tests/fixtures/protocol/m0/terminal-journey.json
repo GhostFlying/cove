@@ -22,11 +22,21 @@
     }
   ],
   "focusRace": { "olderFocusSeq": 1, "newerFocusSeq": 2, "olderEpoch": 1, "newerEpoch": 2 },
+  "ordering": {
+    "initialAppliedSeq": 3,
+    "nextAppliedSeq": 4,
+    "sentSeq": 5,
+    "futureAppliedSeq": 6,
+    "futureFocusSeq": 4,
+    "futureInputSeq": 3,
+    "viewGeneration": 1,
+    "lateViewGeneration": 0
+  },
   "inputOutcome": {
     "inputSeq": 1,
     "epoch": 2,
     "acceptance": "unknown",
-    "nextAction": "query-operation"
+    "nextAction": "inspect-run"
   },
   "stalePreview": { "knownVersion": 4, "currentVersion": 5, "mustRefresh": true }
 }

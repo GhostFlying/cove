@@ -25,7 +25,7 @@ export const requiredSuites = [
   {
     project: "protocol",
     file: "packages/protocol/tests/consumer-contracts.test.mjs",
-    minimumTests: 9,
+    minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 21 },

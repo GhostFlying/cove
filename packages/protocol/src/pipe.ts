@@ -98,7 +98,13 @@ function validIdentity(value: PipeMetadata): boolean {
     if ("appearance" in value && value.appearance && !validateAppearance(value.appearance))
       return false;
   }
-  if (value.type === "error" && value.error.code !== ERROR_CODES[value.error.kind]) return false;
+  if (
+    value.type === "error" &&
+    (value.error.code !== ERROR_CODES[value.error.kind] ||
+      (value.commandType === "input" && value.error.kind === "RESULT_UNKNOWN") !==
+        (value.error.subject === "input"))
+  )
+    return false;
   return true;
 }
 

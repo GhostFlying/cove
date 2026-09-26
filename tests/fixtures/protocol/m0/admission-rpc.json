@@ -72,6 +72,7 @@
     "terminal.stop": "STALE_CONTROL",
     "operation.get": "OPERATION_NOT_FOUND"
   },
+  "errorAcceptance": { "terminal.create": "unknown" },
   "sameIntentOtherRpcId": "q-repeat",
   "literalBaseV1": {
     "bootstrapVersion": 1,
@@ -82,5 +83,6 @@
   },
   "oldPeerCapabilities": ["terminal-framing-v1", "logical-grid-recovery-v1"],
   "optionalExtension": "future-optional-v1",
+  "optionalField": { "futureOptionalV1": "fixture-only" },
   "incompatibleProtocolVersion": 2
 }
