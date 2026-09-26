@@ -96,7 +96,7 @@ Web 探针从已安装的 `playwright-core/browsers.json` 读取 Chromium revisi
 
 ## P1a 临时协议实验
 
-`@cove/protocol` 保留 `./provisional/terminal` 与 `./provisional/pipe` 两个实验入口，并新增 M0 的 `./identity`、`./errors`、`./profile`、`./budgets`、`./terminal` 编译契约入口。两者提供 Zod 身份与元数据 schema、交叉身份与基线块约束，以及接收/发送 `Uint8Array` 的临时帧编码器和增量解码器。调用方先校验元数据，自己完成 JSON 与 UTF-8 转换；接收方使用 fatal UTF-8 解码，只解析已经完整且不超过 4096 字节的元数据，再用 `validateTerminalFrame` 或 `validatePipeFrame` 核对头部 kind、身份和 payload 约束。具体组合例子见 `packages/protocol/tests/composition.test.mjs`。
+`@cove/protocol` 保留 `./provisional/terminal` 与 `./provisional/pipe` 两个实验入口，并新增 M0 的 `./identity`、`./errors`、`./profile`、`./budgets`、`./terminal`、`./pipe`、`./runtime` 编译契约入口。入口提供 Zod 身份与元数据 schema、交叉身份与基线块约束，以及接收/发送 `Uint8Array` 的帧编码器和增量解码器。调用方先校验元数据，自己完成 JSON 与 UTF-8 转换；接收方使用 fatal UTF-8 解码，只解析已经完整且不超过 4096 字节的元数据，再用对应 `validateTerminalFrame` 或 `validatePipeFrame` 核对头部 kind、身份和 payload 约束。具体组合例子见 `packages/protocol/tests/composition.test.mjs`。
 
 实验帧有 16 字节头部，metadata 最多 4096 字节、payload 最多 65536 字节。一次 `read` 至多消耗 256 KiB 输入并交付 32 帧和 256 KiB 完整帧；返回 `consumedBytes`，调用方保留未消耗的输入，在下次调度重试。`finish` 遇半帧报错并关闭解码器。`baseline-chunk` 保持不透明，库不组装或安装基线，也不实现 terminal profile、输入控制、服务端 RPC、worker IPC 或恢复状态机。
 

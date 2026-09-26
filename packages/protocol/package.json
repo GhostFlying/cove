@@ -24,6 +24,14 @@
       "types": "./dist/terminal.d.ts",
       "import": "./dist/terminal.js"
     },
+    "./pipe": {
+      "types": "./dist/pipe.d.ts",
+      "import": "./dist/pipe.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js"
+    },
     "./provisional/terminal": {
       "types": "./dist/provisional/terminal.d.ts",
       "import": "./dist/provisional/terminal.js"

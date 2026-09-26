@@ -20,6 +20,7 @@ export const requiredSuites = [
     file: "packages/protocol/tests/supported-terminal.test.mjs",
     minimumTests: 14,
   },
+  { project: "protocol", file: "packages/protocol/tests/supported-pipe.test.mjs", minimumTests: 8 },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 18 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
