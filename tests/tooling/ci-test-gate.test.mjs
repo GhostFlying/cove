@@ -346,6 +346,7 @@ test("bounded native writer owner and fd-reuse suites cannot disappear or shrink
     ["native-write-reuse", 4],
     ["native-write-lifecycle", 2],
     ["native-write-rollback", 3],
+    ["native-write-fault", 1],
     ["native-write-churn", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
