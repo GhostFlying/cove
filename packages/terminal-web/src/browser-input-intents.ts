@@ -16,6 +16,7 @@ export function trackBrowserInput(
   let source: InputSource | undefined;
   let composing = false;
   let token = 0;
+  const timers = new Set<number>();
   const listeners: Array<[EventTarget, string, EventListener, boolean]> = [];
   const listen = (target: EventTarget, type: string, listener: EventListener, capture = true) => {
     target.addEventListener(type, listener, capture);
@@ -26,9 +27,11 @@ export function trackBrowserInput(
     const current = ++token;
     // Chromium may run a microtask checkpoint between listeners on the same native event. Keep
     // the tag through that dispatch turn, then clear it before the next unrelated task.
-    setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
+      timers.delete(timer);
       if (token === current && !composing) source = undefined;
     }, 0);
+    timers.add(timer);
   };
   listen(container, "keydown", () => tag("keyboard"));
   listen(container, "keypress", () => tag("keyboard"));
@@ -50,10 +53,12 @@ export function trackBrowserInput(
     });
     listen(textarea, "compositionend", () => {
       tag("keyboard");
-      setTimeout(() => {
+      const timer = globalThis.setTimeout(() => {
+        timers.delete(timer);
         composing = false;
         source = undefined;
       }, 0);
+      timers.add(timer);
     });
   }
   return {
@@ -62,8 +67,24 @@ export function trackBrowserInput(
       token++;
       source = undefined;
       composing = false;
-      for (const [target, type, listener, capture] of listeners.reverse())
-        target.removeEventListener(type, listener, capture);
+      const errors: unknown[] = [];
+      for (const timer of timers) {
+        try {
+          globalThis.clearTimeout(timer);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      timers.clear();
+      for (const [target, type, listener, capture] of listeners.reverse()) {
+        try {
+          target.removeEventListener(type, listener, capture);
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      listeners.length = 0;
+      if (errors.length) throw new AggregateError(errors, "Browser input tracker cleanup failed");
     },
   };
 }

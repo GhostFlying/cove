@@ -8,16 +8,22 @@ test("V1-R1 continues raw UTF-8 CSI OSC and DCS tails after every interior cut",
   const results = await withViewPage(async (page) =>
     page.evaluate(async () => {
       const encoder = new TextEncoder();
-      const sequences = ["é", "\x1b[31mRED", "\x1b]0;title\x1b\\Z", "\x1bPignored\x1b\\Q"];
+      const sequences = [
+        { value: "é", line: "Aé", cursorX: 2 },
+        { value: "\x1b[31mRED", line: "ARED", cursorX: 4 },
+        { value: "\x1b]0;title\x1b\\Z", line: "AZ", cursorX: 2 },
+        { value: "\x1bPignored\x1b\\Q", line: "AQ", cursorX: 2 },
+      ];
       const observed = [];
       for (const sequence of sequences) {
-        const bytes = encoder.encode(sequence);
+        const bytes = encoder.encode(sequence.value);
         for (let cut = 1; cut < Math.min(bytes.length, 8); cut++) {
           await window.coveView.reset();
           await window.coveView.baseline([[65, ...Array.from(bytes.slice(0, cut))]], cut);
           observed.push({
-            sequence,
+            sequence: sequence.value,
             cut,
+            expected: { line: sequence.line, cursorX: sequence.cursorX },
             evidence: await window.coveView.output(Array.from(bytes.slice(cut))),
           });
         }
@@ -26,9 +32,23 @@ test("V1-R1 continues raw UTF-8 CSI OSC and DCS tails after every interior cut",
     }),
   );
   expect(results.length).toBeGreaterThan(8);
-  expect(results.some((item) => item.evidence.rows.join("").includes("é"))).toBe(true);
-  expect(results.some((item) => item.evidence.rows.join("").includes("RED"))).toBe(true);
-  expect(results.every((item) => item.evidence.inputs.length === 0)).toBe(true);
+  for (const item of results) {
+    expect(item.evidence.rows[0], `${JSON.stringify(item.sequence)} cut ${item.cut}`).toBe(
+      item.expected.line,
+    );
+    expect(item.evidence.logical, `${JSON.stringify(item.sequence)} cut ${item.cut}`).toMatchObject(
+      {
+        activeBuffer: "normal",
+        cursorX: item.expected.cursorX,
+        cursorY: 0,
+      },
+    );
+    expect(item.evidence.logical.modes).toMatchObject({
+      applicationCursorKeysMode: false,
+      bracketedPasteMode: false,
+    });
+    expect(item.evidence.inputs).toEqual([]);
+  }
 });
 
 test("V1-R2 restores normal plus active alternate and continues after switching back", async () => {
@@ -59,13 +79,27 @@ test("V1-R3 keeps incremental writes and replaces a non-pristine model for a new
         Array.from(new TextEncoder().encode("-LIVE")),
       );
       await window.coveView.baseline([Array.from(new TextEncoder().encode("SECOND"))]);
-      return { incremented, replacement: window.coveView.evidence() };
+      const replacement = window.coveView.evidence();
+      const visibility = await window.coveView.hiddenReplacement();
+      await window.coveView.reset();
+      const construction = await window.coveView.attemptReplacementConstructionFailure();
+      return { incremented, replacement, visibility, construction };
     }),
   );
   expect(evidence.incremented.rows.join("")).toContain("FIRST-LIVE");
   expect(evidence.replacement.rows.join("")).toContain("SECOND");
   expect(evidence.replacement.rows.join("")).not.toContain("FIRST");
   expect(evidence.replacement.logical).toMatchObject({ cols: 40, rows: 10 });
+  expect(evidence.visibility.before.hidden).toBe(true);
+  expect(evidence.visibility.replaced.hidden).toBe(true);
+  expect(evidence.visibility.replaced.rows[0]).toBe("NEW");
+  expect(evidence.visibility.shown.hidden).toBe(false);
+  expect(evidence.construction.kind).toBe("RECOVERY_UNAVAILABLE");
+  expect(evidence.construction.after).toBe("RESYNC_REQUIRED");
+  expect(evidence.construction.evidence.failures.map((error) => error.kind)).toEqual([
+    "RECOVERY_UNAVAILABLE",
+  ]);
+  expect(evidence.construction.evidence.ownedRoots).toBe(0);
 });
 
 test("V1-R4 fences a held callback across disposal and replacement", async () => {
@@ -164,11 +198,8 @@ test("V1-R6 enforces chunk count byte totals overlap and the full streaming maxi
         run: { serverId: "server", relayInstanceId: "relay", runId: "run" },
         seq: 2,
       });
-      const chunks = Array.from({ length: 129 }, (_, index) =>
-        new Array(65536).fill(index === 128 ? 0 : 0),
-      );
       await window.coveView.reset();
-      await window.coveView.baseline(chunks, 65536);
+      const maximum = await window.coveView.fullMaximumBaseline();
       return {
         malformed,
         begin,
@@ -176,7 +207,7 @@ test("V1-R6 enforces chunk count byte totals overlap and the full streaming maxi
         unfinished,
         overlap,
         missing,
-        final: window.coveView.evidence(),
+        maximum,
       };
     }),
   );
@@ -188,5 +219,12 @@ test("V1-R6 enforces chunk count byte totals overlap and the full streaming maxi
     overlap: "BUSY",
     missing: "RESYNC_REQUIRED",
   });
-  expect(result.final.failures).toEqual([]);
+  expect(result.maximum.markers).toEqual(Array.from({ length: 129 }, (_, index) => index));
+  expect(result.maximum.evidence.allRows.join("\n")).toContain("MARKER-128");
+  expect(result.maximum.evidence.logical).toMatchObject({
+    activeBuffer: "normal",
+    cols: 40,
+    rows: 10,
+  });
+  expect(result.maximum.evidence.failures).toEqual([]);
 });
