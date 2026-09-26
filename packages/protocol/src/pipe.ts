@@ -207,8 +207,8 @@ export function validatePipeResultForCommand(
     if (
       command.type === "recover" &&
       result.outcome === "accepted" &&
-      command.appliedSeq !== undefined &&
-      result.atSeq! < command.appliedSeq
+      ((result.recoveryMode === "replay" && command.appliedSeq === undefined) ||
+        (command.appliedSeq !== undefined && result.atSeq! < command.appliedSeq))
     )
       return false;
   }
