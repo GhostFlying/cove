@@ -160,27 +160,21 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     focuses.emit({ viewGeneration, focusSeq, focused, geometry: { ...geometry } });
     return true;
   };
+  const acceptsInputFrom = (targetIncarnation: number) =>
+    targetIncarnation === incarnation &&
+    backend?.incarnation === targetIncarnation &&
+    state !== "disposed" &&
+    state !== "failed";
 
   const publishInput = (bytes: Uint8Array, source: InputSource, targetIncarnation: number) => {
-    if (
-      targetIncarnation !== incarnation ||
-      backend?.incarnation !== targetIncarnation ||
-      state !== "ready"
-    )
-      return;
+    if (!acceptsInputFrom(targetIncarnation)) return;
     // Local DOM focus does not prove that this client still owns server control. Every deliberate
     // input therefore carries a fresh monotonic focus intent that a controller can stage before
     // the bytes; ordinary blur remains transition-only.
     if (!publishFocus(true, true)) return;
     // Focus observers are synchronous and may replace, hide, fail or dispose the view. Never let
     // the old callback label bytes with a successor generation or emit after focus was withdrawn.
-    if (
-      targetIncarnation !== incarnation ||
-      backend?.incarnation !== targetIncarnation ||
-      state !== "ready" ||
-      !effectivelyFocused
-    )
-      return;
+    if (!acceptsInputFrom(targetIncarnation) || !effectivelyFocused) return;
     inputs.emit({ viewGeneration, source, bytes: bytes.slice() });
   };
 
