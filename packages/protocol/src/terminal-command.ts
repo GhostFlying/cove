@@ -84,7 +84,6 @@ export const TerminalResultSchema = z.discriminatedUnion("type", [
     type: z.literal("recover-result"),
     ...correlated,
     subscription: SubscriptionRefSchema,
-    replacement: SubscriptionRefSchema,
     mode: z.enum(["replay", "baseline"]),
     atSeq: SequenceSchema,
   }),

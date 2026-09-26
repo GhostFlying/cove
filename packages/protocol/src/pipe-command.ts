@@ -11,7 +11,7 @@ import {
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { ControlHolderSchema, TerminalEventSchema } from "./terminal-events.js";
 
-export const PIPE_VERSION = 1;
+export const PIPE_VERSION = 2;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };
@@ -90,7 +90,6 @@ export const PipeCommandSchema = z.discriminatedUnion("type", [
     type: z.literal("recover"),
     ...command,
     subscription: SubscriptionRefSchema,
-    replacement: SubscriptionRefSchema,
     appliedSeq: SequenceSchema.optional(),
   }),
   z.object({ type: z.literal("unsubscribe"), ...command, subscription: SubscriptionRefSchema }),
@@ -155,6 +154,7 @@ export const PipeResultSchema = z.object({
     "preview-refresh",
   ]),
   outcome: z.enum(["accepted", "rejected", "unknown"]),
+  recoveryMode: z.enum(["replay", "baseline"]).optional(),
   operationId: OpaqueIdSchema.optional(),
   atSeq: SequenceSchema.optional(),
   inputSeq: SequenceSchema.optional(),
@@ -168,6 +168,7 @@ export const PipeEventSchema = z.object({
   type: z.literal("terminal-event"),
   ...common,
   run: RunRefSchema,
+  subscription: SubscriptionRefSchema.optional(),
   terminal: TerminalEventSchema,
 });
 export type PipeEvent = z.infer<typeof PipeEventSchema>;

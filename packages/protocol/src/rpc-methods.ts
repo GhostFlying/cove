@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROTOCOL_VERSION } from "./bootstrap.js";
 import { sameRunRef } from "./identity.js";
 import { validateAppearance } from "./profile.js";
 import { EffectiveBudgetsSchema, M0_LIMITS } from "./budgets.js";
@@ -49,7 +50,7 @@ export const ServerStatusResultSchema = z.object({
   serverId: OpaqueIdSchema,
   relayInstanceId: OpaqueIdSchema,
   buildVersion: z.string().min(1).max(128),
-  protocolVersion: z.literal(1),
+  protocolVersion: z.literal(PROTOCOL_VERSION),
   profile: ProfileSchema,
   effectiveBudgets: EffectiveBudgetsSchema,
   workerCount: z.number().int().min(0).max(M0_LIMITS.maxRuns),
