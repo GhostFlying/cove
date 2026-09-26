@@ -94,11 +94,11 @@ serialize 发布声明引用浏览器 xterm 类型但未声明其依赖；引擎
 
 Web 探针从已安装的 `playwright-core/browsers.json` 读取 Chromium revision 和版本，要求可执行文件位于本 checkout 对应的托管 revision 目录，并在连接后核对浏览器实际报告的版本。结果记录 revision、实际版本和规范化的可执行文件路径；错误选择或版本不匹配会使检查失败，并清理已启动的浏览器与 listener。
 
-## P1a 临时协议实验
+## P1a 临时协议与 M0 支持契约
 
-`@cove/protocol` 保留 `./provisional/terminal` 与 `./provisional/pipe` 两个实验入口，并新增 M0 的 `./identity`、`./errors`、`./profile`、`./budgets`、`./terminal`、`./pipe`、`./runtime`、`./bootstrap`、`./view` 编译契约入口。入口提供 Zod 身份与元数据 schema、交叉身份与基线块约束，以及接收/发送 `Uint8Array` 的帧编码器和增量解码器。调用方先校验元数据，自己完成 JSON 与 UTF-8 转换；接收方使用 fatal UTF-8 解码，只解析已经完整且不超过 4096 字节的元数据，再用对应 `validateTerminalFrame` 或 `validatePipeFrame` 核对头部 kind、身份和 payload 约束。具体组合例子见 `packages/protocol/tests/composition.test.mjs`。
+`@cove/protocol` 保留 `./provisional/terminal` 与 `./provisional/pipe` 两个实验入口，并新增 M0 的 `./identity`、`./errors`、`./profile`、`./budgets`、`./terminal`、`./pipe`、`./runtime`、`./bootstrap`、`./rpc`、`./view` 编译契约入口。入口提供 Zod 身份与元数据 schema、交叉身份与基线块约束，以及接收/发送 `Uint8Array` 的帧编码器和增量解码器。调用方先校验元数据，自己完成 JSON 与 UTF-8 转换；接收方使用 fatal UTF-8 解码，只解析已经完整且不超过 4096 字节的元数据，再用对应 `validateTerminalFrame` 或 `validatePipeFrame` 核对头部 kind、身份和 payload 约束。具体组合例子见 `packages/protocol/tests/composition.test.mjs` 与 `packages/protocol/tests/consumer-contracts.test.mjs`。
 
-实验帧有 16 字节头部，metadata 最多 4096 字节、payload 最多 65536 字节。一次 `read` 至多消耗 256 KiB 输入并交付 32 帧和 256 KiB 完整帧；返回 `consumedBytes`，调用方保留未消耗的输入，在下次调度重试。`finish` 遇半帧报错并关闭解码器。`baseline-chunk` 保持不透明，库不组装或安装基线，也不实现 terminal profile、输入控制、服务端 RPC、worker IPC 或恢复状态机。
+帧有 16 字节头部，metadata 最多 4096 字节、payload 最多 65536 字节。一次 `read` 至多消耗 256 KiB 输入并交付 32 帧和 256 KiB 完整帧；返回 `consumedBytes`，调用方保留未消耗的输入，在下次调度重试。`finish` 遇半帧报错并关闭解码器。支持契约定义 profile、输入控制、RPC 与 worker pipe 的纯 schema/校验器；库不启动 PTY、安装基线或实现 server/worker/controller 状态机。
 
 ```sh
 pnpm --filter @cove/protocol --fail-if-no-match build

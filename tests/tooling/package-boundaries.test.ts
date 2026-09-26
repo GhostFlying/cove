@@ -120,7 +120,7 @@ test("Vite rejects side-effect, dynamic, native, and transitive Node imports in 
   }
 });
 
-test("isolated compiled consumer sees only experimental exports and emitted declarations", async () => {
+test("isolated compiled consumer sees supported exports and ES-only Cove declarations", async () => {
   const directory = await mkdtemp(join(tmpdir(), "cove-boundary-consumer-"));
   directories.push(directory);
   const scope = join(directory, "node_modules/@cove");
@@ -144,6 +144,20 @@ test("isolated compiled consumer sees only experimental exports and emitted decl
       await readFile(join(protocol, `dist/provisional/${name}.d.ts`), "utf8"),
     );
   }
+  const promotedM0 = join(declarations, "m0");
+  async function promoteDeclarations(source: string, target: string): Promise<void> {
+    await mkdir(target, { recursive: true });
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      if (entry.isDirectory())
+        await promoteDeclarations(join(source, entry.name), join(target, entry.name));
+      else if (entry.name.endsWith(".d.ts"))
+        await writeFile(
+          join(target, entry.name.replace(/\.d\.ts$/, ".ts")),
+          await readFile(join(source, entry.name), "utf8"),
+        );
+    }
+  }
+  await promoteDeclarations(join(protocol, "dist"), promotedM0);
   await writeFile(
     join(directory, "tsconfig.json"),
     JSON.stringify({
@@ -159,7 +173,7 @@ test("isolated compiled consumer sees only experimental exports and emitted decl
         skipLibCheck: true,
         noEmit: true,
       },
-      include: ["consumer.mts", "promoted-declarations/*.ts"],
+      include: ["consumer.mts", "promoted-declarations/**/*.ts"],
     }),
   );
   await writeFile(
@@ -168,6 +182,16 @@ test("isolated compiled consumer sees only experimental exports and emitted decl
 import type { WebProbeResult } from '@cove/terminal-web/probes/environment';
 import type { TerminalMetadata } from '@cove/protocol/provisional/terminal';
 import type { PipeMetadata } from '@cove/protocol/provisional/pipe';
+import type { BootstrapSuccess } from '@cove/protocol/bootstrap';
+import type { EffectiveBudgets } from '@cove/protocol/budgets';
+import type { DomainError } from '@cove/protocol/errors';
+import type { SubscriptionRef } from '@cove/protocol/identity';
+import type { PipeMetadata as SupportedPipeMetadata } from '@cove/protocol/pipe';
+import type { Appearance } from '@cove/protocol/profile';
+import type { OperationRecord } from '@cove/protocol/rpc';
+import type { RuntimeTerminalPort } from '@cove/protocol/runtime';
+import type { TerminalMetadata as SupportedTerminalMetadata } from '@cove/protocol/terminal';
+import type { TerminalView } from '@cove/protocol/view';
 declare const engine: EngineProbeResult;
 declare const web: WebProbeResult;
 const tuple: [string, string] = [engine.roundTrip, web.input];
@@ -175,6 +199,28 @@ declare const terminal: TerminalMetadata;
 declare const pipe: PipeMetadata;
 void terminal;
 void pipe;
+declare const supported: [BootstrapSuccess, EffectiveBudgets, DomainError, SubscriptionRef, SupportedPipeMetadata, Appearance, OperationRecord, RuntimeTerminalPort, SupportedTerminalMetadata, TerminalView];
+void supported;
+declare const result: Awaited<ReturnType<RuntimeTerminalPort['spawn']>>;
+const runtime: RuntimeTerminalPort = {
+  spawn: async () => result, stop: async () => result, setControl: async () => result,
+  writeInput: async () => result, resize: async () => result,
+  setAppearance: async () => result, openSubscription: async () => result,
+  closeSubscription: async () => result, ackApplied: async () => result,
+  ackBaselineProgress: async () => result, getStatus: async () => result,
+  refreshPreview: async () => result, onEvent: () => ({ dispose() {} }),
+};
+const view: TerminalView = {
+  initialize: async () => {}, beginBaseline: async () => {},
+  writeBaselineChunk: async () => {}, finishBaseline: async () => {},
+  applyEvent: async () => {}, measureGrid: () => ({ cols: 80, rows: 24 }),
+  setAppearance() {}, setVisibility() {},
+  onInputIntent: () => ({ dispose() {} }),
+  onFocusIntent: () => ({ dispose() {} }),
+  onFailure: () => ({ dispose() {} }), dispose() {},
+};
+void runtime;
+void view;
 void tuple;
 `,
   );
@@ -185,7 +231,7 @@ void tuple;
   );
   if (tsc.status !== 0) throw new Error(tsc.stderr || tsc.stdout);
   expect(tsc.status).toBe(0);
-  const terminalDeclaration = join(declarations, "terminal.ts");
+  const terminalDeclaration = join(promotedM0, "terminal.ts");
   const original = await readFile(terminalDeclaration, "utf8");
   await writeFile(terminalDeclaration, `${original}\nexport declare const leakedHostType: URL;\n`);
   const leaked = spawnSync(
@@ -202,8 +248,11 @@ void tuple;
 import { runEnvironmentProbe as web } from '@cove/terminal-web/probes/environment';
 import { TerminalMetadataSchema } from '@cove/protocol/provisional/terminal';
 import { PipeMetadataSchema } from '@cove/protocol/provisional/pipe';
+import { BootstrapRequestSchema } from '@cove/protocol/bootstrap';
+import { PipeCommandSchema } from '@cove/protocol/pipe';
+import { RpcRequestSchema } from '@cove/protocol/rpc';
 if (typeof engine !== 'function' || typeof web !== 'function') throw new Error('Compiled exports missing');
-if (!TerminalMetadataSchema || !PipeMetadataSchema) throw new Error('Protocol exports missing');
+if (!TerminalMetadataSchema || !PipeMetadataSchema || !BootstrapRequestSchema || !PipeCommandSchema || !RpcRequestSchema) throw new Error('Protocol exports missing');
 for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-web/dist/probes/node/environment', '@cove/protocol', '@cove/protocol/src/provisional/identity']) {
   try { await import(name); throw new Error('Private import succeeded: ' + name); }
   catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }

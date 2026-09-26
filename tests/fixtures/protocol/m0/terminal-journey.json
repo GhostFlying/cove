@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "run": { "serverId": "fixture-s", "relayInstanceId": "fixture-i", "runId": "fixture-r" },
+  "connection": { "connectionId": "fixture-c", "generation": 1 },
+  "subscriptionId": "fixture-sub",
+  "viewId": "fixture-view",
+  "baseline": {
+    "baselineId": "fixture-b",
+    "checkpointSeq": 2,
+    "atSeq": 3,
+    "vt": [27, 91, 72],
+    "tail": [27, 91],
+    "chunkLengths": [3, 2]
+  },
+  "orderedPostBaseline": [
+    { "type": "output", "seq": 4, "payload": [53, 109, 88] },
+    {
+      "type": "resize",
+      "seq": 5,
+      "geometry": { "cols": 100, "rows": 30 },
+      "requiresBaseline": true
+    }
+  ],
+  "focusRace": { "olderFocusSeq": 1, "newerFocusSeq": 2, "olderEpoch": 1, "newerEpoch": 2 },
+  "inputOutcome": {
+    "inputSeq": 1,
+    "epoch": 2,
+    "acceptance": "unknown",
+    "nextAction": "query-operation"
+  },
+  "stalePreview": { "knownVersion": 4, "currentVersion": 5, "mustRefresh": true }
+}
