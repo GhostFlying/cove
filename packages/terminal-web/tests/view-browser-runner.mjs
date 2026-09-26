@@ -42,12 +42,13 @@ export async function withViewPage(work) {
     /(view-(?:input|recovery|lifecycle)\.test\.mjs):(\d+):\d+/,
   );
   const caseId = caller ? `${caller[1]}:${caller[2]}` : "standalone";
+  const invocationId = `${process.pid}-${invocation}`;
   await mkdir(evidenceDirectory, { recursive: true });
-  const path = join(evidenceDirectory, `${process.pid}-${invocation}.json`);
+  const path = join(evidenceDirectory, `${invocationId}.json`);
   lastEvidencePath = path;
   await writeFile(
     path,
-    `${JSON.stringify({ schemaVersion: 1, final: false, caseId, testName, runId, sourceCommit, sourceDirty })}\n`,
+    `${JSON.stringify({ schemaVersion: 1, final: false, caseId, testName, invocationId, runId, sourceCommit, sourceDirty })}\n`,
   );
   const { value } = await withManagedBrowser(
     async (context) => {
@@ -64,6 +65,7 @@ export async function withViewPage(work) {
       path,
       caseId,
       testName,
+      invocationId,
       runId,
       sourceCommit,
       sourceDirty,

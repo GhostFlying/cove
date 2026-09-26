@@ -188,6 +188,7 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     final: true,
     caseId: "view-lifecycle.test.mjs:123",
     testName: "V1-L1 evidence",
+    invocationId: "42-1",
     runId: "local-43-1",
     sourceCommit,
     sourceDirty: false,
@@ -254,7 +255,7 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
   );
   await writeFile(path, `${JSON.stringify(record)}\n`);
   const secondPath = resolve(directory, "42-2.json");
-  await writeFile(secondPath, `${JSON.stringify(record)}\n`);
+  await writeFile(secondPath, `${JSON.stringify({ ...record, invocationId: "42-2" })}\n`);
   const expectedCases = ["V1-L1 evidence", "V1-L2 evidence"].map((name) => ({
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
     name,
@@ -264,15 +265,23 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
   ).rejects.toThrow(/executed cases/);
   await writeFile(
     secondPath,
-    `${JSON.stringify({ ...record, caseId: "view-lifecycle.test.mjs:124", testName: "V1-L2 evidence" })}\n`,
+    `${JSON.stringify({ ...record, invocationId: "42-2", caseId: "view-lifecycle.test.mjs:124", testName: "V1-L2 evidence" })}\n`,
   );
   expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases)).toMatchObject({
     recordCount: 2,
+  });
+  await writeFile(
+    resolve(directory, "42-3.json"),
+    `${JSON.stringify({ ...record, invocationId: "42-3", caseId: "view-lifecycle.test.mjs:125", testName: "V1-L2 evidence" })}\n`,
+  );
+  expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases)).toMatchObject({
+    recordCount: 3,
   });
   for (const changed of [
     { graceful: { ...record.graceful, budgetMs: -1 } },
     { graceful: { ...record.graceful, outcome: "unknown" } },
     { graceful: { ...record.graceful, phaseDeadlineMs: 4_501 } },
+    { graceful: { ...record.graceful, startedMs: 1_000, phaseRemainingMs: 4_500 } },
     { kill: undefined },
     { kill: { ...record.kill, attempts: 1 } },
     { listener: undefined },
@@ -282,6 +291,8 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     { primaryOutcome: "unknown" },
     { primaryErrorName: "secret" },
     { listenerPort: null },
+    { pages: [{}], disposedPages: 1 },
+    { invocationId: "42-2" },
   ]) {
     await writeFile(path, `${JSON.stringify({ ...record, ...changed })}\n`);
     await expect(
@@ -289,6 +300,18 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     ).rejects.toThrow(/incomplete/);
   }
   await writeFile(path, `${JSON.stringify({ ...record, testName: "V1-L2 evidence" })}\n`);
+  await expect(
+    verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases),
+  ).rejects.toThrow(/executed cases/);
+  await writeFile(path, `${JSON.stringify(record)}\n`);
+  await writeFile(
+    secondPath,
+    `${JSON.stringify({ ...record, invocationId: "42-2", caseId: "view-lifecycle.test.mjs:124" })}\n`,
+  );
+  await writeFile(
+    resolve(directory, "42-3.json"),
+    `${JSON.stringify({ ...record, invocationId: "42-3", caseId: "view-lifecycle.test.mjs:125" })}\n`,
+  );
   await expect(
     verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases),
   ).rejects.toThrow(/executed cases/);

@@ -86,6 +86,7 @@ interface ManagedBrowserEvidenceOptions {
   path: string;
   caseId: string;
   testName: string | null;
+  invocationId: string;
   runId: string;
   sourceCommit: string;
   sourceDirty: boolean;
@@ -599,6 +600,7 @@ export async function withManagedBrowser<T>(
     final: true,
     caseId: evidenceOptions?.caseId ?? null,
     testName: evidenceOptions?.testName ?? null,
+    invocationId: evidenceOptions?.invocationId ?? null,
     runId: evidenceOptions?.runId ?? null,
     sourceCommit: evidenceOptions?.sourceCommit ?? null,
     sourceDirty: evidenceOptions?.sourceDirty ?? null,
