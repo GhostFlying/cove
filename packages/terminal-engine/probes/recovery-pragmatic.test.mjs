@@ -20,7 +20,7 @@ const bytes = (value) => (value instanceof Uint8Array ? value : new TextEncoder(
 const completed = [];
 
 afterAll(() =>
-  writeRecoverySuiteEvidence("recovery-pragmatic", completed, 175, {
+  writeRecoverySuiteEvidence("recovery-pragmatic", completed, 180, {
     contract: "pragmatic-logical-grid-v1",
     classification: "required",
     outcome: "pass",
@@ -30,7 +30,8 @@ afterAll(() =>
     parserCuts: 138,
     c0Effects: 7,
     queryFamilies: 9,
-    oracleControls: 2,
+    oracleControls: 6,
+    capControls: 1,
   }),
 );
 
@@ -217,14 +218,82 @@ const commonCases = [
   },
 ];
 
-test.each(commonCases)(
-  "pragmatic $caseId",
-  async ({ caseId, setup, tail = "", continuation, geometry }) => {
-    const result = await run(caseId, setup, tail, continuation, geometry);
-    expect(result.checkpoint.vt.length).toBeGreaterThan(0);
-  },
-);
+async function runCommon(caseId) {
+  const fixture = commonCases.find((item) => item.caseId === caseId);
+  if (!fixture) throw new Error(`Missing pragmatic case ${caseId}`);
+  return run(
+    fixture.caseId,
+    fixture.setup,
+    fixture.tail ?? "",
+    fixture.continuation,
+    fixture.geometry,
+  );
+}
 
+test("pragmatic alternate-current-pen", async () => {
+  const result = await runCommon("alternate-current-pen");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic alternate-saved-position", async () => {
+  const result = await runCommon("alternate-saved-position");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic current-pending-wrap", async () => {
+  const result = await runCommon("current-pending-wrap");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic origin-margins-scroll", async () => {
+  const result = await runCommon("origin-margins-scroll");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic visible-custom-tabs", async () => {
+  const result = await runCommon("visible-custom-tabs");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic in-grid-edit", async () => {
+  const result = await runCommon("in-grid-edit");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic alternate-cleared-normal-snapshot", async () => {
+  const result = await runCommon("alternate-cleared-normal-snapshot");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic three-line-history", async () => {
+  const result = await runCommon("three-line-history");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic full-history-budget", async () => {
+  const result = await runCommon("full-history-budget");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic unicode-at-margin", async () => {
+  const result = await runCommon("unicode-at-margin");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic osc-dcs-c0-tail", async () => {
+  const result = await runCommon("osc-dcs-c0-tail");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic source-resize-fresh-baseline", async () => {
+  const result = await runCommon("source-resize-fresh-baseline");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic reverse-wrap-and-input-modes", async () => {
+  const result = await runCommon("reverse-wrap-and-input-modes");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
 test("pragmatic oracle rejects a missing visible overline and P256 color", async () => {
   const options = { cols: 12, rows: 4, allowProposedApi: true };
   const styled = new Terminal(options);
@@ -256,6 +325,34 @@ test("pragmatic oracle rejects wrong cursor visibility", async () => {
   }
 });
 
+test("pragmatic oracle rejects visible text loss", async () => {
+  const source = new Terminal({ cols: 12, rows: 4, allowProposedApi: true });
+  const damaged = new Terminal({ cols: 12, rows: 4, allowProposedApi: true });
+  try {
+    await writeParsed(source, "ABC");
+    await writeParsed(damaged, "AB");
+    expect(observeLogicalGrid(damaged)).not.toEqual(observeLogicalGrid(source));
+    completed.push("oracle-visible-text-loss");
+  } finally {
+    source.dispose();
+    damaged.dispose();
+  }
+});
+
+test("pragmatic oracle rejects wrong current cursor with identical text", async () => {
+  const source = new Terminal({ cols: 12, rows: 4, allowProposedApi: true });
+  const damaged = new Terminal({ cols: 12, rows: 4, allowProposedApi: true });
+  try {
+    await writeParsed(source, "ABC");
+    await writeParsed(damaged, "ABC\u001b[1;1H");
+    expect(observeLogicalGrid(damaged)).not.toEqual(observeLogicalGrid(source));
+    completed.push("oracle-current-cursor");
+  } finally {
+    source.dispose();
+    damaged.dispose();
+  }
+});
+
 const joinedCases = [
   ["interior", "\u001b[2;3H\u001b7\u001b[1;38;5;201mA", "\u001b[3b", {}],
   ["pending", "\u001b[2;12H\u001b7A", "\u0301", {}],
@@ -269,11 +366,62 @@ const joinedCases = [
   ["print-resize", "\u001b[2;4He\u0301", "\u001b[3b", { sourceResize: [11, 4] }],
 ];
 
-test.each(joinedCases)("pragmatic joined $0", async (id, setup, continuation, geometry) => {
-  const result = await run(`joined-${id}`, setup, "", continuation, geometry);
+async function runJoined(id) {
+  const fixture = joinedCases.find(([caseId]) => caseId === id);
+  if (!fixture) throw new Error(`Missing pragmatic joined case ${id}`);
+  const [, setup, continuation, geometry] = fixture;
+  return run(`joined-${id}`, setup, "", continuation, geometry);
+}
+
+test("pragmatic joined interior", async () => {
+  const result = await runJoined("interior");
   expect(result.checkpoint.vt.length).toBeGreaterThan(0);
 });
 
+test("pragmatic joined pending", async () => {
+  const result = await runJoined("pending");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined wide", async () => {
+  const result = await runJoined("wide");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined combined", async () => {
+  const result = await runJoined("combined");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined dec", async () => {
+  const result = await runJoined("dec");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined insert", async () => {
+  const result = await runJoined("insert");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined rejected-wide", async () => {
+  const result = await runJoined("rejected-wide");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined bottom-margin", async () => {
+  const result = await runJoined("bottom-margin");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined cluster-67", async () => {
+  const result = await runJoined("cluster-67");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
+
+test("pragmatic joined print-resize", async () => {
+  const result = await runJoined("print-resize");
+  expect(result.checkpoint.vt.length).toBeGreaterThan(0);
+});
 test("pragmatic printable stream proves twenty fresh checkpoints before resetting each tail", async () => {
   const targets = [32_768, 65_520, 98_304, 131_072, 131_073];
   let attempts = 0;
@@ -367,4 +515,73 @@ test("pragmatic source answers nine live query families without replay to its si
   );
   expect(sourceReplies).toEqual([...expected, ...expected, ...expected]);
   expect(receiverReplies).toEqual([...expected, ...expected]);
+});
+
+test("pragmatic oracle rejects a duplicated C0 raw tail", async () => {
+  const options = { cols: 12, rows: 4, allowProposedApi: true };
+  const source = new Terminal(options);
+  const duplicate = new Terminal(options);
+  try {
+    await writeParsed(source, "A");
+    const checkpoint = createLogicalGridCheckpoint(source, 1);
+    await writeParsed(source, "\n");
+    await writeParsed(duplicate, checkpoint.vt);
+    await writeParsed(duplicate, "\n\n");
+    expect(observeLogicalGrid(duplicate)).not.toEqual(observeLogicalGrid(source));
+    completed.push("oracle-duplicated-c0-tail");
+  } finally {
+    source.dispose();
+    duplicate.dispose();
+  }
+});
+
+test("pragmatic replay query cannot enter the live source reply sink", async () => {
+  const options = { cols: 12, rows: 4, allowProposedApi: true };
+  const source = new Terminal(options);
+  const receiver = new Terminal(options);
+  const sourceReplies = [];
+  const receiverReplies = [];
+  const sourceListener = source.onData((data) => sourceReplies.push(data));
+  const receiverListener = receiver.onData((data) => receiverReplies.push(data));
+  try {
+    const checkpoint = createLogicalGridCheckpoint(source, 0);
+    await writeParsed(source, "\u001b[5n");
+    expect(sourceReplies).toEqual(["\u001b[0n"]);
+    await writeParsed(receiver, checkpoint.vt);
+    await writeParsed(receiver, "\u001b[5n");
+    expect(receiverReplies).toEqual(["\u001b[0n"]);
+    expect(sourceReplies).toEqual(["\u001b[0n"]);
+    completed.push("oracle-replay-query-isolation");
+  } finally {
+    sourceListener.dispose();
+    receiverListener.dispose();
+    source.dispose();
+    receiver.dispose();
+  }
+});
+
+test("pragmatic candidate enforces finite caps and the 120x40 history profile", async () => {
+  const small = new Terminal({ cols: 12, rows: 4, allowProposedApi: true });
+  const wide = new Terminal({ cols: 121, rows: 4, allowProposedApi: true });
+  const overHistory = new Terminal({ cols: 12, rows: 4, scrollback: 1001, allowProposedApi: true });
+  const maximum = new Terminal({ cols: 120, rows: 40, scrollback: 1000, allowProposedApi: true });
+  try {
+    await writeParsed(small, "A");
+    for (const cap of [0, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])
+      expect(() => createLogicalGridCheckpoint(small, 1, cap)).toThrow(/baseline cap/);
+    expect(() => createLogicalGridCheckpoint(small, 1, 1)).toThrow(/byte cap/);
+    expect(() => createLogicalGridCheckpoint(wide, 0)).toThrow(/geometry exceeds profile/);
+    await writeParsed(overHistory, "H\r\n".repeat(1100));
+    expect(() => createLogicalGridCheckpoint(overHistory, 2200)).toThrow(/history exceeds profile/);
+    await writeParsed(maximum, ("H".repeat(120) + "\r\n").repeat(1040));
+    const checkpoint = createLogicalGridCheckpoint(maximum, 126_880);
+    expect(checkpoint.vt.length).toBeLessThanOrEqual(8 * 1024 * 1024);
+    expect(checkpoint.metrics.scannedCells).toBeLessThanOrEqual(2 * 120 * (1040 + 40));
+    completed.push("candidate-bounds-profile");
+  } finally {
+    small.dispose();
+    wide.dispose();
+    overHistory.dispose();
+    maximum.dispose();
+  }
 });
