@@ -136,3 +136,23 @@ Checks on the frozen repair used pinned Node 26.10.0 and pnpm 12.6.0:
 | One final external scoped V1 run                      | pass, 3 files / 18 tests, 40.26 s Vitest duration (40.42 s wall) |
 
 No failed candidate or driver-correction run occurred in this batch. The source/test worktree was clean at freeze, and a targeted process scan found no owned Chromium, V1 runner or Vite process. Retained Q1 was not rerun because its source, fixture and managed runner were unchanged. These remain author-scoped external-config results; root integration, renewed independent review/testing, full gate, Linux/dual-OS and GitHub exact-head qualification remain separate and are not claimed. No independent corpus, shared/root registration/config/lock/pin, protocol/schema/wire/P3, native/W1, PTY/server/product, GPU/performance or GitHub operation was touched.
+
+## Exact-incarnation input reentry repair
+
+The latest independent review appendix was read and verified at SHA-256 `e39f712bb68c7c1e2079c891c91a15931804c03b6ccfc5ddd8465c7e50983828`. It approved the preceding per-input focus and disposed-registration fixes at author `399c4da`, integrated by root as `62d8b15` with results `ec27a9b`, but identified one synchronous focus-listener reentry residual. The pre-code allocation is `5905dda`; the frozen correction is `2991acf554707ea1ca4d92ce42f93e15f8aec7ed`, tree `dc45c07b91f7f41ccbd38079cf05fd6bfe079c5b`.
+
+Before publishing focus, `publishInput` now requires the captured incarnation to match both the view counter and current backend and requires lifecycle state `ready`. Because focus listeners run synchronously and may mutate the view, it repeats those checks immediately after fresh-focus publication and additionally requires focus to remain effective before copying/emitting bytes. A listener that replaces, hides/blurs, fails or disposes the view therefore suppresses the stale or withdrawn input rather than relabeling it with successor state; input is not replayed. Existing monotonic-counter failure and normal fresh focus-before-input behavior are preserved.
+
+L4 retains its real two-action remote-takeover model and non-input negative controls, and adds two reentry controls. One focus listener synchronously initializes a successor: old `s` bytes are absent, then fresh `n` input reaches the ready successor with that generation's fresh focus. A separate listener synchronously hides/blurs: `h` bytes are absent after the nested false-focus intent, while fresh `v` input succeeds after explicit show. No extra test was added; registration remains three suites and 18 cases.
+
+Checks on the frozen source used pinned Node 26.10.0 and pnpm 12.6.0:
+
+| Check                                                 | Result                                                           |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| Terminal-web build/typecheck and both Vite bundles    | pass before focused regression and again at final source         |
+| Focused L4 exact-incarnation/reentry control          | pass, 1/1 in 1.62 s after build                                  |
+| Final-source Prettier and Oxlint with warnings denied | pass over allocated source/browser/lifecycle paths               |
+| Complete lifecycle suite                              | pass, 1 file / 6 tests, 25.29 s Vitest duration (25.46 s wall)   |
+| One final external scoped V1 run                      | pass, 3 files / 18 tests, 40.33 s Vitest duration (40.50 s wall) |
+
+No failed candidate or driver correction occurred. The worktree was clean at source/test freeze, and a targeted scan found no owned Chromium, V1 runner or Vite process. These are author-scoped external-config results; root full gate, Linux/dual-OS, independent reentry execution/review, GitHub exact-head qualification and merge remain separate and are not claimed. Retained Q1 was not rerun because its source/fixture/runner did not change, and the independent corpus was not read. No protocol/P3/controller, shared/root file, W1/native, server/PTY/product, GPU/performance or GitHub operation was performed.
