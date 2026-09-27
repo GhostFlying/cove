@@ -382,11 +382,12 @@ test("native reap forbids a new signal while JavaScript exit delivery is held", 
   if (failure) throw failure;
 });
 
-async function assertFaultSelector(phase, scope, expected) {
+async function observeFaultSelector(phase, scope) {
   const deadline = Date.now() + 8_000;
   const originalFork = pty.native.fork;
   let nativeResult;
   let session;
+  let observed;
   let failure;
   try {
     pty.native.fork = (...args) => {
@@ -400,7 +401,7 @@ async function assertFaultSelector(phase, scope, expected) {
       deadline,
       "fault-selector leader did not become ready",
     );
-    assert.deepEqual(session.terminal.signalOwned("SIGKILL", scope), expected);
+    observed = session.terminal.signalOwned("SIGKILL", scope);
     assert.equal(inspectOwned(session.terminal.pid, session.mode, session.nonce), true);
     assert.equal(nativeResult.stopOwnedChild(9), true);
     await bodyWait(session.exited, deadline, "owned rollback stop did not deliver exit");
@@ -420,17 +421,18 @@ async function assertFaultSelector(phase, scope, expected) {
     }
   }
   if (failure) throw failure;
+  return observed;
 }
 
 test("native kill ESRCH classifies without signaling an unowned process", async () => {
-  await assertFaultSelector("owned-kill-esrch", "leader", {
+  assert.deepEqual(await observeFaultSelector("owned-kill-esrch", "leader"), {
     kind: "unverifiable",
     reason: "not-found",
   });
 });
 
 test("native kill EPERM classifies without signaling an unowned process", async () => {
-  await assertFaultSelector("owned-kill-eperm", "leader", {
+  assert.deepEqual(await observeFaultSelector("owned-kill-eperm", "leader"), {
     kind: "unverifiable",
     reason: "signal-failed",
     errorCode: String(constants.errno.EPERM),
@@ -438,14 +440,14 @@ test("native kill EPERM classifies without signaling an unowned process", async 
 });
 
 test("native getpgid ESRCH classifies without signaling an unowned process", async () => {
-  await assertFaultSelector("owned-getpgid-esrch", "initial-process-group", {
+  assert.deepEqual(await observeFaultSelector("owned-getpgid-esrch", "initial-process-group"), {
     kind: "unverifiable",
     reason: "not-found",
   });
 });
 
 test("native getpgid EPERM classifies without signaling an unowned process", async () => {
-  await assertFaultSelector("owned-getpgid-eperm", "initial-process-group", {
+  assert.deepEqual(await observeFaultSelector("owned-getpgid-eperm", "initial-process-group"), {
     kind: "unverifiable",
     reason: "scope-unavailable",
     errorCode: String(constants.errno.EPERM),
@@ -453,7 +455,7 @@ test("native getpgid EPERM classifies without signaling an unowned process", asy
 });
 
 test("native unqualified group classifies without signaling an unowned process", async () => {
-  await assertFaultSelector("owned-group-unqualified", "initial-process-group", {
+  assert.deepEqual(await observeFaultSelector("owned-group-unqualified", "initial-process-group"), {
     kind: "unverifiable",
     reason: "scope-unavailable",
   });
