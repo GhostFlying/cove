@@ -445,9 +445,15 @@ class WorkerExecutionCore {
       recovery: state?.recovery.state ?? previous?.recovery ?? "unavailable",
       ...(snap.writableFenced
         ? { reason: "Control or input transaction is uncertain" }
-        : state?.recovery.reason
-          ? { reason: state.recovery.reason.slice(0, 128) }
-          : {}),
+        : snap.counterExhausted
+          ? { reason: "Run fact sequence exhausted" }
+          : snap.epochCounterExhausted && snap.controlEpoch === Number.MAX_SAFE_INTEGER
+            ? { reason: "Control epoch exhausted" }
+            : snap.currentInputCounterExhausted
+              ? { reason: "Current input sequence exhausted" }
+              : state?.recovery.reason
+                ? { reason: state.recovery.reason.slice(0, 128) }
+                : {}),
       exitCode: leader?.exitCode ?? null,
       signal: leader?.signal === undefined ? null : String(leader.signal),
     };

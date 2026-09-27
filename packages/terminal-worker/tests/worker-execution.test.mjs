@@ -1,4 +1,6 @@
 import { expect, test } from "vitest";
+import { randomUUID } from "node:crypto";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
   composeSpawnPayload,
@@ -164,6 +166,34 @@ async function start(config = {}, budgets = M0_LIMITS, onFact) {
     atSeq: 0,
   });
   return { execution, factory, item: [...factory.owned.values()][0] };
+}
+
+async function withInstrumentedCounters(fields, runCase) {
+  const suffix = randomUUID();
+  const source = new URL("../dist/src/", import.meta.url);
+  const sessionFile = new URL(`run-session-counter-${suffix}.js`, source);
+  const workerFile = new URL(`worker-execution-counter-${suffix}.js`, source);
+  const originalSession = await readFile(new URL("run-session.js", source), "utf8");
+  const originalWorker = await readFile(new URL("worker-execution.js", source), "utf8");
+  let instrumentedSession = originalSession;
+  for (const [field, value] of Object.entries(fields)) {
+    const initializer = `#${field} = 0;`;
+    expect(instrumentedSession.split(initializer)).toHaveLength(2);
+    instrumentedSession = instrumentedSession.replace(initializer, `#${field} = ${value};`);
+  }
+  const instrumentedWorker = originalWorker.replaceAll(
+    '"./run-session.js"',
+    `"./run-session-counter-${suffix}.js"`,
+  );
+  expect(instrumentedWorker).not.toBe(originalWorker);
+  try {
+    await writeFile(sessionFile, instrumentedSession);
+    await writeFile(workerFile, instrumentedWorker);
+    const { createWorkerExecution: createNearLimitWorker } = await import(workerFile.href);
+    await runCase(createNearLimitWorker);
+  } finally {
+    await Promise.allSettled([unlink(sessionFile), unlink(workerFile)]);
+  }
 }
 
 function expectCorrelated(commandValue, response, type) {
@@ -473,6 +503,162 @@ test("same subscription keeps attempted sequence across control loss and regrant
   } finally {
     await execution.shutdown("test");
   }
+});
+
+test("input MAX exhausts only its full identity after one legal gap", async () => {
+  const { execution, item } = await start();
+  try {
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: holder(),
+        geometry,
+      }),
+    );
+    const maximum = Number.MAX_SAFE_INTEGER;
+    expect(
+      await execution.execute(
+        command("input", { subscription: subscription(), epoch: 1, inputSeq: maximum }),
+        encode("max"),
+      ),
+    ).toMatchObject({ type: "result", writtenBytes: 3 });
+    expect(
+      await execution.execute(
+        command("input", { subscription: subscription(), epoch: 1, inputSeq: maximum }),
+        encode("repeat"),
+      ),
+    ).toMatchObject({ type: "error", error: { kind: "COUNTER_EXHAUSTED" } });
+    expect((await execution.execute(command("status"))).runStatus.reason).toBe(
+      "Current input sequence exhausted",
+    );
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 1,
+        nextEpoch: 1,
+        holder: null,
+        geometry,
+      }),
+    );
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 1,
+        nextEpoch: 2,
+        holder: holder(),
+        geometry,
+      }),
+    );
+    expect(
+      await execution.execute(
+        command("input", { subscription: subscription(), epoch: 2, inputSeq: maximum }),
+        encode("regrant"),
+      ),
+    ).toMatchObject({ type: "error", error: { kind: "COUNTER_EXHAUSTED" } });
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 2,
+        nextEpoch: 3,
+        holder: holder("other"),
+        geometry,
+      }),
+    );
+    expect(
+      await execution.execute(
+        command("input", { subscription: subscription("other"), epoch: 3, inputSeq: 1 }),
+        encode("other"),
+      ),
+    ).toMatchObject({ type: "result", writtenBytes: 5 });
+    expect(item.writes.map((value) => value.toString())).toEqual(["max", "other"]);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("compiled near-MAX epoch rejects new grants but accepts same-epoch release", async () => {
+  await withInstrumentedCounters(
+    { controlEpoch: Number.MAX_SAFE_INTEGER },
+    async (createNearLimitWorker) => {
+      const factory = fakeFactory();
+      const execution = createNearLimitWorker({ worker, effectiveBudgets: M0_LIMITS, factory });
+      try {
+        const spawn = spawnCommand();
+        const spawned = await execution.execute(spawn.command, spawn.payload);
+        expectCorrelated(spawn.command, spawned, "result");
+        const grant = command("set-control", {
+          expectedEpoch: Number.MAX_SAFE_INTEGER,
+          nextEpoch: Number.MAX_SAFE_INTEGER,
+          holder: holder(),
+          geometry,
+        });
+        const rejected = await execution.execute(grant);
+        expectCorrelated(grant, rejected, "error");
+        expect(rejected.error.kind).toBe("COUNTER_EXHAUSTED");
+        const release = command("set-control", {
+          expectedEpoch: Number.MAX_SAFE_INTEGER,
+          nextEpoch: Number.MAX_SAFE_INTEGER,
+          holder: null,
+          geometry,
+        });
+        const released = await execution.execute(release);
+        expectCorrelated(release, released, "result");
+        const statusCommand = command("status");
+        const status = await execution.execute(statusCommand);
+        expectCorrelated(statusCommand, status, "result");
+        expect(status.runStatus).toMatchObject({
+          controlEpoch: Number.MAX_SAFE_INTEGER,
+          controlHolder: null,
+          reason: "Control epoch exhausted",
+        });
+        const stopCommand = command("stop", { operationId: "near-max-epoch-stop" });
+        expectCorrelated(stopCommand, await execution.execute(stopCommand), "result");
+      } finally {
+        await execution.shutdown("test");
+      }
+    },
+  );
+});
+
+test("compiled near-MAX output rejects multi-fact grant before native resize", async () => {
+  await withInstrumentedCounters(
+    { receivedSeq: Number.MAX_SAFE_INTEGER - 1 },
+    async (createNearLimitWorker) => {
+      const factory = fakeFactory();
+      const execution = createNearLimitWorker({ worker, effectiveBudgets: M0_LIMITS, factory });
+      try {
+        const spawn = spawnCommand();
+        expectCorrelated(
+          spawn.command,
+          await execution.execute(spawn.command, spawn.payload),
+          "result",
+        );
+        const item = [...factory.owned.values()][0];
+        const grant = command("set-control", {
+          expectedEpoch: 0,
+          nextEpoch: 1,
+          holder: holder(),
+          geometry: { cols: geometry.cols + 1, rows: geometry.rows },
+        });
+        const rejected = await execution.execute(grant);
+        expectCorrelated(grant, rejected, "error");
+        expect(rejected.error.kind).toBe("COUNTER_EXHAUSTED");
+        expect(item.resizes).toEqual([]);
+        const statusCommand = command("status");
+        const status = await execution.execute(statusCommand);
+        expectCorrelated(statusCommand, status, "result");
+        expect(status.runStatus).toMatchObject({
+          controlEpoch: 0,
+          controlHolder: null,
+          receivedSeq: Number.MAX_SAFE_INTEGER - 1,
+          reason: "Run fact sequence exhausted",
+        });
+        expect(execution.snapshot().sessions[0].snapshot.counterExhausted).toBe(true);
+        const stopCommand = command("stop", { operationId: "near-max-output-stop" });
+        expectCorrelated(stopCommand, await execution.execute(stopCommand), "result");
+      } finally {
+        await execution.shutdown("test");
+      }
+    },
+  );
 });
 
 test("native resize failure does not publish a grant and preserves live status", async () => {

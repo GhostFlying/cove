@@ -147,6 +147,9 @@ export interface RunSessionSnapshot {
   readonly exited: boolean;
   readonly faulted: boolean;
   readonly counterExhausted: boolean;
+  readonly epochCounterExhausted: boolean;
+  readonly inputCounterExhausted: boolean;
+  readonly currentInputCounterExhausted: boolean;
   readonly consumerFenced: boolean;
   readonly diagnosticFenced: boolean;
   readonly writer: RunSessionWriterObservation;
@@ -215,6 +218,8 @@ class RunSessionCore {
   #exitApplied = false;
   #faulted = false;
   #counterExhausted = false;
+  #epochCounterExhausted = false;
+  #inputCounterExhausted = false;
   #disposed = false;
   #consumerFenced = false;
   #diagnosticFenced = false;
@@ -473,6 +478,18 @@ class RunSessionCore {
       exited: this.#exited,
       faulted: this.#faulted,
       counterExhausted: this.#counterExhausted,
+      epochCounterExhausted: this.#epochCounterExhausted,
+      inputCounterExhausted: this.#inputCounterExhausted,
+      currentInputCounterExhausted:
+        this.#controlHolder !== null &&
+        this.#inputSequences.get(
+          JSON.stringify([
+            this.#controlHolder.connection.connectionId,
+            this.#controlHolder.connection.generation,
+            this.#controlHolder.viewId,
+            this.#controlHolder.subscriptionId,
+          ]),
+        ) === Number.MAX_SAFE_INTEGER,
       consumerFenced: this.#consumerFenced,
       diagnosticFenced: this.#diagnosticFenced,
       writer: this.#writer,
@@ -794,6 +811,10 @@ class RunSessionCore {
       if (operation.expectedEpoch !== this.#controlEpoch)
         return { kind: "rejected", reason: "stale-control" };
       if (operation.holder) {
+        if (this.#controlEpoch === Number.MAX_SAFE_INTEGER) {
+          this.#epochCounterExhausted = true;
+          return { kind: "rejected", reason: "counter-exhausted" };
+        }
         if (nextCounter(this.#controlEpoch) !== operation.nextEpoch)
           return { kind: "rejected", reason: "stale-control" };
       } else if (this.#controlEpoch === 0 || operation.nextEpoch !== this.#controlEpoch) {
@@ -805,6 +826,10 @@ class RunSessionCore {
     if (operation.type === "input") {
       const key = this.#inputKey(operation.subscription);
       const previous = this.#inputSequences.get(key) ?? 0;
+      if (previous === Number.MAX_SAFE_INTEGER) {
+        this.#inputCounterExhausted = true;
+        return { kind: "rejected", reason: "counter-exhausted" };
+      }
       if (operation.inputSeq <= previous) return { kind: "rejected", reason: "input-sequence" };
       if (!this.#inputSequences.has(key) && !this.#reserveInputIdentity(operation.subscription))
         return { kind: "rejected", reason: "input-identity-cap" };
@@ -828,8 +853,10 @@ class RunSessionCore {
     const controlFact =
       operation.type === "control" && (operation.holder !== null || this.#controlHolder !== null);
     const factCount = Number(changedGeometry) + Number(changedAppearance) + Number(controlFact);
-    if (factCount > Number.MAX_SAFE_INTEGER - this.#receivedSeq)
+    if (factCount > Number.MAX_SAFE_INTEGER - this.#receivedSeq) {
+      this.#counterExhausted = true;
       return { kind: "rejected", reason: "counter-exhausted" };
+    }
     if (changedGeometry) {
       try {
         this.#native!.resize(operation.geometry.cols, operation.geometry.rows);
