@@ -241,36 +241,44 @@ describe("dual-channel connection", () => {
     expect(states).toEqual(["connecting", "connected"]);
   });
 
-  test.each([
-    ["server build", bootstrap(), bootstrap({ buildVersion: "other-build" }, true), "server-build"],
-    [
-      "capability set",
+  async function rejectsChannelDisagreement(httpValue, terminalValue, field) {
+    const context = harness();
+    const promise = context.client.connect();
+    await flush();
+    context.http.respond(0, httpValue);
+    context.terminal.text(0, terminalValue);
+    expect(await promise).toEqual({
+      ok: false,
+      error: { category: "negotiation", reason: "channel-disagreement", field },
+    });
+    expect(context.http.requests[0].cancelled).toBe(true);
+    expect(context.terminal.opens[0]).toMatchObject({ closed: true, disposed: true });
+  }
+
+  test("rejects a server build disagreement and closes both owned sides", async () => {
+    expect.assertions(3);
+    await rejectsChannelDisagreement(
+      bootstrap(),
+      bootstrap({ buildVersion: "other-build" }, true),
+      "server-build",
+    );
+  });
+  test("rejects a capability set disagreement and closes both owned sides", async () => {
+    expect.assertions(3);
+    await rejectsChannelDisagreement(
       bootstrap(),
       bootstrap({ capabilities: [M0_CAPABILITIES[0], M0_CAPABILITIES[1]] }, true),
       "capabilities",
-    ],
-    [
-      "budget",
+    );
+  });
+  test("rejects a budget disagreement and closes both owned sides", async () => {
+    expect.assertions(3);
+    await rejectsChannelDisagreement(
       bootstrap(),
       bootstrap({ effectiveBudgets: budgets({ rpcInflight: 1 }) }, true),
       "effective-budgets",
-    ],
-  ])(
-    "rejects a %s disagreement and closes both owned sides",
-    async (_name, httpValue, terminalValue, field) => {
-      const context = harness();
-      const promise = context.client.connect();
-      await flush();
-      context.http.respond(0, httpValue);
-      context.terminal.text(0, terminalValue);
-      expect(await promise).toEqual({
-        ok: false,
-        error: { category: "negotiation", reason: "channel-disagreement", field },
-      });
-      expect(context.http.requests[0].cancelled).toBe(true);
-      expect(context.terminal.opens[0]).toMatchObject({ closed: true, disposed: true });
-    },
-  );
+    );
+  });
 
   test("rejects a channel identity outside the frozen expected instance", async () => {
     const context = harness();
@@ -575,36 +583,40 @@ describe("bounded typed RPC", () => {
     expect(context.client.snapshot().pendingRpcCount).toBe(0);
   });
 
-  test.each([
-    ["wrong request ID", (request) => rpcResult(`${request.id}-wrong`, { runs: [] })],
-    [
-      "foreign list run",
-      (request) =>
-        rpcResult(request.id, {
-          runs: [runRecord({ run: { ...run, relayInstanceId: "foreign" } })],
-        }),
-    ],
-    [
-      "foreign headers",
-      (request) => rpcResult(request.id, { runs: [] }),
-      { "Cove-Protocol": "2", "Cove-Server-Id": ids.serverId, "Cove-Instance-Id": "foreign" },
-    ],
-  ])(
-    "rejects %s instead of returning false success",
-    async (_name, response, responseHeaders = headers()) => {
-      const context = harness();
-      await connectHarness(context);
-      const call = context.client.call("terminal.list", { limit: 1 });
-      await flush();
-      const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
-      context.http.respond(1, response(request), { headers: responseHeaders });
-      expect(await call).toMatchObject({
-        ok: false,
-        kind: "local-error",
-        error: { category: "local" },
-      });
-    },
-  );
+  async function rejectsMismatchedResult(response, responseHeaders = headers()) {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.list", { limit: 1 });
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, response(request), { headers: responseHeaders });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "local-error",
+      error: { category: "local" },
+    });
+  }
+
+  test("rejects wrong request ID instead of returning false success", async () => {
+    expect.assertions(2);
+    await rejectsMismatchedResult((request) => rpcResult(`${request.id}-wrong`, { runs: [] }));
+  });
+  test("rejects foreign list run instead of returning false success", async () => {
+    expect.assertions(2);
+    await rejectsMismatchedResult((request) =>
+      rpcResult(request.id, {
+        runs: [runRecord({ run: { ...run, relayInstanceId: "foreign" } })],
+      }),
+    );
+  });
+  test("rejects foreign headers instead of returning false success", async () => {
+    expect.assertions(2);
+    await rejectsMismatchedResult((request) => rpcResult(request.id, { runs: [] }), {
+      "Cove-Protocol": "2",
+      "Cove-Server-Id": ids.serverId,
+      "Cove-Instance-Id": "foreign",
+    });
+  });
 
   test("distinguishes definitely not-sent writes from unknown writes and never retries", async () => {
     const context = harness();
@@ -740,9 +752,21 @@ describe("bounded typed RPC", () => {
     expect(await query).toMatchObject({ ok: true, value: { operation: { state: "failed" } } });
   });
 
-  test.each([
-    [
-      "operation method",
+  async function wrongWriteBindingIsUnknown(method, params, record) {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call(method, params);
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcResult(request.id, { operation: record }), {
+      headers: headers(),
+    });
+    expect(await call).toMatchObject({ ok: false, kind: "operation-unknown" });
+  }
+
+  test("treats a wrong operation method binding as an unknown write", async () => {
+    expect.assertions(2);
+    await wrongWriteBindingIsUnknown(
       "terminal.create",
       {
         operationId: "op-method",
@@ -753,23 +777,15 @@ describe("bounded typed RPC", () => {
         geometry: { cols: 80, rows: 24 },
       },
       operation("op-method", "terminal.stop"),
-    ],
-    [
-      "stop run",
+    );
+  });
+  test("treats a wrong stop run binding as an unknown write", async () => {
+    expect.assertions(2);
+    await wrongWriteBindingIsUnknown(
       "terminal.stop",
       { operationId: "op-stop-run", expectedRelayInstanceId: ids.relayInstanceId, run },
       operation("op-stop-run", "terminal.stop", { run: { ...run, runId: "other-run" } }),
-    ],
-  ])("treats a wrong %s binding as an unknown write", async (_name, method, params, record) => {
-    const context = harness();
-    await connectHarness(context);
-    const call = context.client.call(method, params);
-    await flush();
-    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
-    context.http.respond(1, rpcResult(request.id, { operation: record }), {
-      headers: headers(),
-    });
-    expect(await call).toMatchObject({ ok: false, kind: "operation-unknown" });
+    );
   });
 
   test("enforces negotiated inflight and request limits before handing bytes to the port", async () => {

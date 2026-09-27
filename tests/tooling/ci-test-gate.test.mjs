@@ -119,7 +119,7 @@ test("protocol registration and its actual test root are required", async () => 
 test("client public-contract suites reject missing and short discovery", async () => {
   const files = await readVitestOwnedTestFiles();
   for (const [name, minimumTests] of [
-    ["connection-rpc", 22],
+    ["connection-rpc", 27],
     ["compiled-client", 4],
   ]) {
     const file = `packages/client/tests/${name}.test.mjs`;
