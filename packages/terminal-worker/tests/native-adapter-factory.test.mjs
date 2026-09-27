@@ -634,6 +634,64 @@ test("compiled N2 partial write faults before settlement but leaves output and e
   });
 });
 
+test("compiled adapter forwards bounded synchronous native settlement diagnostics", async () => {
+  await withPublicSeam(async (seam) => {
+    seam.preflight({ supported: true, contractVersion: 3 });
+    const source = {
+      ticket: 81,
+      status: "error",
+      originalBytes: 2,
+      writtenBytes: 1,
+      remainingBytes: 1,
+      errorCode: "E".repeat(200_000),
+      errorMessage: "😀".repeat(100_000),
+      retainedGraph: { bytes: Buffer.alloc(200_000) },
+    };
+    const native = fakePty({
+      writeBounded: vi.fn((bytes, callback) => {
+        callback(source);
+        source.errorCode = "CHANGED";
+        source.errorMessage = "CHANGED";
+        return { accepted: true, ticket: 81, byteLength: bytes.length };
+      }),
+    });
+    seam.spawn(() => native.terminal);
+    const { createNativePtyFactory } = await loadFactoryModule();
+    const factory = createNativePtyFactory(limits());
+    const created = factory.spawn(spec(), observer());
+    expect(created.kind).toBe("created");
+    try {
+      const settlements = [];
+      expect(created.pty.submit(Buffer.from("AB"), (value) => settlements.push(value)).kind).toBe(
+        "accepted",
+      );
+      expect(settlements).toEqual([
+        {
+          kind: "unknown",
+          ticket: 81,
+          status: "error",
+          originalBytes: 2,
+          writtenBytes: 1,
+          remainingBytes: 1,
+          errorCode: "E".repeat(32),
+          errorMessage: "😀".repeat(32),
+        },
+      ]);
+      expect(JSON.stringify(settlements)).not.toContain("retainedGraph");
+      expect(native.terminal.writeBounded).toHaveBeenCalledOnce();
+      expect(nodePty.spawn).toHaveBeenCalledOnce();
+      expect(native.terminal.signalOwned).not.toHaveBeenCalled();
+    } finally {
+      const stopped = created.pty.stop();
+      native.exit({ exitCode: 0 });
+      native.writer.resolve({ kind: "closed" });
+      await stopped;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(factory.snapshot().owners).toBe(0);
+    }
+  });
+});
+
 test("owned stop forces once at the grace boundary and reports unknown at the final deadline", async () => {
   vi.useFakeTimers();
   try {

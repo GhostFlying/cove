@@ -1,6 +1,8 @@
 import { expect, test, vi } from "vitest";
 import { PtyInputController, SharedNativeInputBudget } from "../dist/src/pty-input.js";
 
+const TICKET_BYTES = 768;
+
 function controller(options = {}) {
   const faults = [];
   const writer = {
@@ -124,9 +126,20 @@ test("factory byte and task caps apply across independent PTY controllers", () =
 
 test("settlement observer reentry sees the whole original allocation until finally", () => {
   let callback;
+  let held = 0;
+  let releases = 0;
   const session = controller({
     maxBytes: 2,
     maxTasks: 1,
+    reserveRetainedBytes(bytes) {
+      held += bytes;
+      return {
+        release() {
+          held -= bytes;
+          releases++;
+        },
+      };
+    },
     writeBounded: vi.fn((bytes, onSettled) => {
       callback = onSettled;
       return { accepted: true, ticket: 7, byteLength: bytes.byteLength };
@@ -134,10 +147,13 @@ test("settlement observer reentry sees the whole original allocation until final
   });
   const reentered = [];
   session.input.submit(Buffer.from("A"), "user", () => {
+    expect(held).toBe(2 + TICKET_BYTES);
     reentered.push(session.input.submit(Buffer.from("B"), "query", vi.fn()));
   });
   callback({ ticket: 7, status: "written", originalBytes: 1, writtenBytes: 1, remainingBytes: 0 });
   expect(reentered).toEqual([{ kind: "rejected", reason: "pty-task-limit", writtenBytes: 0 }]);
+  expect(held).toBe(0);
+  expect(releases).toBe(1);
   expect(session.input.snapshot()).toMatchObject({ allocatedBytes: 0, tasks: 0 });
 });
 
@@ -182,6 +198,171 @@ test("partial settlement reports exact unknown, fences input, and never retries"
   expect(session.writer.writeBounded).toHaveBeenCalledTimes(1);
 });
 
+test.each([
+  ["exact ASCII code", "E".repeat(32), undefined, "E".repeat(32), undefined],
+  ["long ASCII code", "E".repeat(33), undefined, "E".repeat(32), undefined],
+  ["non-ASCII code", "EIOé", undefined, undefined, undefined],
+  ["exact UTF-8 message", undefined, "A".repeat(128), undefined, "A".repeat(128)],
+  ["long UTF-8 message", undefined, "A".repeat(129), undefined, "A".repeat(128)],
+  ["scalar at byte boundary", undefined, "A".repeat(124) + "😀", undefined, "A".repeat(124) + "😀"],
+  ["scalar crossing byte boundary", undefined, "A".repeat(126) + "😀", undefined, "A".repeat(126)],
+  [
+    "lone surrogate replacement",
+    undefined,
+    "A".repeat(125) + "\ud800",
+    undefined,
+    "A".repeat(125) + "�",
+  ],
+  ["huge diagnostics", "E".repeat(200_000), "😀".repeat(100_000), "E".repeat(32), "😀".repeat(32)],
+])(
+  "settlement diagnostics retain only bounded %s",
+  (_name, errorCode, errorMessage, code, message) => {
+    let callback;
+    const settled = [];
+    const session = controller({
+      writeBounded: vi.fn((bytes, onSettled) => {
+        callback = onSettled;
+        return { accepted: true, ticket: 71, byteLength: bytes.length };
+      }),
+    });
+    expect(
+      session.input.submit(Buffer.from("AB"), "user", (value) => settled.push(value)).kind,
+    ).toBe("accepted");
+    callback({
+      ticket: 71,
+      status: "error",
+      originalBytes: 2,
+      writtenBytes: 1,
+      remainingBytes: 1,
+      ...(errorCode === undefined ? {} : { errorCode }),
+      ...(errorMessage === undefined ? {} : { errorMessage }),
+    });
+    expect(settled).toEqual([
+      {
+        kind: "unknown",
+        ticket: 71,
+        status: "error",
+        originalBytes: 2,
+        writtenBytes: 1,
+        remainingBytes: 1,
+        ...(code === undefined ? {} : { errorCode: code }),
+        ...(message === undefined ? {} : { errorMessage: message }),
+      },
+    ]);
+    expect(Buffer.byteLength(settled[0].errorCode ?? "", "utf8")).toBeLessThanOrEqual(32);
+    expect(Buffer.byteLength(settled[0].errorMessage ?? "", "utf8")).toBeLessThanOrEqual(128);
+    expect(session.writer.writeBounded).toHaveBeenCalledOnce();
+  },
+);
+
+test("synchronous early capture owns bounded fields before native admission returns", () => {
+  const source = {
+    ticket: 72,
+    status: "error",
+    originalBytes: 2,
+    writtenBytes: 1,
+    remainingBytes: 1,
+    errorCode: "E".repeat(200_000),
+    errorMessage: "😀".repeat(100_000),
+    retainedGraph: { bytes: Buffer.alloc(200_000) },
+  };
+  const settled = [];
+  let held = 0;
+  const session = controller({
+    reserveRetainedBytes(bytes) {
+      held += bytes;
+      return {
+        release: () => {
+          held -= bytes;
+        },
+      };
+    },
+    writeBounded: vi.fn((bytes, callback) => {
+      callback(source);
+      source.errorCode = "CHANGED";
+      source.errorMessage = "CHANGED";
+      expect(held).toBe(2 * bytes.length + TICKET_BYTES);
+      return { accepted: true, ticket: 72, byteLength: bytes.length };
+    }),
+  });
+  expect(
+    session.input.submit(Buffer.from("AB"), "user", (value) => {
+      expect(held).toBe(2 * 2 + TICKET_BYTES);
+      settled.push(value);
+    }).kind,
+  ).toBe("accepted");
+  expect(settled).toEqual([
+    {
+      kind: "unknown",
+      ticket: 72,
+      status: "error",
+      originalBytes: 2,
+      writtenBytes: 1,
+      remainingBytes: 1,
+      errorCode: "E".repeat(32),
+      errorMessage: "😀".repeat(32),
+    },
+  ]);
+  expect(JSON.stringify(settled)).not.toContain("retainedGraph");
+  expect(held).toBe(0);
+});
+
+test("throwing known settlement field stays invalid and a later valid callback cannot promote it", () => {
+  let callback;
+  const settled = [];
+  const session = controller({
+    writeBounded: vi.fn((bytes, onSettled) => {
+      callback = onSettled;
+      return { accepted: true, ticket: 73, byteLength: bytes.length };
+    }),
+  });
+  session.input.submit(Buffer.from("AB"), "user", (value) => settled.push(value));
+  callback({
+    ticket: 73,
+    status: "error",
+    originalBytes: 2,
+    writtenBytes: 1,
+    remainingBytes: 1,
+    get errorMessage() {
+      throw new Error("hostile accessor");
+    },
+  });
+  callback({ ticket: 73, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(settled).toEqual([
+    {
+      kind: "unknown",
+      ticket: 73,
+      status: "invalid",
+      originalBytes: 2,
+      writtenBytes: 0,
+      remainingBytes: 2,
+    },
+  ]);
+  expect(session.faults.map((fault) => fault.reason)).toEqual([
+    "native-settlement-invalid",
+    "native-settlement-duplicate",
+  ]);
+});
+
+test("fixed settlement charge rejects at cap plus one before native entry", () => {
+  const writeBounded = vi.fn(() => ({ accepted: true, ticket: 74, byteLength: 2 }));
+  const cap = 2 * 2 + TICKET_BYTES - 1;
+  const session = controller({
+    writeBounded,
+    reserveRetainedBytes(bytes) {
+      expect(bytes).toBe(2 * 2 + TICKET_BYTES);
+      return bytes <= cap ? { release() {} } : undefined;
+    },
+  });
+  expect(session.input.submit(Buffer.from("AB"), "user", vi.fn())).toEqual({
+    kind: "rejected",
+    reason: "worker-byte-limit",
+    writtenBytes: 0,
+  });
+  expect(writeBounded).not.toHaveBeenCalled();
+  expect(session.input.snapshot()).toMatchObject({ allocatedBytes: 0, tasks: 0 });
+});
+
 test("synchronous settlement before admission is bound once and duplicate settlement faults", () => {
   const settled = [];
   let nativeCallback;
@@ -214,6 +395,58 @@ test("synchronous settlement before admission is bound once and duplicate settle
   });
   expect(settled).toHaveLength(1);
   expect(session.faults).toMatchObject([{ reason: "native-settlement-duplicate" }]);
+});
+
+test("malformed synchronous first callback cannot be replaced after admission", () => {
+  const settled = [];
+  let callback;
+  let held = 0;
+  let releases = 0;
+  const session = controller({
+    reserveRetainedBytes(bytes) {
+      held += bytes;
+      return {
+        release() {
+          held -= bytes;
+          releases++;
+        },
+      };
+    },
+    writeBounded: vi.fn((bytes, onSettled) => {
+      callback = onSettled;
+      callback({
+        ticket: 91,
+        status: "error",
+        originalBytes: 2,
+        writtenBytes: 1,
+        remainingBytes: 1,
+        get errorCode() {
+          throw new Error("hostile early accessor");
+        },
+      });
+      return { accepted: true, ticket: 91, byteLength: bytes.length };
+    }),
+  });
+  expect(session.input.submit(Buffer.from("AB"), "user", (value) => settled.push(value)).kind).toBe(
+    "accepted",
+  );
+  callback({ ticket: 91, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(settled).toEqual([
+    {
+      kind: "unknown",
+      ticket: 91,
+      status: "invalid",
+      originalBytes: 2,
+      writtenBytes: 0,
+      remainingBytes: 2,
+    },
+  ]);
+  expect(session.faults.map((fault) => fault.reason)).toEqual([
+    "native-settlement-invalid",
+    "native-settlement-duplicate",
+  ]);
+  expect(held).toBe(0);
+  expect(releases).toBe(1);
 });
 
 test("possible handoff throw retains allocation until a later one-shot settlement", () => {
@@ -294,13 +527,30 @@ test("worker reservation survives missing callback and retires exactly once afte
   expect(session.input.submit(Buffer.from("AB"), "user", (value) => settled.push(value)).kind).toBe(
     "accepted",
   );
-  expect(held).toBe(132);
+  expect(held).toBe(2 * 2 + TICKET_BYTES);
   session.input.retire();
-  expect(held).toBe(132);
-  callback({ ticket: 41, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(held).toBe(2 * 2 + TICKET_BYTES);
+  callback({
+    ticket: 41,
+    status: "error",
+    originalBytes: 2,
+    writtenBytes: 1,
+    remainingBytes: 1,
+    errorMessage: "😀".repeat(100_000),
+  });
   expect(held).toBe(0);
   expect(releases).toBe(1);
-  expect(settled).toHaveLength(1);
+  expect(settled).toEqual([
+    {
+      kind: "unknown",
+      ticket: 41,
+      status: "error",
+      originalBytes: 2,
+      writtenBytes: 1,
+      remainingBytes: 1,
+      errorMessage: "😀".repeat(32),
+    },
+  ]);
   callback({ ticket: 41, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
   expect(releases).toBe(1);
   expect(settled).toHaveLength(1);
@@ -329,7 +579,7 @@ test("malformed first settlement releases after consumer reentry and valid secon
   });
   session.input.submit(Buffer.from("AB"), "user", (value) => {
     settled.push(value);
-    expect(held).toBe(132);
+    expect(held).toBe(2 * 2 + TICKET_BYTES);
     throw new Error("consumer failed after observation");
   });
   callback({
