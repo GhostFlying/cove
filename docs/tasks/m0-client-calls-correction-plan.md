@@ -68,3 +68,12 @@
 本计划原文 SHA-256 `3fac9758324e474859f73db463693839514a40969abdfed3548844fb797b1e4f`；独立批准报告 `/tmp/cove-m0-p3a-correction-plan-review/report.md` whole-file SHA-256 `39abb54008b5badfb7577c337ef6db1d15c7dd1b894ba373ebb0dd42efc6f4f5`。原候选 `89b41e5b46a0827f06fa429e46f154a62db33c6c`、tree `a8ff916a6156a3e20abf6de53b9b592dc92ed843`，位于 `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-terminal-recovery` 的 `p/luchengxuan/m0-19-client-calls`；此提交只转录已审计划，源码未修正，P3a 尚未验收。
 
 Root 在本提交后接回该 checkout 的分配权，另行指派独立作者只改本计划列出的 `packages/client/src/**`、`packages/client/tests/**` 与局部任务结果。原 P3a 注册与共享清单由指定 sole registrar 串行处理，独立验证和审查不能由作者兼任；W1a 的独立 checkout 不受此交接影响。M0 保持进行中，M1 与 devbox 资格均未放行。
+
+## 563092d 审查后的有限追加修正
+
+2026-09-27，当前实现 `563092db9c87d1747c591895d061c75f22556f36` / tree `2289f9e162bb3723481c8995ebde086b10283b44`。独立源码审查 `/tmp/cove-m0-p3a-corrected-source-review/report.md` whole-file SHA-256 `59d9a317e6eb114cbd1145d4dc18906bd555630d5005248018ff06da43989742` 判定仍有两处已批准范围内的正确性缺陷。历史有限验证 `/tmp/cove-m0-p3a-native-verify/rpc-correction-563-report.md` SHA-256 `0dab4c9a286829caba07e2432b0b5c9e33dda9b47bd10c712bee857b9a7888af` 不含下列反例，不构成新候选或 P3a 的验收。
+
+- `dispatchRpc` 的每次**尚未 settled** 的 `onResponse` 入口，必须在检查status/generation并读取任何response header、body或codec之前单调合入 `handed-off`。同步 `post()` 内先dispose/reconnect、再收到response、最后迟到handle的cancel返回`not-sent`时，不能把已收到的请求降格为`operation-not-sent`。已选择的有效响应结果不被重入回调替换；已settled的迟到回调仍受围栏约束。用原operation reference、一次post/一次cancel、零pending/active intent验证unknown路径，并覆盖response accessor重入。
+- RPC timer通过一个受保护的`disposeTimerOnce`释放：调用外部`dispose()`前先认领并清空handle，避免同步重入、抛错、`uncertainOrLocal → completeUncertain → complete`和迟到handle路径重复释放。用pre-post credential timeout与post-entry deferred uncertainty的计数/重入/抛错scheduler验证一次dispose、一次public outcome及本地资源清零；不能把缺少实际timer释放伪装为通过。
+
+原TraeX作者只在现有 `packages/client/src/client.ts` 和 `packages/client/tests/connection-rpc.test.mjs` 内完成这两个有限修正及必要的相邻测试；若发现确需扩大文件范围，先回报协调者。共享suite floor/manifest/lock仍由sole registrar依据冻结后的真实显式测试数串行登记。先做package build、scoped tests与静态discovery，再交独立源码复核和有限反事实验证；后续完整双系统CI、集成及final-main门禁不以563的旧证据替代。不增新协议、重试、持久ledger、通用transport框架或更强生命周期保证。本提交仅追加前置计划，源码与注册不变，随后将checkout写权限交还协调者派发作者。
