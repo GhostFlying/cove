@@ -181,7 +181,12 @@ test("a throwing parsed consumer is fenced while the authoritative model continu
     expect(await owned.session.barrier()).toMatchObject({ ok: true });
     expect(delivered).toBe(1);
     expect(owned.writes.map(({ bytes }) => bytes.toString())).toEqual(["\u001b[0n"]);
-    expect(owned.session.snapshot()).toMatchObject({ parsedSeq: 2, faulted: false });
+    expect(owned.faults).toEqual([{ kind: "consumer", reason: "parsed-fact-observer-threw" }]);
+    expect(owned.session.snapshot()).toMatchObject({
+      parsedSeq: 2,
+      faulted: false,
+      consumerFenced: true,
+    });
   } finally {
     await owned.session.dispose();
   }
