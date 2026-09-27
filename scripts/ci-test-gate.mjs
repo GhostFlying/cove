@@ -341,6 +341,11 @@ export const requiredSuites = [
   },
   {
     project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-execution.test.mjs",
+    minimumTests: 21,
+  },
+  {
+    project: "terminal-worker",
     file: "packages/terminal-worker/tests/run-session-real.test.mjs",
     minimumTests: 1,
   },

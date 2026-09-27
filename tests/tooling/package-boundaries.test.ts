@@ -397,14 +397,17 @@ test("isolated Node consumer compiles the native adapter export without a privat
     join(directory, "consumer.mts"),
     `import { createNativePtyFactory } from '@cove/terminal-worker/native-adapter';
 import type { NativeFactoryLimits } from '@cove/terminal-worker/native-adapter';
-import { createRunSession } from '@cove/terminal-worker/execution';
-import type { RunSessionOptions } from '@cove/terminal-worker/execution';
+import { createRunSession, createWorkerExecution } from '@cove/terminal-worker/execution';
+import type { RunSessionOptions, WorkerExecutionOptions } from '@cove/terminal-worker/execution';
 declare const limits: NativeFactoryLimits;
 declare const sessionOptions: RunSessionOptions;
+declare const executionOptions: WorkerExecutionOptions;
 const factory = createNativePtyFactory(limits);
 const session = createRunSession(sessionOptions);
+const execution = createWorkerExecution(executionOptions);
 void factory;
 void session;
+void execution;
 `,
   );
   const compiled = spawnSync(
@@ -417,7 +420,9 @@ void session;
   await writeFile(
     join(directory, "consumer.mjs"),
     `import { createNativePtyFactory } from '@cove/terminal-worker/native-adapter';
+import { createWorkerExecution } from '@cove/terminal-worker/execution';
 if (typeof createNativePtyFactory !== 'function') throw new Error('Native adapter export missing');
+if (typeof createWorkerExecution !== 'function') throw new Error('Worker execution export missing');
 try { await import('@cove/terminal-worker/src/pty-input'); throw new Error('Private import succeeded'); }
 catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }
 `,
