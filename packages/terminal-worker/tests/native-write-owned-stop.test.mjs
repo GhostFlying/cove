@@ -39,6 +39,24 @@ async function until(predicate, milliseconds, message) {
   throw new Error(message);
 }
 
+function remaining(deadline, message) {
+  const milliseconds = deadline - Date.now();
+  if (milliseconds <= 0) throw new Error(message);
+  return milliseconds;
+}
+
+function bodyWait(promise, deadline, message, limit = 2_000) {
+  return within(promise, Math.min(limit, remaining(deadline, message)), message);
+}
+
+function bodyUntil(predicate, deadline, message, limit = 2_000) {
+  return until(predicate, Math.min(limit, remaining(deadline, message)), message);
+}
+
+function delay(milliseconds) {
+  return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+}
+
 function inspectOwned(pid, mode, nonce) {
   const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
     encoding: "utf8",
@@ -57,6 +75,19 @@ function inspectOwned(pid, mode, nonce) {
     throw new Error(`Owned fixture ${pid} identity changed`);
   }
   return true;
+}
+
+function ownedGroup(pid, mode, nonce) {
+  assert.equal(inspectOwned(pid, mode, nonce), true);
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "pgid="], {
+    encoding: "utf8",
+    timeout: 1_000,
+  });
+  assert.equal(result.status, 0, `Owned fixture ${pid} group is unverifiable`);
+  const group = Number(result.stdout.trim());
+  assert.ok(Number.isSafeInteger(group) && group > 0);
+  assert.equal(inspectOwned(pid, mode, nonce), true);
+  return group;
 }
 
 function stopVerified(pid, mode, nonce) {
@@ -90,6 +121,8 @@ function start(mode) {
 }
 
 async function cleanup(session, helperPid) {
+  if (!session) return;
+  const deadline = Date.now() + 5_000;
   const failures = [];
   try {
     session.terminal.signalOwned("SIGKILL", "leader");
@@ -108,31 +141,39 @@ async function cleanup(session, helperPid) {
       failures.push(error);
     }
   }
+  const observations = [];
   try {
     session.terminal.disposeBoundedWrite();
-    await within(session.terminal.boundedWriteCompletion, 2_000, "writer did not close");
-  } catch (error) {
-    failures.push(error);
-  }
-  try {
-    await until(
-      () => !inspectOwned(session.terminal.pid, session.mode, session.nonce),
-      2_000,
-      "owned leader did not disappear",
+    observations.push(
+      within(
+        session.terminal.boundedWriteCompletion,
+        remaining(deadline, "writer cleanup expired"),
+        "writer did not close",
+      ),
     );
   } catch (error) {
     failures.push(error);
   }
+  observations.push(
+    (async () =>
+      until(
+        () => !inspectOwned(session.terminal.pid, session.mode, session.nonce),
+        remaining(deadline, "leader cleanup expired"),
+        "owned leader did not disappear",
+      ))(),
+  );
   if (helperPid !== undefined) {
-    try {
-      await until(
-        () => !inspectOwned(helperPid, "helper", session.nonce),
-        2_000,
-        "owned helper did not disappear",
-      );
-    } catch (error) {
-      failures.push(error);
-    }
+    observations.push(
+      (async () =>
+        until(
+          () => !inspectOwned(helperPid, "helper", session.nonce),
+          remaining(deadline, "helper cleanup expired"),
+          "owned helper did not disappear",
+        ))(),
+    );
+  }
+  for (const result of await Promise.allSettled(observations)) {
+    if (result.status === "rejected") failures.push(result.reason);
   }
   if (failures.length > 0) throw new AggregateError(failures, "Owned-stop fixture cleanup failed");
 }
@@ -144,20 +185,25 @@ function preserveCleanupFailure(primary, cleanupFailure) {
 }
 
 test("real owned leader accepts HUP and reports recorded reap", async () => {
-  const session = start("graceful");
+  const deadline = Date.now() + 8_000;
+  let session;
   let failure;
   try {
-    await until(
+    session = start("graceful");
+    await bodyUntil(
       () => session.text().includes(`READY ${session.nonce}`),
-      2_000,
+      deadline,
       "owned leader did not become ready",
     );
     assert.deepEqual(session.terminal.signalOwned("SIGHUP", "leader"), { kind: "signaled" });
-    await within(session.exited, 2_000, "owned leader exit callback missing");
+    await bodyWait(session.exited, deadline, "owned leader exit callback missing");
     assert.deepEqual(session.terminal.signalOwned("SIGKILL", "leader"), {
       kind: "already-reaped",
     });
-    assert.deepEqual(await session.terminal.boundedWriteCompletion, { kind: "closed" });
+    assert.deepEqual(
+      await bodyWait(session.terminal.boundedWriteCompletion, deadline, "writer did not close"),
+      { kind: "closed" },
+    );
   } catch (error) {
     failure = error;
   } finally {
@@ -171,19 +217,25 @@ test("real owned leader accepts HUP and reports recorded reap", async () => {
 });
 
 test("real owned leader ignores HUP until KILL", async () => {
-  const session = start("ignore-hup");
+  const deadline = Date.now() + 8_000;
+  let session;
   let failure;
   try {
-    await until(
+    session = start("ignore-hup");
+    await bodyUntil(
       () => session.text().includes(`READY ${session.nonce}`),
-      2_000,
+      deadline,
       "owned leader did not become ready",
     );
     assert.deepEqual(session.terminal.signalOwned("SIGHUP", "leader"), { kind: "signaled" });
+    await bodyWait(delay(250), deadline, "HUP survival window expired", 500);
     assert.equal(inspectOwned(session.terminal.pid, session.mode, session.nonce), true);
     assert.deepEqual(session.terminal.signalOwned("SIGKILL", "leader"), { kind: "signaled" });
-    await within(session.exited, 2_000, "owned leader exit callback missing");
-    assert.deepEqual(await session.terminal.boundedWriteCompletion, { kind: "closed" });
+    await bodyWait(session.exited, deadline, "owned leader exit callback missing");
+    assert.deepEqual(
+      await bodyWait(session.terminal.boundedWriteCompletion, deadline, "writer did not close"),
+      { kind: "closed" },
+    );
   } catch (error) {
     failure = error;
   } finally {
@@ -197,27 +249,39 @@ test("real owned leader ignores HUP until KILL", async () => {
 });
 
 test("group attempt never retains authority after leader reap", async () => {
-  const session = start("leader-with-helper");
+  const deadline = Date.now() + 8_000;
+  let session;
   let helperPid;
   let failure;
   try {
-    await until(
+    session = start("leader-with-helper");
+    await bodyUntil(
       () => session.text().includes(`READY ${session.nonce}`),
-      2_000,
+      deadline,
       "leader and helper did not become ready",
     );
     helperPid = Number(session.text().match(new RegExp(`READY ${session.nonce} (\\d+)`))?.[1]);
     assert.ok(Number.isSafeInteger(helperPid) && helperPid > 0);
     assert.equal(inspectOwned(helperPid, "helper", session.nonce), true);
+    assert.equal(
+      ownedGroup(session.terminal.pid, session.mode, session.nonce),
+      session.terminal.pid,
+    );
+    assert.equal(ownedGroup(helperPid, "helper", session.nonce), session.terminal.pid);
     assert.throws(() => session.terminal.signalOwned("SIGKILL", "host"), TypeError);
     assert.deepEqual(session.terminal.signalOwned("SIGHUP", "initial-process-group"), {
       kind: "signaled",
     });
-    await within(session.exited, 2_000, "group-signaled leader exit callback missing");
+    await bodyWait(session.exited, deadline, "group-signaled leader exit callback missing");
+    assert.equal(inspectOwned(helperPid, "helper", session.nonce), true);
     assert.deepEqual(session.terminal.signalOwned("SIGKILL", "initial-process-group"), {
       kind: "already-reaped",
     });
-    assert.deepEqual(await session.terminal.boundedWriteCompletion, { kind: "closed" });
+    assert.equal(inspectOwned(helperPid, "helper", session.nonce), true);
+    assert.deepEqual(
+      await bodyWait(session.terminal.boundedWriteCompletion, deadline, "writer did not close"),
+      { kind: "closed" },
+    );
   } catch (error) {
     failure = error;
   } finally {
@@ -228,9 +292,10 @@ test("group attempt never retains authority after leader reap", async () => {
     }
   }
   if (failure) throw failure;
-}, 10_000);
+});
 
 test("native reap forbids a new signal while JavaScript exit delivery is held", async () => {
+  const deadline = Date.now() + 8_000;
   const originalFork = pty.native.fork;
   let releaseExit;
   let nativeExit;
@@ -251,9 +316,9 @@ test("native reap forbids a new signal while JavaScript exit delivery is held", 
     );
     pty.native.fork = originalFork;
     const exited = new Promise((resolveExit) => terminal.onExit(resolveExit));
-    await until(
+    await bodyUntil(
       () => processAbsent(terminal.pid) && nativeExit !== undefined,
-      2_000,
+      deadline,
       "owned watcher did not reap before held JavaScript delivery",
     );
     assert.deepEqual(terminal.signalOwned("SIGKILL", "leader"), { kind: "already-reaped" });
@@ -262,104 +327,145 @@ test("native reap forbids a new signal while JavaScript exit delivery is held", 
     });
     releaseExit(...nativeExit);
     nativeExit = undefined;
-    await within(exited, 2_000, "held exit delivery did not complete");
-    assert.deepEqual(await terminal.boundedWriteCompletion, { kind: "closed" });
+    await bodyWait(exited, deadline, "held exit delivery did not complete");
+    assert.deepEqual(
+      await bodyWait(terminal.boundedWriteCompletion, deadline, "held writer did not close"),
+      { kind: "closed" },
+    );
   } catch (error) {
     failure = error;
   } finally {
     pty.native.fork = originalFork;
     if (terminal) {
+      const cleanupDeadline = Date.now() + 5_000;
+      const cleanupFailures = [];
       try {
         if (nativeExit) releaseExit(...nativeExit);
-        terminal.signalOwned("SIGKILL", "leader");
-        terminal.disposeBoundedWrite();
-        await within(terminal.boundedWriteCompletion, 2_000, "held writer did not close");
       } catch (error) {
-        failure = preserveCleanupFailure(failure, error);
+        cleanupFailures.push(error);
+      }
+      try {
+        terminal.signalOwned("SIGKILL", "leader");
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      try {
+        terminal.disposeBoundedWrite();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+      const observations = await Promise.allSettled([
+        (async () =>
+          within(
+            terminal.boundedWriteCompletion,
+            remaining(cleanupDeadline, "held writer cleanup expired"),
+            "held writer did not close",
+          ))(),
+        (async () =>
+          until(
+            () => processAbsent(terminal.pid),
+            remaining(cleanupDeadline, "held owner cleanup expired"),
+            "held owner did not disappear",
+          ))(),
+      ]);
+      for (const result of observations) {
+        if (result.status === "rejected") cleanupFailures.push(result.reason);
+      }
+      if (cleanupFailures.length > 0) {
+        failure = preserveCleanupFailure(
+          failure,
+          new AggregateError(cleanupFailures, "Held owner cleanup failed"),
+        );
       }
     }
   }
   if (failure) throw failure;
-}, 10_000);
+});
 
-for (const [phase, scope, expected] of [
-  ["owned-kill-esrch", "leader", { kind: "unverifiable", reason: "not-found" }],
-  [
-    "owned-kill-eperm",
-    "leader",
-    {
-      kind: "unverifiable",
-      reason: "signal-failed",
-      errorCode: String(constants.errno.EPERM),
-    },
-  ],
-  [
-    "owned-getpgid-esrch",
-    "initial-process-group",
-    {
-      kind: "unverifiable",
-      reason: "not-found",
-    },
-  ],
-  [
-    "owned-getpgid-eperm",
-    "initial-process-group",
-    {
-      kind: "unverifiable",
-      reason: "scope-unavailable",
-      errorCode: String(constants.errno.EPERM),
-    },
-  ],
-  [
-    "owned-group-unqualified",
-    "initial-process-group",
-    {
-      kind: "unverifiable",
-      reason: "scope-unavailable",
-    },
-  ],
-]) {
-  test(`native ${phase} classifies without signaling an unowned process`, async () => {
-    const originalFork = pty.native.fork;
-    let nativeResult;
-    let session;
-    let failure;
+async function assertFaultSelector(phase, scope, expected) {
+  const deadline = Date.now() + 8_000;
+  const originalFork = pty.native.fork;
+  let nativeResult;
+  let session;
+  let failure;
+  try {
+    pty.native.fork = (...args) => {
+      nativeResult = originalFork(...args.slice(0, -1), phase, args.at(-1));
+      return nativeResult;
+    };
+    session = start("ignore-hup");
+    pty.native.fork = originalFork;
+    await bodyUntil(
+      () => session.text().includes(`READY ${session.nonce}`),
+      deadline,
+      "fault-selector leader did not become ready",
+    );
+    assert.deepEqual(session.terminal.signalOwned("SIGKILL", scope), expected);
+    assert.equal(inspectOwned(session.terminal.pid, session.mode, session.nonce), true);
+    assert.equal(nativeResult.stopOwnedChild(9), true);
+    await bodyWait(session.exited, deadline, "owned rollback stop did not deliver exit");
+    assert.deepEqual(
+      await bodyWait(session.terminal.boundedWriteCompletion, deadline, "writer did not close"),
+      { kind: "closed" },
+    );
+  } catch (error) {
+    failure = error;
+  } finally {
+    pty.native.fork = originalFork;
     try {
-      pty.native.fork = (...args) => {
-        nativeResult = originalFork(...args.slice(0, -1), phase, args.at(-1));
-        return nativeResult;
-      };
-      session = start("ignore-hup");
-      pty.native.fork = originalFork;
-      await until(
-        () => session.text().includes(`READY ${session.nonce}`),
-        2_000,
-        "fault-selector leader did not become ready",
-      );
-      assert.deepEqual(session.terminal.signalOwned("SIGKILL", scope), expected);
-      assert.equal(inspectOwned(session.terminal.pid, session.mode, session.nonce), true);
-      assert.equal(nativeResult.stopOwnedChild(9), true);
-      await within(session.exited, 2_000, "owned rollback stop did not deliver exit");
-      assert.deepEqual(await session.terminal.boundedWriteCompletion, { kind: "closed" });
+      if (nativeResult) nativeResult.stopOwnedChild(9);
+      if (session) await cleanup(session);
     } catch (error) {
-      failure = error;
-    } finally {
-      pty.native.fork = originalFork;
-      try {
-        if (nativeResult) nativeResult.stopOwnedChild(9);
-        if (session) await cleanup(session);
-      } catch (error) {
-        failure = preserveCleanupFailure(failure, error);
-      }
+      failure = preserveCleanupFailure(failure, error);
     }
-    if (failure) throw failure;
-  }, 10_000);
+  }
+  if (failure) throw failure;
 }
 
+test("native kill ESRCH classifies without signaling an unowned process", async () => {
+  await assertFaultSelector("owned-kill-esrch", "leader", {
+    kind: "unverifiable",
+    reason: "not-found",
+  });
+});
+
+test("native kill EPERM classifies without signaling an unowned process", async () => {
+  await assertFaultSelector("owned-kill-eperm", "leader", {
+    kind: "unverifiable",
+    reason: "signal-failed",
+    errorCode: String(constants.errno.EPERM),
+  });
+});
+
+test("native getpgid ESRCH classifies without signaling an unowned process", async () => {
+  await assertFaultSelector("owned-getpgid-esrch", "initial-process-group", {
+    kind: "unverifiable",
+    reason: "not-found",
+  });
+});
+
+test("native getpgid EPERM classifies without signaling an unowned process", async () => {
+  await assertFaultSelector("owned-getpgid-eperm", "initial-process-group", {
+    kind: "unverifiable",
+    reason: "scope-unavailable",
+    errorCode: String(constants.errno.EPERM),
+  });
+});
+
+test("native unqualified group classifies without signaling an unowned process", async () => {
+  await assertFaultSelector("owned-group-unqualified", "initial-process-group", {
+    kind: "unverifiable",
+    reason: "scope-unavailable",
+  });
+});
+
 test("missing per-instance signal method is a post-entry ownership failure", async () => {
+  const deadline = Date.now() + 8_000;
   const originalFork = pty.native.fork;
   const nonce = randomUUID();
   let nativeResult;
+  let unexpectedTerminal;
+  let observedError;
   let failure;
   try {
     try {
@@ -368,37 +474,64 @@ test("missing per-instance signal method is a post-entry ownership failure", asy
         nativeResult.signalOwned = undefined;
         return nativeResult;
       };
-      assert.throws(
-        () => pty.spawn(process.execPath, [fixture, "graceful", nonce], options),
-        (error) => {
-          assert.ok(error instanceof pty.BoundedPtySpawnError);
-          assert.match(String(error.cause), /native ownership result/);
-          failure = error;
-          return true;
-        },
-      );
+      try {
+        unexpectedTerminal = pty.spawn(process.execPath, [fixture, "graceful", nonce], options);
+      } catch (error) {
+        observedError = error;
+      }
     } finally {
       pty.native.fork = originalFork;
     }
+    assert.ok(observedError instanceof pty.BoundedPtySpawnError);
+    assert.match(String(observedError.cause), /native ownership result/);
     assert.ok(nativeResult);
-    assert.deepEqual(await within(failure.cleanup, 4_000, "post-entry cleanup did not settle"), {
-      kind: "cleanup-uncertain",
-      reason: "native-result",
-    });
+    assert.deepEqual(
+      await bodyWait(observedError.cleanup, deadline, "post-entry cleanup did not settle", 4_000),
+      { kind: "cleanup-uncertain", reason: "native-result" },
+    );
   } catch (error) {
     failure = error;
   } finally {
     pty.native.fork = originalFork;
+    const cleanupDeadline = Date.now() + 5_000;
+    const cleanupFailures = [];
     try {
       if (nativeResult) nativeResult.stopOwnedChild(9);
-      await until(
-        () => !nativeResult || processAbsent(nativeResult.pid),
-        2_000,
-        "post-entry owned child did not disappear",
-      );
     } catch (error) {
-      failure = preserveCleanupFailure(failure, error);
+      cleanupFailures.push(error);
+    }
+    try {
+      unexpectedTerminal?.disposeBoundedWrite();
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    const observations = [
+      (async () =>
+        until(
+          () => !nativeResult || processAbsent(nativeResult.pid),
+          remaining(cleanupDeadline, "post-entry owner cleanup expired"),
+          "post-entry owned child did not disappear",
+        ))(),
+    ];
+    if (unexpectedTerminal) {
+      observations.push(
+        (async () =>
+          within(
+            unexpectedTerminal.boundedWriteCompletion,
+            remaining(cleanupDeadline, "post-entry writer cleanup expired"),
+            "post-entry writer did not close",
+          ))(),
+      );
+    }
+    for (const result of await Promise.allSettled(observations)) {
+      if (result.status === "rejected") cleanupFailures.push(result.reason);
+    }
+    if (cleanupFailures.length > 0) {
+      failure = preserveCleanupFailure(
+        failure,
+        new AggregateError(cleanupFailures, "Post-entry cleanup failed"),
+      );
     }
   }
-  if (failure && !(failure instanceof pty.BoundedPtySpawnError)) throw failure;
-}, 10_000);
+  if (failure) throw failure;
+});
