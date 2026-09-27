@@ -7,6 +7,9 @@ import {
   recordedCommand,
   prepareBrowserCleanupEvidence,
   verifyBrowserCleanupEvidence,
+  validBrowserCloseTimeline,
+  validateBrowserCloseDiagnosticInvocation,
+  verifyBrowserCloseDiagnosticReport,
   requiredSuites,
   verifyDiscovery,
   verifyInventory,
@@ -221,6 +224,22 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     primaryErrorName: null,
     listenerPort: 12345,
     browserExit: { code: 0, signal: null, observedMs: 14 },
+    closeTimeline: {
+      finalized: true,
+      invocationId: "42-1",
+      runId: "local-43-1",
+      sourceCommit,
+      cleanupStartedMs: 0,
+      finalMs: 14,
+      connectedBeforeClose: true,
+      connectedAtFinal: false,
+      disconnected: { firstMs: 12, count: 1 },
+      serverClose: { firstMs: 14, count: 1 },
+      processExit: { firstMs: 14, count: 1 },
+      rawClose: { calledMs: 2, settledMs: 14, outcome: "fulfilled" },
+      closeWrapper: { calledMs: 2, settledMs: 14, outcome: "fulfilled", timeoutObservedMs: null },
+      rawKill: { calledMs: null, settledMs: null, outcome: "not-called" },
+    },
     listenerClosed: true,
     graceful: {
       attempts: 1,
@@ -261,6 +280,12 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     cleanupElapsedMs: 14,
     workBudgetMs: 32_000,
   };
+  const forInvocation = (invocationId, changes = {}) => ({
+    ...record,
+    ...changes,
+    invocationId,
+    closeTimeline: { ...record.closeTimeline, invocationId },
+  });
   await writeFile(path, `${JSON.stringify(record)}\n`);
   expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).toEqual({
     runId: "local-43-1",
@@ -284,7 +309,7 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
   );
   await writeFile(path, `${JSON.stringify(record)}\n`);
   const secondPath = resolve(directory, "42-2.json");
-  await writeFile(secondPath, `${JSON.stringify({ ...record, invocationId: "42-2" })}\n`);
+  await writeFile(secondPath, `${JSON.stringify(forInvocation("42-2"))}\n`);
   const expectedCases = ["V1-L1 evidence", "V1-L2 evidence"].map((name) => ({
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
     name,
@@ -294,14 +319,14 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
   ).rejects.toThrow(/executed cases/);
   await writeFile(
     secondPath,
-    `${JSON.stringify({ ...record, invocationId: "42-2", caseId: "view-lifecycle.test.mjs:124", testName: "V1-L2 evidence" })}\n`,
+    `${JSON.stringify(forInvocation("42-2", { caseId: "view-lifecycle.test.mjs:124", testName: "V1-L2 evidence" }))}\n`,
   );
   expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases)).toMatchObject({
     recordCount: 2,
   });
   await writeFile(
     resolve(directory, "42-3.json"),
-    `${JSON.stringify({ ...record, invocationId: "42-3", caseId: "view-lifecycle.test.mjs:125", testName: "V1-L2 evidence" })}\n`,
+    `${JSON.stringify(forInvocation("42-3", { caseId: "view-lifecycle.test.mjs:125", testName: "V1-L2 evidence" }))}\n`,
   );
   expect(await verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases)).toMatchObject({
     recordCount: 3,
@@ -347,11 +372,11 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
   await writeFile(path, `${JSON.stringify(record)}\n`);
   await writeFile(
     secondPath,
-    `${JSON.stringify({ ...record, invocationId: "42-2", caseId: "view-lifecycle.test.mjs:124" })}\n`,
+    `${JSON.stringify(forInvocation("42-2", { caseId: "view-lifecycle.test.mjs:124" }))}\n`,
   );
   await writeFile(
     resolve(directory, "42-3.json"),
-    `${JSON.stringify({ ...record, invocationId: "42-3", caseId: "view-lifecycle.test.mjs:125" })}\n`,
+    `${JSON.stringify(forInvocation("42-3", { caseId: "view-lifecycle.test.mjs:125" }))}\n`,
   );
   await expect(
     verifyBrowserCleanupEvidence(directory, sourceCommit, expectedCases),
@@ -363,6 +388,116 @@ test("view evidence follows validated passing case growth above three suite floo
   const inventory = verifyInventory(discovered, execution, files, viewSuites);
   expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 10]);
   expect(viewEvidenceCases(execution, inventory)).toHaveLength(23);
+});
+
+test("diagnostic dispatch requires exact branch, SHA, mode and allowlisted source", () => {
+  const input = {
+    eventName: "workflow_dispatch",
+    mode: "browser-close-v1-l4",
+    ref: "refs/heads/p/luchengxuan/m0-browser-close-diagnostic",
+    expectedSha: "a".repeat(40),
+    head: "a".repeat(40),
+    githubSha: "a".repeat(40),
+    dirty: false,
+    baseIsAncestor: true,
+    changedFiles: ["packages/terminal-web/probes/node/managed-browser.ts"],
+  };
+  expect(validateBrowserCloseDiagnosticInvocation(input).sourceCommit).toBe(input.head);
+  for (const changed of [
+    { eventName: "pull_request" },
+    { mode: "" },
+    { expectedSha: "b".repeat(40) },
+    { ref: "refs/heads/main" },
+    { dirty: true },
+    { baseIsAncestor: false },
+    { changedFiles: ["packages/terminal-web/src/client.ts"] },
+  ]) {
+    expect(() => validateBrowserCloseDiagnosticInvocation({ ...input, ...changed })).toThrow(
+      /identity or source scope/,
+    );
+  }
+});
+
+test("single diagnostic result cannot satisfy ordinary suite inventory", () => {
+  const execution = {
+    success: true,
+    numTotalTests: 2,
+    numPassedTests: 1,
+    numFailedTests: 0,
+    numPendingTests: 1,
+    numTodoTests: 0,
+    testResults: [
+      {
+        name: resolve(root, "packages/terminal-web/tests/view-lifecycle.test.mjs"),
+        status: "passed",
+        assertionResults: [
+          {
+            fullName:
+              "V1-L4 publishes focus before input but not for selection scrolling appearance or show",
+            status: "passed",
+          },
+          { fullName: "V1-L5 skipped", status: "skipped" },
+        ],
+      },
+    ],
+  };
+  expect(verifyBrowserCloseDiagnosticReport(execution)).toHaveLength(1);
+  expect(() => verifyInventory([], execution, [], requiredSuites)).toThrow(/Required suite/);
+  expect(() => verifyBrowserCloseDiagnosticReport({ ...execution, numTotalTests: 3 })).toThrow(
+    /exactly V1-L4/,
+  );
+});
+
+test("timeline gate rejects missing final, invalid time and mismatched invocation", () => {
+  const record = {
+    invocationId: "42-1",
+    runId: "local-43-1",
+    sourceCommit: "b".repeat(40),
+    cleanupElapsedMs: 14,
+    graceful: { attempts: 1, outcome: "completed" },
+    kill: { attempts: 0 },
+    browserExit: { observedMs: 14 },
+  };
+  const event = { firstMs: null, count: 0 };
+  const unused = { calledMs: null, settledMs: null, outcome: "not-called" };
+  const timeline = {
+    finalized: true,
+    invocationId: record.invocationId,
+    runId: record.runId,
+    sourceCommit: record.sourceCommit,
+    cleanupStartedMs: 0,
+    finalMs: 14,
+    connectedBeforeClose: true,
+    connectedAtFinal: false,
+    disconnected: event,
+    serverClose: event,
+    processExit: { firstMs: 14, count: 1 },
+    rawClose: { calledMs: 2, settledMs: 14, outcome: "fulfilled" },
+    closeWrapper: { calledMs: 2, settledMs: 14, outcome: "fulfilled", timeoutObservedMs: null },
+    rawKill: unused,
+  };
+  expect(validBrowserCloseTimeline(timeline, record)).toBe(true);
+  for (const changed of [
+    { finalized: false },
+    { invocationId: "42-2" },
+    { finalMs: null },
+    { processExit: { firstMs: 15, count: 1 } },
+    { serverClose: { firstMs: 15, count: 1 } },
+    { rawClose: { calledMs: 2, settledMs: 15, outcome: "fulfilled" } },
+    { closeWrapper: { ...timeline.closeWrapper, outcome: "threw" } },
+    { disconnected: { firstMs: null, count: 0, endpoint: "unexpected" } },
+  ])
+    expect(validBrowserCloseTimeline({ ...timeline, ...changed }, record)).toBe(false);
+});
+
+test("workflow registers diagnostic only on explicit manual selection", async () => {
+  const workflow = await readFile(resolve(root, ".github/workflows/check.yml"), "utf8");
+  expect(workflow).toContain("browser-close-diagnostic:");
+  expect(workflow).toContain("--diagnostic-identity");
+  expect(workflow).toContain("--browser-close-diagnostic");
+  expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
+  expect(workflow).toContain("inputs.diagnostic == 'browser-close-v1-l4'");
+  expect(workflow).toContain("os: [ubuntu-latest, macos-latest]");
 });
 
 test("view evidence still rejects missing, short, pending, and mismatched suites", () => {
@@ -661,7 +796,7 @@ test("rejects removal of a gate test below the required floor", () => {
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 32 }, (_, index) => ({
+    ...Array.from({ length: 36 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -669,7 +804,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 31 tests; needs 32/,
+    /discovered 35 tests; needs 36/,
   );
 });
 
