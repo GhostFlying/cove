@@ -176,7 +176,7 @@ async function cleanupAdoptionOwner(nonce, ownedStop, recordFailure) {
 
 test("public preflight and pre-entry failures are side-effect-free", async () => {
   const baseline = descriptorCount();
-  assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 2 });
+  assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 3 });
   for (let index = 0; index < 3; index++) {
     let failure;
     try {
@@ -195,7 +195,7 @@ test("public preflight and pre-entry failures are side-effect-free", async () =>
   assert.deepEqual(await invalidElement.cleanup, { kind: "confirmed-clean" });
   const marker = pty.native.coveBoundedWriterVersion;
   try {
-    pty.native.coveBoundedWriterVersion = 1;
+    pty.native.coveBoundedWriterVersion = 2;
     assert.deepEqual(pty.checkBoundedPtySupport(), {
       supported: false,
       reason: "binding-mismatch",
@@ -209,6 +209,23 @@ test("public preflight and pre-entry failures are side-effect-free", async () =>
     assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
   } finally {
     pty.native.coveBoundedWriterVersion = marker;
+  }
+  const originalSignalOwned = UnixTerminal.prototype.signalOwned;
+  try {
+    UnixTerminal.prototype.signalOwned = undefined;
+    assert.deepEqual(pty.checkBoundedPtySupport(), {
+      supported: false,
+      reason: "binding-mismatch",
+    });
+    let failure;
+    try {
+      pty.spawn(process.execPath, [], options);
+    } catch (error) {
+      failure = assertSpawnError(error, /Bounded PTY support unavailable/);
+    }
+    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
+  } finally {
+    UnixTerminal.prototype.signalOwned = originalSignalOwned;
   }
   assert.equal(descriptorCount(), baseline);
 });
@@ -403,7 +420,7 @@ test("adoption stop failure is uncertain and never silently frees the owner", as
 
 test("finite admission releases confirmed failures exactly once after zero-cost preflight", async () => {
   const ledger = finiteLedger(2);
-  assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 2 });
+  assert.deepEqual(pty.checkBoundedPtySupport(), { supported: true, contractVersion: 3 });
   assert.equal(ledger.used, 0);
   let invalid;
   try {
