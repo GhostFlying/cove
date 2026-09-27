@@ -413,11 +413,22 @@ async function observeFaultSelector(phase, scope) {
     failure = error;
   } finally {
     pty.native.fork = originalFork;
+    const cleanupFailures = [];
     try {
       if (nativeResult) nativeResult.stopOwnedChild(9);
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    try {
       if (session) await cleanup(session);
     } catch (error) {
-      failure = preserveCleanupFailure(failure, error);
+      cleanupFailures.push(error);
+    }
+    if (cleanupFailures.length > 0) {
+      failure = preserveCleanupFailure(
+        failure,
+        new AggregateError(cleanupFailures, "Fault-selector cleanup failed"),
+      );
     }
   }
   if (failure) throw failure;
