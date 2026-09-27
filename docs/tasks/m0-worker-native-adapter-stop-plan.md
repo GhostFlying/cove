@@ -8,11 +8,11 @@
 用户接受：可靠、安全地停止**直接拥有的PTY leader**，有限等待并真实报告；相关初始进程组清理尽力而为，未确认helper消失不构成关闭硬门禁。自然退出不因helper清理增加等待或改变reap顺序。初始组不包含所有shell作业/任意后代，逃逸session/group不承诺覆盖。
 这明确替代旧stop-plan `6d64f92…`及A/B决策稿`d43a0dd…`要求保持组权力到force/expiry、改变自然退出、helper unknown永久占slot的方向；也替代旧N2文档中把child+helper全部清理作为production stop成功前提的解释。原plan review F1的强清理要求由用户选择修订；其误杀/结果真实性反例仍须测。source review的公开stop依赖、吞错、无限等待和fixture安全问题继续有效，不能仅靠改文档关闭。
 
-| 事实 | 唯一计费规则 |
-|---|---|
-| 成功spawn writer confirmed closed AND实际leader exit | 同一maxOwners slot释放恰好一次；两顺序均成立，helper unknown单独不阻止释放 |
-| writer未闭合或leader未实际exit | 保持原slot；stop已请求、超时、native already-reaped但JS未交付都不替代缺失事实 |
-| writer close-uncertain/原已定义post-entry失配 | 原有有界tombstone继续持有；不因leader退出或helper诊断清除 |
+| 事实                                                      | 唯一计费规则                                                                                          |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 成功spawn writer confirmed closed AND实际leader exit      | 同一maxOwners slot释放恰好一次；两顺序均成立，helper unknown单独不阻止释放                            |
+| writer未闭合或leader未实际exit                            | 保持原slot；stop已请求、超时、native already-reaped但JS未交付都不替代缺失事实                         |
+| writer close-uncertain/原已定义post-entry失配             | 原有有界tombstone继续持有；不因leader退出或helper诊断清除                                             |
 | 失败spawn typed cleanup pending/confirmed-clean/uncertain | 原N1b receipt规则不变：pending持有、不提前fatal；clean一次释放；uncertain/非法/无receipt保守tombstone |
 
 maxOwners约束直接拥有的PTY/writer/leader，不宣称约束全部OS后代总数。不新增group tombstone、第二ledger、factory轮换或自动respawn。用户输入及自动query/focus共用既有FIFO/两级bytes+tasks预算；同步settlement finally、未知写不重放均不变。
@@ -21,15 +21,21 @@ maxOwners约束直接拥有的PTY/writer/leader，不宣称约束全部OS后代�
 
 证据：N2 `packages/terminal-worker/src/native-pty.ts:454–468`仍使用legacy kill并永久await exit；accepted patch `src/index.ts`preflight仅native marker2，`src/unix/pty.cc`闭包持owned-child mutex检查reaped后signal，但`src/unixTerminal.ts`只私藏该closure，boolean false混合reap与ESRCH。不能在N2读private、解析错误message、裸PID signal或用timeout掩盖此缺口。
 在bounded Unix IPty新增公开 `signalOwned(signal, scope)`，同步、小型固定结果；范围仅darwin/linux，legacy非bounded kill行为保持原样：
+
 ```ts
-type OwnedSignal = 'SIGHUP' | 'SIGKILL';
-type OwnedSignalScope = 'leader' | 'initial-process-group';
+type OwnedSignal = "SIGHUP" | "SIGKILL";
+type OwnedSignalScope = "leader" | "initial-process-group";
 type OwnedSignalResult =
-  | { kind: 'signaled' }
-  | { kind: 'already-reaped' }
-  | { kind: 'unverifiable'; reason: 'not-found' | 'signal-failed' | 'scope-unavailable'; errorCode?: string };
+  | { kind: "signaled" }
+  | { kind: "already-reaped" }
+  | {
+      kind: "unverifiable";
+      reason: "not-found" | "signal-failed" | "scope-unavailable";
+      errorCode?: string;
+    };
 // IPty.signalOwned?(signal: OwnedSignal, scope: OwnedSignalScope): OwnedSignalResult
 ```
+
 - Native闭包绑定该spawn的owned-child对象，无caller PID/PGID输入；同一mutex覆盖reaped检查和signal，sole watcher仍按原时序reap。recorded reaped时零signal syscall；ESRCH只表示not-found，不能冒充recorded reap或exit。合法调用的OS错误显式分类，程序性异常可throw，N2捕获且保留首错。
 - leader scope用正owned PID；group scope仅当owned leader尚未reap、原生实际验证其初始PTY/session组且`getpgid(pid)==pid`时向该组signal。须据Darwin/Linux真实spawn路径验证此资格，无法确认则scope-unavailable；禁止继承host组、缓存PGID、外部PID或进程名猜测。mutex避免同一watcher在检查和signal之间释放leader身份；不延后reap、不接管helper reaping。
 - group信号接受仅表示此次内核接受，不表示helper结束。leader在group调用前已reap或两scope调用之间被reap均允许返回already-reaped并安全跳过，不能因想补齐group强行保留身份或追加重试。
@@ -50,16 +56,16 @@ type OwnedSignalResult =
 
 ## 4. 有限强制验收（独立测试者验证）
 
-| Oracle | 必须证明 |
-|---|---|
-| 双preflight | native3+缺失/非callable实际JS方法零spawn/零reservation拒绝；旧marker/stock拒绝；完整3通过。单实例损坏仍post-entry持有 |
-| 身份边界 | native已reap但JS callback人为hold，public leader/group均不signal；不对无关真实PID做危险复用实验。ESRCH未记录reap是unverifiable；scope未证不发负PGID；组检查不会命中host组 |
-| stop有限性/重入 | 2s后force最多一次、3s无exit返回未知；timer超期不补signal；重复/重入同promise；exit取消force；HUP错后实际exit仍有首错诊断 |
-| 真实native leader | 不会自行结束的child分别响应HUP、忽略HUP直到KILL，要求actual exit callback和writer completion；macOS/Linux各用真实compiled binding，不能以自退出digest例代替 |
-| 非对称同组helper | leader响应HUP、helper忽略HUP并在leader reap后仍活着：leader可exited，group报告未验证，之后不得cached-PGID signal；writer+leader齐全正常释放slot，cap=1可再次spawn。独立fixture安全收尾helper且证明absence；**helper幸存本身不使production stop测试失败** |
-| 已退出及逃逸边界 | stop前已实际exit/已native reap等变体不延后reap；逃逸group不得声称覆盖，未知不持额外owner。实际scope资格失败须真实skip，非硬凑group成功 |
-| 计费/输入回归 | writer+leader两顺序释放一次；helper unknown不阻塞；writer uncertain仍持有；超时未exit仍持有，晚exit可按事实结算；failed-spawn receipt/FIFO/caps/never replay不变 |
-| fixture失败安全 | 第一PTY stop失败或writer挂起、第二spawn失败、body断言失败：全部已创建session均获cleanup尝试，primary error保留，其他cleanup失败附带，不因首错跳过剩余资源 |
+| Oracle            | 必须证明                                                                                                                                                                                                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 双preflight       | native3+缺失/非callable实际JS方法零spawn/零reservation拒绝；旧marker/stock拒绝；完整3通过。单实例损坏仍post-entry持有                                                                                                                                    |
+| 身份边界          | native已reap但JS callback人为hold，public leader/group均不signal；不对无关真实PID做危险复用实验。ESRCH未记录reap是unverifiable；scope未证不发负PGID；组检查不会命中host组                                                                                |
+| stop有限性/重入   | 2s后force最多一次、3s无exit返回未知；timer超期不补signal；重复/重入同promise；exit取消force；HUP错后实际exit仍有首错诊断                                                                                                                                 |
+| 真实native leader | 不会自行结束的child分别响应HUP、忽略HUP直到KILL，要求actual exit callback和writer completion；macOS/Linux各用真实compiled binding，不能以自退出digest例代替                                                                                              |
+| 非对称同组helper  | leader响应HUP、helper忽略HUP并在leader reap后仍活着：leader可exited，group报告未验证，之后不得cached-PGID signal；writer+leader齐全正常释放slot，cap=1可再次spawn。独立fixture安全收尾helper且证明absence；**helper幸存本身不使production stop测试失败** |
+| 已退出及逃逸边界  | stop前已实际exit/已native reap等变体不延后reap；逃逸group不得声称覆盖，未知不持额外owner。实际scope资格失败须真实skip，非硬凑group成功                                                                                                                   |
+| 计费/输入回归     | writer+leader两顺序释放一次；helper unknown不阻塞；writer uncertain仍持有；超时未exit仍持有，晚exit可按事实结算；failed-spawn receipt/FIFO/caps/never replay不变                                                                                         |
+| fixture失败安全   | 第一PTY stop失败或writer挂起、第二spawn失败、body断言失败：全部已创建session均获cleanup尝试，primary error保留，其他cleanup失败附带，不因首错跳过剩余资源                                                                                                |
 
 真实fixture仍在既定15秒case ceiling内：单一body最多8秒、全部finally合计最多5秒、2秒余量；各wait使用剩余deadline，非逐会话叠加。创建后立刻登记每个session；cleanup对所有PTY并行/非短路启动stop与writer观察，全部有限settle后才assert/throw，取消多余timer。
 helper外层收尾优先用本次fixture独立拥有的控制通道；若需要test-only signal fallback，重新验证精确fixture路径+nonce/PID，身份不明不得signal，有限确认absence且不得把ps absence当leader watcher reap。外层收尾只能证明测试未留资源，不升级production cleanup.verified。安全negative oracle只在受控seam注入，不向其他进程试错。
@@ -74,6 +80,10 @@ helper外层收尾优先用本次fixture独立拥有的控制通道；若需要t
 
 DAG：`已接受用户契约 → 本修订独立计划检查 → N1c public capability+双preflight原子candidate → 独立source/native验证、macOS+Linux/full/final-main接受 → N2 rebase并修stop+fixture → 独立source re-review/native/full/双OS/final-main接受 → W1a`。N2测试结构可准备，但依赖N1c的实现/接受结论不得提前派发为就绪。没有W2/P2、run pump、wire、PID轮询、通用descendant framework、keeper或延后reap。真实新增依赖若出现先报告事实，不擅自恢复旧强保证或再问已决定的A/B。
 
+## 6. Orca仅作对照，非此契约依据
+
+沿用已核验 `/tmp/cove-orca-stop-guarantee-comparison.md` SHA256 `722cdf932b7d65c049f799315f83cbea6ba4969386828e3cd2a032d35e477940`，本轮无重复audit。当前fork322/v1.4.190：`src/main/pty/posix-pty-process-groups.ts:88–129`和`src/main/pty-descendant-termination.ts:203–208,332–374`有组/后代尽力清理及root-only降级；553/v1.4.211：`src/main/pty-descendant-exit-verification.ts:99–118,219–243`提供三态，但普通teardown caller `src/main/pty-descendant-termination.ts:292–319`不以exited硬门禁。Cove采用自己的public native身份保护，不能照搬ps后裸PID signal；也不从Orca推导必须“all helper gone”。
+
 ## 7. N2 S1/S2 execution allocation, 2026-09-27
 
 N1c is accepted at main `0997ff584c65502c212f7d2adefb2a6fc4de1205` (tree `3b45883742785a15752ae12c5bd5c29bb8667066`); independent final-main report SHA-256 `b950164888dd4a9f089e6cc17ec1a040d1b575a2fbd3b62d5d99ec11268d257c` confirms macOS and Linux 39/338. This branch is `p/luchengxuan/m0-16-native-adapter-stop` from that exact commit. The original N2 functional commit `6cdd23aa74df699a8187c327ebd49905fafd7ce8` and its documentation branch `p/luchengxuan/m0-16-native-adapter-accepted` at `7dad593eed4be64538f6ff355311248c30783e58` remain preserved and unaccepted.
@@ -81,7 +91,3 @@ N1c is accepted at main `0997ff584c65502c212f7d2adefb2a6fc4de1205` (tree `3b4588
 This file copies the reviewed revised plan (off-tree SHA-256 `b7fc1b7295e28a6794bbe43d7dc1dec6fbc96bf5001de61dff58beb78ea6a2e2`; independent review SHA-256 `a5149f76868fff5c7d0a5f19b363ff7710ff294c69c71730aec5daf97d31c4de`) and records the current execution boundary. The user's smaller truthful stop contract supersedes the historical A/B alternatives and all-helper hard gate. We will selectively restore the original N2 source/tests/registration without committing an incompatible marker-2 intermediate state, then correct consumption of N1c marker 3 and public `signalOwned` before the first functional commit. N1c native patch, reaper, and public API are immutable dependencies.
 
 `/root/m0_t1_impl` is the sole writer for N2 package source/tests/fixture, package export/test-only dependency, lock importer, CI inventory/tooling and N2 task/handoff documents in the primary checkout. Root coordinates separate source review and native verification; neither role writes this branch. No other worker, protocol, view, server, or agent runtime is in scope. The owner will use the pinned Node 26.10.0 and pnpm 12.6.0 toolchain, run affected lint/discovery/scoped checks before source freeze, and run one combined full gate after the candidate is coherent. N2 remains blocked from acceptance until independent source/native checks and exact-head/final-main dual-OS artifacts pass.
-
-## 6. Orca仅作对照，非此契约依据
-
-沿用已核验 `/tmp/cove-orca-stop-guarantee-comparison.md` SHA256 `722cdf932b7d65c049f799315f83cbea6ba4969386828e3cd2a032d35e477940`，本轮无重复audit。当前fork322/v1.4.190：`src/main/pty/posix-pty-process-groups.ts:88–129`和`src/main/pty-descendant-termination.ts:203–208,332–374`有组/后代尽力清理及root-only降级；553/v1.4.211：`src/main/pty-descendant-exit-verification.ts:99–118,219–243`提供三态，但普通teardown caller `src/main/pty-descendant-termination.ts:292–319`不以exited硬门禁。Cove采用自己的public native身份保护，不能照搬ps后裸PID signal；也不从Orca推导必须“all helper gone”。

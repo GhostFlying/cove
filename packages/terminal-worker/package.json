@@ -4,6 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
+    "./native-adapter": {
+      "types": "./dist/src/native-pty.d.ts",
+      "import": "./dist/src/native-pty.js"
+    },
     "./qualification": {
       "types": "./dist/src/native-qualification.d.ts",
       "import": "./dist/src/native-qualification.js"
@@ -18,6 +22,7 @@
     "node-pty": "catalog:"
   },
   "devDependencies": {
+    "@cove/terminal-engine": "workspace:*",
     "@types/node": "26.6.2"
   }
 }

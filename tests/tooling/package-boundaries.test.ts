@@ -8,6 +8,7 @@ const root = resolve(import.meta.dirname, "../..");
 const engine = join(root, "packages/terminal-engine");
 const web = join(root, "packages/terminal-web");
 const protocol = join(root, "packages/protocol");
+const worker = join(root, "packages/terminal-worker");
 const directories: string[] = [];
 
 afterEach(async () => {
@@ -326,6 +327,61 @@ void view;
   );
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   expect(result.status).toBe(0);
+});
+
+test("isolated Node consumer compiles the native adapter export without a private import", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "cove-native-adapter-consumer-"));
+  directories.push(directory);
+  const scope = join(directory, "node_modules/@cove");
+  await mkdir(scope, { recursive: true });
+  await symlink(worker, join(scope, "terminal-worker"), "dir");
+  await writeFile(
+    join(directory, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        target: "ES2024",
+        lib: ["ES2024"],
+        strict: true,
+        types: [],
+        skipLibCheck: true,
+        noEmit: true,
+      },
+      include: ["consumer.mts"],
+    }),
+  );
+  await writeFile(
+    join(directory, "consumer.mts"),
+    `import { createNativePtyFactory } from '@cove/terminal-worker/native-adapter';
+import type { NativeFactoryLimits } from '@cove/terminal-worker/native-adapter';
+declare const limits: NativeFactoryLimits;
+const factory = createNativePtyFactory(limits);
+void factory;
+`,
+  );
+  const compiled = spawnSync(
+    process.execPath,
+    [join(root, "node_modules/typescript/bin/tsc"), "-p", directory],
+    { cwd: directory, encoding: "utf8", timeout: 20_000 },
+  );
+  if (compiled.status !== 0) throw new Error(compiled.stderr || compiled.stdout);
+  expect(compiled.status).toBe(0);
+  await writeFile(
+    join(directory, "consumer.mjs"),
+    `import { createNativePtyFactory } from '@cove/terminal-worker/native-adapter';
+if (typeof createNativePtyFactory !== 'function') throw new Error('Native adapter export missing');
+try { await import('@cove/terminal-worker/src/pty-input'); throw new Error('Private import succeeded'); }
+catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }
+`,
+  );
+  const executed = spawnSync(process.execPath, [join(directory, "consumer.mjs")], {
+    cwd: directory,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  if (executed.status !== 0) throw new Error(executed.stderr || executed.stdout);
+  expect(executed.status).toBe(0);
 });
 
 test("compiled export removal fails in an isolated consumer", async () => {
