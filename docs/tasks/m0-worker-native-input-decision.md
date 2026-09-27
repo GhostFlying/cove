@@ -1,6 +1,8 @@
 # W1 native input contract: bounded decision preparation
 
-Status: **accepted maintenance route, 2026-09-26**. The user selected a minimal maintained node-pty patch (option B below). This supersedes the pending-route statements in the historical analysis. The existing dependency version and PTY backend remain the starting point; remedy implementation and qualification are not yet complete.
+Decision status, 2026-09-26: **accepted maintenance route**. The user selected a minimal maintained node-pty patch (option B below), superseding the pending-route statements in the historical analysis. The existing dependency version and PTY backend were its starting point; the implementation status is updated below.
+
+Current implementation checkpoint, 2026-09-27: the N1/N1b/N1c maintained patch capabilities are accepted through main `0997ff584c65502c212f7d2adefb2a6fc4de1205`. N1c provides typed, identity-bound leader/initial-group signaling without delaying natural exit. The user subsequently chose the [smaller truthful stop contract](m0-worker-native-adapter-stop-plan.md): group cleanup is best effort, and helper uncertainty alone does not retain an owner slot. The historical group-cleanup alternatives below are not current acceptance gates. N2's consumption of the public capability remains a candidate pending independent native and hosted validation.
 
 ## Accepted decision
 
