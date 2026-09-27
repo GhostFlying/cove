@@ -1314,7 +1314,7 @@ index c53e086b4968d6fb0bf601ace3a813809433fedb..378a4001094940cac598d4b9ac1212f8
    pty: string;
  }
 diff --git a/src/unix/pty.cc b/src/unix/pty.cc
-index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed26db3cda 100644
+index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..69d53fa463371076b44b803c1681a7b93213cc18 100644
 --- a/src/unix/pty.cc
 +++ b/src/unix/pty.cc
 @@ -24,6 +24,10 @@
@@ -1328,7 +1328,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  #include <thread>
  
  #include <sys/types.h>
-@@ -110,6 +114,145 @@ struct ExitEvent {
+@@ -110,6 +114,160 @@ struct ExitEvent {
    int exit_code = 0, signal_code = 0;
  };
  
@@ -1350,7 +1350,8 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
 +}
 +
 +Napi::Value CoveSignalOwned(const Napi::CallbackInfo& call,
-+                            const std::shared_ptr<CoveOwnedChild>& child) {
++                            const std::shared_ptr<CoveOwnedChild>& child,
++                            const std::string& test_fault) {
 +  Napi::Env env = call.Env();
 +  if (call.Length() != 2 || !call[0].IsString() || !call[1].IsString()) {
 +    throw Napi::TypeError::New(env, "Owned signal requires signal and scope");
@@ -1368,7 +1369,14 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
 +  if (child->reaped) return CoveOwnedSignalResult(env, "already-reaped");
 +  pid_t target = child->pid;
 +  if (scope == "initial-process-group") {
-+    const pid_t group = getpgid(child->pid);
++    pid_t group;
++    if (test_fault == "owned-getpgid-esrch" ||
++        test_fault == "owned-getpgid-eperm") {
++      errno = test_fault == "owned-getpgid-esrch" ? ESRCH : EPERM;
++      group = -1;
++    } else {
++      group = test_fault == "owned-group-unqualified" ? 0 : getpgid(child->pid);
++    }
 +    if (group == -1) {
 +      const int error_code = errno;
 +      return error_code == ESRCH
@@ -1382,7 +1390,14 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
 +    }
 +    target = -group;
 +  }
-+  if (kill(target, signal) == 0) return CoveOwnedSignalResult(env, "signaled");
++  int signal_result;
++  if (test_fault == "owned-kill-esrch" || test_fault == "owned-kill-eperm") {
++    errno = test_fault == "owned-kill-esrch" ? ESRCH : EPERM;
++    signal_result = -1;
++  } else {
++    signal_result = kill(target, signal);
++  }
++  if (signal_result == 0) return CoveOwnedSignalResult(env, "signaled");
 +  const int error_code = errno;
 +  return error_code == ESRCH
 +             ? CoveOwnedSignalResult(env, "unverifiable", "not-found")
@@ -1474,7 +1489,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
    std::thread *th = new std::thread;
    // Don't use Napi::AsyncWorker which is limited by UV_THREADPOOL_SIZE.
-@@ -167,6 +310,8 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
+@@ -167,6 +325,8 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
          }
        }
      }
@@ -1483,7 +1498,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  #else
      while (true) {
        errno = 0;
-@@ -243,7 +388,8 @@ pty_posix_spawn(char** argv, char** env,
+@@ -243,7 +403,8 @@ pty_posix_spawn(char** argv, char** env,
                  const struct winsize *winp,
                  int* master,
                  pid_t* pid,
@@ -1493,7 +1508,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  #endif
  
  struct DelBuf {
-@@ -262,7 +408,8 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -262,7 +423,8 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
    Napi::Env napiEnv(info.Env());
    Napi::HandleScope scope(napiEnv);
  
@@ -1503,7 +1518,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
        !info[0].IsString() ||
        !info[1].IsArray() ||
        !info[2].IsArray() ||
-@@ -273,9 +420,37 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -273,9 +435,42 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        !info[7].IsNumber() ||
        !info[8].IsBoolean() ||
        !info[9].IsString() ||
@@ -1535,14 +1550,19 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
 +        test_fault != "rollback-writer-close-report" &&
 +        test_fault != "rollback-stop-report" &&
 +        test_fault != "auxiliary-close-then-duplicate" &&
-+        test_fault != "auxiliary-close-after-watcher") {
++        test_fault != "auxiliary-close-after-watcher" &&
++        test_fault != "owned-kill-esrch" &&
++        test_fault != "owned-kill-eperm" &&
++        test_fault != "owned-getpgid-esrch" &&
++        test_fault != "owned-getpgid-eperm" &&
++        test_fault != "owned-group-unqualified") {
 +      throw Napi::TypeError::New(napiEnv, "Unknown bounded writer test fault");
 +    }
 +  }
  
    // file
    std::string file = info[0].As<Napi::String>();
-@@ -352,7 +527,8 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -352,7 +547,8 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
    std::string helper_path = info[9].As<Napi::String>();
  
    pid_t pid;
@@ -1552,7 +1572,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  #if defined(__APPLE__)
    int argc = argv_.Length();
    int argl = argc + 4;
-@@ -368,13 +544,27 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -368,13 +564,27 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
    }
  
    int err = -1;
@@ -1581,7 +1601,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
  #else
    int argc = argv_.Length();
    int argl = argc + 2;
-@@ -413,6 +603,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -413,6 +623,7 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
  
    switch (pid) {
      case -1:
@@ -1589,7 +1609,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
        throw Napi::Error::New(napiEnv, "forkpty(3) failed.");
      case 0:
        if (strlen(cwd_.c_str())) {
-@@ -443,11 +634,113 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+@@ -443,11 +654,113 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
        }
      default:
        if (pty_nonblock(master) == -1) {
@@ -1652,8 +1672,8 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
 +            throw Napi::Error::New(env, "Owned child stop failed");
 +          }));
 +      obj.Set("signalOwned", Napi::Function::New(
-+          napiEnv, [child](const Napi::CallbackInfo& call) {
-+            return CoveSignalOwned(call, child);
++          napiEnv, [child, test_fault](const Napi::CallbackInfo& call) {
++            return CoveSignalOwned(call, child, test_fault);
 +          }));
 +      if (test_fault == "before-watcher" ||
 +          test_fault == "before-watcher-held") {
@@ -1703,7 +1723,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
    Napi::Object obj = Napi::Object::New(napiEnv);
    obj.Set("fd", Napi::Number::New(napiEnv, master));
    obj.Set("pid", Napi::Number::New(napiEnv, pid));
-@@ -690,96 +983,110 @@ pty_posix_spawn(char** argv, char** env,
+@@ -690,96 +1003,110 @@ pty_posix_spawn(char** argv, char** env,
                  const struct winsize *winp,
                  int* master,
                  pid_t* pid,
@@ -1898,7 +1918,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..8f6d08015352df43017b887dcf5d09ed
    }
  }
  #endif
-@@ -789,6 +1096,7 @@ done:
+@@ -789,6 +1116,7 @@ done:
   */
  
  Napi::Object init(Napi::Env env, Napi::Object exports) {

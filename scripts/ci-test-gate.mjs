@@ -146,7 +146,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-write-owned-stop.test.mjs",
-    minimumTests: 5,
+    minimumTests: 10,
   },
   {
     project: "terminal-web-probes",
