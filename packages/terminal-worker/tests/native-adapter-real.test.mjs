@@ -74,11 +74,11 @@ function ownedGroup(pid, mode, nonce, deadline) {
   return group;
 }
 
-function stopVerified(pid, mode, nonce, deadline, runPs = spawnSync) {
+function stopVerified(pid, mode, nonce, deadline, runPs = spawnSync, sendSignal = process.kill) {
   if (!inspectOwned(pid, mode, nonce, deadline, runPs)) return;
   remaining(deadline, "owned fixture stop");
   try {
-    process.kill(pid, "SIGKILL");
+    sendSignal(pid, "SIGKILL");
   } catch (error) {
     if (error.code !== "ESRCH") throw error;
   }
@@ -139,6 +139,7 @@ function spawnOwned(nativeFactory, mode, nonce, sessions) {
   );
   const session = {
     pty: result.pty,
+    rescueStop: result.pty?.stop.bind(result.pty),
     mode,
     nonce,
     bytes: () => Buffer.concat(chunks),
@@ -151,34 +152,68 @@ function spawnOwned(nativeFactory, mode, nonce, sessions) {
   return session;
 }
 
-async function cleanupAll(sessions, helpers, deadline, runPs = spawnSync) {
+async function settleOwnedLeader(session, deadline, runPs, sendSignal) {
   const failures = [];
-  const observations = [];
-  for (const session of sessions) {
-    try {
-      session.pty.retireInput();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      observations.push(within(session.pty.stop(), deadline, "owned stop settlement"));
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      stopVerified(session.pty.pid, session.mode, session.nonce, deadline, runPs);
-    } catch (error) {
-      failures.push(error);
-    }
-    observations.push(within(session.pty.writerCompletion, deadline, "writer close"));
-    observations.push(
-      until(
-        () => !inspectOwned(session.pty.pid, session.mode, session.nonce, deadline, runPs),
-        deadline,
-        "owned leader absence",
-      ),
-    );
+  try {
+    session.pty.retireInput();
+  } catch (error) {
+    failures.push(error);
   }
+  let stop;
+  let stopThrew = false;
+  try {
+    stop = session.pty.stop();
+  } catch (error) {
+    failures.push(error);
+    stopThrew = true;
+    try {
+      stop = session.rescueStop();
+    } catch (rescueError) {
+      failures.push(rescueError);
+    }
+  }
+  let stopResult;
+  if (stop) {
+    try {
+      stopResult = await within(stop, deadline, "owned stop settlement");
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  let stopProbeError;
+  if (!stopThrew && session.exit() === undefined && stopResult?.kind !== "exited") {
+    try {
+      stopVerified(session.pty.pid, session.mode, session.nonce, deadline, runPs, sendSignal);
+    } catch (error) {
+      stopProbeError = error;
+    }
+  }
+  try {
+    await until(() => session.exit() !== undefined, deadline, "owned leader exit");
+  } catch (error) {
+    failures.push(error);
+  }
+  if (session.exit() === undefined && stopProbeError) failures.push(stopProbeError);
+  try {
+    const writer = await within(session.pty.writerCompletion, deadline, "writer close");
+    if (writer?.kind !== "closed") throw new Error("Owned writer close is unverified");
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length) throw new AggregateError(failures, "Owned leader cleanup failed");
+}
+
+async function cleanupAll(
+  sessions,
+  helpers,
+  deadline,
+  runPs = spawnSync,
+  sendSignal = process.kill,
+) {
+  const failures = [];
+  const observations = sessions.map((session) =>
+    settleOwnedLeader(session, deadline, runPs, sendSignal),
+  );
   for (const helper of helpers) {
     try {
       stopVerified(helper.pid, "helper", helper.nonce, deadline, runPs);
@@ -218,7 +253,10 @@ async function cleanupAll(sessions, helpers, deadline, runPs = spawnSync) {
   if (failures.length) throw new AggregateError(failures, "Owned adapter fixture cleanup failed");
 }
 
-async function runOwned(body, { cleanupMs = 5_000, runPs = spawnSync } = {}) {
+async function runOwned(
+  body,
+  { cleanupMs = 5_000, runPs = spawnSync, sendSignal = process.kill } = {},
+) {
   const sessions = [];
   const helpers = [];
   const deadline = Date.now() + 8_000;
@@ -229,7 +267,7 @@ async function runOwned(body, { cleanupMs = 5_000, runPs = spawnSync } = {}) {
     failure = error;
   }
   try {
-    await cleanupAll(sessions, helpers, Date.now() + cleanupMs, runPs);
+    await cleanupAll(sessions, helpers, Date.now() + cleanupMs, runPs, sendSignal);
   } catch (error) {
     failure = failure ? new AggregateError([failure, error], "Body and cleanup failed") : error;
   }
@@ -408,10 +446,14 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   expect(caught).toBeInstanceOf(AggregateError);
   expect(caught.errors[0]).toBe(primary);
   expect(
-    caught.errors[1].errors.some((error) => /injected first stop failure/.test(String(error))),
+    caught.errors[1].errors
+      .flatMap((error) => error.errors ?? [error])
+      .some((error) => /injected first stop failure/.test(String(error))),
   ).toBe(true);
-  expect(inspectOwned(first.pty.pid, first.mode, first.nonce, Date.now() + 1_000)).toBe(false);
-  expect(inspectOwned(second.pty.pid, second.mode, second.nonce, Date.now() + 1_000)).toBe(false);
+  expect(first.exit()).toBeDefined();
+  expect(second.exit()).toBeDefined();
+  await expect(first.pty.writerCompletion).resolves.toEqual({ kind: "closed" });
+  await expect(second.pty.writerCompletion).resolves.toEqual({ kind: "closed" });
 
   const stopCalls = [];
   const probeTimeouts = [];
@@ -426,6 +468,7 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   const fakeSession = (pid, mode) => ({
     mode,
     nonce: "controlled-slow-probe",
+    exit: () => undefined,
     pty: {
       pid,
       retireInput() {},
@@ -457,4 +500,72 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   expect(probeTimeouts[0]).toBeGreaterThan(0);
   expect(probeTimeouts[0]).toBeLessThanOrEqual(120);
   expect(Date.now() - started).toBeLessThan(1_000);
+
+  const foreignPs = () => ({ status: 0, stdout: "unrelated process" });
+  expect(() =>
+    inspectOwned(10_003, "live-hup", "controlled-identity", Date.now() + 1_000, foreignPs),
+  ).toThrow("identity changed");
+  const controlled = async (exit, writer, runPs) => {
+    const signals = [];
+    let failure;
+    try {
+      await runOwned(
+        async ({ sessions }) => {
+          sessions.push({
+            mode: "live-hup",
+            nonce: "controlled-identity",
+            exit: () => (typeof exit === "function" ? exit() : exit),
+            pty: {
+              pid: 10_003,
+              retireInput() {},
+              stop: () => Promise.resolve({ kind: "unverifiable" }),
+              writerCompletion: Promise.resolve(writer),
+            },
+          });
+        },
+        {
+          cleanupMs: 50,
+          runPs,
+          sendSignal: (pid, signal) => signals.push({ pid, signal }),
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    return { failure, signals };
+  };
+  const matchingPs = () => ({
+    status: 0,
+    stdout: `${fixture} live-hup controlled-identity`,
+  });
+  const live = await controlled(undefined, { kind: "closed" }, matchingPs);
+  expect(live.failure).toBeInstanceOf(AggregateError);
+  expect(
+    live.failure.errors.some((error) => /Owned leader cleanup failed/.test(String(error))),
+  ).toBe(true);
+  expect(live.signals).toEqual([{ pid: 10_003, signal: "SIGKILL" }]);
+  const changed = await controlled(undefined, { kind: "closed" }, foreignPs);
+  expect(changed.failure).toBeInstanceOf(AggregateError);
+  expect(changed.signals).toEqual([]);
+  for (const code of ["ETIMEDOUT", "EPERM"]) {
+    const uncertain = await controlled(undefined, { kind: "closed" }, () => ({
+      error: Object.assign(new Error("ps unavailable"), { code }),
+    }));
+    expect(uncertain.failure).toBeInstanceOf(AggregateError);
+    expect(uncertain.signals).toEqual([]);
+  }
+  const completed = await controlled({ exitCode: 0 }, { kind: "closed" }, foreignPs);
+  expect(completed).toEqual({ failure: undefined, signals: [] });
+  let lateExit;
+  const lateForeignPs = () => {
+    queueMicrotask(() => {
+      lateExit = { exitCode: 0 };
+    });
+    return foreignPs();
+  };
+  const lateCompleted = await controlled(() => lateExit, { kind: "closed" }, lateForeignPs);
+  expect(lateCompleted).toEqual({ failure: undefined, signals: [] });
+  const writerUncertain = await controlled({ exitCode: 0 }, { kind: "close-uncertain" }, foreignPs);
+  expect(writerUncertain.failure).toBeInstanceOf(AggregateError);
+  expect(writerUncertain.signals).toEqual([]);
 });
