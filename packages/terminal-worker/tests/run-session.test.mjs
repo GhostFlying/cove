@@ -17,25 +17,52 @@ function deferred() {
 function start(name = "run", callbacks = {}) {
   const events = [];
   const writes = [];
-  const state = { paused: 0, resumed: 0, stopped: 0, retired: 0 };
+  const state = {
+    paused: 0,
+    resumed: 0,
+    stopped: 0,
+    retired: 0,
+    flowPaused: false,
+    exited: false,
+    writer: "pending",
+  };
   let observer;
+  const writerCompletion = callbacks.writerCompletion ?? Promise.resolve({ kind: "closed" });
+  void Promise.resolve(writerCompletion).then(
+    (result) => {
+      state.writer =
+        result?.kind === "closed" || result?.kind === "close-uncertain" ? result.kind : "invalid";
+    },
+    () => {
+      state.writer = "invalid";
+    },
+  );
   const pty = {
     pid: 1,
-    writerCompletion: callbacks.writerCompletion ?? Promise.resolve({ kind: "closed" }),
+    writerCompletion,
+    submit() {
+      throw new Error("Unexpected input admission in the first worker slice");
+    },
     automaticOutputSink(output) {
       writes.push({ ...output, bytes: Buffer.from(output.bytes) });
       callbacks.onAutomaticOutput?.(output, observer);
     },
     pause() {
       state.paused++;
+      state.flowPaused = true;
       callbacks.onPause?.(observer);
     },
     resume() {
       state.resumed++;
+      state.flowPaused = false;
       callbacks.onResume?.(observer);
+    },
+    resize() {
+      throw new Error("Unexpected resize in the first worker slice");
     },
     retireInput() {
       state.retired++;
+      callbacks.onRetire?.(observer);
     },
     stop() {
       state.stopped++;
@@ -54,11 +81,34 @@ function start(name = "run", callbacks = {}) {
         })
       );
     },
+    snapshot() {
+      return {
+        pid: 1,
+        exited: state.exited,
+        writer: state.writer,
+        input: {
+          allocatedBytes: 0,
+          tasks: 0,
+          peakAllocatedBytes: 0,
+          peakTasks: 0,
+          maxBytes: 64 * 1024,
+          maxTasks: 256,
+        },
+        earlyOutputBytes: 0,
+        paused: state.flowPaused,
+      };
+    },
   };
   const factory = {
     spawn(_spec, value) {
-      observer = value;
-      callbacks.onSpawn?.(value);
+      observer = {
+        ...value,
+        onExit(exit) {
+          state.exited = true;
+          value.onExit(exit);
+        },
+      };
+      callbacks.onSpawn?.(observer);
       return { kind: "created", pty };
     },
   };
@@ -76,7 +126,7 @@ function start(name = "run", callbacks = {}) {
     },
   });
   expect(result.kind).toBe("created");
-  return { session: result.session, observer, events, writes, state, faults };
+  return { session: result.session, observer, pty, events, writes, state, faults };
 }
 
 test("copies native callback bytes before reuse and preserves split UTF-8/NUL order", async () => {
@@ -346,6 +396,16 @@ test("deadline freezes unresolved receipt while later owned facts improve only s
     const writer = deferred();
     const stop = deferred();
     const owned = start("late", { writerCompletion: writer.promise, stopResult: stop.promise });
+    const initial = owned.session.snapshot();
+    expect(Object.isFrozen(initial.writer)).toBe(true);
+    expect(Object.isFrozen(initial.stop)).toBe(true);
+    expect(Reflect.set(initial.writer, "kind", "closed")).toBe(false);
+    expect(Reflect.set(initial.stop, "kind", "observed")).toBe(false);
+    expect(owned.session.snapshot()).toMatchObject({
+      writer: { kind: "pending-at-deadline" },
+      stop: { kind: "pending-at-deadline" },
+      ownershipEvidence: "unresolved",
+    });
     const pending = owned.session.dispose();
     await vi.advanceTimersByTimeAsync(3_000);
     const receipt = await pending;
@@ -355,6 +415,10 @@ test("deadline freezes unresolved receipt while later owned facts improve only s
       writer: { kind: "pending-at-deadline" },
       ownershipEvidence: "unresolved",
     });
+    expect(Object.isFrozen(receipt.writer)).toBe(true);
+    expect(Object.isFrozen(receipt.stop)).toBe(true);
+    expect(Reflect.set(receipt.writer, "kind", "closed")).toBe(false);
+    expect(Reflect.set(receipt.stop, "kind", "observed")).toBe(false);
     owned.observer.onExit({ exitCode: 0 });
     writer.resolve({ kind: "closed" });
     stop.resolve({
@@ -477,6 +541,77 @@ test("a rejected stop still records independent writer closure and actual exit",
     writer: { kind: "closed" },
     ownershipEvidence: "closure-proven",
   });
+});
+
+test("synchronous retire and stop throws preserve independently observed exit and writer closure", async () => {
+  const writer = deferred();
+  const owned = start("sync-cleanup", {
+    writerCompletion: writer.promise,
+    onRetire() {
+      throw new Error("retire failed");
+    },
+    onStop() {
+      throw new Error("stop failed");
+    },
+  });
+  expect(Object.keys(owned.pty).sort()).toEqual([
+    "automaticOutputSink",
+    "pause",
+    "pid",
+    "resize",
+    "resume",
+    "retireInput",
+    "snapshot",
+    "stop",
+    "submit",
+    "writerCompletion",
+  ]);
+  expect(owned.pty.snapshot()).toMatchObject({
+    pid: 1,
+    exited: false,
+    writer: "pending",
+    input: { allocatedBytes: 0, tasks: 0 },
+  });
+  const pending = owned.session.dispose();
+  expect(owned.session.dispose()).toBe(pending);
+  owned.observer.onExit({ exitCode: 0 });
+  writer.resolve({ kind: "closed" });
+  expect(await pending).toMatchObject({
+    stop: { kind: "failed-to-observe" },
+    leader: { kind: "exit-observed" },
+    writer: { kind: "closed" },
+    ownershipEvidence: "closure-proven",
+  });
+  expect(owned.pty.snapshot()).toMatchObject({ exited: true, writer: "closed" });
+  expect(owned.state).toMatchObject({ retired: 1, stopped: 1 });
+});
+
+test("rejected writer completion remains uncertain despite stop and actual exit", async () => {
+  const writer = deferred();
+  const owned = start("rejected-writer", {
+    writerCompletion: writer.promise,
+    stopResult: Promise.resolve({
+      kind: "exited",
+      exit: { exitCode: 0 },
+      cleanup: {
+        scope: "initial-process-group",
+        verified: false,
+        graceful: { kind: "not-attempted", reason: "already-exited" },
+        force: { kind: "not-attempted", reason: "already-exited" },
+      },
+    }),
+  });
+  const pending = owned.session.dispose();
+  owned.observer.onExit({ exitCode: 0 });
+  writer.reject(new Error("writer failed"));
+  expect(await pending).toMatchObject({
+    stop: { kind: "observed", result: { kind: "exited" } },
+    leader: { kind: "exit-observed" },
+    writer: { kind: "invalid" },
+    ownershipEvidence: "retained-uncertain",
+  });
+  expect(owned.session.dispose()).toBe(pending);
+  expect(owned.state.stopped).toBe(1);
 });
 
 test("consumer and diagnostic thenables fence once without blocking query parsing", async () => {

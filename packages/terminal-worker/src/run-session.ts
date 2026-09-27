@@ -20,6 +20,8 @@ import type {
 } from "./native-pty.js";
 
 const OUTPUT_CHUNK_BYTES = 65_536;
+const PENDING_WRITER: RunSessionWriterObservation = Object.freeze({ kind: "pending-at-deadline" });
+const PENDING_STOP: RunSessionStopObservation = Object.freeze({ kind: "pending-at-deadline" });
 
 type Fact = { readonly event: RunEvent; readonly bytes?: Buffer };
 type Pending =
@@ -162,8 +164,8 @@ class RunSessionCore {
   #consumerFenced = false;
   #diagnosticFenced = false;
   #leaderExit: NativeExit | undefined;
-  #writer: RunSessionWriterObservation = { kind: "pending-at-deadline" };
-  #stop: RunSessionStopObservation = { kind: "pending-at-deadline" };
+  #writer: RunSessionWriterObservation = PENDING_WRITER;
+  #stop: RunSessionStopObservation = PENDING_STOP;
   #stopStarted = false;
   #disposePromise: Promise<RunSessionDisposalReceipt> | undefined;
   #resolveDispose: ((receipt: RunSessionDisposalReceipt) => void) | undefined;
