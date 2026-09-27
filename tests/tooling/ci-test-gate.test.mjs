@@ -116,6 +116,28 @@ test("protocol registration and its actual test root are required", async () => 
   );
 });
 
+test("client public-contract suites reject missing and short discovery", async () => {
+  const files = await readVitestOwnedTestFiles();
+  for (const [name, minimumTests] of [
+    ["connection-rpc", 27],
+    ["compiled-client", 4],
+  ]) {
+    const file = `packages/client/tests/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "client", minimumTests });
+    expect(files).toContain(file);
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/Required suite client:/);
+    const short = Array.from({ length: minimumTests - 1 }, (_, index) => ({
+      projectName: "client",
+      file: resolve(root, file),
+      name: `${name} ${index}`,
+    }));
+    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(
+      `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
+    );
+  }
+});
+
 test("query input browser suite is mandatory with eleven acceptance rows", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-web/probes/query-input.test.mjs",
@@ -634,8 +656,12 @@ test("records spawn and timeout failures before propagating them", async () => {
 test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   const complete = [
-    ...discoveredCases.slice(0, 2),
-    ...Array.from({ length: 31 }, (_, index) => ({
+    ...Array.from({ length: 3 }, (_, index) => ({
+      projectName: "tooling",
+      file: resolve(root, first),
+      name: `project reference ${index}`,
+    })),
+    ...Array.from({ length: 32 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -643,7 +669,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 30 tests; needs 31/,
+    /discovered 31 tests; needs 32/,
   );
 });
 
@@ -658,6 +684,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
+  await mkdir(resolve(checkout, "packages/client/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
@@ -667,7 +694,9 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/tests/view-input.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
+  await writeFile(resolve(checkout, "packages/client/tests/contract.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "packages/client/tests/contract.test.mjs",
     "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",
     "packages/terminal-engine/tests/engine.test.mjs",

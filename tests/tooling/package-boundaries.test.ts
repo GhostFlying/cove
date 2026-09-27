@@ -8,6 +8,7 @@ const root = resolve(import.meta.dirname, "../..");
 const engine = join(root, "packages/terminal-engine");
 const web = join(root, "packages/terminal-web");
 const protocol = join(root, "packages/protocol");
+const client = join(root, "packages/client");
 const worker = join(root, "packages/terminal-worker");
 const directories: string[] = [];
 
@@ -88,6 +89,40 @@ test("real package manifests stay within their execution environments", async ()
   );
 });
 
+function assertClientBoundary(manifest: {
+  dependencies: Record<string, string>;
+  exports: Record<string, unknown>;
+}): void {
+  if (
+    Object.keys(manifest.dependencies).join() !== "@cove/protocol" ||
+    manifest.dependencies["@cove/protocol"] !== "workspace:*"
+  )
+    throw new Error("Client runtime dependencies escaped the pure protocol boundary");
+  if (
+    Object.keys(manifest.exports).join() !== "." ||
+    JSON.stringify(manifest.exports["."]) !==
+      JSON.stringify({ types: "./dist/client.d.ts", import: "./dist/client.js" })
+  )
+    throw new Error("Client public export escaped the single compiled entry");
+}
+
+test("client manifest exposes one ES-only entry and only the protocol runtime dependency", async () => {
+  const manifest = JSON.parse(await readFile(join(client, "package.json"), "utf8"));
+  assertClientBoundary(manifest);
+  expect(() =>
+    assertClientBoundary({
+      ...manifest,
+      dependencies: { ...manifest.dependencies, "node-pty": "1.1.0" },
+    }),
+  ).toThrow(/runtime dependencies/);
+  expect(() =>
+    assertClientBoundary({
+      ...manifest,
+      exports: { ...manifest.exports, "./src/client": "./src/client.ts" },
+    }),
+  ).toThrow(/public export/);
+});
+
 test("Vite rejects side-effect, dynamic, native, and transitive Node imports in isolated builds", async () => {
   const variants = [
     { name: "side-effect", main: 'import "node:fs";' },
@@ -136,6 +171,7 @@ test("isolated compiled consumer sees supported exports and ES-only Cove declara
   await symlink(engine, join(scope, "terminal-engine"), "dir");
   await symlink(web, join(scope, "terminal-web"), "dir");
   await symlink(protocol, join(scope, "protocol"), "dir");
+  await symlink(client, join(scope, "client"), "dir");
   await mkdir(join(directory, "node_modules"), { recursive: true });
   await symlink(join(protocol, "node_modules/zod"), join(directory, "node_modules/zod"), "dir");
   const declarations = join(directory, "promoted-declarations");
@@ -166,6 +202,7 @@ test("isolated compiled consumer sees supported exports and ES-only Cove declara
     }
   }
   await promoteDeclarations(join(protocol, "dist"), promotedM0);
+  await promoteDeclarations(join(client, "dist"), join(declarations, "client"));
   const promotedEngine = join(declarations, "engine");
   await mkdir(promotedEngine);
   await writeFile(
@@ -207,6 +244,10 @@ import type { OperationRecord } from '@cove/protocol/rpc';
 import type { RuntimeTerminalPort } from '@cove/protocol/runtime';
 import type { TerminalMetadata as SupportedTerminalMetadata } from '@cove/protocol/terminal';
 import type { TerminalView } from '@cove/protocol/view';
+import { createClient, type ClientOptions, type ParamsFor } from '@cove/client';
+declare const clientOptions: ClientOptions;
+declare const callParams: ParamsFor<'terminal.list'>;
+void createClient; void clientOptions; void callParams;
 declare const engine: EngineProbeResult;
 declare const adapter: TerminalModel;
 declare const adapterResults: [EngineBaseline, EnginePreview, EngineState];
@@ -271,9 +312,10 @@ import { PipeMetadataSchema } from '@cove/protocol/provisional/pipe';
 import { BootstrapRequestSchema } from '@cove/protocol/bootstrap';
 import { PipeCommandSchema } from '@cove/protocol/pipe';
 import { RpcRequestSchema } from '@cove/protocol/rpc';
-if (typeof engine !== 'function' || typeof web !== 'function' || typeof createTerminalModel !== 'function') throw new Error('Compiled exports missing');
+import { createClient } from '@cove/client';
+if (typeof engine !== 'function' || typeof web !== 'function' || typeof createTerminalModel !== 'function' || typeof createClient !== 'function') throw new Error('Compiled exports missing');
 if (!TerminalMetadataSchema || !PipeMetadataSchema || !BootstrapRequestSchema || !PipeCommandSchema || !RpcRequestSchema) throw new Error('Protocol exports missing');
-for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-web/dist/probes/node/environment', '@cove/protocol', '@cove/protocol/src/provisional/identity']) {
+for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-web/dist/probes/node/environment', '@cove/protocol', '@cove/protocol/src/provisional/identity', '@cove/client/src/client']) {
   try { await import(name); throw new Error('Private import succeeded: ' + name); }
   catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }
 }
