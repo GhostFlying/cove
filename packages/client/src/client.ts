@@ -24,6 +24,7 @@ import {
 import {
   checkRpcResponse,
   prepareCall,
+  rpcErrorProvesWriteNotAccepted,
   type ParamsFor,
   type ResultFor,
   type RpcBinding,
@@ -808,32 +809,43 @@ class CoveClient implements Client {
     const promise = new Promise<CallOutcome<ResultFor<M>>>((settle) => {
       resolve = settle;
     });
-    let settled = false;
+    let settlement: "active" | "settling" | "settled" = "active";
+    let postEntered = false;
+    let postInProgress = false;
     let cancellation: CancellationHandle | undefined;
-    let cancellationUsed = false;
+    let cancellationRequested = false;
+    let cancellationStarted = false;
+    let deferredUncertainReason: LocalErrorReason | undefined;
     let timer: Disposable | undefined;
     let disposition: TransferDisposition | undefined;
 
-    const finish = (outcome: CallOutcome<ResultFor<M>>): void => {
-      if (settled) return;
-      settled = true;
+    const cancelOnce = (): void => {
+      cancellationRequested = true;
+      if (!cancellation || cancellationStarted) return;
+      // Claim the handle before adapter code can synchronously reenter settlement.
+      cancellationStarted = true;
+      disposition = mergeDisposition(disposition, safeCancel(cancellation));
+    };
+    const complete = (outcome: CallOutcome<ResultFor<M>>): void => {
       safeDispose(timer);
-      if (!cancellationUsed) {
-        safeCancel(cancellation);
-        cancellationUsed = true;
-      }
+      cancelOnce();
       this.pendingRpcs.delete(requestId);
       if (operation) this.activeOperationIntents.delete(operation.operationId);
+      settlement = "settled";
       resolve(Object.freeze(outcome));
       if (!this.suppressRpcState) this.emitState();
     };
-    const uncertainOrLocal = (reason: LocalErrorReason, definitelyNotSent = false): void => {
+    const finish = (outcome: CallOutcome<ResultFor<M>>): void => {
+      if (settlement !== "active") return;
+      settlement = "settling";
+      complete(outcome);
+    };
+    const completeUncertain = (reason: LocalErrorReason): void => {
+      cancelOnce();
       if (operation) {
-        const cancelled = cancellationUsed ? undefined : safeCancel(cancellation);
-        cancellationUsed = cancellation !== undefined || cancellationUsed;
-        if (cancelled) disposition = mergeDisposition(disposition, cancelled);
-        const notSent = definitelyNotSent || disposition === "not-sent";
-        finish(
+        // Handle absence becomes inconclusive as soon as adapter code is entered.
+        const notSent = !postEntered || disposition === "not-sent";
+        complete(
           notSent
             ? { ok: false, kind: "operation-not-sent", operation }
             : {
@@ -844,17 +856,23 @@ class CoveClient implements Client {
               },
         );
       } else {
-        if (!cancellationUsed) {
-          safeCancel(cancellation);
-          cancellationUsed = true;
-        }
-        finish({ ok: false, kind: "local-error", error: localError(reason) });
+        complete({ ok: false, kind: "local-error", error: localError(reason) });
       }
+    };
+    const uncertainOrLocal = (reason: LocalErrorReason): void => {
+      if (settlement !== "active") return;
+      settlement = "settling";
+      safeDispose(timer);
+      cancelOnce();
+      if (postInProgress && !cancellation) {
+        deferredUncertainReason = reason;
+        return;
+      }
+      completeUncertain(reason);
     };
     const pending: PendingRpc = {
       generation,
-      cancel: (reason) =>
-        uncertainOrLocal(reason, cancellation === undefined && disposition === undefined),
+      cancel: uncertainOrLocal,
     };
     this.pendingRpcs.set(requestId, pending);
     this.peakPendingRpcCount = Math.max(this.peakPendingRpcCount, this.pendingRpcs.size);
@@ -862,11 +880,11 @@ class CoveClient implements Client {
 
     try {
       timer = this.options.scheduler.setTimer(this.rpcTimeoutMs, () => {
-        uncertainOrLocal("timeout", cancellation === undefined);
+        uncertainOrLocal("timeout");
       });
-      if (settled) safeDispose(timer);
+      if (settlement !== "active") safeDispose(timer);
     } catch {
-      uncertainOrLocal("invalid-state", true);
+      uncertainOrLocal("invalid-state");
       return promise;
     }
 
@@ -874,10 +892,15 @@ class CoveClient implements Client {
       .then(() => this.options.credentials())
       .then(
         (credentials) => {
-          if (settled || generation !== this.generation || this.status !== "connected") return;
+          if (
+            settlement !== "active" ||
+            generation !== this.generation ||
+            this.status !== "connected"
+          )
+            return;
           const credentialSnapshot = copyCredentials(credentials, this.options.codec);
           if (!credentialSnapshot) {
-            uncertainOrLocal("credential", true);
+            uncertainOrLocal("credential");
             return;
           }
           const responseCap = Math.min(
@@ -885,9 +908,16 @@ class CoveClient implements Client {
             M0_LIMITS.rpcResponseBytes,
           );
           try {
-            // Once post() is entered, an exception is not proof that the adapter did not
-            // hand off a write. Only its explicit disposition/cancel result can prove that.
-            cancellation = this.options.http.post(
+            if (
+              settlement !== "active" ||
+              generation !== this.generation ||
+              this.status !== "connected"
+            )
+              return;
+            // This boundary is monotonic even when post() reenters or throws.
+            postEntered = true;
+            postInProgress = true;
+            const returnedCancellation = this.options.http.post(
               {
                 path: LOCAL_PATHS.rpc,
                 headers: headersFor(credentialSnapshot.authorization, this.offer),
@@ -896,10 +926,15 @@ class CoveClient implements Client {
               },
               {
                 onDisposition: (next) => {
+                  if (settlement === "settled") return;
                   disposition = mergeDisposition(disposition, next);
                 },
                 onResponse: (response) => {
-                  if (settled || generation !== this.generation || this.status !== "connected")
+                  if (
+                    settlement !== "active" ||
+                    generation !== this.generation ||
+                    this.status !== "connected"
+                  )
                     return;
                   disposition = mergeDisposition(disposition, "handed-off");
                   if (response.body.byteLength > responseCap) {
@@ -932,16 +967,12 @@ class CoveClient implements Client {
                   }
                   if (checked.kind === "rpc-error") {
                     const error = checked.response.error;
-                    if (
-                      operation &&
-                      error.data?.kind === "RESULT_UNKNOWN" &&
-                      error.data.acceptance === "unknown"
-                    ) {
+                    if (operation && !rpcErrorProvesWriteNotAccepted(checked.response)) {
                       finish({
                         ok: false,
                         kind: "operation-unknown",
                         operation,
-                        error: error.data,
+                        error: domainError("RESULT_UNKNOWN", "unknown"),
                       });
                     } else {
                       finish({
@@ -956,6 +987,7 @@ class CoveClient implements Client {
                   finish({ ok: true, value: checked.value });
                 },
                 onFailure: (failure) => {
+                  if (settlement === "settled") return;
                   disposition = mergeDisposition(disposition, failure.disposition);
                   uncertainOrLocal(
                     failure.reason === "response-too-large" ? "response-too-large" : "transport",
@@ -963,13 +995,27 @@ class CoveClient implements Client {
                 },
               },
             );
-            if (settled) safeCancel(cancellation);
+            postInProgress = false;
+            cancellation = returnedCancellation;
+            if (cancellationRequested || settlement !== "active") cancelOnce();
+            if (deferredUncertainReason) {
+              const reason = deferredUncertainReason;
+              deferredUncertainReason = undefined;
+              completeUncertain(reason);
+            }
           } catch {
+            postInProgress = false;
             disposition = mergeDisposition(disposition, "unknown");
-            uncertainOrLocal("transport");
+            if (deferredUncertainReason) {
+              const reason = deferredUncertainReason;
+              deferredUncertainReason = undefined;
+              completeUncertain(reason);
+            } else {
+              uncertainOrLocal("transport");
+            }
           }
         },
-        () => uncertainOrLocal("credential", true),
+        () => uncertainOrLocal("credential"),
       );
     return promise;
   }

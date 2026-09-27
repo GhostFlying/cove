@@ -14,7 +14,7 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
-  { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 27 },
+  { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 53 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
