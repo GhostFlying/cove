@@ -26,3 +26,5 @@ W1a does **not** include the executable `main.ts`, `pipe-endpoint.ts`, hello/rea
 ## First-freeze correction, 2026-09-27
 
 The first functional freeze is `07fa6479249e10a4fe56bfc93047a991e27e813e`. Self-review found that N2 can report a synchronous I/O fault from `pause()`. The fault callback must retire/stop without calling `pause()` again, and the caller may record a paused state only if no fault intervened. Add a fake synchronous pause-failure regression, then freeze a separate atomic source correction before the full gate.
+
+The corrected freeze `4185bfb17231863746bd63137018e157cf22031a` exposed one related early-spawn ownership case: queued callback copies must be released if N2 reports a fault before its returned owner can be attached. Clear only that pending queue on the faulted attach path and prove it with an onData-then-onFault spawn fixture before the one full gate.

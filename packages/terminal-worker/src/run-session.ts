@@ -106,6 +106,7 @@ export class RunSession {
   attach(native: NativePtyAdapter): void {
     this.#native = native;
     if (this.#faulted || this.#disposed) {
+      this.#releasePending("Run session faulted before native attachment");
       void native.stop();
       return;
     }
