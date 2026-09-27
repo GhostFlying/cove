@@ -49,16 +49,16 @@
 
 ## 有限负例和独立接受
 
-| 场景 | 必须证明 |
-| --- | --- |
-| public boundary | compiled package无constructible class/attach/native ingress；facade及prototype不能暴露内部constructor；无法替换adapter；自己的fake factory仍能驱动early callbacks |
-| disposal reentry/重复 | retire/stop/model相关同步路径重入dispose返回同一Promise；one stop call；排队与正在settle的barrier失败完成；后续data不解析/发布 |
-| 两种正常完成顺序 | writer closed先/actual exit先均直到两者事实成立才closure-proven；真实factory owner最终0；helper报告unknown不妨碍此结论 |
-| 有限未知 | stop-unverifiable+closed不谎称exit；exited+writer永不settle在3s窗口返回pending writer/unresolved；stop throw/reject或未settle仍独立观察writer/exit、typed失败不unhandled |
-| 不确定writer | exit+close-uncertain/invalid/rejected完成不能clean；snapshot保留不确定，fake/真实适用N2账目仍charged；不把错误signalFailure抹掉 |
-| late facts | dispose后但receipt前exit被记录；receipt后exit/writerclosed仅完善snapshot，receipt深值及Promise身份不变，不post-disposal fact/diagnostic，不重放/重启 |
-| observer边界 | sync throw、resolved/rejected/pending Promise、then getter/call throw均立即fence；后续query仍回复一次且parse继续；diagnostic同类返回无递归/无unhandled且snapshot可见 |
-| paused callback dispose | 高水位pause后低水位onFact同步dispose；resume计数始终0，stop一次，字节队列/barrier释放，晚callback不恢复；保留原normal low-water resume正例 |
+| 场景                    | 必须证明                                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| public boundary         | compiled package无constructible class/attach/native ingress；facade及prototype不能暴露内部constructor；无法替换adapter；自己的fake factory仍能驱动early callbacks        |
+| disposal reentry/重复   | retire/stop/model相关同步路径重入dispose返回同一Promise；one stop call；排队与正在settle的barrier失败完成；后续data不解析/发布                                           |
+| 两种正常完成顺序        | writer closed先/actual exit先均直到两者事实成立才closure-proven；真实factory owner最终0；helper报告unknown不妨碍此结论                                                   |
+| 有限未知                | stop-unverifiable+closed不谎称exit；exited+writer永不settle在3s窗口返回pending writer/unresolved；stop throw/reject或未settle仍独立观察writer/exit、typed失败不unhandled |
+| 不确定writer            | exit+close-uncertain/invalid/rejected完成不能clean；snapshot保留不确定，fake/真实适用N2账目仍charged；不把错误signalFailure抹掉                                          |
+| late facts              | dispose后但receipt前exit被记录；receipt后exit/writerclosed仅完善snapshot，receipt深值及Promise身份不变，不post-disposal fact/diagnostic，不重放/重启                     |
+| observer边界            | sync throw、resolved/rejected/pending Promise、then getter/call throw均立即fence；后续query仍回复一次且parse继续；diagnostic同类返回无递归/无unhandled且snapshot可见     |
+| paused callback dispose | 高水位pause后低水位onFact同步dispose；resume计数始终0，stop一次，字节队列/barrier释放，晚callback不恢复；保留原normal low-water resume正例                               |
 
 以deferred fake-native completion和受控时钟/计时边界驱动负例，不让每个case真实睡3秒。允许局部非public测试 seam/现有timer控制；不增加生产scheduler配置框架。真实compiled PTY只补/改现有 run-session-real oracle读取新receipt并核对actual exit + writer closed + N2 owner释放；保留有/无observer的独立query receipt、原始字节、exit顺序和两run进度证据。fake native必须提供完整公共writerCompletion/stop/snapshot契约，不再用缺成员对象来绕过F2。
 
