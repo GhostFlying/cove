@@ -42,6 +42,14 @@ if (mode === "bytes") {
     process.stdout.write(Buffer.from("QUERY:" + receipt + "\n"));
     process.exit(0);
   });
+} else if (mode === "engine-query") {
+  process.stdout.write(Buffer.from("\u001b[5n"));
+  process.stdin.once("data", (chunk) => {
+    process.stdout.write(
+      Buffer.from("ANSWER:" + Buffer.from(chunk).toString("hex") + ":" + nonce + "\n"),
+    );
+    process.exit(0);
+  });
 } else if (mode === "live-hup") {
   process.on("SIGHUP", () => process.exit(0));
   process.stdout.write(Buffer.from("READY:" + nonce + "\n"));
