@@ -8,6 +8,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import type { RunRef } from "@cove/protocol/identity";
 import type { Appearance, Geometry } from "@cove/protocol/profile";
 import type { RunEvent } from "@cove/protocol/terminal";
+import type { IBoundedWriteOwnerResult } from "node-pty";
 import type {
   NativeExit,
   NativePtyAdapter,
@@ -39,7 +40,30 @@ export interface RunSessionOptions {
 export type RunSessionFault =
   | NativePtyFault
   | { readonly kind: "pump"; readonly reason: string }
-  | { readonly kind: "consumer"; readonly reason: "parsed-fact-observer-threw" };
+  | { readonly kind: "consumer"; readonly reason: "parsed-fact-observer-failed" };
+
+export type RunSessionWriterObservation =
+  | { readonly kind: "pending-at-deadline" }
+  | { readonly kind: "closed" }
+  | { readonly kind: "close-uncertain"; readonly error: string }
+  | { readonly kind: "invalid" };
+
+export type RunSessionStopObservation =
+  | { readonly kind: "pending-at-deadline" }
+  | { readonly kind: "failed-to-observe" }
+  | { readonly kind: "observed"; readonly result: NativeStopResult };
+
+export type RunSessionLeaderObservation =
+  { readonly kind: "not-observed" } | { readonly kind: "exit-observed"; readonly exit: NativeExit };
+
+export type RunSessionOwnershipEvidence = "closure-proven" | "retained-uncertain" | "unresolved";
+
+export interface RunSessionDisposalReceipt {
+  readonly stop: RunSessionStopObservation;
+  readonly leader: RunSessionLeaderObservation;
+  readonly writer: RunSessionWriterObservation;
+  readonly ownershipEvidence: RunSessionOwnershipEvidence;
+}
 
 export interface RunSessionSnapshot {
   readonly receivedSeq: number;
@@ -52,7 +76,18 @@ export interface RunSessionSnapshot {
   readonly faulted: boolean;
   readonly counterExhausted: boolean;
   readonly consumerFenced: boolean;
+  readonly diagnosticFenced: boolean;
+  readonly writer: RunSessionWriterObservation;
+  readonly leader: RunSessionLeaderObservation;
+  readonly stop: RunSessionStopObservation;
+  readonly ownershipEvidence: RunSessionOwnershipEvidence;
   readonly disposed: boolean;
+}
+
+export interface RunSession {
+  barrier(): Promise<EngineResult<EngineState>>;
+  snapshot(): RunSessionSnapshot;
+  dispose(): Promise<RunSessionDisposalReceipt>;
 }
 
 export type RunSessionStart =
@@ -63,11 +98,54 @@ function failure(reason: string): EngineResult<never> {
   return { ok: false, error: { code: "faulted", reason } };
 }
 
-export class RunSession {
+function consumesThenable(value: unknown): boolean {
+  if ((typeof value !== "object" || value === null) && typeof value !== "function") return false;
+  let then: unknown;
+  try {
+    then = (value as PromiseLike<unknown>).then;
+  } catch {
+    return true;
+  }
+  if (typeof then !== "function") return false;
+  // Assimilation consumes rejection without awaiting a user callback in the parse turn.
+  void new Promise<void>((resolve, reject) => {
+    queueMicrotask(() => {
+      try {
+        then.call(value, () => resolve(), reject);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }).catch(() => {});
+  return true;
+}
+
+function frozenStopResult(result: NativeStopResult): NativeStopResult {
+  const cleanup = Object.freeze({
+    ...result.cleanup,
+    graceful: Object.freeze({ ...result.cleanup.graceful }),
+    force: Object.freeze({ ...result.cleanup.force }),
+  });
+  const signalFailure = result.signalFailure
+    ? Object.freeze({ ...result.signalFailure })
+    : undefined;
+  return Object.freeze(
+    result.kind === "exited"
+      ? {
+          ...result,
+          exit: Object.freeze({ ...result.exit }),
+          cleanup,
+          ...(signalFailure && { signalFailure }),
+        }
+      : { ...result, cleanup, ...(signalFailure && { signalFailure }) },
+  );
+}
+
+class RunSessionCore {
   readonly #run: RunRef;
-  readonly #model: TerminalModel;
-  readonly #onFact: ((fact: Fact) => void) | undefined;
-  readonly #onFault: RunSessionOptions["onFault"];
+  #model: TerminalModel | undefined;
+  #onFact: ((fact: Fact) => void) | undefined;
+  #onFault: RunSessionOptions["onFault"];
   #native: NativePtyAdapter | undefined;
   #pending: Pending[] = [];
   #queuedBytes = 0;
@@ -82,6 +160,14 @@ export class RunSession {
   #counterExhausted = false;
   #disposed = false;
   #consumerFenced = false;
+  #diagnosticFenced = false;
+  #leaderExit: NativeExit | undefined;
+  #writer: RunSessionWriterObservation = { kind: "pending-at-deadline" };
+  #stop: RunSessionStopObservation = { kind: "pending-at-deadline" };
+  #stopStarted = false;
+  #disposePromise: Promise<RunSessionDisposalReceipt> | undefined;
+  #resolveDispose: ((receipt: RunSessionDisposalReceipt) => void) | undefined;
+  #disposeTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: RunSessionOptions) {
     this.#run = options.run;
@@ -108,10 +194,12 @@ export class RunSession {
   }
 
   attach(native: NativePtyAdapter): void {
+    if (this.#native) throw new Error("Run session already has an owned PTY");
     this.#native = native;
+    this.#observeWriter(native);
     if (this.#faulted || this.#disposed) {
       this.#releasePending("Run session faulted before native attachment");
-      void native.stop();
+      this.#requestStop();
       return;
     }
     if (this.#queuedBytes >= M0_LIMITS.parseHighBytes) this.#pause();
@@ -150,8 +238,11 @@ export class RunSession {
   }
 
   onExit(exit: NativeExit): void {
-    if (this.#disposed || this.#exited) return;
+    if (this.#exited) return;
     this.#exited = true;
+    this.#leaderExit = Object.freeze({ ...exit });
+    this.#settleDisposalIfComplete();
+    if (this.#disposed) return;
     if (this.#faulted) return;
     if (this.#receivedSeq === Number.MAX_SAFE_INTEGER) {
       this.#counterExhausted = true;
@@ -173,16 +264,17 @@ export class RunSession {
   }
 
   onFault(fault: NativePtyFault): void {
-    if (this.#disposed || this.#faulted) return;
+    if (this.#faulted) return;
     this.#faulted = true;
+    this.#requestStop();
+    if (this.#disposed) return;
     // A fault can be raised synchronously by pause itself; retrying it recurses.
-    this.#native?.retireInput();
-    void this.#native?.stop();
     try {
-      this.#onFault?.(fault);
+      this.#native?.retireInput();
     } catch {
-      // Diagnostic observers cannot restore authority after a native fault.
+      // The owned stop receipt remains observable after a retirement failure.
     }
+    this.#reportFault(fault);
     this.#schedule();
   }
 
@@ -209,22 +301,165 @@ export class RunSession {
       faulted: this.#faulted,
       counterExhausted: this.#counterExhausted,
       consumerFenced: this.#consumerFenced,
+      diagnosticFenced: this.#diagnosticFenced,
+      writer: this.#writer,
+      leader: this.#leaderObservation(),
+      stop: this.#stop,
+      ownershipEvidence: this.#ownershipEvidence(),
       disposed: this.#disposed,
     };
   }
 
-  async dispose(): Promise<NativeStopResult | undefined> {
-    if (this.#disposed) return undefined;
+  dispose(): Promise<RunSessionDisposalReceipt> {
+    if (this.#disposePromise) return this.#disposePromise;
+    const promise = new Promise<RunSessionDisposalReceipt>((resolve) => {
+      this.#resolveDispose = resolve;
+    });
+    // Publish identity before model retirement or native stop can reenter.
+    this.#disposePromise = promise;
     this.#disposed = true;
-    this.#model.dispose();
+    this.#disposeTimer = setTimeout(() => this.#finishDisposal(), 3_000);
+    const model = this.#model;
+    this.#model = undefined;
+    try {
+      model?.dispose();
+    } catch {
+      this.#faulted = true;
+    }
     this.#releasePending("Run session disposed");
-    return this.#native?.stop();
+    this.#onFact = undefined;
+    this.#onFault = undefined;
+    try {
+      this.#native?.retireInput();
+    } catch {
+      this.#faulted = true;
+    }
+    this.#requestStop();
+    // Pending native completions retain only lifecycle facts, not the model or consumers.
+    this.#native = undefined;
+    this.#settleDisposalIfComplete();
+    return promise;
+  }
+
+  finishSpawnFailure(): void {
+    this.#stop = Object.freeze({ kind: "failed-to-observe" });
+    this.#writer = Object.freeze({ kind: "invalid" });
+    this.#settleDisposalIfComplete();
+  }
+
+  #observeWriter(native: NativePtyAdapter): void {
+    try {
+      const completion = native.writerCompletion;
+      if (!completion || typeof completion.then !== "function")
+        throw new Error("Missing writer completion");
+      void Promise.resolve(completion).then(
+        (result: IBoundedWriteOwnerResult) => {
+          try {
+            this.#writer =
+              result?.kind === "closed"
+                ? Object.freeze({ kind: "closed" })
+                : result?.kind === "close-uncertain" && typeof result.error === "string"
+                  ? Object.freeze({ kind: "close-uncertain", error: result.error.slice(0, 128) })
+                  : Object.freeze({ kind: "invalid" });
+          } catch {
+            this.#writer = Object.freeze({ kind: "invalid" });
+          }
+          this.#settleDisposalIfComplete();
+        },
+        () => {
+          this.#writer = Object.freeze({ kind: "invalid" });
+          this.#settleDisposalIfComplete();
+        },
+      );
+    } catch {
+      this.#writer = Object.freeze({ kind: "invalid" });
+      this.#settleDisposalIfComplete();
+    }
+  }
+
+  #requestStop(): void {
+    if (!this.#native || this.#stopStarted) return;
+    this.#stopStarted = true;
+    try {
+      void Promise.resolve(this.#native.stop()).then(
+        (result) => {
+          try {
+            if (result?.kind !== "exited" && result?.kind !== "unverifiable") {
+              this.#stop = Object.freeze({ kind: "failed-to-observe" });
+            } else {
+              const frozen = frozenStopResult(result);
+              this.#stop = Object.freeze({ kind: "observed", result: frozen });
+              if (frozen.kind === "exited" && !this.#leaderExit) {
+                this.#leaderExit = frozen.exit;
+                this.#exited = true;
+              }
+            }
+          } catch {
+            this.#stop = Object.freeze({ kind: "failed-to-observe" });
+          }
+          this.#settleDisposalIfComplete();
+        },
+        () => {
+          this.#stop = Object.freeze({ kind: "failed-to-observe" });
+          this.#settleDisposalIfComplete();
+        },
+      );
+    } catch {
+      this.#stop = Object.freeze({ kind: "failed-to-observe" });
+      this.#settleDisposalIfComplete();
+    }
+  }
+
+  #leaderObservation(): RunSessionLeaderObservation {
+    return this.#leaderExit
+      ? Object.freeze({ kind: "exit-observed", exit: this.#leaderExit })
+      : Object.freeze({ kind: "not-observed" });
+  }
+
+  #ownershipEvidence(): RunSessionOwnershipEvidence {
+    if (this.#writer.kind === "close-uncertain" || this.#writer.kind === "invalid")
+      return "retained-uncertain";
+    if (this.#leaderExit && this.#writer.kind === "closed") return "closure-proven";
+    return "unresolved";
+  }
+
+  #settleDisposalIfComplete(): void {
+    if (
+      this.#disposePromise &&
+      this.#stop.kind !== "pending-at-deadline" &&
+      this.#writer.kind !== "pending-at-deadline"
+    )
+      this.#finishDisposal();
+  }
+
+  #finishDisposal(): void {
+    const resolve = this.#resolveDispose;
+    if (!resolve) return;
+    this.#resolveDispose = undefined;
+    if (this.#disposeTimer) clearTimeout(this.#disposeTimer);
+    this.#disposeTimer = undefined;
+    // The receipt records this observation boundary; late native facts only improve snapshot().
+    resolve(
+      Object.freeze({
+        stop: this.#stop,
+        leader: this.#leaderObservation(),
+        writer: this.#writer,
+        ownershipEvidence: this.#ownershipEvidence(),
+      }),
+    );
   }
 
   #pause(): void {
     if (!this.#native || this.#paused) return;
-    this.#native.pause();
-    if (!this.#faulted) this.#paused = true;
+    const native = this.#native;
+    try {
+      native.pause();
+    } catch {
+      this.onFault({ kind: "io", reason: "pause-threw" });
+      return;
+    }
+    if (!this.#faulted && !this.#disposed && !this.#exited && native === this.#native)
+      this.#paused = true;
   }
 
   #schedule(): void {
@@ -247,29 +482,25 @@ export class RunSession {
     this.#running = true;
     try {
       if (item.kind === "barrier") {
-        const result = await this.#model.barrier();
+        const result = await this.#model!.barrier();
         item.resolve(this.#disposed ? failure("Run session disposed") : result);
       } else if (item.kind === "unpublished") {
-        const result = await this.#model.continueUnpublishedOutput(item.bytes);
+        const result = await this.#model!.continueUnpublishedOutput(item.bytes);
         this.#queuedBytes = Math.max(0, this.#queuedBytes - item.bytes.length);
         if (!result.ok) this.#fault(`Terminal model ${result.error.code}: ${result.error.reason}`);
       } else {
         const { event, bytes } = item.fact;
-        const result = await this.#model.apply(event, bytes);
+        const result = await this.#model!.apply(event, bytes);
         if (bytes) this.#queuedBytes = Math.max(0, this.#queuedBytes - bytes.length);
         if (!result.ok) this.#fault(`Terminal model ${result.error.code}: ${result.error.reason}`);
         else if (!this.#disposed && !this.#faulted) {
           this.#parsedSeq = event.seq;
           if (!this.#consumerFenced) {
             try {
-              this.#onFact?.(item.fact);
+              const returned = this.#onFact?.(item.fact) as unknown;
+              if (consumesThenable(returned)) this.#fenceConsumer();
             } catch {
-              this.#consumerFenced = true;
-              try {
-                this.#onFault?.({ kind: "consumer", reason: "parsed-fact-observer-threw" });
-              } catch {
-                // A diagnostic callback cannot interrupt authoritative parsing.
-              }
+              this.#fenceConsumer();
             }
           }
         }
@@ -279,9 +510,21 @@ export class RunSession {
       this.#fault("Ordered terminal parse failed");
     } finally {
       this.#running = false;
-      if (this.#paused && !this.#faulted && this.#queuedBytes <= M0_LIMITS.parseLowBytes) {
-        this.#native.resume();
-        this.#paused = false;
+      const native = this.#native;
+      if (
+        native &&
+        this.#paused &&
+        !this.#faulted &&
+        !this.#disposed &&
+        !this.#exited &&
+        this.#queuedBytes <= M0_LIMITS.parseLowBytes
+      ) {
+        try {
+          native.resume();
+          if (!this.#faulted && !this.#disposed && native === this.#native) this.#paused = false;
+        } catch {
+          this.#fault("Native resume failed");
+        }
       }
       this.#schedule();
     }
@@ -297,38 +540,68 @@ export class RunSession {
   #fault(reason: string): void {
     if (this.#faulted || this.#disposed) return;
     this.#faulted = true;
-    this.#native?.pause();
-    this.#native?.retireInput();
-    void this.#native?.stop();
     try {
-      this.#onFault?.({ kind: "pump", reason });
+      this.#native?.pause();
     } catch {
-      // Diagnostic observers cannot revive a fenced run.
+      // A pause fault must not block owned stop observation.
     }
+    try {
+      this.#native?.retireInput();
+    } catch {
+      // A retirement fault must not block owned stop observation.
+    }
+    this.#requestStop();
+    this.#reportFault({ kind: "pump", reason });
     this.#schedule();
+  }
+
+  #fenceConsumer(): void {
+    if (this.#consumerFenced) return;
+    this.#consumerFenced = true;
+    if (!this.#disposed)
+      this.#reportFault({ kind: "consumer", reason: "parsed-fact-observer-failed" });
+  }
+
+  #reportFault(fault: RunSessionFault): void {
+    if (this.#disposed || this.#diagnosticFenced || !this.#onFault) return;
+    try {
+      const returned = this.#onFault(fault) as unknown;
+      if (consumesThenable(returned)) this.#diagnosticFenced = true;
+    } catch {
+      this.#diagnosticFenced = true;
+    }
   }
 }
 
 export function createRunSession(options: RunSessionOptions): RunSessionStart {
-  const session = new RunSession(options);
+  const core = new RunSessionCore(options);
   let result: NativeSpawnResult;
   try {
     result = options.factory.spawn(
       { ...options.spawn, cols: options.geometry.cols, rows: options.geometry.rows },
       {
-        onData: (bytes) => session.onData(bytes),
-        onExit: (exit) => session.onExit(exit),
-        onFault: (fault) => session.onFault(fault),
+        onData: (bytes) => core.onData(bytes),
+        onExit: (exit) => core.onExit(exit),
+        onFault: (fault) => core.onFault(fault),
       },
     );
   } catch (cause) {
-    session.dispose();
+    void core.dispose();
+    core.finishSpawnFailure();
     return { kind: "unclassified-failure", cause };
   }
   if (result.kind !== "created") {
-    void session.dispose();
+    void core.dispose();
+    core.finishSpawnFailure();
     return result;
   }
-  session.attach(result.pty);
+  core.attach(result.pty);
+  const session: RunSession = Object.freeze(
+    Object.assign(Object.create(null) as RunSession, {
+      barrier: () => core.barrier(),
+      snapshot: () => core.snapshot(),
+      dispose: () => core.dispose(),
+    }),
+  );
   return { kind: "created", session };
 }
