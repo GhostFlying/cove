@@ -319,8 +319,9 @@ JSON-RPC 2.0 定义关联 ID、结果/错误、通知和 batch，不替代 Cove 
   握手结果不能成为后续 HTTP 请求跳过检查的理由。
 - 版本不匹配通过稳定 bootstrap 错误格式返回，包含支持版本及 recovery 提示；不需要读懂当前业务 envelope。
   HTTP 状态与 bootstrap 错误字段的准确映射仍需在身份/配对设计中冻结。
-- 业务响应通过 HTTP headers 携带 `serverId`、`relayInstanceId` 和 `protocolVersion`（具体 header 名另定），
-  不给标准 JSON-RPC envelope 增加必需 meta 字段；客户端验证原服务身份。
+- 业务响应复用请求中的 `Cove-Server-Id`、`Cove-Instance-Id` 和 `Cove-Protocol` 三个 header，
+  分别携带 `serverId`、`relayInstanceId` 和 `protocolVersion`；header 名按 HTTP 规则不区分大小写。
+  响应不回显 `Authorization`，也不给标准 JSON-RPC envelope 增加必需 meta 字段；客户端逐次验证原服务身份。
   网络地址改变不创建新的操作命名空间，服务重启也不改变持久 serverId。
 - API 消息大小、并发、超时均有界；具体限额另行测定，文件内容不嵌入 RPC body。
 
