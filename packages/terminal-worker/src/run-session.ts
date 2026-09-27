@@ -168,9 +168,9 @@ export class RunSession {
   }
 
   onFault(fault: NativePtyFault): void {
-    if (this.#disposed) return;
+    if (this.#disposed || this.#faulted) return;
     this.#faulted = true;
-    this.#native?.pause();
+    // A fault can be raised synchronously by pause itself; retrying it recurses.
     this.#native?.retireInput();
     void this.#native?.stop();
     try {
@@ -218,7 +218,7 @@ export class RunSession {
   #pause(): void {
     if (!this.#native || this.#paused) return;
     this.#native.pause();
-    this.#paused = true;
+    if (!this.#faulted) this.#paused = true;
   }
 
   #schedule(): void {

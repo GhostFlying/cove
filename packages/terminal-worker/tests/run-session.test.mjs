@@ -16,6 +16,7 @@ function start(name = "run", callbacks = {}) {
     },
     pause() {
       state.paused++;
+      callbacks.onPause?.(observer);
     },
     resume() {
       state.resumed++;
@@ -145,6 +146,22 @@ test("high-water pause and low-water resume account copied pending bytes", async
     expect(await owned.session.barrier()).toMatchObject({ ok: true });
     expect(owned.session.snapshot()).toMatchObject({ queuedBytes: 0, paused: false });
     expect(owned.state.resumed).toBe(1);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("a synchronous native pause fault retires once without recursive pause", async () => {
+  const owned = start("pause-fault", {
+    onPause(observer) {
+      observer.onFault({ kind: "io", reason: "pause-failed" });
+    },
+  });
+  try {
+    owned.observer.onData(Buffer.alloc(9 * 65_536, 65));
+    expect(owned.session.snapshot()).toMatchObject({ faulted: true, paused: false });
+    expect(owned.state).toMatchObject({ paused: 1, retired: 1, stopped: 1 });
+    expect((await owned.session.barrier()).ok).toBe(false);
   } finally {
     await owned.session.dispose();
   }
