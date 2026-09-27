@@ -52,7 +52,12 @@ test("real PTY query reaches the bounded native writer before the ordered exit",
     expect(faults).toEqual([]);
   } finally {
     const settled = await result.session.dispose();
-    expect(settled?.kind).toBe("exited");
+    expect(settled).toMatchObject({
+      stop: { kind: "observed", result: { kind: "exited" } },
+      leader: { kind: "exit-observed" },
+      writer: { kind: "closed" },
+      ownershipEvidence: "closure-proven",
+    });
     expect(factory.snapshot().owners).toBe(0);
   }
 });

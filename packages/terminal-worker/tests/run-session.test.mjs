@@ -1,7 +1,18 @@
-import { expect, test } from "vitest";
-import { createRunSession } from "../dist/src/run-session.js";
+import { expect, test, vi } from "vitest";
+import * as execution from "@cove/terminal-worker/execution";
 
 const encoder = new TextEncoder();
+const { createRunSession } = execution;
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((accept, fail) => {
+    resolve = accept;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
 
 function start(name = "run", callbacks = {}) {
   const events = [];
@@ -10,6 +21,7 @@ function start(name = "run", callbacks = {}) {
   let observer;
   const pty = {
     pid: 1,
+    writerCompletion: callbacks.writerCompletion ?? Promise.resolve({ kind: "closed" }),
     automaticOutputSink(output) {
       writes.push({ ...output, bytes: Buffer.from(output.bytes) });
       callbacks.onAutomaticOutput?.(output, observer);
@@ -20,13 +32,27 @@ function start(name = "run", callbacks = {}) {
     },
     resume() {
       state.resumed++;
+      callbacks.onResume?.(observer);
     },
     retireInput() {
       state.retired++;
     },
     stop() {
       state.stopped++;
-      return Promise.resolve({ kind: "unverifiable", cause: "test", cleanup: {} });
+      callbacks.onStop?.(observer);
+      return (
+        callbacks.stopResult ??
+        Promise.resolve({
+          kind: "unverifiable",
+          cause: "test",
+          cleanup: {
+            scope: "initial-process-group",
+            verified: false,
+            graceful: { kind: "not-attempted", reason: "deadline-not-reached" },
+            force: { kind: "not-attempted", reason: "deadline-not-reached" },
+          },
+        })
+      );
     },
   };
   const factory = {
@@ -44,7 +70,10 @@ function start(name = "run", callbacks = {}) {
     spawn: { file: "unused", args: [], cwd: "/", env: {} },
     factory,
     onFact: callbacks.onFact ?? ((fact) => events.push(fact)),
-    onFault: (fault) => faults.push(fault),
+    onFault: (fault) => {
+      faults.push(fault);
+      return callbacks.onFault?.(fault);
+    },
   });
   expect(result.kind).toBe("created");
   return { session: result.session, observer, events, writes, state, faults };
@@ -181,7 +210,7 @@ test("a throwing parsed consumer is fenced while the authoritative model continu
     expect(await owned.session.barrier()).toMatchObject({ ok: true });
     expect(delivered).toBe(1);
     expect(owned.writes.map(({ bytes }) => bytes.toString())).toEqual(["\u001b[0n"]);
-    expect(owned.faults).toEqual([{ kind: "consumer", reason: "parsed-fact-observer-threw" }]);
+    expect(owned.faults).toEqual([{ kind: "consumer", reason: "parsed-fact-observer-failed" }]);
     expect(owned.session.snapshot()).toMatchObject({
       parsedSeq: 2,
       faulted: false,
@@ -256,4 +285,322 @@ test("dispose fences queued and later native callbacks", async () => {
   expect((await barrier).ok).toBe(false);
   expect(owned.events).toEqual([]);
   expect(owned.session.snapshot()).toMatchObject({ disposed: true, queuedBytes: 0 });
+});
+
+test("public facade has no constructor, native ingress, or replacement path", async () => {
+  const owned = start("facade");
+  expect(Object.getPrototypeOf(owned.session)).toBeNull();
+  expect(Object.keys(owned.session).sort()).toEqual(["barrier", "dispose", "snapshot"]);
+  expect(Object.isFrozen(owned.session)).toBe(true);
+  expect(owned.session.constructor).toBeUndefined();
+  expect(Reflect.get(execution, "RunSession")).toBeUndefined();
+  expect(owned.session.attach).toBeUndefined();
+  expect(owned.session.onData).toBeUndefined();
+  await owned.session.dispose();
+  expect(owned.state.stopped).toBe(1);
+});
+
+test("reentrant disposal returns one promise and preserves stop, exit, and writer facts", async () => {
+  const writer = deferred();
+  const stop = deferred();
+  let session;
+  let reentrant;
+  const owned = start("receipt", {
+    writerCompletion: writer.promise,
+    stopResult: stop.promise,
+    onStop() {
+      reentrant = session.dispose();
+    },
+  });
+  session = owned.session;
+  const receiptPromise = session.dispose();
+  expect(reentrant).toBe(receiptPromise);
+  expect(session.dispose()).toBe(receiptPromise);
+  expect(owned.state.stopped).toBe(1);
+  owned.observer.onExit({ exitCode: 0 });
+  writer.resolve({ kind: "closed" });
+  stop.resolve({
+    kind: "exited",
+    exit: { exitCode: 0 },
+    cleanup: {
+      scope: "initial-process-group",
+      verified: false,
+      graceful: { kind: "not-attempted", reason: "already-exited" },
+      force: { kind: "not-attempted", reason: "already-exited" },
+    },
+  });
+  const receipt = await receiptPromise;
+  expect(receipt).toMatchObject({
+    stop: { kind: "observed", result: { kind: "exited" } },
+    leader: { kind: "exit-observed", exit: { exitCode: 0 } },
+    writer: { kind: "closed" },
+    ownershipEvidence: "closure-proven",
+  });
+  expect(Object.isFrozen(receipt)).toBe(true);
+  expect(owned.session.snapshot()).toMatchObject({ ownershipEvidence: "closure-proven" });
+});
+
+test("deadline freezes unresolved receipt while later owned facts improve only snapshot", async () => {
+  vi.useFakeTimers();
+  try {
+    const writer = deferred();
+    const stop = deferred();
+    const owned = start("late", { writerCompletion: writer.promise, stopResult: stop.promise });
+    const pending = owned.session.dispose();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const receipt = await pending;
+    expect(receipt).toMatchObject({
+      stop: { kind: "pending-at-deadline" },
+      leader: { kind: "not-observed" },
+      writer: { kind: "pending-at-deadline" },
+      ownershipEvidence: "unresolved",
+    });
+    owned.observer.onExit({ exitCode: 0 });
+    writer.resolve({ kind: "closed" });
+    stop.resolve({
+      kind: "unverifiable",
+      cause: "late",
+      cleanup: {
+        scope: "initial-process-group",
+        verified: false,
+        graceful: { kind: "not-attempted", reason: "deadline-not-reached" },
+        force: { kind: "not-attempted", reason: "deadline-not-reached" },
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(receipt.writer.kind).toBe("pending-at-deadline");
+    expect(owned.session.dispose()).toBe(pending);
+    expect(owned.session.snapshot()).toMatchObject({
+      leader: { kind: "exit-observed" },
+      writer: { kind: "closed" },
+      ownershipEvidence: "closure-proven",
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("close-uncertain remains charged evidence despite actual exit", async () => {
+  const writer = deferred();
+  const owned = start("uncertain", { writerCompletion: writer.promise });
+  const pending = owned.session.dispose();
+  owned.observer.onExit({ exitCode: 0 });
+  writer.resolve({ kind: "close-uncertain", error: "EIO" });
+  expect(await pending).toMatchObject({
+    leader: { kind: "exit-observed" },
+    writer: { kind: "close-uncertain", error: "EIO" },
+    ownershipEvidence: "retained-uncertain",
+  });
+});
+
+test("writer-first stop uncertainty retains signal detail until actual exit arrives", async () => {
+  const writer = deferred();
+  const stop = deferred();
+  const owned = start("writer-first", {
+    writerCompletion: writer.promise,
+    stopResult: stop.promise,
+  });
+  const pending = owned.session.dispose();
+  writer.resolve({ kind: "closed" });
+  stop.resolve({
+    kind: "unverifiable",
+    cause: "leader-unseen",
+    signalFailure: { phase: "graceful", cause: "EPERM" },
+    cleanup: {
+      scope: "initial-process-group",
+      verified: false,
+      graceful: { kind: "unverifiable", reason: "signal-failed", errorCode: "EPERM" },
+      force: { kind: "not-attempted", reason: "deadline-not-reached" },
+    },
+  });
+  const receipt = await pending;
+  expect(receipt).toMatchObject({
+    stop: {
+      kind: "observed",
+      result: { kind: "unverifiable", signalFailure: { phase: "graceful", cause: "EPERM" } },
+    },
+    writer: { kind: "closed" },
+    leader: { kind: "not-observed" },
+    ownershipEvidence: "unresolved",
+  });
+  owned.observer.onExit({ exitCode: 0 });
+  expect(owned.session.snapshot().ownershipEvidence).toBe("closure-proven");
+  expect(receipt.ownershipEvidence).toBe("unresolved");
+});
+
+test("an exited stop cannot claim closure while the writer never completes", async () => {
+  vi.useFakeTimers();
+  try {
+    const writer = deferred();
+    const owned = start("held-writer", {
+      writerCompletion: writer.promise,
+      stopResult: Promise.resolve({
+        kind: "exited",
+        exit: { exitCode: 0 },
+        cleanup: {
+          scope: "initial-process-group",
+          verified: false,
+          graceful: { kind: "not-attempted", reason: "already-exited" },
+          force: { kind: "not-attempted", reason: "already-exited" },
+        },
+      }),
+    });
+    const pending = owned.session.dispose();
+    await vi.advanceTimersByTimeAsync(3_000);
+    const receipt = await pending;
+    expect(receipt).toMatchObject({
+      stop: { kind: "observed", result: { kind: "exited" } },
+      leader: { kind: "exit-observed" },
+      writer: { kind: "pending-at-deadline" },
+      ownershipEvidence: "unresolved",
+    });
+    writer.resolve({ kind: "closed" });
+    await Promise.resolve();
+    expect(owned.session.snapshot().ownershipEvidence).toBe("closure-proven");
+    expect(receipt.ownershipEvidence).toBe("unresolved");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a rejected stop still records independent writer closure and actual exit", async () => {
+  const owned = start("rejected-stop", {
+    writerCompletion: Promise.resolve({ kind: "closed" }),
+    stopResult: Promise.reject(new Error("stop rejected")),
+  });
+  const pending = owned.session.dispose();
+  owned.observer.onExit({ exitCode: 0 });
+  expect(await pending).toMatchObject({
+    stop: { kind: "failed-to-observe" },
+    leader: { kind: "exit-observed" },
+    writer: { kind: "closed" },
+    ownershipEvidence: "closure-proven",
+  });
+});
+
+test("consumer and diagnostic thenables fence once without blocking query parsing", async () => {
+  let delivered = 0;
+  const owned = start("thenable", {
+    onFact() {
+      delivered++;
+      return Promise.reject(new Error("consumer rejected"));
+    },
+    onFault() {
+      return Promise.reject(new Error("diagnostic rejected"));
+    },
+  });
+  try {
+    owned.observer.onData(Buffer.from("A"));
+    owned.observer.onData(Buffer.from(encoder.encode("\u001b[5n")));
+    expect(await owned.session.barrier()).toMatchObject({ ok: true });
+    expect(delivered).toBe(1);
+    expect(owned.faults).toEqual([{ kind: "consumer", reason: "parsed-fact-observer-failed" }]);
+    expect(owned.session.snapshot()).toMatchObject({
+      parsedSeq: 2,
+      consumerFenced: true,
+      diagnosticFenced: true,
+      faulted: false,
+    });
+    expect(owned.writes.map(({ bytes }) => bytes.toString())).toEqual(["\u001b[0n"]);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("throwing then getter and pending diagnostic fence without halting the model", async () => {
+  let delivered = 0;
+  const owned = start("then-getter", {
+    onFact() {
+      delivered++;
+      return Object.defineProperty({}, "then", {
+        get() {
+          throw new Error("then getter failed");
+        },
+      });
+    },
+    onFault() {
+      return new Promise(() => {});
+    },
+  });
+  try {
+    owned.observer.onData(Buffer.from("A"));
+    owned.observer.onData(Buffer.from(encoder.encode("\u001b[5n")));
+    expect(await owned.session.barrier()).toMatchObject({ ok: true });
+    expect(delivered).toBe(1);
+    expect(owned.session.snapshot()).toMatchObject({
+      parsedSeq: 2,
+      consumerFenced: true,
+      diagnosticFenced: true,
+      faulted: false,
+    });
+    expect(owned.writes.map(({ bytes }) => bytes.toString())).toEqual(["\u001b[0n"]);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("resolved and throwing-call thenables violate the synchronous consumer boundary", async () => {
+  const resolved = start("resolved-then", { onFact: () => Promise.resolve() });
+  const throwing = start("throwing-then", {
+    onFact: () => ({
+      then() {
+        throw new Error("then call failed");
+      },
+    }),
+  });
+  try {
+    resolved.observer.onData(Buffer.from("A"));
+    throwing.observer.onData(Buffer.from("B"));
+    expect(await Promise.all([resolved.session.barrier(), throwing.session.barrier()])).toEqual([
+      expect.objectContaining({ ok: true }),
+      expect.objectContaining({ ok: true }),
+    ]);
+    expect(resolved.session.snapshot()).toMatchObject({ consumerFenced: true, faulted: false });
+    expect(throwing.session.snapshot()).toMatchObject({ consumerFenced: true, faulted: false });
+    expect(resolved.faults).toHaveLength(1);
+    expect(throwing.faults).toHaveLength(1);
+  } finally {
+    await Promise.all([resolved.session.dispose(), throwing.session.dispose()]);
+  }
+});
+
+test("invalid writer and rejected stop cannot be labeled as released ownership", async () => {
+  const owned = start("invalid-completion", {
+    writerCompletion: Promise.resolve({ kind: "invalid-native-result" }),
+    stopResult: Promise.reject(new Error("stop failed")),
+  });
+  const receipt = await owned.session.dispose();
+  expect(receipt).toMatchObject({
+    stop: { kind: "failed-to-observe" },
+    writer: { kind: "invalid" },
+    leader: { kind: "not-observed" },
+    ownershipEvidence: "retained-uncertain",
+  });
+  expect(owned.state.stopped).toBe(1);
+});
+
+test("fact consumer disposal at low water never resumes a retired PTY", async () => {
+  let session;
+  let receipt;
+  let delivered = 0;
+  let remainingAtDispose;
+  const owned = start("paused-dispose", {
+    onFact() {
+      if (++delivered === 7) {
+        remainingAtDispose = session.snapshot().queuedBytes;
+        receipt = session.dispose();
+      }
+    },
+  });
+  session = owned.session;
+  owned.observer.onData(Buffer.alloc(9 * 65_536, 65));
+  expect(owned.state.paused).toBe(1);
+  const barrier = session.barrier();
+  expect((await barrier).ok).toBe(false);
+  await receipt;
+  expect(delivered).toBe(7);
+  expect(remainingAtDispose).toBe(2 * 65_536);
+  expect(owned.state).toMatchObject({ resumed: 0, stopped: 1 });
+  expect(session.snapshot()).toMatchObject({ disposed: true, queuedBytes: 0 });
 });

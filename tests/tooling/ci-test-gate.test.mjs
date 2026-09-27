@@ -549,7 +549,7 @@ test("native adapter and run session suites cannot disappear or shrink", async (
     ["native-adapter-factory", 18],
     ["native-adapter-input", 7],
     ["native-adapter-real", 6],
-    ["run-session", 12],
+    ["run-session", 24],
     ["run-session-real", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
