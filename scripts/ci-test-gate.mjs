@@ -150,7 +150,14 @@ async function installedBrowserProvenance(identity, runId) {
 
 export function bindDiagnosticBrowserVersion(provenance, record) {
   const version = record.browserVersion;
-  if (version !== null && version !== provenance.chromiumVersion)
+  if (
+    (version === null &&
+      (record.browserVersionPinMatched !== null || record.browserVersionTruncated !== null)) ||
+    (version !== null &&
+      (version !== provenance.chromiumVersion ||
+        record.browserVersionPinMatched !== true ||
+        record.browserVersionTruncated !== false))
+  )
     throw new Error("Browser-close diagnostic reported browser version differs from installed pin");
   return { ...provenance, browserReportedVersion: version };
 }
@@ -166,6 +173,9 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
     /^\d+(?:\.\d+){1,3}$/.test(provenance.chromiumVersion ?? "") &&
     provenance.browserReportedVersion === record.browserVersion &&
     (record.browserVersion === null || record.browserVersion === provenance.chromiumVersion) &&
+    (record.browserVersion === null
+      ? record.browserVersionPinMatched === null && record.browserVersionTruncated === null
+      : record.browserVersionPinMatched === true && record.browserVersionTruncated === false) &&
     (!runId.startsWith("github-") ||
       runId === `github-${provenance.githubRunId}-${provenance.githubRunAttempt}`)
   );
@@ -909,7 +919,12 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
         (typeof record.browserVersion !== "string" ||
           !/^\d+(?:\.\d+){1,3}$/.test(record.browserVersion) ||
           record.browserVersion.length > 80)) ||
+      (record.browserVersion === null
+        ? record.browserVersionPinMatched !== null || record.browserVersionTruncated !== null
+        : typeof record.browserVersionPinMatched !== "boolean" ||
+          typeof record.browserVersionTruncated !== "boolean") ||
       (record.primaryOutcome === "completed" && record.browserVersion === null) ||
+      (record.primaryOutcome === "completed" && record.browserVersionPinMatched !== true) ||
       record.browserExited !== true ||
       record.listenerClosed !== true ||
       !validBrowserCleanupRecord(record) ||
