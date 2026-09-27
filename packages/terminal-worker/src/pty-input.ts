@@ -179,6 +179,9 @@ const NATIVE_REJECTIONS = new Set<BoundedWriteRejectionReason>([
   "task-limit",
   "ticket-exhausted",
 ]);
+const SETTLEMENT_TICKET_BYTES = 768;
+const MAX_SETTLEMENT_CODE_BYTES = 32;
+const MAX_SETTLEMENT_MESSAGE_BYTES = 128;
 
 function isSafeCount(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
@@ -205,15 +208,89 @@ function parseAdmission(value: unknown, byteLength: number): ParsedAdmission | u
     : undefined;
 }
 
+type CapturedSettlement =
+  | { readonly kind: "invalid"; readonly ticket?: number }
+  | {
+      readonly kind: "captured";
+      readonly ticket: number;
+      readonly status: "written" | "error" | "closed";
+      readonly originalBytes: number;
+      readonly writtenBytes: number;
+      readonly remainingBytes: number;
+      readonly errorCode?: string;
+      readonly errorMessage?: string;
+    };
+
+function boundedAsciiCode(value: string): string | undefined {
+  const chars: string[] = [];
+  for (let index = 0; index < value.length && chars.length < MAX_SETTLEMENT_CODE_BYTES; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x20 || code > 0x7e) return undefined;
+    chars.push(String.fromCharCode(code));
+  }
+  return chars.join("");
+}
+
+function boundedUtf8Message(value: string): string {
+  const chars: string[] = [];
+  let bytes = 0;
+  for (let index = 0; index < value.length;) {
+    const original = value.codePointAt(index)!;
+    const scalar = original >= 0xd800 && original <= 0xdfff ? 0xfffd : original;
+    const width = scalar < 0x80 ? 1 : scalar < 0x800 ? 2 : scalar < 0x10000 ? 3 : 4;
+    if (bytes + width > MAX_SETTLEMENT_MESSAGE_BYTES) break;
+    chars.push(String.fromCodePoint(scalar));
+    bytes += width;
+    index += original > 0xffff ? 2 : 1;
+  }
+  return chars.join("");
+}
+
+function captureSettlement(value: unknown): CapturedSettlement {
+  if (typeof value !== "object" || value === null) return { kind: "invalid" };
+  const source = value as Partial<IBoundedWriteSettlement>;
+  let ticket: number | undefined;
+  try {
+    const actualTicket = source.ticket;
+    if (Number.isSafeInteger(actualTicket) && Number(actualTicket) > 0) ticket = actualTicket;
+    const status = source.status;
+    const originalBytes = source.originalBytes;
+    const writtenBytes = source.writtenBytes;
+    const remainingBytes = source.remainingBytes;
+    const errorCode = source.errorCode;
+    const errorMessage = source.errorMessage;
+    if (
+      ticket === undefined ||
+      (status !== "written" && status !== "error" && status !== "closed") ||
+      !isSafeCount(originalBytes) ||
+      !isSafeCount(writtenBytes) ||
+      !isSafeCount(remainingBytes) ||
+      (errorCode !== undefined && typeof errorCode !== "string") ||
+      (errorMessage !== undefined && typeof errorMessage !== "string")
+    )
+      return { kind: "invalid", ...(ticket === undefined ? {} : { ticket }) };
+    const code = errorCode === undefined ? undefined : boundedAsciiCode(errorCode);
+    return {
+      kind: "captured",
+      ticket,
+      status,
+      originalBytes,
+      writtenBytes,
+      remainingBytes,
+      ...(code === undefined ? {} : { errorCode: code }),
+      ...(errorMessage === undefined ? {} : { errorMessage: boundedUtf8Message(errorMessage) }),
+    };
+  } catch {
+    return { kind: "invalid", ...(ticket === undefined ? {} : { ticket }) };
+  }
+}
+
 function settlementResult(
-  value: unknown,
+  value: CapturedSettlement,
   ticket: number,
   byteLength: number,
 ): NativeInputSettlement {
-  if (typeof value !== "object" || value === null) {
-    return invalidSettlement(ticket, byteLength);
-  }
-  const settlement = value as Partial<IBoundedWriteSettlement>;
+  if (value.kind === "invalid") return invalidSettlement(ticket, byteLength);
   const {
     ticket: actualTicket,
     status,
@@ -222,7 +299,7 @@ function settlementResult(
     remainingBytes,
     errorCode,
     errorMessage,
-  } = settlement;
+  } = value;
   const valid =
     actualTicket === ticket &&
     originalBytes === byteLength &&
@@ -273,13 +350,8 @@ function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
-function settlementTicket(value: IBoundedWriteSettlement | undefined): number | undefined {
-  if (!value) return undefined;
-  try {
-    return Number.isSafeInteger(value.ticket) && value.ticket > 0 ? value.ticket : undefined;
-  } catch {
-    return undefined;
-  }
+function settlementTicket(value: CapturedSettlement | undefined): number | undefined {
+  return value?.ticket;
 }
 
 export class PtyInputController {
@@ -335,7 +407,8 @@ export class PtyInputController {
     }
 
     // The native owner and this callback may each retain the full original intent.
-    const retained = this.#reserveRetainedBytes?.(bytes.byteLength * 2 + 128);
+    // Two intents plus bounded capture/result diagnostics and their overlapping envelopes.
+    const retained = this.#reserveRetainedBytes?.(bytes.byteLength * 2 + SETTLEMENT_TICKET_BYTES);
     if (this.#reserveRetainedBytes && !retained) {
       local.release();
       shared.release();
@@ -351,11 +424,11 @@ export class PtyInputController {
       retained?.release();
     };
     let admission: Extract<IBoundedWriteAdmission, { accepted: true }> | undefined;
-    let earlySettlement: IBoundedWriteSettlement | undefined;
+    let earlySettlement: CapturedSettlement | undefined;
     let uncertainCall = false;
     let settlementCallbacks = 0;
     let settlementHandled = false;
-    const handleSettlement = (value: unknown): void => {
+    const handleSettlement = (value: CapturedSettlement): void => {
       if (!admission || settlementHandled) return;
       settlementHandled = true;
       let result: NativeInputSettlement;
@@ -380,6 +453,7 @@ export class PtyInputController {
       } finally {
         // Both ledgers retain the whole allocation while the consumer observes
         // settlement, including when that callback reenters submit.
+        earlySettlement = undefined;
         release();
       }
     };
@@ -393,15 +467,18 @@ export class PtyInputController {
           );
           return;
         }
+        // Capture before the synchronous callback can leave an owned early record.
+        const captured = captureSettlement(value);
         if (!admission) {
-          earlySettlement = value;
-          if (uncertainCall && Number.isSafeInteger(value.ticket) && value.ticket > 0) {
-            admission = { accepted: true, ticket: value.ticket, byteLength: bytes.byteLength };
-            handleSettlement(value);
+          earlySettlement = captured;
+          const ticket = settlementTicket(captured);
+          if (uncertainCall && ticket !== undefined) {
+            admission = { accepted: true, ticket, byteLength: bytes.byteLength };
+            handleSettlement(captured);
           }
           return;
         }
-        handleSettlement(value);
+        handleSettlement(captured);
       } catch (error) {
         this.#faultAndFence("native-settlement-invalid", error);
       }
