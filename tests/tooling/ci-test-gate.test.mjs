@@ -225,6 +225,8 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     sourceDirty: false,
     browserPid: 42,
     browserVersion: "153.0.8010.12",
+    browserVersionPinMatched: true,
+    browserVersionTruncated: false,
     browserExited: true,
     profile: "query",
     primaryOutcome: "completed",
@@ -410,6 +412,28 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     classification: "validated-test-failure",
     vitestExitCode: 1,
   });
+  await writeFile(
+    path,
+    `${JSON.stringify({
+      ...failedRecord,
+      primaryOutcome: "rejected",
+      primaryErrorName: "Error",
+      browserVersion: "152.0.0.0",
+      browserVersionPinMatched: false,
+    })}\n`,
+  );
+  const observedMismatch = await verifyBrowserCloseDiagnosticEvidence(
+    diagnosticDirectory,
+    directory,
+    sourceCommit,
+    "local-43-1",
+    1,
+  );
+  expect(observedMismatch.record.browserVersion).toBe("152.0.0.0");
+  expect(() =>
+    bindDiagnosticBrowserVersion({ chromiumVersion: "153.0.8010.12" }, observedMismatch.record),
+  ).toThrow(/differs/);
+  await writeFile(path, `${JSON.stringify(failedRecord)}\n`);
   await expect(
     verifyBrowserCloseDiagnosticEvidence(
       diagnosticDirectory,
@@ -656,7 +680,7 @@ test("single diagnostic result cannot satisfy ordinary suite inventory", () => {
   expect(() => verifyBrowserCloseDiagnosticSelection(extra)).toThrow(/exactly V1-L4/);
 });
 
-test("diagnostic provenance distinguishes observed and unobserved browser versions", () => {
+test("diagnostic provenance rejects observed pin failures without treating them as unobserved", () => {
   const installed = {
     sourceCommit: "a".repeat(40),
     tree: "b".repeat(40),
@@ -669,27 +693,45 @@ test("diagnostic provenance distinguishes observed and unobserved browser versio
     chromiumVersion: "153.0.8010.12",
     browserReportedVersion: null,
   };
-  expect(bindDiagnosticBrowserVersion(installed, { browserVersion: null })).toMatchObject({
+  const unobserved = {
+    browserVersion: null,
+    browserVersionPinMatched: null,
+    browserVersionTruncated: null,
+  };
+  const matched = {
+    browserVersion: "153.0.8010.12",
+    browserVersionPinMatched: true,
+    browserVersionTruncated: false,
+  };
+  expect(bindDiagnosticBrowserVersion(installed, unobserved)).toMatchObject({
     browserReportedVersion: null,
   });
-  expect(
-    bindDiagnosticBrowserVersion(installed, { browserVersion: "153.0.8010.12" }),
-  ).toMatchObject({
+  expect(bindDiagnosticBrowserVersion(installed, matched)).toMatchObject({
     browserReportedVersion: "153.0.8010.12",
   });
-  expect(() => bindDiagnosticBrowserVersion(installed, { browserVersion: "152.0.0.0" })).toThrow(
-    /differs/,
-  );
+  const mismatch = {
+    browserVersion: "152.0.0.0",
+    browserVersionPinMatched: false,
+    browserVersionTruncated: false,
+  };
+  expect(() => bindDiagnosticBrowserVersion(installed, mismatch)).toThrow(/differs/);
+  expect(() =>
+    bindDiagnosticBrowserVersion(installed, { ...matched, browserVersionPinMatched: false }),
+  ).toThrow(/differs/);
+  expect(() =>
+    bindDiagnosticBrowserVersion(installed, { ...matched, browserVersionTruncated: true }),
+  ).toThrow(/differs/);
+  expect(() =>
+    bindDiagnosticBrowserVersion(installed, { ...unobserved, browserVersionPinMatched: false }),
+  ).toThrow(/differs/);
   expect(() => bindDiagnosticBrowserVersion(installed, {})).toThrow(/differs/);
-  const observed = bindDiagnosticBrowserVersion(installed, {
-    browserVersion: "153.0.8010.12",
-  });
+  const observed = bindDiagnosticBrowserVersion(installed, matched);
   expect(
     validDiagnosticBrowserProvenance(
       observed,
       { sourceCommit: installed.sourceCommit, tree: installed.tree },
       installed.runId,
-      { browserVersion: "153.0.8010.12" },
+      matched,
     ),
   ).toBe(true);
   expect(
@@ -697,7 +739,7 @@ test("diagnostic provenance distinguishes observed and unobserved browser versio
       observed,
       { sourceCommit: "wrong", tree: installed.tree },
       installed.runId,
-      { browserVersion: "153.0.8010.12" },
+      matched,
     ),
   ).toBe(false);
 });

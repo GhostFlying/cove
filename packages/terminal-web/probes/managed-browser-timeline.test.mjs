@@ -1,6 +1,9 @@
 import { EventEmitter } from "node:events";
 import { expect, test } from "vitest";
-import { BrowserCloseTimeline } from "../dist/probes/node/managed-browser.js";
+import {
+  BrowserCloseTimeline,
+  observeBrowserVersion,
+} from "../dist/probes/node/managed-browser.js";
 
 function attachedTimeline() {
   const timeline = new BrowserCloseTimeline();
@@ -109,4 +112,31 @@ test("missing and repeated events remain bounded through failed connection clean
   timeline.finalize();
   expect(server.listenerCount("close")).toBe(0);
   expect(process.listenerCount("exit")).toBe(0);
+});
+
+test("public browser version remains observed when pin validation fails", () => {
+  let observed = null;
+  expect(() => {
+    observed = observeBrowserVersion({ version: () => "152.0.0.0" }, "153.0.8010.12");
+    if (!observed.pinMatched) throw new Error("version mismatch");
+  }).toThrow("version mismatch");
+  expect(observed).toEqual({ value: "152.0.0.0", pinMatched: false, truncated: false });
+
+  observed = null;
+  expect(() =>
+    observeBrowserVersion(
+      {
+        version: () => {
+          throw new Error("version unavailable");
+        },
+      },
+      "153.0.8010.12",
+    ),
+  ).toThrow("version unavailable");
+  expect(observed).toBeNull();
+  expect(observeBrowserVersion({ version: () => "1".repeat(100) }, "153.0.8010.12")).toEqual({
+    value: "1".repeat(80),
+    pinMatched: false,
+    truncated: true,
+  });
 });

@@ -295,6 +295,15 @@ export interface ManagedBrowserContext {
   listenerPort: number;
 }
 
+export function observeBrowserVersion(browser: Pick<ProbeBrowser, "version">, pinned: string) {
+  const value = browser.version();
+  return {
+    value: value.slice(0, 80),
+    pinMatched: value === pinned,
+    truncated: value.length > 80,
+  };
+}
+
 export async function withManagedBrowser<T>(
   work: (context: ManagedBrowserContext) => Promise<T>,
   profile: "query" | "environment" = "query",
@@ -410,6 +419,7 @@ export async function withManagedBrowser<T>(
     exitEvent = { code, signal, at: performance.now() };
   };
   let browser: ProbeBrowser | undefined;
+  let versionObservation: ReturnType<typeof observeBrowserVersion> | null = null;
   let listenerPort: number | null = null;
   let result: T | undefined;
   let contextRecord:
@@ -460,15 +470,13 @@ export async function withManagedBrowser<T>(
       timeout: remaining(5_000, "Chromium connect"),
     });
     closeTimeline.attachBrowser(browser);
-    const browserVersion = browser.version();
+    versionObservation = observeBrowserVersion(browser, chromiumEntry.browserVersion);
+    const browserVersion = versionObservation.value;
     const reportedVersion =
       profile === "environment"
         ? (process.env.COVE_PROBE_TEST_REPORTED_VERSION ?? browserVersion)
         : browserVersion;
-    if (
-      browserVersion !== chromiumEntry.browserVersion ||
-      reportedVersion !== chromiumEntry.browserVersion
-    )
+    if (!versionObservation.pinMatched || reportedVersion !== chromiumEntry.browserVersion)
       throw new Error(
         `Chromium version ${browserVersion !== chromiumEntry.browserVersion ? browserVersion : reportedVersion} does not match pinned ${chromiumEntry.browserVersion}`,
       );
@@ -772,7 +780,9 @@ export async function withManagedBrowser<T>(
     primaryErrorName:
       primaryError instanceof Error ? primaryError.name : primaryError ? "unknown" : null,
     browserPid: browserState?.pid ?? null,
-    browserVersion: contextRecord?.browserVersion ?? null,
+    browserVersion: versionObservation?.value ?? null,
+    browserVersionPinMatched: versionObservation?.pinMatched ?? null,
+    browserVersionTruncated: versionObservation?.truncated ?? null,
     browserExited: browserState
       ? browserState.exitCode !== null || browserState.signalCode !== null
       : true,
