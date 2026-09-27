@@ -13,6 +13,14 @@ export default defineConfig({
       },
       {
         test: {
+          name: "client",
+          environment: "node",
+          include: ["packages/client/tests/**/*.test.mjs"],
+          testTimeout: 15_000,
+        },
+      },
+      {
+        test: {
           name: "tooling",
           environment: "node",
           include: ["tests/tooling/**/*.test.{ts,mjs}"],

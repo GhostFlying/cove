@@ -14,6 +14,8 @@ const vitest = join(root, "node_modules/vitest/vitest.mjs");
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
+  { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 27 },
+  { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
@@ -29,10 +31,10 @@ export const requiredSuites = [
     file: "packages/protocol/tests/consumer-contracts.test.mjs",
     minimumTests: 12,
   },
-  { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 2 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 31 },
+  { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 3 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 32 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 6 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 7 },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
@@ -415,6 +417,7 @@ async function testFilesIn(directory, prefix) {
 
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
   return Promise.all([
+    testFilesIn(join(checkoutRoot, "packages/client/tests"), "packages/client/tests"),
     testFilesIn(join(checkoutRoot, "packages/protocol/tests"), "packages/protocol/tests"),
     testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling"),
     testFilesIn(

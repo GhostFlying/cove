@@ -118,3 +118,15 @@ test("rejects incompatible consumers and private package imports", async () => {
   expect(executed.status).not.toBe(0);
   expect(executed.stderr).toContain("ERR_PACKAGE_PATH_NOT_EXPORTED");
 });
+
+test("the client project builds from the public protocol reference", async () => {
+  const rootReferences = JSON.parse(await readFile(join(repository, "tsconfig.json"), "utf8"));
+  const clientProject = JSON.parse(
+    await readFile(join(repository, "packages/client/tsconfig.json"), "utf8"),
+  );
+  expect(rootReferences.references).toContainEqual({ path: "./packages/client/tsconfig.json" });
+  expect(clientProject.references).toEqual([{ path: "../protocol" }]);
+  expect(await readFile(join(repository, "packages/client/dist/client.d.ts"), "utf8")).toContain(
+    "createClient",
+  );
+});
