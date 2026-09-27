@@ -258,13 +258,16 @@ importers:
 
   packages/terminal-worker:
     dependencies:
+      '@cove/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@cove/terminal-engine':
+        specifier: workspace:*
+        version: link:../terminal-engine
       node-pty:
         specifier: 'catalog:'
         version: 1.1.0(patch_hash=7597b50397cd456b692683b6c01908323c8288afbec509fef13e4778b2b1006e)
     devDependencies:
-      '@cove/terminal-engine':
-        specifier: workspace:*
-        version: link:../terminal-engine
       '@types/node':
         specifier: 26.6.2
         version: 26.6.2

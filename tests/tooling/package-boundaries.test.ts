@@ -355,9 +355,14 @@ test("isolated Node consumer compiles the native adapter export without a privat
     join(directory, "consumer.mts"),
     `import { createNativePtyFactory } from '@cove/terminal-worker/native-adapter';
 import type { NativeFactoryLimits } from '@cove/terminal-worker/native-adapter';
+import { createRunSession } from '@cove/terminal-worker/execution';
+import type { RunSessionOptions } from '@cove/terminal-worker/execution';
 declare const limits: NativeFactoryLimits;
+declare const sessionOptions: RunSessionOptions;
 const factory = createNativePtyFactory(limits);
+const session = createRunSession(sessionOptions);
 void factory;
+void session;
 `,
   );
   const compiled = spawnSync(

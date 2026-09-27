@@ -11,6 +11,10 @@
     "./qualification": {
       "types": "./dist/src/native-qualification.d.ts",
       "import": "./dist/src/native-qualification.js"
+    },
+    "./execution": {
+      "types": "./dist/src/run-session.d.ts",
+      "import": "./dist/src/run-session.js"
     }
   },
   "scripts": {
@@ -19,10 +23,11 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
+    "@cove/protocol": "workspace:*",
+    "@cove/terminal-engine": "workspace:*",
     "node-pty": "catalog:"
   },
   "devDependencies": {
-    "@cove/terminal-engine": "workspace:*",
     "@types/node": "26.6.2"
   }
 }

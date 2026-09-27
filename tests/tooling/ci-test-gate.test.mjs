@@ -544,11 +544,13 @@ test("bounded native writer owner and fd-reuse suites cannot disappear or shrink
   }
 });
 
-test("native adapter factory, input, and real PTY suites cannot disappear or shrink", async () => {
+test("native adapter and run session suites cannot disappear or shrink", async () => {
   for (const [name, minimumTests] of [
     ["native-adapter-factory", 18],
     ["native-adapter-input", 7],
     ["native-adapter-real", 6],
+    ["run-session", 10],
+    ["run-session-real", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);

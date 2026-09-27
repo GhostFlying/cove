@@ -164,6 +164,16 @@ export const requiredSuites = [
     minimumTests: 6,
   },
   {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/run-session.test.mjs",
+    minimumTests: 10,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/run-session-real.test.mjs",
+    minimumTests: 1,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
