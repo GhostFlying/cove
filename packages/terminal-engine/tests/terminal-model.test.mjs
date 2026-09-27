@@ -28,6 +28,85 @@ test("M01 compiled root owns one model and a protocol-valid seq-0 capture", asyn
   }
 });
 
+test("shared reservation charges checkpoint, full tail allocation and queue before releasing on dispose", async () => {
+  let current = 0;
+  let peak = 0;
+  const limit = 128 * 1024;
+  const engine = model({
+    reserveRetainedBytes(bytes) {
+      if (bytes > limit - current) return undefined;
+      current += bytes;
+      peak = Math.max(peak, current);
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          current -= bytes;
+        },
+      };
+    },
+    availableRetainedBytes: () => limit - current,
+  });
+  try {
+    const initial = current;
+    expect(initial).toBeGreaterThan(0);
+    expect(engine.currentState().resources.checkpointBytes).toBeGreaterThan(0);
+    expect((await engine.apply(output(1), utf8("A"))).ok).toBe(true);
+    expect(engine.currentState().resources.tailAllocatedBytes).toBe(65_536);
+    expect(current - initial).toBeGreaterThanOrEqual(65_536);
+    expect(peak).toBeLessThanOrEqual(limit);
+  } finally {
+    engine.dispose();
+  }
+  expect(current).toBe(0);
+});
+
+test("checkpoint scratch denial preserves prior checkpoint and tail without leaking leases", async () => {
+  let current = 0;
+  let peak = 0;
+  let denyScratch = false;
+  let afterSetters = false;
+  const limit = 256 * 1024;
+  const engine = model({
+    reserveRetainedBytes(bytes) {
+      if (denyScratch && afterSetters) {
+        afterSetters = false;
+        return undefined;
+      }
+      if (denyScratch && bytes === 16_512) afterSetters = true;
+      if (bytes > limit - current) return undefined;
+      current += bytes;
+      peak = Math.max(peak, current);
+      let released = false;
+      return {
+        release() {
+          if (!released) {
+            released = true;
+            current -= bytes;
+          }
+        },
+      };
+    },
+    availableRetainedBytes: () => limit - current,
+  });
+  try {
+    const initialCheckpoint = engine.currentState().resources.checkpointBytes;
+    expect((await engine.apply(output(1), utf8("A"))).ok).toBe(true);
+    denyScratch = true;
+    expect((await engine.apply(output(2), utf8("B".repeat(32_768)))).ok).toBe(true);
+    expect(engine.currentState().resources.checkpointBytes).toBe(initialCheckpoint);
+    expect(engine.currentState().resources.tailAllocatedBytes).toBe(65_536);
+    expect(peak).toBeLessThanOrEqual(limit);
+    denyScratch = false;
+    expect((await engine.apply(output(3), utf8("C"))).ok).toBe(true);
+    expect(engine.currentState().resources.tailAllocatedBytes).toBe(0);
+  } finally {
+    engine.dispose();
+  }
+  expect(current).toBe(0);
+});
+
 test("M02 invalid factory and event input leave accepted sequence unchanged", async () => {
   expect(() => model({ geometry: { cols: 1, rows: 4 } })).toThrow(/Invalid terminal model options/);
   expect(() => model({ effectiveBudgets: { ...M0_LIMITS, workerBytes: Number.NaN } })).toThrow(

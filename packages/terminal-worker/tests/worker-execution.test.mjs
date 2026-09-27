@@ -1,6 +1,11 @@
 import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
-import { composeSpawnPayload } from "@cove/protocol/pipe";
+import {
+  composeSpawnPayload,
+  PipeErrorSchema,
+  PipeResultSchema,
+  validatePipeResultForCommand,
+} from "@cove/protocol/pipe";
 import { PROFILE, DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { createRunSession, createWorkerExecution } from "@cove/terminal-worker/execution";
 
@@ -59,6 +64,7 @@ function fakeFactory(config = {}) {
   const owned = new Map();
   let tickets = 0;
   return {
+    retainedBytesAccounting: "participating",
     owned,
     snapshot() {
       return { owners: owned.size };
@@ -70,10 +76,27 @@ function fakeFactory(config = {}) {
         pid: owned.size + 100,
         writerCompletion: Promise.resolve({ kind: "closed" }),
         submit(bytes, onSettled) {
+          const lease = spec.reserveRetainedBytes?.("native-input", bytes.length * 2 + 128);
+          if (spec.reserveRetainedBytes && !lease)
+            return { kind: "rejected", reason: "worker-byte-limit", writtenBytes: 0 };
           item.writes.push(Buffer.from(bytes));
-          if (config.submit) return config.submit(item, bytes, onSettled, ++tickets);
+          let handled = false;
+          const settle = (result) => {
+            if (handled) return onSettled(result);
+            handled = true;
+            try {
+              onSettled(result);
+            } finally {
+              lease?.release();
+            }
+          };
+          if (config.submit) {
+            const admission = config.submit(item, bytes, settle, ++tickets);
+            if (admission.kind === "rejected" && !handled) lease?.release();
+            return admission;
+          }
           const ticket = ++tickets;
-          onSettled({
+          settle({
             kind: "written",
             ticket,
             status: "written",
@@ -141,6 +164,14 @@ async function start(config = {}, budgets = M0_LIMITS, onFact) {
     atSeq: 0,
   });
   return { execution, factory, item: [...factory.owned.values()][0] };
+}
+
+function expectCorrelated(commandValue, response, type) {
+  expect(response.type).toBe(type);
+  expect((type === "result" ? PipeResultSchema : PipeErrorSchema).safeParse(response).success).toBe(
+    true,
+  );
+  expect(validatePipeResultForCommand(commandValue, response)).toBe(true);
 }
 
 test("registered execution entry preserves the first-slice facade and rejects W2 commands", async () => {
@@ -236,7 +267,10 @@ test("queued control holds later callback bytes unsequenced through synchronous 
       ["output", 6],
       ["exit", 7],
     ]);
-    expect(execution.snapshot().accountedBytes).toBe(retainedBytes);
+    const retained = execution.snapshot();
+    expect(retained.accountedBytes).toBeGreaterThan(retainedBytes);
+    expect(retained.retainedBreakdown.engineBytes).toBeGreaterThanOrEqual(65_536);
+    expect(retained.accountedBytes).toBeLessThanOrEqual(M0_LIMITS.workerBytes);
   } finally {
     await execution.shutdown("test");
   }
@@ -507,7 +541,7 @@ test("synchronous resize output overflow fences the transaction before a grant",
   }
 });
 
-test("pending command cap includes a write awaiting actual settlement", async () => {
+test("pending command cap retains a write while reserved status remains available", async () => {
   let settle;
   const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1 };
   const { execution } = await start(
@@ -538,12 +572,238 @@ test("pending command cap includes a write awaiting actual settlement", async ()
     await new Promise((resolve) => setImmediate(resolve));
     expect(typeof settle).toBe("function");
     expect(await execution.execute(command("status"))).toMatchObject({
-      type: "error",
-      error: { kind: "BUSY" },
+      type: "result",
+      commandType: "status",
     });
     settle();
     expect(await pending).toMatchObject({ type: "result", writtenBytes: 7 });
   } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("status and first stop use independent reserved slots under ordinary saturation", async () => {
+  let settle;
+  const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1, reservedControlBytes: 4112 };
+  const { execution, item } = await start(
+    {
+      submit(_item, bytes, onSettled, ticket) {
+        settle = () =>
+          onSettled({
+            kind: "written",
+            ticket,
+            status: "written",
+            originalBytes: bytes.length,
+            writtenBytes: bytes.length,
+            remainingBytes: 0,
+          });
+        return { kind: "accepted", ticket, byteLength: bytes.length };
+      },
+    },
+    budgets,
+  );
+  try {
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: holder(),
+        geometry,
+      }),
+    );
+    const input = execution.execute(
+      command("input", { subscription: subscription(), epoch: 1, inputSeq: 1 }),
+      encode("held"),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const status = await execution.execute(command("status"));
+    expect(status).toMatchObject({
+      type: "result",
+      runStatus: {
+        controlEpoch: 1,
+        parsedSeq: 1,
+        receivedSeq: 1,
+      },
+    });
+    const stop = execution.execute(command("stop", { operationId: "first-stop" }));
+    expect(execution.snapshot()).toMatchObject({
+      ordinaryPendingCommands: 1,
+      reservedStatusPending: false,
+      reservedStopPending: true,
+      retainedBreakdown: { reservedControlBytes: 4112 },
+    });
+    expect(await execution.execute(command("stop", { operationId: "second-stop" }))).toMatchObject({
+      type: "error",
+      error: { kind: "BUSY" },
+    });
+    settle();
+    expect(await input).toMatchObject({ type: "result", writtenBytes: 4 });
+    expect(await stop).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(item.stops).toBe(1);
+    expect(await execution.execute(command("stop", { operationId: "later-stop" }))).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    expect(item.stops).toBe(1);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("cached status reports only settled geometry while a mutation waits on input", async () => {
+  let settle;
+  const { execution } = await start({
+    submit(_item, bytes, onSettled, ticket) {
+      settle = () =>
+        onSettled({
+          kind: "written",
+          ticket,
+          status: "written",
+          originalBytes: bytes.length,
+          writtenBytes: bytes.length,
+          remainingBytes: 0,
+        });
+      return { kind: "accepted", ticket, byteLength: bytes.length };
+    },
+  });
+  try {
+    await execution.execute(
+      command("set-control", {
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: holder(),
+        geometry,
+      }),
+    );
+    const pendingInput = execution.execute(
+      command("input", {
+        subscription: subscription(),
+        epoch: 1,
+        inputSeq: 1,
+      }),
+      encode("held"),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const nextGeometry = { cols: geometry.cols + 1, rows: geometry.rows };
+    const mutation = execution.execute(
+      command("set-control", {
+        expectedEpoch: 1,
+        nextEpoch: 2,
+        holder: holder(),
+        geometry: nextGeometry,
+      }),
+    );
+    const status = await execution.execute(command("status"));
+    expect(status.runStatus).toMatchObject({
+      geometry,
+      controlEpoch: 1,
+      receivedSeq: 1,
+      parsedSeq: 1,
+    });
+    settle();
+    expect(await pendingInput).toMatchObject({ type: "result", writtenBytes: 4 });
+    expect(await mutation).toMatchObject({ type: "result" });
+    expect((await execution.execute(command("status"))).runStatus).toMatchObject({
+      geometry: nextGeometry,
+      controlEpoch: 2,
+    });
+  } finally {
+    settle?.();
+    await execution.shutdown("test");
+  }
+});
+
+test("minimum control carve-out covers max IDs and concurrent status/stop overlap", async () => {
+  const id = "x".repeat(128);
+  const longWorker = { serverId: id, relayInstanceId: id, workerId: id, workerIncarnationId: id };
+  const longRun = { serverId: id, relayInstanceId: id, runId: id };
+  const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1, reservedControlBytes: 4112 };
+  let settle;
+  const factory = fakeFactory({
+    submit(_item, bytes, onSettled, ticket) {
+      settle = () =>
+        onSettled({
+          kind: "written",
+          ticket,
+          status: "written",
+          originalBytes: bytes.length,
+          writtenBytes: bytes.length,
+          remainingBytes: 0,
+        });
+      return { kind: "accepted", ticket, byteLength: bytes.length };
+    },
+    stop(item) {
+      item.observer.onExit({ exitCode: 0 });
+      return {
+        kind: "unverifiable",
+        cause: "c".repeat(128),
+        cleanup: {
+          ...cleanup,
+          graceful: { kind: "unverifiable", reason: "signal-failed", errorCode: "E".repeat(32) },
+          force: { kind: "unverifiable", reason: "signal-failed", errorCode: "F".repeat(32) },
+        },
+        signalFailure: { phase: "force", cause: "s".repeat(128) },
+      };
+    },
+  });
+  const execution = createWorkerExecution({
+    worker: longWorker,
+    effectiveBudgets: budgets,
+    factory,
+  });
+  const makeCommand = (type, fields, requestId) => ({
+    ...command(type, fields, longRun),
+    worker: longWorker,
+    requestId,
+  });
+  try {
+    const spawn = spawnCommand(longRun, budgets);
+    const spawnRequest = { ...spawn.command, worker: longWorker, operationId: id };
+    expectCorrelated(spawnRequest, await execution.execute(spawnRequest, spawn.payload), "result");
+    const grant = makeCommand(
+      "set-control",
+      {
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: holder(),
+        geometry,
+      },
+      "grant",
+    );
+    expectCorrelated(grant, await execution.execute(grant), "result");
+    const input = makeCommand(
+      "input",
+      { subscription: subscription("sub", longRun), epoch: 1, inputSeq: 1 },
+      "input",
+    );
+    const pendingInput = execution.execute(input, encode("held"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(typeof settle).toBe("function");
+    const statusRequest = makeCommand("status", {}, id);
+    const stopRequest = makeCommand("stop", { operationId: id }, "r".repeat(128));
+    const statusPromise = execution.execute(statusRequest);
+    const stopPromise = execution.execute(stopRequest);
+    expect(execution.snapshot()).toMatchObject({
+      ordinaryPendingCommands: 1,
+      reservedStatusPending: true,
+      reservedStopPending: true,
+      retainedBreakdown: { reservedControlBytes: 4112 },
+    });
+    const status = await statusPromise;
+    expectCorrelated(statusRequest, status, "result");
+    expect(status.runStatus.controlEpoch).toBe(1);
+    expect(execution.snapshot().accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+    settle();
+    expectCorrelated(input, await pendingInput, "result");
+    const stopped = await stopPromise;
+    expectCorrelated(stopRequest, stopped, "result");
+    expect(Buffer.byteLength(statusRequest.requestId)).toBe(128);
+    expect(Buffer.byteLength(stopRequest.requestId)).toBe(128);
+    expect(Buffer.byteLength(stopRequest.operationId)).toBe(128);
+    expect(execution.snapshot().peakAccountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+    expect(factory.owned.size).toBe(1);
+  } finally {
+    settle?.();
     await execution.shutdown("test");
   }
 });
@@ -575,21 +835,9 @@ test("retained input identity count rejects a second full subscription", async (
   }
 });
 
-test("worker byte cap retains identity and rejects the next run without eviction", async () => {
-  let byteCap = 4_000;
-  for (let index = 0; index < 8; index++) {
-    const budgets = { ...M0_LIMITS, workerBytes: byteCap };
-    const spawn = spawnCommand(run(), budgets);
-    byteCap =
-      128 +
-      Buffer.byteLength(JSON.stringify(spawn.command)) +
-      spawn.payload.length +
-      256 +
-      Buffer.byteLength("serverrelayrun") +
-      1;
-  }
-  const budgets = { ...M0_LIMITS, workerBytes: byteCap };
-  const { execution } = await start({}, budgets);
+test("worker byte cap rejects model allocation before native spawn and retains run identity", async () => {
+  const budgets = { ...M0_LIMITS, workerBytes: 92 * 1024 };
+  const { execution, factory } = await start({}, budgets);
   try {
     const firstBytes = execution.snapshot().accountedBytes;
     const second = spawnCommand(run("next"), budgets);
@@ -597,7 +845,123 @@ test("worker byte cap retains identity and rejects the next run without eviction
       type: "error",
       error: { kind: "BUSY" },
     });
-    expect(execution.snapshot()).toMatchObject({ runIds: 1, accountedBytes: firstBytes });
+    expect(execution.snapshot().runIds).toBe(2);
+    expect(execution.snapshot().accountedBytes).toBeGreaterThan(firstBytes);
+    expect(execution.snapshot().accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+    expect(factory.owned.size).toBe(1);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("two T2 tails and held N2 input share one worker pre-admission cap", async () => {
+  let releaseFirst;
+  const budgets = { ...M0_LIMITS, workerBytes: 256 * 1024, reservedControlBytes: 4112 };
+  const {
+    execution,
+    factory,
+    item: first,
+  } = await start(
+    {
+      submit(item, bytes, onSettled, ticket) {
+        if (item === first) {
+          releaseFirst = () =>
+            onSettled({
+              kind: "written",
+              ticket,
+              status: "written",
+              originalBytes: bytes.length,
+              writtenBytes: bytes.length,
+              remainingBytes: 0,
+            });
+          return { kind: "accepted", ticket, byteLength: bytes.length };
+        }
+        onSettled({
+          kind: "written",
+          ticket,
+          status: "written",
+          originalBytes: bytes.length,
+          writtenBytes: bytes.length,
+          remainingBytes: 0,
+        });
+        return { kind: "accepted", ticket, byteLength: bytes.length };
+      },
+    },
+    budgets,
+  );
+  const secondRun = run("second");
+  try {
+    const secondSpawn = spawnCommand(secondRun, budgets);
+    expect(await execution.execute(secondSpawn.command, secondSpawn.payload)).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    const second = [...factory.owned.values()][1];
+    first.observer.onData(Buffer.from("A"));
+    second.observer.onData(Buffer.from("B"));
+    await execution.execute(command("status"));
+    await execution.execute(command("status", {}, secondRun));
+    const snapshots = execution.snapshot().sessions.map(({ snapshot }) => snapshot);
+    expect(snapshots.map((snapshot) => snapshot.settledState.resources.tailAllocatedBytes)).toEqual(
+      [65_536, 65_536],
+    );
+    for (const target of [run(), secondRun])
+      await execution.execute(
+        command(
+          "set-control",
+          {
+            expectedEpoch: 0,
+            nextEpoch: 1,
+            holder: holder(),
+            geometry,
+          },
+          target,
+        ),
+      );
+    const held = execution.execute(
+      command("input", {
+        subscription: subscription("sub", run()),
+        epoch: 1,
+        inputSeq: 1,
+      }),
+      Buffer.alloc(20_000),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(typeof releaseFirst).toBe("function");
+    expect(
+      await execution.execute(
+        command(
+          "input",
+          {
+            subscription: subscription("sub", secondRun),
+            epoch: 1,
+            inputSeq: 1,
+          },
+          secondRun,
+        ),
+        Buffer.alloc(20_000),
+      ),
+    ).toMatchObject({ type: "error", error: { kind: "BUSY" } });
+    expect(second.writes).toHaveLength(0);
+    expect(execution.snapshot().accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+    releaseFirst();
+    expect(await held).toMatchObject({ type: "result", writtenBytes: 20_000 });
+    expect(
+      await execution.execute(
+        command(
+          "input",
+          {
+            subscription: subscription("sub", secondRun),
+            epoch: 1,
+            inputSeq: 2,
+          },
+          secondRun,
+        ),
+        Buffer.alloc(20_000),
+      ),
+    ).toMatchObject({ type: "result", writtenBytes: 20_000 });
+    expect(second.writes).toHaveLength(1);
+    expect(execution.snapshot().peakAccountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
   } finally {
     await execution.shutdown("test");
   }
@@ -643,6 +1007,41 @@ test("stop follows earlier output in the pump and returns the cached receipt", a
     receivedSeq: 1,
     parsedSeq: 1,
   });
+});
+
+test("hostile injected stop causes are normalized before cached status and receipt", async () => {
+  const cause = { oversized: Buffer.alloc(200_000) };
+  Object.defineProperty(cause, "message", {
+    get() {
+      throw new Error("accessor evaluated");
+    },
+  });
+  const budgets = { ...M0_LIMITS, workerBytes: 96 * 1024, reservedControlBytes: 4112 };
+  const { execution, item } = await start(
+    {
+      stop() {
+        return { kind: "unverifiable", cause, cleanup, signalFailure: { phase: "force", cause } };
+      },
+    },
+    budgets,
+  );
+  const stopped = await execution.execute(command("stop", { operationId: "hostile-stop" }));
+  expect(stopped).toMatchObject({ type: "result", outcome: "accepted" });
+  const snapshot = execution.snapshot();
+  const receipt = snapshot.sessions[0].snapshot.stop.result;
+  expect(receipt).toMatchObject({
+    kind: "unverifiable",
+    cause: { category: "native-failure" },
+    signalFailure: { phase: "force", cause: { category: "native-failure" } },
+  });
+  expect(receipt.cause).not.toBe(cause);
+  expect(receipt.signalFailure.cause).not.toBe(cause);
+  expect(JSON.stringify(receipt).length).toBeLessThan(1024);
+  expect(snapshot.accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+  expect(snapshot.sessions[0].snapshot.ownershipEvidence).toBe("unresolved");
+  item.observer.onExit({ exitCode: 0 });
+  expect(execution.snapshot().sessions[0].snapshot.ownershipEvidence).toBe("closure-proven");
+  expect(item.stops).toBe(1);
 });
 
 test("failed spawn retains its run identity", async () => {

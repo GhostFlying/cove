@@ -29,6 +29,7 @@ import {
   type RunSessionSnapshot,
   type WorkerRunSessionCapability,
 } from "./run-session.js";
+import { WorkerRetainedBytes, type RetainedLease } from "./worker-retained-bytes.js";
 
 export { createRunSession } from "./run-session.js";
 export type {
@@ -40,7 +41,7 @@ export type {
   RunSessionStart,
 } from "./run-session.js";
 
-const RUN_RECORD_BYTES = 256;
+const RUN_RECORD_BYTES = 6144;
 const INPUT_KEY_BYTES = 192;
 const COMMAND_RECORD_BYTES = 128;
 const MAX_INPUT_BYTES = 65_536;
@@ -67,9 +68,13 @@ export interface WorkerExecutionSnapshot {
   readonly worker: WorkerRef;
   readonly runIds: number;
   readonly pendingCommands: number;
+  readonly ordinaryPendingCommands: number;
+  readonly reservedStatusPending: boolean;
+  readonly reservedStopPending: boolean;
   readonly inputIdentities: number;
   readonly accountedBytes: number;
   readonly peakAccountedBytes: number;
+  readonly retainedBreakdown: ReturnType<WorkerRetainedBytes["snapshot"]>;
   readonly shuttingDown: boolean;
   readonly runs: readonly RunStatus[];
   readonly sessions: readonly { readonly run: RunRef; readonly snapshot: RunSessionSnapshot }[];
@@ -159,9 +164,12 @@ class WorkerExecutionCore {
   readonly #onFault: RunSessionOptions["onFault"];
   readonly #runs = new Map<string, RunRecord>();
   readonly #pendingRequests = new Set<string>();
+  readonly #account: WorkerRetainedBytes;
+  readonly #workerLeases = new Map<number, RetainedLease[]>();
   #inputIdentities = 0;
-  #accountedBytes = 0;
-  #peakAccountedBytes = 0;
+  #ordinaryPendingCommands = 0;
+  #reservedStatusPending = false;
+  #reservedStopPending = false;
   #shuttingDown = false;
   #shutdownPromise: Promise<readonly RunSessionDisposalReceipt[]> | undefined;
 
@@ -171,6 +179,9 @@ class WorkerExecutionCore {
     if (!worker.success || !budgets) throw new TypeError("Invalid worker identity or budgets");
     this.#worker = Object.freeze({ ...worker.data });
     this.#budgets = budgets;
+    this.#account = new WorkerRetainedBytes(budgets.workerBytes, budgets.reservedControlBytes);
+    if (options.factory && options.factory.retainedBytesAccounting !== "participating")
+      throw new TypeError("Injected native factory must participate in worker retention");
     this.#factory =
       options.factory ??
       createNativePtyFactory({
@@ -212,7 +223,15 @@ class WorkerExecutionCore {
     if (this.#shuttingDown) return correlatedError(command, "WORKER_UNAVAILABLE");
     if (this.#pendingRequests.has(command.requestId))
       return correlatedError(command, "OPERATION_ID_CONFLICT");
-    if (this.#pendingRequests.size >= this.#budgets.pendingWorkerCommands)
+    const reservedStatus = command.type === "status";
+    const reservedStop = command.type === "stop";
+    if (
+      reservedStatus
+        ? this.#reservedStatusPending
+        : reservedStop
+          ? this.#reservedStopPending
+          : this.#ordinaryPendingCommands >= this.#budgets.pendingWorkerCommands
+    )
       return correlatedError(command, "BUSY");
     if (command.type !== "spawn" && command.type !== "input" && payload !== undefined)
       return correlatedError(command, "INPUT_REJECTED");
@@ -224,18 +243,26 @@ class WorkerExecutionCore {
     if (command.type === "spawn" && !(payload instanceof Uint8Array))
       return correlatedError(command, "INPUT_REJECTED");
     const charge =
-      COMMAND_RECORD_BYTES +
-      Buffer.byteLength(JSON.stringify(command)) +
-      (payload?.byteLength ?? 0);
-    if (!this.#reserveBytes(charge)) return correlatedError(command, "BUSY");
+      reservedStatus || reservedStop
+        ? 0
+        : COMMAND_RECORD_BYTES +
+          Buffer.byteLength(JSON.stringify(command)) +
+          (payload?.byteLength ?? 0);
+    if (charge && !this.#reserveBytes(charge)) return correlatedError(command, "BUSY");
     this.#pendingRequests.add(command.requestId);
+    if (reservedStatus) this.#reservedStatusPending = true;
+    else if (reservedStop) this.#reservedStopPending = true;
+    else this.#ordinaryPendingCommands++;
     try {
       // Reserve before copying caller memory, which may be reused immediately.
       const copied = payload === undefined ? undefined : Buffer.from(payload);
       return await this.#executeAdmitted(command, copied);
     } finally {
       this.#pendingRequests.delete(command.requestId);
-      this.#releaseBytes(charge);
+      if (reservedStatus) this.#reservedStatusPending = false;
+      else if (reservedStop) this.#reservedStopPending = false;
+      else this.#ordinaryPendingCommands--;
+      if (charge) this.#releaseBytes(charge);
     }
   }
 
@@ -259,7 +286,10 @@ class WorkerExecutionCore {
       return accepted(command, { operationId: command.operationId });
     }
     if (command.type === "status") {
-      const observation = await record.capability.execute({ type: "status" });
+      const observation = await record.capability.execute({
+        type: "status",
+        cached: this.#ordinaryPendingCommands > 0,
+      });
       if (observation.kind === "settled") record.lastStatus = this.#runStatus(record, observation);
       const status = this.#runStatus(
         record,
@@ -365,6 +395,9 @@ class WorkerExecutionCore {
         ...(this.#onFault && { onFault: this.#onFault }),
         reserveIngressBytes: (bytes) => this.#reserveBytes(bytes),
         releaseIngressBytes: (bytes) => this.#releaseBytes(bytes),
+        reserveRetainedBytes: (bytes) => this.#account.reserve("engine", bytes),
+        availableRetainedBytes: () => this.#account.availableOrdinaryBytes(),
+        reserveNativeRetainedBytes: (category, bytes) => this.#account.reserve(category, bytes),
         reserveInputIdentity: (subscription) => {
           if (this.#inputIdentities >= this.#budgets.pendingWorkerCommands) return false;
           const charge = bytesForInputIdentity(subscription);
@@ -373,8 +406,13 @@ class WorkerExecutionCore {
           return true;
         },
       });
-    } catch {
-      return correlatedError(command, "RESULT_UNKNOWN", "unknown");
+    } catch (error) {
+      return correlatedError(
+        command,
+        error instanceof Error && error.message.includes("capacity")
+          ? "BUSY"
+          : "WORKER_UNAVAILABLE",
+      );
     }
     if (created.kind !== "created") {
       return correlatedError(
@@ -393,7 +431,7 @@ class WorkerExecutionCore {
   ): RunStatus {
     const snap = record.session!.snapshot();
     const previous = record.lastStatus;
-    const state = observation?.state;
+    const state = observation?.state ?? snap.settledState;
     const leader = snap.leader.kind === "exit-observed" ? snap.leader.exit : undefined;
     const status = leader ? "exited" : snap.disposed || snap.faulted ? "unverifiable" : "live";
     return {
@@ -416,6 +454,7 @@ class WorkerExecutionCore {
   }
 
   snapshot(): WorkerExecutionSnapshot {
+    const account = this.#account.snapshot();
     const runs = [...this.#runs.values()]
       .filter((record) => record.session)
       .map((record) => this.#runStatus(record));
@@ -426,9 +465,13 @@ class WorkerExecutionCore {
       worker: this.#worker,
       runIds: this.#runs.size,
       pendingCommands: this.#pendingRequests.size,
+      ordinaryPendingCommands: this.#ordinaryPendingCommands,
+      reservedStatusPending: this.#reservedStatusPending,
+      reservedStopPending: this.#reservedStopPending,
       inputIdentities: this.#inputIdentities,
-      accountedBytes: this.#accountedBytes,
-      peakAccountedBytes: this.#peakAccountedBytes,
+      accountedBytes: account.accountedBytes,
+      peakAccountedBytes: account.peakAccountedBytes,
+      retainedBreakdown: account,
       shuttingDown: this.#shuttingDown,
       runs,
       sessions,
@@ -452,14 +495,18 @@ class WorkerExecutionCore {
   }
 
   #reserveBytes(bytes: number): boolean {
-    if (bytes > this.#budgets.workerBytes - this.#accountedBytes) return false;
-    this.#accountedBytes += bytes;
-    this.#peakAccountedBytes = Math.max(this.#peakAccountedBytes, this.#accountedBytes);
+    const lease = this.#account.reserve("worker", bytes);
+    if (!lease) return false;
+    const leases = this.#workerLeases.get(bytes) ?? [];
+    leases.push(lease);
+    this.#workerLeases.set(bytes, leases);
     return true;
   }
 
   #releaseBytes(bytes: number): void {
-    this.#accountedBytes -= bytes;
+    const leases = this.#workerLeases.get(bytes);
+    leases?.pop()?.release();
+    if (leases?.length === 0) this.#workerLeases.delete(bytes);
   }
 }
 

@@ -14,6 +14,7 @@ function controller(options = {}) {
     maxBytes: options.maxBytes ?? 8,
     maxTasks: options.maxTasks ?? 2,
     onFault: (fault) => faults.push(fault),
+    ...(options.reserveRetainedBytes && { reserveRetainedBytes: options.reserveRetainedBytes }),
   });
   return { input, writer, shared, faults };
 }
@@ -265,4 +266,84 @@ test("observer throw cannot skip release and retirement remains one-shot", () =>
   session.input.retire();
   session.input.retire();
   expect(session.writer.disposeBoundedWrite).toHaveBeenCalledTimes(1);
+});
+
+test("worker reservation survives missing callback and retires exactly once after late first settlement", () => {
+  let callback;
+  let held = 0;
+  let releases = 0;
+  const settled = [];
+  const session = controller({
+    writeBounded: vi.fn((bytes, onSettled) => {
+      callback = onSettled;
+      return { accepted: true, ticket: 41, byteLength: bytes.length };
+    }),
+    reserveRetainedBytes(bytes) {
+      held += bytes;
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          held -= bytes;
+          releases++;
+        },
+      };
+    },
+  });
+  expect(session.input.submit(Buffer.from("AB"), "user", (value) => settled.push(value)).kind).toBe(
+    "accepted",
+  );
+  expect(held).toBe(132);
+  session.input.retire();
+  expect(held).toBe(132);
+  callback({ ticket: 41, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(held).toBe(0);
+  expect(releases).toBe(1);
+  expect(settled).toHaveLength(1);
+  callback({ ticket: 41, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(releases).toBe(1);
+  expect(settled).toHaveLength(1);
+  expect(session.faults.some((fault) => fault.reason === "native-settlement-duplicate")).toBe(true);
+});
+
+test("malformed first settlement releases after consumer reentry and valid second stays duplicate", () => {
+  let callback;
+  let held = 0;
+  let releases = 0;
+  const settled = [];
+  const session = controller({
+    writeBounded: vi.fn((bytes, onSettled) => {
+      callback = onSettled;
+      return { accepted: true, ticket: 42, byteLength: bytes.length };
+    }),
+    reserveRetainedBytes(bytes) {
+      held += bytes;
+      return {
+        release() {
+          held -= bytes;
+          releases++;
+        },
+      };
+    },
+  });
+  session.input.submit(Buffer.from("AB"), "user", (value) => {
+    settled.push(value);
+    expect(held).toBe(132);
+    throw new Error("consumer failed after observation");
+  });
+  callback({
+    ticket: 42,
+    status: "written",
+    originalBytes: 999,
+    writtenBytes: 2,
+    remainingBytes: 0,
+  });
+  expect(settled).toMatchObject([{ kind: "unknown", status: "invalid" }]);
+  expect(held).toBe(0);
+  expect(releases).toBe(1);
+  callback({ ticket: 42, status: "written", originalBytes: 2, writtenBytes: 2, remainingBytes: 0 });
+  expect(settled).toHaveLength(1);
+  expect(releases).toBe(1);
+  expect(session.faults.map((fault) => fault.reason)).toContain("native-settlement-duplicate");
 });

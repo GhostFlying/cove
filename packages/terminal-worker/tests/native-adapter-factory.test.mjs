@@ -1,5 +1,14 @@
 import { createRequire } from "node:module";
 import { createTerminalModel } from "@cove/terminal-engine";
+import { M0_LIMITS } from "@cove/protocol/budgets";
+import {
+  composeSpawnPayload,
+  PipeErrorSchema,
+  PipeResultSchema,
+  validatePipeResultForCommand,
+} from "@cove/protocol/pipe";
+import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
+import { createWorkerExecution } from "@cove/terminal-worker/execution";
 import { expect, test, vi } from "vitest";
 
 const nodePty = createRequire(import.meta.url)("node-pty");
@@ -95,6 +104,60 @@ async function withPublicSeam(run) {
     nodePty.checkBoundedPtySupport = originalPreflight;
     nodePty.spawn = originalSpawn;
   }
+}
+
+function workerCommands(factory) {
+  const worker = {
+    serverId: "server",
+    relayInstanceId: "relay",
+    workerId: "worker",
+    workerIncarnationId: "one",
+  };
+  const run = { serverId: "server", relayInstanceId: "relay", runId: "run" };
+  const geometry = { cols: 12, rows: 4 };
+  const holder = {
+    connection: { connectionId: "connection", generation: 1 },
+    viewId: "view",
+    subscriptionId: "sub",
+  };
+  const execution = createWorkerExecution({ worker, effectiveBudgets: M0_LIMITS, factory });
+  let ordinal = 0;
+  const command = (type, fields = {}) => ({
+    type,
+    worker,
+    run,
+    requestId: `${type}-${++ordinal}`,
+    ...fields,
+  });
+  const payload = composeSpawnPayload(
+    { executable: process.execPath, argv: [], cwd: process.cwd() },
+    (text) => new TextEncoder().encode(text),
+  ).bytes;
+  const spawn = command("spawn", {
+    operationId: "spawn",
+    geometry,
+    profile: PROFILE,
+    appearance: DEFAULT_APPEARANCE,
+    effectiveBudgets: M0_LIMITS,
+    spawnPayloadBytes: payload.length,
+  });
+  const assertResult = (request, result) => {
+    expect(
+      (result.type === "result" ? PipeResultSchema : PipeErrorSchema).safeParse(result).success,
+    ).toBe(true);
+    expect(validatePipeResultForCommand(request, result)).toBe(true);
+  };
+  return { execution, command, spawn, payload, geometry, holder, run, assertResult };
+}
+
+function workerFactoryLimits() {
+  return limits({
+    aggregateInputBytes: 64 * 1024,
+    aggregateInputTasks: 256,
+    perPtyInputBytes: 64 * 1024,
+    perPtyInputTasks: 256,
+    earlyOutputBytes: 1024 * 1024,
+  });
 }
 
 test("preflight and pure validation reject without consuming owner capacity", async () => {
@@ -279,8 +342,10 @@ test("successful owner releases only after writer close and child exit in either
       });
       if (order === "writer-first") first.exit();
       else first.writer.resolve({ kind: "closed" });
-      await Promise.resolve();
-      expect(factory.snapshot()).toMatchObject({ owners: 0, activeOwners: 0 });
+      await vi.waitFor(
+        () => expect(factory.snapshot()).toMatchObject({ owners: 0, activeOwners: 0 }),
+        { timeout: 300 },
+      );
       expect(factory.spawn(spec(), observer()).kind).toBe("created");
     });
   }
@@ -296,8 +361,10 @@ test("close uncertainty stays charged after child exit and invalid public shape 
     expect(factory.spawn(spec(), observer()).kind).toBe("created");
     first.writer.resolve({ kind: "close-uncertain", error: "EINTR" });
     first.exit();
-    await Promise.resolve();
-    expect(factory.snapshot()).toMatchObject({ owners: 1, tombstones: 1, activeOwners: 0 });
+    await vi.waitFor(
+      () => expect(factory.snapshot()).toMatchObject({ owners: 1, tombstones: 1, activeOwners: 0 }),
+      { timeout: 300 },
+    );
   });
 
   await withPublicSeam(async (seam) => {
@@ -409,6 +476,164 @@ test("stop uses owned group and leader signals and settles only from observed ex
   });
 });
 
+test("compiled N2 caches only bounded signal failure fields from a hostile public result", async () => {
+  await withPublicSeam(async (seam) => {
+    seam.preflight({ supported: true, contractVersion: 3 });
+    const native = fakePty();
+    const retainedGraph = {
+      payload: Buffer.alloc(200_000),
+      nested: { payload: Buffer.alloc(200_000) },
+    };
+    native.terminal.signalOwned = vi.fn(() => ({
+      kind: "unverifiable",
+      reason: "signal-failed",
+      errorCode: "E".repeat(200_000),
+      retainedGraph,
+    }));
+    seam.spawn(() => native.terminal);
+    const { createNativePtyFactory } = await loadFactoryModule();
+    const factory = createNativePtyFactory(limits());
+    const created = factory.spawn(spec(), observer());
+    expect(created.kind).toBe("created");
+    const stop = created.pty.stop();
+    expect(factory.snapshot().owners).toBe(1);
+    native.exit({ exitCode: 0 });
+    const receipt = await stop;
+    expect(receipt).toMatchObject({
+      kind: "exited",
+      cleanup: {
+        graceful: { kind: "unverifiable", errorCode: "E".repeat(32) },
+      },
+      signalFailure: { phase: "graceful", cause: { category: "native-failure" } },
+    });
+    expect(JSON.stringify(receipt)).not.toContain("retainedGraph");
+    expect(JSON.stringify(receipt).length).toBeLessThan(1024);
+    expect(receipt.signalFailure.cause).not.toBe(retainedGraph);
+    expect(factory.snapshot().owners).toBe(1);
+    native.writer.resolve({ kind: "closed" });
+    await vi.waitFor(() => expect(factory.snapshot().owners).toBe(0), { timeout: 300 });
+  });
+});
+
+test("compiled N2 resize onFault fences W1 transaction without signaling a live leader", async () => {
+  await withPublicSeam(async (seam) => {
+    seam.preflight({ supported: true, contractVersion: 3 });
+    const native = fakePty();
+    native.terminal.resize = vi.fn(() => {
+      throw new Error("resize failed");
+    });
+    seam.spawn(() => native.terminal);
+    const { createNativePtyFactory } = await loadFactoryModule();
+    const factory = createNativePtyFactory(workerFactoryLimits());
+    const harness = workerCommands(factory);
+    const { execution, command, assertResult, geometry, holder } = harness;
+    try {
+      const spawned = await execution.execute(harness.spawn, harness.payload);
+      assertResult(harness.spawn, spawned);
+      expect(spawned.type).toBe("result");
+      const resize = command("set-control", {
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder,
+        geometry: { cols: 14, rows: 4 },
+      });
+      const failed = await execution.execute(resize);
+      assertResult(resize, failed);
+      expect(failed).toMatchObject({ type: "error", error: { kind: "RESULT_UNKNOWN" } });
+      expect(native.terminal.resize).toHaveBeenCalledOnce();
+      expect(native.terminal.signalOwned).not.toHaveBeenCalled();
+      native.data(Buffer.from("A"));
+      const status = command("status");
+      const observed = await execution.execute(status);
+      assertResult(status, observed);
+      expect(observed.runStatus).toMatchObject({
+        status: "live",
+        controlEpoch: 0,
+        controlHolder: null,
+        geometry,
+        receivedSeq: 1,
+        parsedSeq: 1,
+      });
+      const stop = command("stop", { operationId: "stop" });
+      const pendingStop = execution.execute(stop);
+      native.exit({ exitCode: 0 });
+      native.writer.resolve({ kind: "closed" });
+      const stopped = await pendingStop;
+      assertResult(stop, stopped);
+      expect(stopped.type).toBe("result");
+      expect(factory.snapshot().owners).toBe(0);
+    } finally {
+      native.writer.resolve({ kind: "closed" });
+      native.exit({ exitCode: 0 });
+      await execution.shutdown("test");
+    }
+  });
+});
+
+test("compiled N2 partial write faults before settlement but leaves output and explicit stop available", async () => {
+  await withPublicSeam(async (seam) => {
+    seam.preflight({ supported: true, contractVersion: 3 });
+    const native = fakePty();
+    let settle;
+    native.terminal.writeBounded = vi.fn((bytes, callback) => {
+      settle = callback;
+      return { accepted: true, ticket: 7, byteLength: bytes.length };
+    });
+    seam.spawn(() => native.terminal);
+    const { createNativePtyFactory } = await loadFactoryModule();
+    const factory = createNativePtyFactory(workerFactoryLimits());
+    const harness = workerCommands(factory);
+    const { execution, command, assertResult, geometry, holder, run } = harness;
+    try {
+      const spawned = await execution.execute(harness.spawn, harness.payload);
+      assertResult(harness.spawn, spawned);
+      expect(spawned.type).toBe("result");
+      const control = command("set-control", { expectedEpoch: 0, nextEpoch: 1, holder, geometry });
+      const controlResult = await execution.execute(control);
+      assertResult(control, controlResult);
+      const input = command("input", { subscription: { run, ...holder }, epoch: 1, inputSeq: 1 });
+      const pending = execution.execute(input, Buffer.from("AB"));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(typeof settle).toBe("function");
+      settle({
+        ticket: 7,
+        status: "error",
+        originalBytes: 2,
+        writtenBytes: 1,
+        remainingBytes: 1,
+        errorCode: "EIO",
+      });
+      const failed = await pending;
+      assertResult(input, failed);
+      expect(failed).toMatchObject({ type: "error", error: { kind: "RESULT_UNKNOWN" } });
+      expect(native.terminal.writeBounded).toHaveBeenCalledOnce();
+      expect(native.terminal.signalOwned).not.toHaveBeenCalled();
+      native.data(Buffer.from("B"));
+      const status = command("status");
+      const observed = await execution.execute(status);
+      assertResult(status, observed);
+      expect(observed.runStatus).toMatchObject({
+        status: "live",
+        receivedSeq: 2,
+        parsedSeq: 2,
+        controlEpoch: 1,
+      });
+      const stop = command("stop", { operationId: "stop" });
+      const pendingStop = execution.execute(stop);
+      native.exit({ exitCode: 0 });
+      native.writer.resolve({ kind: "closed" });
+      const stopped = await pendingStop;
+      assertResult(stop, stopped);
+      expect(stopped.type).toBe("result");
+      expect(factory.snapshot().owners).toBe(0);
+    } finally {
+      native.writer.resolve({ kind: "closed" });
+      native.exit({ exitCode: 0 });
+      await execution.shutdown("test");
+    }
+  });
+});
+
 test("owned stop forces once at the grace boundary and reports unknown at the final deadline", async () => {
   vi.useFakeTimers();
   try {
@@ -493,8 +718,7 @@ test("already exited and late exit never trigger another owned signal", async ()
     });
     expect(first.terminal.signalOwned).not.toHaveBeenCalled();
     first.writer.resolve({ kind: "closed" });
-    await Promise.resolve();
-    expect(factory.snapshot().owners).toBe(0);
+    await vi.waitFor(() => expect(factory.snapshot().owners).toBe(0), { timeout: 300 });
   });
 });
 
