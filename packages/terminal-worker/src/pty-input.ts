@@ -3,6 +3,7 @@ import type {
   IBoundedWriteAdmission,
   IBoundedWriteSettlement,
 } from "node-pty";
+import type { RetainedBytesReservation } from "@cove/terminal-engine";
 
 export type NativeInputOrigin = "user" | "query" | "focus";
 
@@ -15,6 +16,7 @@ export type NativeInputRejectionReason =
   | "pty-task-limit"
   | "factory-byte-limit"
   | "factory-task-limit"
+  | "worker-byte-limit"
   | "native-not-enabled"
   | "native-closed"
   | "native-error"
@@ -164,6 +166,7 @@ export interface PtyInputControllerOptions {
   readonly maxBytes: number;
   readonly maxTasks: number;
   readonly onFault: (fault: NativeInputFault) => void;
+  readonly reserveRetainedBytes?: RetainedBytesReservation;
 }
 
 const NATIVE_REJECTIONS = new Set<BoundedWriteRejectionReason>([
@@ -284,6 +287,7 @@ export class PtyInputController {
   readonly #sharedBudget: SharedNativeInputBudget;
   readonly #localBudget: InputBudget;
   readonly #onFault: (fault: NativeInputFault) => void;
+  readonly #reserveRetainedBytes: RetainedBytesReservation | undefined;
   #fenced = false;
   #retired = false;
 
@@ -292,6 +296,7 @@ export class PtyInputController {
     this.#sharedBudget = options.sharedBudget;
     this.#localBudget = new InputBudget(options.maxBytes, options.maxTasks);
     this.#onFault = options.onFault;
+    this.#reserveRetainedBytes = options.reserveRetainedBytes;
   }
 
   submit(
@@ -329,12 +334,21 @@ export class PtyInputController {
       };
     }
 
+    // The native owner and this callback may each retain the full original intent.
+    const retained = this.#reserveRetainedBytes?.(bytes.byteLength * 2 + 128);
+    if (this.#reserveRetainedBytes && !retained) {
+      local.release();
+      shared.release();
+      return { kind: "rejected", reason: "worker-byte-limit", writtenBytes: 0 };
+    }
+
     let released = false;
     const release = (): void => {
       if (released) return;
       released = true;
       local.release();
       shared.release();
+      retained?.release();
     };
     let admission: Extract<IBoundedWriteAdmission, { accepted: true }> | undefined;
     let earlySettlement: IBoundedWriteSettlement | undefined;
@@ -480,7 +494,7 @@ export class PtyInputController {
       };
       handleSettlement(earlySettlement);
     }
-    const cause = new Error("Invalid native input admission", { cause: rawAdmission });
+    const cause = new Error("Invalid native input admission");
     this.#faultAndFence("native-admission-invalid", cause);
     return {
       kind: "unknown",

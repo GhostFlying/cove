@@ -3,6 +3,7 @@ import {
   type EngineResult,
   type EngineState,
   type TerminalModel,
+  type RetainedBytesReservation,
 } from "@cove/terminal-engine";
 import { M0_LIMITS, type EffectiveBudgets } from "@cove/protocol/budgets";
 import {
@@ -23,8 +24,10 @@ import type {
   NativeSpawnSpec,
   NativeStopResult,
 } from "./native-pty.js";
+import { boundedNativeCause, boundedNativeStopResult } from "./native-pty.js";
 
 const OUTPUT_CHUNK_BYTES = 65_536;
+const INGRESS_RECORD_BYTES = 64;
 const PENDING_WRITER: RunSessionWriterObservation = Object.freeze({ kind: "pending-at-deadline" });
 const PENDING_STOP: RunSessionStopObservation = Object.freeze({ kind: "pending-at-deadline" });
 
@@ -43,7 +46,7 @@ type Pending =
 
 type ControlHolder = Extract<RunEvent, { type: "control" }>["holder"];
 export type RunSessionOperation =
-  | { readonly type: "status" }
+  | { readonly type: "status"; readonly cached?: boolean }
   | { readonly type: "stop" }
   | {
       readonly type: "control";
@@ -100,6 +103,9 @@ export interface RunSessionOptions {
   readonly reserveIngressBytes?: (bytes: number) => boolean;
   readonly releaseIngressBytes?: (bytes: number) => void;
   readonly reserveInputIdentity?: (subscription: SubscriptionRef) => boolean;
+  readonly reserveRetainedBytes?: RetainedBytesReservation;
+  readonly availableRetainedBytes?: () => number;
+  readonly reserveNativeRetainedBytes?: NativeSpawnSpec["reserveRetainedBytes"];
   readonly effectiveBudgets?: EffectiveBudgets;
 }
 
@@ -152,6 +158,7 @@ export interface RunSessionSnapshot {
   readonly controlHolder: ControlHolder | null;
   readonly geometry: Geometry;
   readonly writableFenced: boolean;
+  readonly settledState: EngineState;
 }
 
 export interface RunSession {
@@ -190,27 +197,6 @@ function consumesThenable(value: unknown): boolean {
   return true;
 }
 
-function frozenStopResult(result: NativeStopResult): NativeStopResult {
-  const cleanup = Object.freeze({
-    ...result.cleanup,
-    graceful: Object.freeze({ ...result.cleanup.graceful }),
-    force: Object.freeze({ ...result.cleanup.force }),
-  });
-  const signalFailure = result.signalFailure
-    ? Object.freeze({ ...result.signalFailure })
-    : undefined;
-  return Object.freeze(
-    result.kind === "exited"
-      ? {
-          ...result,
-          exit: Object.freeze({ ...result.exit }),
-          cleanup,
-          ...(signalFailure && { signalFailure }),
-        }
-      : { ...result, cleanup, ...(signalFailure && { signalFailure }) },
-  );
-}
-
 class RunSessionCore {
   readonly #run: RunRef;
   #model: TerminalModel | undefined;
@@ -237,6 +223,7 @@ class RunSessionCore {
   #stop: RunSessionStopObservation = PENDING_STOP;
   #stopStarted = false;
   #disposePromise: Promise<RunSessionDisposalReceipt> | undefined;
+  #stopOperationPromise: Promise<RunSessionOperationResult> | undefined;
   #resolveDispose: ((receipt: RunSessionDisposalReceipt) => void) | undefined;
   #disposeTimer: ReturnType<typeof setTimeout> | undefined;
   #deferIngress = false;
@@ -245,6 +232,7 @@ class RunSessionCore {
   #controlEpoch = 0;
   #controlHolder: ControlHolder | null = null;
   #inputSequences = new Map<string, number>();
+  #lastState!: EngineState;
   readonly #reserveIngressBytes: (bytes: number) => boolean;
   readonly #releaseIngressBytes: (bytes: number) => void;
   readonly #reserveInputIdentity: (subscription: SubscriptionRef) => boolean;
@@ -272,6 +260,10 @@ class RunSessionCore {
       ...(options.effectiveBudgets === undefined
         ? {}
         : { effectiveBudgets: options.effectiveBudgets }),
+      ...(options.reserveRetainedBytes && { reserveRetainedBytes: options.reserveRetainedBytes }),
+      ...(options.availableRetainedBytes && {
+        availableRetainedBytes: options.availableRetainedBytes,
+      }),
       onAutomaticOutput: (output) => {
         if (this.#disposed || this.#faulted) return;
         if (!this.#native || (output.atSeq === null && !this.#counterExhausted)) {
@@ -286,6 +278,7 @@ class RunSessionCore {
         });
       },
     });
+    this.#lastState = this.#model.currentState();
   }
 
   attach(native: NativePtyAdapter): void {
@@ -315,7 +308,7 @@ class RunSessionCore {
       this.#fault("Native output exceeded the bounded parse queue");
       return;
     }
-    if (!this.#reserveIngressBytes(bytes.length)) {
+    if (!this.#reserveIngressBytes(bytes.length + chunks * INGRESS_RECORD_BYTES)) {
       this.#fault("Native output exceeded the worker byte budget");
       return;
     }
@@ -340,12 +333,30 @@ class RunSessionCore {
 
   onExit(exit: NativeExit): void {
     if (this.#exited) return;
+    let normalized: NativeExit;
+    try {
+      const exitCode = exit.exitCode;
+      const signal = exit.signal;
+      if (
+        !Number.isSafeInteger(exitCode) ||
+        (signal !== undefined && !Number.isSafeInteger(signal))
+      )
+        throw new TypeError("Invalid native exit");
+      normalized = Object.freeze({ exitCode, ...(signal === undefined ? {} : { signal }) });
+    } catch {
+      this.onFault({ kind: "binding", reason: "exit-event-invalid" });
+      return;
+    }
     this.#exited = true;
-    this.#leaderExit = Object.freeze({ ...exit });
+    this.#leaderExit = normalized;
     this.#settleDisposalIfComplete();
     if (this.#disposed) return;
     if (this.#faulted) return;
     if (this.#deferIngress) {
+      if (!this.#reserveIngressBytes(INGRESS_RECORD_BYTES)) {
+        this.#fault("Run exit exceeded worker retention capacity");
+        return;
+      }
       this.#pending.push({ kind: "deferred-exit", exit: this.#leaderExit });
       this.#schedule();
       return;
@@ -356,6 +367,10 @@ class RunSessionCore {
     }
     if (this.#pending.length + Number(this.#running) >= this.#itemCap) {
       this.#fault("Run exit could not enter the bounded parse queue");
+      return;
+    }
+    if (!this.#reserveIngressBytes(INGRESS_RECORD_BYTES)) {
+      this.#fault("Run exit exceeded worker retention capacity");
       return;
     }
     const event: RunEvent = {
@@ -370,6 +385,16 @@ class RunSessionCore {
   }
 
   onFault(fault: NativePtyFault): void {
+    if (
+      fault.kind === "input" ||
+      fault.kind === "automatic-output" ||
+      (fault.kind === "io" &&
+        (fault.reason === "resize-failed" || fault.reason === "owned-stop-failed"))
+    ) {
+      this.#writableFenced = true;
+      this.#reportFault(fault);
+      return;
+    }
     if (this.#faulted) return;
     this.#faulted = true;
     this.#requestStop();
@@ -396,8 +421,36 @@ class RunSessionCore {
   }
 
   execute(operation: RunSessionOperation): Promise<RunSessionOperationResult> {
-    if (operation.type === "stop" && (this.#disposed || this.#faulted))
-      return this.dispose().then((receipt) => ({ kind: "stopped", receipt }));
+    if (operation.type === "stop") {
+      if (this.#stopOperationPromise) return this.#stopOperationPromise;
+      let resolveStop!: (result: RunSessionOperationResult) => void;
+      const promise = new Promise<RunSessionOperationResult>((resolve) => {
+        resolveStop = resolve;
+      });
+      this.#stopOperationPromise = promise;
+      if (this.#disposed || this.#faulted)
+        void this.dispose().then((receipt) => resolveStop({ kind: "stopped", receipt }));
+      else {
+        this.#deferIngress = true;
+        this.#pending.push({ kind: "operation", operation, resolve: resolveStop });
+        this.#schedule();
+      }
+      return promise;
+    }
+    if (
+      operation.type === "status" &&
+      (operation.cached ||
+        this.#disposed ||
+        this.#faulted ||
+        this.#pending.length + Number(this.#running) >= this.#itemCap)
+    )
+      return Promise.resolve({
+        kind: "settled",
+        atSeq: this.#parsedSeq,
+        state: this.#lastState,
+        controlEpoch: this.#controlEpoch,
+        controlHolder: this.#controlHolder,
+      });
     if (this.#disposed || this.#faulted)
       return Promise.resolve({ kind: "rejected", reason: "session-fenced" });
     if (this.#pending.length + Number(this.#running) >= this.#itemCap)
@@ -431,6 +484,7 @@ class RunSessionCore {
       controlHolder: this.#controlHolder,
       geometry: this.#geometry,
       writableFenced: this.#writableFenced,
+      settledState: this.#lastState,
     };
   }
 
@@ -482,8 +536,11 @@ class RunSessionCore {
             this.#writer =
               result?.kind === "closed"
                 ? Object.freeze({ kind: "closed" })
-                : result?.kind === "close-uncertain" && typeof result.error === "string"
-                  ? Object.freeze({ kind: "close-uncertain", error: result.error.slice(0, 128) })
+                : result?.kind === "close-uncertain"
+                  ? Object.freeze({
+                      kind: "close-uncertain",
+                      error: boundedNativeCause(result.error).summary ?? "Writer closure uncertain",
+                    })
                   : Object.freeze({ kind: "invalid" });
           } catch {
             this.#writer = Object.freeze({ kind: "invalid" });
@@ -511,7 +568,7 @@ class RunSessionCore {
             if (result?.kind !== "exited" && result?.kind !== "unverifiable") {
               this.#stop = Object.freeze({ kind: "failed-to-observe" });
             } else {
-              const frozen = frozenStopResult(result);
+              const frozen = boundedNativeStopResult(result);
               this.#stop = Object.freeze({ kind: "observed", result: frozen });
               if (frozen.kind === "exited" && !this.#leaderExit) {
                 this.#leaderExit = frozen.exit;
@@ -603,15 +660,22 @@ class RunSessionCore {
     }
     const item = this.#pending.shift();
     if (!item) return;
-    let ingressBytes =
+    const payloadBytes =
       item.kind === "fact"
         ? (item.fact.bytes?.length ?? 0)
         : item.kind === "unpublished" || item.kind === "deferred-output"
           ? item.bytes.length
           : 0;
+    let ingressBytes =
+      item.kind === "fact" ||
+      item.kind === "unpublished" ||
+      item.kind === "deferred-output" ||
+      item.kind === "deferred-exit"
+        ? payloadBytes + INGRESS_RECORD_BYTES
+        : 0;
     const releaseIngress = (): void => {
       if (ingressBytes === 0) return;
-      this.#queuedBytes = Math.max(0, this.#queuedBytes - ingressBytes);
+      this.#queuedBytes = Math.max(0, this.#queuedBytes - payloadBytes);
       this.#releaseIngressBytes(ingressBytes);
       ingressBytes = 0;
     };
@@ -693,6 +757,7 @@ class RunSessionCore {
     }
     if (!this.#disposed && !this.#faulted) {
       this.#parsedSeq = fact.event.seq;
+      this.#lastState = result.value;
       this.#geometry = Object.freeze({ ...result.value.geometry });
       if (fact.event.type === "exit") this.#exitApplied = true;
       if (!this.#consumerFenced) {
@@ -712,6 +777,7 @@ class RunSessionCore {
     if (this.#disposed || this.#faulted) return { kind: "rejected", reason: "session-fenced" };
     if (operation.type === "status") {
       const result = await this.#model!.barrier();
+      if (result.ok) this.#lastState = result.value;
       return result.ok
         ? {
             kind: "settled",
@@ -771,7 +837,7 @@ class RunSessionCore {
         this.#writableFenced = true;
         return { kind: "unknown", reason: "native-resize-failed" };
       }
-      if (this.#faulted || this.#disposed) {
+      if (this.#faulted || this.#disposed || this.#writableFenced) {
         this.#writableFenced = true;
         return { kind: "unknown", reason: "native-resize-faulted" };
       }
@@ -922,9 +988,11 @@ class RunSessionCore {
         else item.resolve({ kind: "rejected", reason });
       }
       if (item.kind === "fact" && item.fact.bytes)
-        this.#releaseIngressBytes(item.fact.bytes.length);
+        this.#releaseIngressBytes(item.fact.bytes.length + INGRESS_RECORD_BYTES);
+      if (item.kind === "fact" && !item.fact.bytes) this.#releaseIngressBytes(INGRESS_RECORD_BYTES);
       if (item.kind === "unpublished" || item.kind === "deferred-output")
-        this.#releaseIngressBytes(item.bytes.length);
+        this.#releaseIngressBytes(item.bytes.length + INGRESS_RECORD_BYTES);
+      if (item.kind === "deferred-exit") this.#releaseIngressBytes(INGRESS_RECORD_BYTES);
     }
     this.#queuedBytes = 0;
   }
@@ -976,7 +1044,14 @@ function startRunSession(options: RunSessionOptions):
   let result: NativeSpawnResult;
   try {
     result = options.factory.spawn(
-      { ...options.spawn, cols: options.geometry.cols, rows: options.geometry.rows },
+      {
+        ...options.spawn,
+        cols: options.geometry.cols,
+        rows: options.geometry.rows,
+        ...(options.reserveNativeRetainedBytes && {
+          reserveRetainedBytes: options.reserveNativeRetainedBytes,
+        }),
+      },
       {
         onData: (bytes) => core.onData(bytes),
         onExit: (exit) => core.onExit(exit),

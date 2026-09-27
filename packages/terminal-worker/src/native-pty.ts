@@ -1,4 +1,5 @@
 import * as pty from "node-pty";
+import type { RetainedBytesLease } from "@cove/terminal-engine";
 import type {
   BoundedPtyCleanupResult,
   IBoundedWriteOwnerResult,
@@ -52,6 +53,10 @@ export interface NativeSpawnSpec {
   readonly rows: number;
   readonly inputBytes?: number;
   readonly inputTasks?: number;
+  readonly reserveRetainedBytes?: (
+    category: "native-input" | "native-output",
+    bytes: number,
+  ) => RetainedBytesLease | undefined;
 }
 
 export interface NativeExit {
@@ -105,6 +110,126 @@ export type NativeStopResult =
       readonly cleanup: NativeStopCleanup;
       readonly signalFailure?: { readonly phase: "graceful" | "force"; readonly cause: unknown };
     };
+
+export interface BoundedNativeCause {
+  readonly category: "native-failure" | "diagnostic-unavailable";
+  readonly summary?: string;
+}
+
+function boundedText(value: unknown, maxBytes: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let text = "";
+  let bytes = 0;
+  for (const point of value) {
+    const width = Buffer.byteLength(point);
+    if (bytes + width > maxBytes) break;
+    text += point;
+    bytes += width;
+  }
+  return text;
+}
+
+export function boundedNativeCause(value: unknown): BoundedNativeCause {
+  try {
+    const summary = boundedText(value, 128);
+    return Object.freeze(
+      summary ? { category: "native-failure", summary } : { category: "native-failure" },
+    );
+  } catch {
+    return Object.freeze({ category: "diagnostic-unavailable" });
+  }
+}
+
+function boundedStopAttempt(value: NativeStopAttempt): NativeStopAttempt {
+  try {
+    if (value.kind === "signaled" || value.kind === "already-reaped") return { kind: value.kind };
+    if (value.kind === "not-attempted") {
+      const reason = value.reason;
+      if (
+        reason === "already-exited" ||
+        reason === "already-reaped" ||
+        reason === "deadline-not-reached" ||
+        reason === "capability-fault"
+      )
+        return { kind: "not-attempted", reason };
+    }
+    if (value.kind === "unverifiable") {
+      const reason = value.reason;
+      if (reason === "not-found" || reason === "signal-failed" || reason === "scope-unavailable") {
+        const errorCode = boundedText(value.errorCode, 32);
+        return errorCode && /^[\x20-\x7e]*$/.test(errorCode)
+          ? { kind: "unverifiable", reason, errorCode }
+          : { kind: "unverifiable", reason };
+      }
+    }
+  } catch {
+    // An accessor from an injected factory cannot become retained state.
+  }
+  return { kind: "not-attempted", reason: "capability-fault" };
+}
+
+export function boundedNativeStopResult(value: NativeStopResult): NativeStopResult {
+  let cleanup: NativeStopCleanup;
+  try {
+    cleanup = {
+      scope: "initial-process-group",
+      verified: false,
+      graceful: boundedStopAttempt(value.cleanup.graceful),
+      force: boundedStopAttempt(value.cleanup.force),
+    };
+  } catch {
+    cleanup = {
+      scope: "initial-process-group",
+      verified: false,
+      graceful: { kind: "not-attempted", reason: "capability-fault" },
+      force: { kind: "not-attempted", reason: "capability-fault" },
+    };
+  }
+  let signalFailure: NativeStopResult["signalFailure"];
+  try {
+    const raw = value.signalFailure;
+    if (raw) {
+      const phase = raw.phase;
+      if (phase === "graceful" || phase === "force")
+        signalFailure = { phase, cause: boundedNativeCause(raw.cause) };
+    }
+  } catch {
+    // An unreadable diagnostic does not justify inventing a signal phase.
+  }
+  try {
+    if (
+      value.kind === "exited" &&
+      Number.isSafeInteger(value.exit.exitCode) &&
+      (value.exit.signal === undefined || Number.isSafeInteger(value.exit.signal))
+    )
+      return Object.freeze({
+        kind: "exited",
+        exit: Object.freeze({
+          exitCode: value.exit.exitCode,
+          ...(value.exit.signal === undefined ? {} : { signal: value.exit.signal }),
+        }),
+        cleanup: Object.freeze(cleanup),
+        ...(signalFailure && { signalFailure }),
+      });
+  } catch {
+    // Preserve uncertainty if independently reported exit facts are malformed.
+  }
+  let cause: BoundedNativeCause;
+  try {
+    cause =
+      value.kind === "unverifiable"
+        ? boundedNativeCause(value.cause)
+        : boundedNativeCause(undefined);
+  } catch {
+    cause = { category: "diagnostic-unavailable" };
+  }
+  return Object.freeze({
+    kind: "unverifiable",
+    cause,
+    cleanup: Object.freeze(cleanup),
+    ...(signalFailure && { signalFailure }),
+  });
+}
 
 export interface NativePtyAdapterSnapshot {
   readonly pid: number;
@@ -165,6 +290,7 @@ export type NativeSpawnResult =
   | { readonly kind: "unclassified-failure"; readonly cause: unknown };
 
 export interface NativePtyFactory {
+  readonly retainedBytesAccounting?: "participating";
   spawn(spec: NativeSpawnSpec, observer: NativeObserver): NativeSpawnResult;
   snapshot(): NativeFactorySnapshot;
 }
@@ -298,6 +424,7 @@ interface ValidSpawnSpec {
   readonly inputBytes: number;
   readonly inputTasks: number;
   readonly observer: NativeObserver;
+  readonly reserveRetainedBytes?: NativeSpawnSpec["reserveRetainedBytes"];
 }
 
 interface BoundedPty extends IPty {
@@ -308,7 +435,7 @@ interface BoundedPty extends IPty {
 }
 
 type EarlyEvent =
-  | { readonly kind: "data"; readonly bytes: Buffer }
+  | { readonly kind: "data"; readonly bytes: Buffer; readonly lease?: RetainedBytesLease }
   | { readonly kind: "exit"; readonly exit: NativeExit };
 
 class NativePtyAdapterImpl implements NativePtyAdapter {
@@ -317,6 +444,7 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
   readonly #reservation: OwnerReservation;
   readonly #input: PtyInputController;
   readonly #earlyOutputLimit: number;
+  readonly #reserveRetainedBytes: NativeSpawnSpec["reserveRetainedBytes"];
   readonly #earlyEvents: EarlyEvent[] = [];
   #dataListener: IDisposable | undefined;
   #exitListener: IDisposable | undefined;
@@ -349,19 +477,43 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
     inputBytes: number,
     inputTasks: number,
     earlyOutputLimit: number,
+    reserveRetainedBytes?: NativeSpawnSpec["reserveRetainedBytes"],
   ) {
     this.#terminal = terminal;
     this.#observer = observer;
     this.#reservation = reservation;
     this.#earlyOutputLimit = earlyOutputLimit;
+    this.#reserveRetainedBytes = reserveRetainedBytes;
     this.pid = terminal.pid;
-    this.writerCompletion = terminal.boundedWriteCompletion;
+    this.writerCompletion = Promise.prototype.then.call(
+      terminal.boundedWriteCompletion,
+      (result: IBoundedWriteOwnerResult): IBoundedWriteOwnerResult => {
+        try {
+          if (result.kind === "closed") return { kind: "closed" };
+          if (result.kind === "close-uncertain")
+            return {
+              kind: "close-uncertain",
+              error: boundedText(result.error, 128) ?? "unavailable",
+            };
+        } catch {
+          // A malformed completion never proves writer closure.
+        }
+        return { kind: "close-uncertain", error: "invalid writer completion" };
+      },
+      (): IBoundedWriteOwnerResult => ({
+        kind: "close-uncertain",
+        error: "writer completion rejected",
+      }),
+    ) as Promise<IBoundedWriteOwnerResult>;
     this.#input = new PtyInputController({
       writer: terminal,
       sharedBudget,
       maxBytes: inputBytes,
       maxTasks: inputTasks,
       onFault: (fault) => this.#reportInputFault(fault),
+      ...(reserveRetainedBytes && {
+        reserveRetainedBytes: (bytes: number) => reserveRetainedBytes("native-input", bytes),
+      }),
     });
 
     // Listener registration can synchronously invoke a controlled public seam.
@@ -386,6 +538,8 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
         (error) => this.#onInvalidWriterCompletion(error),
       );
     } catch (error) {
+      for (const event of this.#earlyEvents) if (event.kind === "data") event.lease?.release();
+      this.#earlyEvents.length = 0;
       this.#disposeListeners();
       throw error;
     }
@@ -396,8 +550,10 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
     this.#constructing = false;
     for (const event of this.#earlyEvents.splice(0)) {
       if (event.kind === "data") {
-        if (!this.#deliverData(event.bytes, preserveBufferedData)) {
-          preserveBufferedData = false;
+        try {
+          if (!this.#deliverData(event.bytes, preserveBufferedData)) preserveBufferedData = false;
+        } finally {
+          event.lease?.release();
         }
       } else this.#deliverExit(event.exit);
     }
@@ -542,7 +698,7 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
         throw new Error("Invalid owned signal result");
       }
       if (result.kind === "unverifiable") this.#recordSignalFailure(phase, result);
-      return result;
+      return boundedStopAttempt(result);
     } catch (error) {
       this.#recordSignalFailure(phase, error);
       return { kind: "not-attempted", reason: "capability-fault" };
@@ -550,7 +706,7 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
   }
 
   #recordSignalFailure(phase: "graceful" | "force", cause: unknown): void {
-    this.#stopFailure ??= { phase, cause };
+    this.#stopFailure ??= { phase, cause: boundedNativeCause(cause) };
     this.#reportFault({ kind: "io", reason: "owned-stop-failed", cause });
   }
 
@@ -567,14 +723,18 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
     };
     const signalFailure = this.#stopFailure;
     this.#resolveStop?.(
-      this.#exited
-        ? { kind: "exited", exit: this.#exited, cleanup, ...(signalFailure && { signalFailure }) }
-        : {
-            kind: "unverifiable",
-            cause: signalFailure?.cause ?? new Error("Owned PTY leader exit was not observed"),
-            cleanup,
-            ...(signalFailure && { signalFailure }),
-          },
+      boundedNativeStopResult(
+        this.#exited
+          ? { kind: "exited", exit: this.#exited, cleanup, ...(signalFailure && { signalFailure }) }
+          : {
+              kind: "unverifiable",
+              cause:
+                signalFailure?.cause ??
+                boundedNativeCause("Owned PTY leader exit was not observed"),
+              cleanup,
+              ...(signalFailure && { signalFailure }),
+            },
+      ),
     );
     this.#resolveStop = undefined;
   }
@@ -603,21 +763,36 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
       this.#failOutput("non-buffer-data", new Error("Native PTY emitted decoded data"));
       return;
     }
-    const bytes = this.#constructing ? Buffer.from(value) : value;
-    if (bytes.byteLength === 0) return;
+    if (value.byteLength === 0) return;
     if (this.#constructing) {
-      if (bytes.byteLength > this.#earlyOutputLimit - this.#earlyOutputBytes) {
+      if (value.byteLength > this.#earlyOutputLimit - this.#earlyOutputBytes) {
         this.#failOutput(
           "early-output-limit",
           new Error("Native PTY exceeded its early output byte budget"),
         );
         return;
       }
+      const lease = this.#reserveRetainedBytes?.("native-output", value.byteLength + 64);
+      if (this.#reserveRetainedBytes && !lease) {
+        this.#failOutput(
+          "early-output-worker-limit",
+          new Error("Early output exceeded worker capacity"),
+        );
+        return;
+      }
+      let bytes: Buffer;
+      try {
+        bytes = Buffer.from(value);
+      } catch (error) {
+        lease?.release();
+        this.#failOutput("early-output-copy-failed", error);
+        return;
+      }
       this.#earlyOutputBytes += bytes.byteLength;
-      this.#earlyEvents.push({ kind: "data", bytes });
+      this.#earlyEvents.push({ kind: "data", bytes, ...(lease && { lease }) });
       return;
     }
-    this.#deliverData(bytes);
+    this.#deliverData(value);
   }
 
   #onExit(value: unknown): void {
@@ -746,6 +921,7 @@ class NativePtyAdapterImpl implements NativePtyAdapter {
 }
 
 class NativePtyFactoryImpl implements NativePtyFactory {
+  readonly retainedBytesAccounting = "participating" as const;
   readonly #limits: ValidLimits;
   readonly #owners: OwnerLedger;
   readonly #input: SharedNativeInputBudget;
@@ -844,6 +1020,7 @@ class NativePtyFactoryImpl implements NativePtyFactory {
         validSpec.inputBytes,
         validSpec.inputTasks,
         this.#limits.earlyOutputBytes,
+        validSpec.reserveRetainedBytes,
       );
       adapter.activate();
       return { kind: "created", pty: adapter };
@@ -964,8 +1141,11 @@ function validateSpawnSpec(
     rows,
     inputBytes: requestedBytes,
     inputTasks: requestedTasks,
+    reserveRetainedBytes,
   } = spec;
   if (typeof file !== "string" || file.length === 0) return undefined;
+  if (reserveRetainedBytes !== undefined && typeof reserveRetainedBytes !== "function")
+    return undefined;
   if (!Array.isArray(args)) {
     return undefined;
   }
@@ -1017,6 +1197,7 @@ function validateSpawnSpec(
     rows,
     inputBytes,
     inputTasks,
+    ...(reserveRetainedBytes && { reserveRetainedBytes }),
     observer: {
       onData: (bytes) => Reflect.apply(onData, observer, [bytes]),
       onExit: (exit) => Reflect.apply(onExit, observer, [exit]),

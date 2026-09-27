@@ -179,7 +179,7 @@ test("a synchronous early native callback is retained until its writer is attach
   }
 });
 
-test("automatic-output rejection fences publication and retires the input path", async () => {
+test("automatic-output rejection fences input without discarding parsed output", async () => {
   const owned = start("rejected", {
     onAutomaticOutput(_output, observer) {
       observer.onFault({
@@ -191,10 +191,10 @@ test("automatic-output rejection fences publication and retires the input path",
   });
   try {
     owned.observer.onData(Buffer.from(encoder.encode("\u001b[5n")));
-    expect((await owned.session.barrier()).ok).toBe(false);
-    expect(owned.events).toEqual([]);
-    expect(owned.session.snapshot().faulted).toBe(true);
-    expect(owned.state.retired).toBe(1);
+    expect((await owned.session.barrier()).ok).toBe(true);
+    expect(owned.events).toHaveLength(1);
+    expect(owned.session.snapshot()).toMatchObject({ faulted: false, writableFenced: true });
+    expect(owned.state.retired).toBe(0);
   } finally {
     await owned.session.dispose();
   }
@@ -458,6 +458,32 @@ test("close-uncertain remains charged evidence despite actual exit", async () =>
   });
 });
 
+test("injected exit callback cannot retain an extra graph or invent a malformed leader exit", async () => {
+  const retainedGraph = { payload: Buffer.alloc(200_000) };
+  const valid = start("bounded-exit");
+  try {
+    valid.observer.onExit({ exitCode: 0, signal: 1, retainedGraph });
+    const snapshot = valid.session.snapshot();
+    expect(snapshot.leader).toEqual({ kind: "exit-observed", exit: { exitCode: 0, signal: 1 } });
+    expect(JSON.stringify(snapshot.leader)).not.toContain("retainedGraph");
+  } finally {
+    await valid.session.dispose();
+  }
+  const invalid = start("malformed-exit");
+  try {
+    invalid.observer.onExit({
+      exitCode: 0,
+      get signal() {
+        throw new Error("hostile accessor");
+      },
+    });
+    expect(invalid.session.snapshot().leader).toEqual({ kind: "not-observed" });
+    expect(invalid.session.snapshot().ownershipEvidence).not.toBe("closure-proven");
+  } finally {
+    await invalid.session.dispose();
+  }
+});
+
 test("writer-first stop uncertainty retains signal detail until actual exit arrives", async () => {
   const writer = deferred();
   const stop = deferred();
@@ -482,7 +508,13 @@ test("writer-first stop uncertainty retains signal detail until actual exit arri
   expect(receipt).toMatchObject({
     stop: {
       kind: "observed",
-      result: { kind: "unverifiable", signalFailure: { phase: "graceful", cause: "EPERM" } },
+      result: {
+        kind: "unverifiable",
+        signalFailure: {
+          phase: "graceful",
+          cause: { category: "native-failure", summary: "EPERM" },
+        },
+      },
     },
     writer: { kind: "closed" },
     leader: { kind: "not-observed" },

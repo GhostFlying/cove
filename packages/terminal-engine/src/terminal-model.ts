@@ -81,12 +81,18 @@ export interface AutomaticOutput {
   readonly kind: "query" | "focus";
   readonly bytes: Uint8Array;
 }
+export interface RetainedBytesLease {
+  release(): void;
+}
+export type RetainedBytesReservation = (bytes: number) => RetainedBytesLease | undefined;
 export interface TerminalModelOptions {
   readonly run: RunRef;
   readonly geometry: Geometry;
   readonly appearance?: Appearance;
   readonly effectiveBudgets?: EffectiveBudgets;
   readonly onAutomaticOutput: (output: AutomaticOutput) => void;
+  readonly reserveRetainedBytes?: RetainedBytesReservation;
+  readonly availableRetainedBytes?: () => number;
 }
 
 interface Checkpoint {
@@ -98,6 +104,7 @@ interface Checkpoint {
 }
 interface Queued {
   readonly bytes: number;
+  readonly lease?: RetainedBytesLease;
   readonly run: () => Promise<unknown>;
   readonly resolve: (result: unknown) => void;
   readonly disposedResult: unknown;
@@ -122,7 +129,10 @@ export class TerminalModel {
   readonly #query: TerminalQueryResponder;
   readonly #sink: (output: AutomaticOutput) => void;
   readonly #tail: BoundedRecoveryTail;
+  readonly #reserveRetainedBytes: RetainedBytesReservation | undefined;
+  readonly #availableRetainedBytes: (() => number) | undefined;
   #checkpoint: Checkpoint | null = null;
+  #checkpointLease: RetainedBytesLease | undefined;
   #queue: Queued[] = [];
   #outstanding = new Set<Queued>();
   #busy = false;
@@ -160,9 +170,11 @@ export class TerminalModel {
     assertPinnedRecoveryPackages();
     this.#run = run.data;
     this.#budgets = budgets;
+    this.#reserveRetainedBytes = options.reserveRetainedBytes;
+    this.#availableRetainedBytes = options.availableRetainedBytes;
     this.#sink = options.onAutomaticOutput;
     this.#admittedGeometry = { ...geometry.data };
-    this.#tail = new BoundedRecoveryTail(budgets.baselineTailBytes);
+    this.#tail = new BoundedRecoveryTail(budgets.baselineTailBytes, this.#reserveRetainedBytes);
     this.#terminal = new HeadlessTerminal({
       cols: geometry.data.cols,
       rows: geometry.data.rows,
@@ -182,6 +194,8 @@ export class TerminalModel {
       if (!this.#checkpoint)
         throw new Error(this.#recoveryReason || "Initial checkpoint unavailable");
     } catch (error) {
+      this.#checkpointLease?.release();
+      this.#tail.resetAfterProvedCheckpoint();
       this.#terminal.dispose();
       throw error;
     }
@@ -219,9 +233,9 @@ export class TerminalModel {
       return Promise.resolve(failure("invalid", "Control geometry differs from ordered model"));
     if (event.type === "appearance" && !validateAppearance(event.appearance))
       return Promise.resolve(failure("invalid", "Appearance is invalid"));
-    const bytes = output ? payload!.slice() : undefined;
+    let bytes: Uint8Array | undefined;
     const admitted = this.#enqueue<EngineResult<EngineState>>(
-      bytes?.length ?? 0,
+      output ? payload!.length : 0,
       async () => {
         if (this.#disposed) return failure("disposed", "Terminal model disposed");
         this.#currentOutputSeq = event.seq;
@@ -270,6 +284,11 @@ export class TerminalModel {
       failure("disposed", "Terminal model disposed"),
       (reason) => failure("faulted", reason),
       true,
+      output
+        ? () => {
+            bytes = payload!.slice();
+          }
+        : undefined,
     );
     if (admitted.ok) {
       this.#receivedSeq = event.seq;
@@ -284,9 +303,9 @@ export class TerminalModel {
     if (this.#fault) return Promise.resolve(failure("faulted", this.#fault));
     if (!(bytes instanceof Uint8Array) || bytes.length < 1 || bytes.length > 65_536)
       return Promise.resolve(failure("invalid", "Unpublished output payload is invalid"));
-    const owned = bytes.slice();
+    let owned: Uint8Array;
     const admitted = this.#enqueue<EngineResult<EngineState>>(
-      owned.length,
+      bytes.length,
       async () => {
         this.#currentOutputSeq = null;
         await this.#write(owned);
@@ -297,10 +316,15 @@ export class TerminalModel {
       failure("disposed", "Terminal model disposed"),
       (reason) => failure("faulted", reason),
       true,
+      () => {
+        owned = bytes.slice();
+      },
     );
     if (!admitted.ok) return Promise.resolve(admitted.error);
     this.#fenced = true;
     this.#checkpoint = null;
+    this.#checkpointLease?.release();
+    this.#checkpointLease = undefined;
     this.#tail.resetAfterProvedCheckpoint();
     return admitted.promise;
   }
@@ -316,6 +340,10 @@ export class TerminalModel {
       true,
     );
     return admitted.ok ? admitted.promise : Promise.resolve(admitted.error);
+  }
+
+  currentState(): EngineState {
+    return this.#state();
   }
 
   captureBaseline(): Promise<EngineBaselineResult> {
@@ -407,6 +435,8 @@ export class TerminalModel {
     this.#query.dispose();
     this.#terminal.dispose();
     this.#checkpoint = null;
+    this.#checkpointLease?.release();
+    this.#checkpointLease = undefined;
     this.#tail.resetAfterProvedCheckpoint();
   }
 
@@ -430,15 +460,26 @@ export class TerminalModel {
     disposedResult: T,
     faultedResult: (reason: string) => T,
     settledState = false,
+    copy?: () => void,
   ): { ok: true; promise: Promise<T> } | { ok: false; error: EngineResult<never> & { ok: false } } {
     if (
       this.#outstanding.size >= this.#budgets.pendingWorkerCommands ||
       bytes > this.#budgets.parseHardBytes - this.#queuedBytes
     )
       return { ok: false, error: failure("capacity", "Engine FIFO capacity exceeded") };
+    const lease = this.#reserveRetainedBytes?.(bytes + 64);
+    if (this.#reserveRetainedBytes && !lease)
+      return { ok: false, error: failure("capacity", "Worker retention capacity exceeded") };
+    try {
+      copy?.();
+    } catch {
+      lease?.release();
+      return { ok: false, error: failure("capacity", "Engine payload copy failed") };
+    }
     const promise = new Promise<T>((resolve) => {
       const item: Queued = {
         bytes,
+        ...(lease && { lease }),
         run,
         resolve: (value) => resolve(value as T),
         disposedResult,
@@ -480,6 +521,7 @@ export class TerminalModel {
     item.settled = true;
     this.#outstanding.delete(item);
     this.#queuedBytes -= item.bytes;
+    item.lease?.release();
     if (
       item.settledState &&
       typeof result === "object" &&
@@ -507,6 +549,8 @@ export class TerminalModel {
 
   #invalidateCheckpoint(reason: string): void {
     this.#checkpoint = null;
+    this.#checkpointLease?.release();
+    this.#checkpointLease = undefined;
     this.#tail.resetAfterProvedCheckpoint();
     this.#recoveryReason = reason;
   }
@@ -528,14 +572,31 @@ export class TerminalModel {
       this.#recoveryReason = "Parser or UTF-8 sequence remains incomplete";
       return;
     }
+    let settersLease: RetainedBytesLease | undefined;
+    let scratchLease: RetainedBytesLease | undefined;
+    let candidateLease: RetainedBytesLease | undefined;
     try {
+      // Palette setters have at most 256 fixed-size entries under the profile.
+      settersLease = this.#reserveRetainedBytes?.(16_512);
+      if (this.#reserveRetainedBytes && !settersLease)
+        throw new Error("Checkpoint setters exceed worker retention capacity");
       const setters = this.#query.checkpointSetters();
       if (setters.length >= this.#budgets.baselineVtBytes)
         throw new Error("Appearance setters exceed VT cap");
+      const available = this.#availableRetainedBytes?.() ?? this.#budgets.workerBytes;
+      const gridCap = Math.min(
+        this.#budgets.baselineVtBytes - setters.length,
+        Math.floor((available - 512 - 3 * setters.length) / 7),
+      );
+      if (gridCap < 1) throw new Error("Checkpoint scratch exceeds worker retention capacity");
+      // 3 encoded copies, 2 text-unit copies, final VT and fixed checkpoint metadata.
+      scratchLease = this.#reserveRetainedBytes?.(6 * gridCap + 2 * setters.length + 256);
+      if (this.#reserveRetainedBytes && !scratchLease)
+        throw new Error("Checkpoint scratch exceeds worker retention capacity");
       const candidate = createLogicalGridCheckpoint(
         this.#terminal,
         this.#outputBytes,
-        this.#budgets.baselineVtBytes - setters.length,
+        gridCap,
         this.#budgets.historyLines,
       );
       const vt = new Uint8Array(setters.length + candidate.vt.length);
@@ -547,7 +608,15 @@ export class TerminalModel {
       if (peak > this.#budgets.workerBytes)
         throw new Error("Checkpoint replacement exceeds engine resource cap");
       this.#peakAccountedBytes = Math.max(this.#peakAccountedBytes, peak);
+      candidateLease = this.#reserveRetainedBytes?.(vt.length + 256);
+      if (this.#reserveRetainedBytes && !candidateLease)
+        throw new Error("Checkpoint retention exceeds worker capacity");
+      scratchLease?.release();
+      scratchLease = undefined;
       const historyLines = Math.max(0, this.#terminal.buffer.normal.length - this.#terminal.rows);
+      this.#checkpointLease?.release();
+      this.#checkpointLease = candidateLease;
+      candidateLease = undefined;
       this.#checkpoint = {
         vt,
         seq: this.#parsedSeq,
@@ -567,7 +636,13 @@ export class TerminalModel {
       this.#recoveryReason = "";
     } catch (error) {
       this.#recoveryReason =
-        error instanceof Error ? error.message : "Checkpoint construction failed";
+        error instanceof Error && error.message.includes("capacity")
+          ? "Checkpoint retention capacity exceeded"
+          : "Checkpoint construction failed";
+    } finally {
+      candidateLease?.release();
+      scratchLease?.release();
+      settersLease?.release();
     }
   }
 
