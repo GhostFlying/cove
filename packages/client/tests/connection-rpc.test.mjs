@@ -66,6 +66,26 @@ class FakeScheduler {
   }
 }
 
+function auditedRpcScheduler({ synchronousTimeout = false } = {}) {
+  const scheduler = new FakeScheduler();
+  const baseSetTimer = scheduler.setTimer;
+  const audit = { disposals: 0 };
+  scheduler.setTimer = (delayMs, callback) => {
+    const handle = baseSetTimer(delayMs, callback);
+    if (delayMs !== 10) return handle;
+    if (synchronousTimeout) callback();
+    return {
+      dispose: () => {
+        audit.disposals += 1;
+        callback();
+        handle.dispose();
+        throw new Error("non-idempotent timer dispose");
+      },
+    };
+  };
+  return { scheduler, audit };
+}
+
 class FakeTerminal {
   opens = [];
 
@@ -719,6 +739,208 @@ describe("bounded typed RPC", () => {
       operation: { operationId: "op-post-throw" },
     });
     expect(posts).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("records response handoff after synchronous dispose before late cancel", async () => {
+    const context = harness();
+    await connectHarness(context);
+    let cancellations = 0;
+    let settlements = 0;
+    context.http.post = (request, callbacks) => {
+      const decoded = JSON.parse(fatalDecoder.decode(request.body));
+      context.client.dispose();
+      callbacks.onResponse({
+        status: 200,
+        headers: headers(),
+        body: encoder.encode(
+          JSON.stringify(
+            rpcResult(decoded.id, {
+              operation: operation("op-response-after-dispose", "terminal.create"),
+            }),
+          ),
+        ),
+      });
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "not-sent";
+        },
+      };
+    };
+
+    const call = context.client.call("terminal.create", createParams("op-response-after-dispose"));
+    void call.then(() => {
+      settlements += 1;
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-response-after-dispose" },
+    });
+    await flush();
+    expect(cancellations).toBe(1);
+    expect(settlements).toBe(1);
+    expect(context.client.snapshot()).toMatchObject({ status: "disposed", pendingRpcCount: 0 });
+  });
+
+  test("records handoff before a response body accessor reenters reconnect", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const ordinaryPost = context.http.post;
+    let bodyReads = 0;
+    let cancellations = 0;
+    let reconnect;
+    context.http.post = (request, callbacks) => {
+      const decoded = JSON.parse(fatalDecoder.decode(request.body));
+      const body = encoder.encode(
+        JSON.stringify(
+          rpcResult(decoded.id, {
+            operation: operation("op-response-accessor", "terminal.create"),
+          }),
+        ),
+      );
+      callbacks.onResponse({
+        status: 200,
+        headers: headers(),
+        get body() {
+          bodyReads += 1;
+          if (bodyReads === 1) {
+            context.http.post = ordinaryPost;
+            reconnect = context.client.reconnect();
+          }
+          return body;
+        },
+      });
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "not-sent";
+        },
+      };
+    };
+
+    expect(
+      await context.client.call("terminal.create", createParams("op-response-accessor")),
+    ).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-response-accessor" },
+    });
+    await flush();
+    context.http.respond(1, bootstrap());
+    context.terminal.text(1, bootstrap({}, true));
+    expect(await reconnect).toMatchObject({ ok: true });
+
+    const reused = context.client.call("terminal.create", {
+      ...createParams("op-response-accessor"),
+      executable: "/bin/different",
+    });
+    await flush();
+    context.http.fail(2, "not-sent");
+    expect(await reused).toMatchObject({ ok: false, kind: "operation-not-sent" });
+    expect(bodyReads).toBeGreaterThan(0);
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot()).toMatchObject({ status: "connected", pendingRpcCount: 0 });
+  });
+
+  test("retires a successful RPC timer once before later deadlines", async () => {
+    const { scheduler, audit } = auditedRpcScheduler();
+    const context = harness({ scheduler, options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    const call = context.client.call("terminal.list", { limit: 1 });
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcResult(request.id, { runs: [] }), { headers: headers() });
+    expect(await call).toEqual({ ok: true, value: { runs: [] } });
+    scheduler.advance(10);
+    expect(audit.disposals).toBe(1);
+    expect(scheduler.timers.size).toBe(0);
+    expect(context.client.snapshot()).toMatchObject({ status: "connected", pendingRpcCount: 0 });
+  });
+
+  test("disposes a reentrant throwing timer once on pre-post credential timeout", async () => {
+    const { scheduler, audit } = auditedRpcScheduler();
+    let credentialCalls = 0;
+    let releaseCredentials;
+    const context = harness({
+      scheduler,
+      options: {
+        rpcTimeoutMs: 10,
+        credentials: () => {
+          credentialCalls += 1;
+          if (credentialCalls === 1) {
+            return { authorization: "Bearer bootstrap", terminalSecret: "a".repeat(43) };
+          }
+          return new Promise((resolve) => {
+            releaseCredentials = resolve;
+          });
+        },
+      },
+    });
+    await connectHarness(context);
+    let settlements = 0;
+    const call = context.client.call("terminal.create", createParams("op-timer-before-post"));
+    void call.then(() => {
+      settlements += 1;
+    });
+    await flush();
+    scheduler.advance(10);
+    expect(await call).toMatchObject({ ok: false, kind: "operation-not-sent" });
+    releaseCredentials({ authorization: "Bearer late", terminalSecret: "b".repeat(43) });
+    await flush();
+    expect(audit.disposals).toBe(1);
+    expect(settlements).toBe(1);
+    expect(context.http.requests).toHaveLength(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("disposes a reentrant throwing timer once during deferred post uncertainty", async () => {
+    const { scheduler, audit } = auditedRpcScheduler();
+    const context = harness({ scheduler, options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    let cancellations = 0;
+    let settlements = 0;
+    context.http.post = () => {
+      scheduler.advance(10);
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "unknown";
+        },
+      };
+    };
+    const call = context.client.call("terminal.stop", stopParams("op-timer-deferred"));
+    void call.then(() => {
+      settlements += 1;
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-timer-deferred" },
+    });
+    await flush();
+    expect(audit.disposals).toBe(1);
+    expect(cancellations).toBe(1);
+    expect(settlements).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("disposes a timer returned after synchronous setup timeout exactly once", async () => {
+    const { scheduler, audit } = auditedRpcScheduler({ synchronousTimeout: true });
+    const context = harness({ scheduler, options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    let settlements = 0;
+    const call = context.client.call("terminal.create", createParams("op-timer-late-handle"));
+    void call.then(() => {
+      settlements += 1;
+    });
+    expect(await call).toMatchObject({ ok: false, kind: "operation-not-sent" });
+    await flush();
+    expect(audit.disposals).toBe(1);
+    expect(settlements).toBe(1);
+    expect(scheduler.timers.size).toBe(0);
+    expect(context.http.requests).toHaveLength(1);
     expect(context.client.snapshot().pendingRpcCount).toBe(0);
   });
 
