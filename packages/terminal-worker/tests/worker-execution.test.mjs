@@ -168,6 +168,29 @@ async function start(config = {}, budgets = M0_LIMITS, onFact) {
   return { execution, factory, item: [...factory.owned.values()][0] };
 }
 
+test.each([
+  ["one chunk", [65_536], 1],
+  ["separate callbacks", [65_536, 1], 2],
+  ["one split callback", [65_537], 2],
+])("worker ingress returns to its baseline after %s", async (_name, lengths, expectedFacts) => {
+  const facts = [];
+  const { execution, item } = await start({}, M0_LIMITS, (fact) => facts.push(fact));
+  try {
+    const baseline = execution.snapshot().retainedBreakdown.workerBytes;
+    for (const length of lengths) item.observer.onData(Buffer.alloc(length, 0x41));
+    expect(execution.snapshot().retainedBreakdown.workerBytes).toBeGreaterThan(baseline);
+    const status = await execution.execute(command("status"));
+    expect(status.runStatus).toMatchObject({ parsedSeq: expectedFacts });
+    expect(facts).toHaveLength(expectedFacts);
+    expect(facts.reduce((sum, fact) => sum + fact.bytes.length, 0)).toBe(
+      lengths.reduce((sum, length) => sum + length, 0),
+    );
+    expect(execution.snapshot().retainedBreakdown.workerBytes).toBe(baseline);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
 async function withInstrumentedCounters(fields, runCase) {
   const suffix = randomUUID();
   const source = new URL("../dist/src/", import.meta.url);

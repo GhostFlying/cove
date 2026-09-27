@@ -124,10 +124,139 @@ function start(name = "run", callbacks = {}) {
       faults.push(fault);
       return callbacks.onFault?.(fault);
     },
+    ...(callbacks.reserveIngressBytes && { reserveIngressBytes: callbacks.reserveIngressBytes }),
   });
   expect(result.kind).toBe("created");
   return { session: result.session, observer, pty, events, writes, state, faults };
 }
+
+function ingressLedger() {
+  const leases = [];
+  let retained = 0;
+  return {
+    leases,
+    get retained() {
+      return retained;
+    },
+    reserveIngressBytes(bytes) {
+      const lease = { bytes, releases: 0 };
+      leases.push(lease);
+      retained += bytes;
+      return {
+        release() {
+          lease.releases++;
+          retained -= bytes;
+        },
+      };
+    },
+  };
+}
+
+test("one split callback retires its aggregate lease after every derived fact", async () => {
+  const ledger = ingressLedger();
+  const owned = start("split-lease", { reserveIngressBytes: ledger.reserveIngressBytes });
+  try {
+    const bytes = Buffer.alloc(65_537, 0x41);
+    bytes[65_536] = 0x42;
+    owned.observer.onData(bytes);
+    expect(ledger.leases).toEqual([{ bytes: 65_665, releases: 0 }]);
+    expect(await owned.session.barrier()).toMatchObject({ ok: true });
+    expect(owned.events.map(({ event, bytes: part }) => [event.seq, part.length, part[0]])).toEqual(
+      [
+        [1, 65_536, 0x41],
+        [2, 1, 0x42],
+      ],
+    );
+    expect(ledger.leases).toEqual([{ bytes: 65_665, releases: 1 }]);
+    expect(ledger.retained).toBe(0);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("equal-sized split callbacks retain independent lease identities across queued disposal", async () => {
+  const ledger = ingressLedger();
+  const first = start("first-lease", { reserveIngressBytes: ledger.reserveIngressBytes });
+  const second = start("second-lease", { reserveIngressBytes: ledger.reserveIngressBytes });
+  try {
+    first.observer.onData(Buffer.alloc(65_537, 0x41));
+    second.observer.onData(Buffer.alloc(65_537, 0x42));
+    expect(ledger.leases).toEqual([
+      { bytes: 65_665, releases: 0 },
+      { bytes: 65_665, releases: 0 },
+    ]);
+    await first.session.dispose();
+    expect(ledger.leases.map((lease) => lease.releases)).toEqual([1, 0]);
+    expect(await second.session.barrier()).toMatchObject({ ok: true });
+    expect(second.events.map(({ bytes }) => bytes[0])).toEqual([0x42, 0x42]);
+    expect(ledger.leases.map((lease) => lease.releases)).toEqual([1, 1]);
+    expect(ledger.retained).toBe(0);
+  } finally {
+    await Promise.all([first.session.dispose(), second.session.dispose()]);
+  }
+});
+
+test("consumer disposal retires queued chunks but keeps the active aggregate lease", async () => {
+  const ledger = ingressLedger();
+  let session;
+  let heldDuringConsumer;
+  const owned = start("active-lease", {
+    reserveIngressBytes: ledger.reserveIngressBytes,
+    onFact() {
+      heldDuringConsumer = ledger.retained;
+      void session.dispose();
+    },
+  });
+  session = owned.session;
+  owned.observer.onData(Buffer.alloc(65_537, 0x41));
+  await owned.session.barrier();
+  expect(heldDuringConsumer).toBe(65_665);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(ledger.leases).toEqual([{ bytes: 65_665, releases: 1 }]);
+  expect(ledger.retained).toBe(0);
+});
+
+test("copy failure after reservation unwinds the entire callback without publishing a prefix", async () => {
+  const ledger = ingressLedger();
+  const owned = start("copy-failure", { reserveIngressBytes: ledger.reserveIngressBytes });
+  const originalFrom = Buffer.from;
+  const from = vi.spyOn(Buffer, "from").mockImplementation((value, ...args) => {
+    if (Buffer.isBuffer(value) && value.length === 1) throw new Error("controlled copy failure");
+    return originalFrom(value, ...args);
+  });
+  try {
+    owned.observer.onData(Buffer.alloc(65_537, 0x41));
+  } finally {
+    from.mockRestore();
+  }
+  try {
+    expect(owned.session.snapshot()).toMatchObject({
+      faulted: true,
+      receivedSeq: 0,
+      queuedBytes: 0,
+    });
+    expect(owned.events).toEqual([]);
+    expect(ledger.leases).toEqual([{ bytes: 65_665, releases: 1 }]);
+    expect(ledger.retained).toBe(0);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("denied aggregate admission publishes no output chunk", async () => {
+  const owned = start("denied-ingress", { reserveIngressBytes: () => undefined });
+  try {
+    owned.observer.onData(Buffer.alloc(65_537, 0x41));
+    expect(owned.session.snapshot()).toMatchObject({
+      faulted: true,
+      receivedSeq: 0,
+      queuedBytes: 0,
+    });
+    expect(owned.events).toEqual([]);
+  } finally {
+    await owned.session.dispose();
+  }
+});
 
 test("copies native callback bytes before reuse and preserves split UTF-8/NUL order", async () => {
   const owned = start();
@@ -309,17 +438,30 @@ test("early copied output is released when spawn faults before owner attachment"
 
 test("two sessions progress independently while one drains several output chunks", async () => {
   const order = [];
-  const first = start("first", { onFact: ({ event }) => order.push(`first:${event.seq}`) });
-  const second = start("second", { onFact: ({ event }) => order.push(`second:${event.seq}`) });
+  const ledger = ingressLedger();
+  const first = start("first", {
+    reserveIngressBytes: ledger.reserveIngressBytes,
+    onFact: ({ event }) => order.push(`first:${event.seq}`),
+  });
+  const second = start("second", {
+    reserveIngressBytes: ledger.reserveIngressBytes,
+    onFact: ({ event }) => order.push(`second:${event.seq}`),
+  });
   try {
     first.observer.onData(Buffer.alloc(4 * 65_536, 65));
     second.observer.onData(Buffer.from("B"));
+    expect(ledger.leases).toEqual([
+      { bytes: 4 * (65_536 + 64), releases: 0 },
+      { bytes: 65, releases: 0 },
+    ]);
     expect(await Promise.all([first.session.barrier(), second.session.barrier()])).toEqual([
       expect.objectContaining({ ok: true }),
       expect.objectContaining({ ok: true }),
     ]);
     expect(order).toContain("second:1");
     expect(order.indexOf("second:1")).toBeLessThan(order.indexOf("first:4"));
+    expect(ledger.leases.map((lease) => lease.releases)).toEqual([1, 1]);
+    expect(ledger.retained).toBe(0);
   } finally {
     await Promise.all([first.session.dispose(), second.session.dispose()]);
   }
@@ -767,7 +909,8 @@ test("fact consumer disposal at low water never resumes a retired PTY", async ()
   expect((await barrier).ok).toBe(false);
   await receipt;
   expect(delivered).toBe(7);
-  expect(remainingAtDispose).toBe(2 * 65_536);
+  // The seventh chunk is still owned until its consumer returns.
+  expect(remainingAtDispose).toBe(3 * 65_536);
   expect(owned.state).toMatchObject({ resumed: 0, stopped: 1 });
   expect(session.snapshot()).toMatchObject({ disposed: true, queuedBytes: 0 });
 });

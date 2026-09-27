@@ -3,6 +3,7 @@ import {
   type EngineResult,
   type EngineState,
   type TerminalModel,
+  type RetainedBytesLease,
   type RetainedBytesReservation,
 } from "@cove/terminal-engine";
 import { M0_LIMITS, type EffectiveBudgets } from "@cove/protocol/budgets";
@@ -33,10 +34,14 @@ const PENDING_STOP: RunSessionStopObservation = Object.freeze({ kind: "pending-a
 
 type Fact = { readonly event: RunEvent; readonly bytes?: Buffer };
 type Pending =
-  | { readonly kind: "fact"; readonly fact: Fact }
-  | { readonly kind: "unpublished"; readonly bytes: Buffer }
-  | { readonly kind: "deferred-output"; readonly bytes: Buffer }
-  | { readonly kind: "deferred-exit"; readonly exit: NativeExit }
+  | { readonly kind: "fact"; readonly fact: Fact; readonly retireIngress: () => void }
+  | { readonly kind: "unpublished"; readonly bytes: Buffer; readonly retireIngress: () => void }
+  | { readonly kind: "deferred-output"; readonly bytes: Buffer; readonly retireIngress: () => void }
+  | {
+      readonly kind: "deferred-exit";
+      readonly exit: NativeExit;
+      readonly retireIngress: () => void;
+    }
   | { readonly kind: "barrier"; readonly resolve: (result: EngineResult<EngineState>) => void }
   | {
       readonly kind: "operation";
@@ -100,8 +105,7 @@ export interface RunSessionOptions {
   readonly factory: NativePtyFactory;
   readonly onFact?: (fact: Fact) => void;
   readonly onFault?: (fault: RunSessionFault) => void;
-  readonly reserveIngressBytes?: (bytes: number) => boolean;
-  readonly releaseIngressBytes?: (bytes: number) => void;
+  readonly reserveIngressBytes?: RetainedBytesReservation;
   readonly reserveInputIdentity?: (subscription: SubscriptionRef) => boolean;
   readonly reserveRetainedBytes?: RetainedBytesReservation;
   readonly availableRetainedBytes?: () => number;
@@ -178,6 +182,20 @@ function failure(reason: string): EngineResult<never> {
   return { ok: false, error: { code: "faulted", reason } };
 }
 
+const UNACCOUNTED_INGRESS_LEASE: RetainedBytesLease = Object.freeze({ release() {} });
+
+function ingressRetirements(lease: RetainedBytesLease, count: number): Array<() => void> {
+  let remaining = count;
+  return Array.from({ length: count }, () => {
+    let retired = false;
+    return () => {
+      if (retired) return;
+      retired = true;
+      if (--remaining === 0) lease.release();
+    };
+  });
+}
+
 function consumesThenable(value: unknown): boolean {
   if ((typeof value !== "object" || value === null) && typeof value !== "function") return false;
   let then: unknown;
@@ -238,8 +256,7 @@ class RunSessionCore {
   #controlHolder: ControlHolder | null = null;
   #inputSequences = new Map<string, number>();
   #lastState!: EngineState;
-  readonly #reserveIngressBytes: (bytes: number) => boolean;
-  readonly #releaseIngressBytes: (bytes: number) => void;
+  readonly #reserveIngressBytes: RetainedBytesReservation;
   readonly #reserveInputIdentity: (subscription: SubscriptionRef) => boolean;
   readonly #parseLowBytes: number;
   readonly #parseHighBytes: number;
@@ -251,8 +268,7 @@ class RunSessionCore {
     this.#geometry = Object.freeze({ ...options.geometry });
     this.#onFact = options.onFact;
     this.#onFault = options.onFault;
-    this.#reserveIngressBytes = options.reserveIngressBytes ?? (() => true);
-    this.#releaseIngressBytes = options.releaseIngressBytes ?? (() => {});
+    this.#reserveIngressBytes = options.reserveIngressBytes ?? (() => UNACCOUNTED_INGRESS_LEASE);
     this.#reserveInputIdentity = options.reserveInputIdentity ?? (() => true);
     this.#parseLowBytes = options.effectiveBudgets?.parseLowBytes ?? M0_LIMITS.parseLowBytes;
     this.#parseHighBytes = options.effectiveBudgets?.parseHighBytes ?? M0_LIMITS.parseHighBytes;
@@ -313,23 +329,41 @@ class RunSessionCore {
       this.#fault("Native output exceeded the bounded parse queue");
       return;
     }
-    if (!this.#reserveIngressBytes(bytes.length + chunks * INGRESS_RECORD_BYTES)) {
+    const lease = this.#reserveIngressBytes(bytes.length + chunks * INGRESS_RECORD_BYTES);
+    if (!lease) {
       this.#fault("Native output exceeded the worker byte budget");
       return;
     }
-    for (let offset = 0; offset < bytes.length; offset += OUTPUT_CHUNK_BYTES) {
-      // The native callback buffer may be reused immediately after return.
-      const owned = Buffer.from(bytes.subarray(offset, offset + OUTPUT_CHUNK_BYTES));
-      if (this.#deferIngress) {
-        this.#pending.push({ kind: "deferred-output", bytes: owned });
-      } else if (this.#receivedSeq === Number.MAX_SAFE_INTEGER) {
-        this.#counterExhausted = true;
-        this.#pending.push({ kind: "unpublished", bytes: owned });
-      } else {
-        const event: RunEvent = { type: "output", run: this.#run, seq: ++this.#receivedSeq };
-        this.#pending.push({ kind: "fact", fact: { event, bytes: owned } });
+    const pendingBefore = this.#pending.length;
+    try {
+      const retirements = ingressRetirements(lease, chunks);
+      const prepared: Pending[] = [];
+      let receivedSeq = this.#receivedSeq;
+      let exhausted = false;
+      for (let index = 0; index < chunks; index++) {
+        // Copy all chunks before publication; a failed copy cannot publish a valid prefix.
+        const offset = index * OUTPUT_CHUNK_BYTES;
+        const owned = Buffer.from(bytes.subarray(offset, offset + OUTPUT_CHUNK_BYTES));
+        const retireIngress = retirements[index]!;
+        if (this.#deferIngress)
+          prepared.push({ kind: "deferred-output", bytes: owned, retireIngress });
+        else if (receivedSeq === Number.MAX_SAFE_INTEGER) {
+          exhausted = true;
+          prepared.push({ kind: "unpublished", bytes: owned, retireIngress });
+        } else {
+          const event: RunEvent = { type: "output", run: this.#run, seq: ++receivedSeq };
+          prepared.push({ kind: "fact", fact: { event, bytes: owned }, retireIngress });
+        }
       }
-      this.#queuedBytes += owned.length;
+      this.#pending.push(...prepared);
+      this.#receivedSeq = receivedSeq;
+      if (exhausted) this.#counterExhausted = true;
+      this.#queuedBytes += bytes.length;
+    } catch {
+      this.#pending.splice(pendingBefore);
+      lease.release();
+      this.#fault("Native output copy or enqueue failed");
+      return;
     }
     this.#peakQueuedBytes = Math.max(this.#peakQueuedBytes, this.#queuedBytes);
     if (this.#queuedBytes >= this.#parseHighBytes) this.#pause();
@@ -358,11 +392,22 @@ class RunSessionCore {
     if (this.#disposed) return;
     if (this.#faulted) return;
     if (this.#deferIngress) {
-      if (!this.#reserveIngressBytes(INGRESS_RECORD_BYTES)) {
+      const lease = this.#reserveIngressBytes(INGRESS_RECORD_BYTES);
+      if (!lease) {
         this.#fault("Run exit exceeded worker retention capacity");
         return;
       }
-      this.#pending.push({ kind: "deferred-exit", exit: this.#leaderExit });
+      try {
+        this.#pending.push({
+          kind: "deferred-exit",
+          exit: this.#leaderExit,
+          retireIngress: () => lease.release(),
+        });
+      } catch {
+        lease.release();
+        this.#fault("Run exit could not enter the bounded parse queue");
+        return;
+      }
       this.#schedule();
       return;
     }
@@ -374,18 +419,26 @@ class RunSessionCore {
       this.#fault("Run exit could not enter the bounded parse queue");
       return;
     }
-    if (!this.#reserveIngressBytes(INGRESS_RECORD_BYTES)) {
+    const lease = this.#reserveIngressBytes(INGRESS_RECORD_BYTES);
+    if (!lease) {
       this.#fault("Run exit exceeded worker retention capacity");
       return;
     }
     const event: RunEvent = {
       type: "exit",
       run: this.#run,
-      seq: ++this.#receivedSeq,
+      seq: this.#receivedSeq + 1,
       exitCode: exit.exitCode,
       signal: exit.signal === undefined ? null : String(exit.signal),
     };
-    this.#pending.push({ kind: "fact", fact: { event } });
+    try {
+      this.#pending.push({ kind: "fact", fact: { event }, retireIngress: () => lease.release() });
+    } catch {
+      lease.release();
+      this.#fault("Run exit could not enter the bounded parse queue");
+      return;
+    }
+    this.#receivedSeq = event.seq;
     this.#schedule();
   }
 
@@ -683,18 +736,13 @@ class RunSessionCore {
         : item.kind === "unpublished" || item.kind === "deferred-output"
           ? item.bytes.length
           : 0;
-    let ingressBytes =
-      item.kind === "fact" ||
-      item.kind === "unpublished" ||
-      item.kind === "deferred-output" ||
-      item.kind === "deferred-exit"
-        ? payloadBytes + INGRESS_RECORD_BYTES
-        : 0;
+    let ingressRetired = false;
     const releaseIngress = (): void => {
-      if (ingressBytes === 0) return;
+      if (ingressRetired) return;
+      ingressRetired = true;
+      if (item.kind === "barrier" || item.kind === "operation") return;
       this.#queuedBytes = Math.max(0, this.#queuedBytes - payloadBytes);
-      this.#releaseIngressBytes(ingressBytes);
-      ingressBytes = 0;
+      item.retireIngress();
     };
     this.#running = true;
     try {
@@ -714,7 +762,7 @@ class RunSessionCore {
             this.#fault(`Terminal model ${result.error.code}: ${result.error.reason}`);
         } else {
           const event: RunEvent = { type: "output", run: this.#run, seq: ++this.#receivedSeq };
-          await this.#applyFact({ event, bytes: item.bytes }, releaseIngress);
+          await this.#applyFact({ event, bytes: item.bytes });
         }
       } else if (item.kind === "deferred-exit") {
         if (this.#receivedSeq === Number.MAX_SAFE_INTEGER) this.#counterExhausted = true;
@@ -729,7 +777,7 @@ class RunSessionCore {
           await this.#applyFact({ event });
         }
       } else {
-        await this.#applyFact(item.fact, releaseIngress);
+        await this.#applyFact(item.fact);
       }
     } catch {
       if (item.kind === "barrier") item.resolve(failure("Ordered terminal barrier failed"));
@@ -765,9 +813,8 @@ class RunSessionCore {
     }
   }
 
-  async #applyFact(fact: Fact, onApplied?: () => void): Promise<EngineResult<EngineState>> {
+  async #applyFact(fact: Fact): Promise<EngineResult<EngineState>> {
     const result = await this.#model!.apply(fact.event, fact.bytes);
-    onApplied?.();
     if (!result.ok) {
       this.#fault(`Terminal model ${result.error.code}: ${result.error.reason}`);
       return result;
@@ -1014,14 +1061,16 @@ class RunSessionCore {
           void this.dispose().then((receipt) => item.resolve({ kind: "stopped", receipt }));
         else item.resolve({ kind: "rejected", reason });
       }
-      if (item.kind === "fact" && item.fact.bytes)
-        this.#releaseIngressBytes(item.fact.bytes.length + INGRESS_RECORD_BYTES);
-      if (item.kind === "fact" && !item.fact.bytes) this.#releaseIngressBytes(INGRESS_RECORD_BYTES);
-      if (item.kind === "unpublished" || item.kind === "deferred-output")
-        this.#releaseIngressBytes(item.bytes.length + INGRESS_RECORD_BYTES);
-      if (item.kind === "deferred-exit") this.#releaseIngressBytes(INGRESS_RECORD_BYTES);
+      if (item.kind === "fact") {
+        this.#queuedBytes -= item.fact.bytes?.length ?? 0;
+        item.retireIngress();
+      }
+      if (item.kind === "unpublished" || item.kind === "deferred-output") {
+        this.#queuedBytes -= item.bytes.length;
+        item.retireIngress();
+      }
+      if (item.kind === "deferred-exit") item.retireIngress();
     }
-    this.#queuedBytes = 0;
   }
 
   #fault(reason: string): void {
