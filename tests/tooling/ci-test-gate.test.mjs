@@ -9,7 +9,13 @@ import {
   verifyBrowserCleanupEvidence,
   validBrowserCloseTimeline,
   validateBrowserCloseDiagnosticInvocation,
+  verifyBrowserCloseDiagnosticEvidence,
+  verifyBrowserCloseDiagnosticSelection,
   verifyBrowserCloseDiagnosticReport,
+  bindDiagnosticBrowserVersion,
+  validDiagnosticBrowserProvenance,
+  writeBrowserCloseDiagnosticManifest,
+  writeNoConclusionDiagnosticFailure,
   requiredSuites,
   verifyDiscovery,
   verifyInventory,
@@ -218,6 +224,7 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     sourceCommit,
     sourceDirty: false,
     browserPid: 42,
+    browserVersion: "153.0.8010.12",
     browserExited: true,
     profile: "query",
     primaryOutcome: "completed",
@@ -291,6 +298,193 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
     runId: "local-43-1",
     recordCount: 1,
   });
+  const diagnosticDirectory = await mkdtemp(resolve(tmpdir(), "cove-browser-close-diagnostic-"));
+  temporaryDirectories.push(diagnosticDirectory);
+  const diagnosticName =
+    "V1-L4 publishes focus before input but not for selection scrolling appearance or show";
+  const reportPath = resolve(diagnosticDirectory, "vitest-results.json");
+  const passingReport = {
+    success: true,
+    numTotalTests: 2,
+    numPassedTests: 1,
+    numFailedTests: 0,
+    numPendingTests: 1,
+    numTodoTests: 0,
+    testResults: [
+      {
+        name: resolve(root, "packages/terminal-web/tests/view-lifecycle.test.mjs"),
+        status: "passed",
+        assertionResults: [
+          { fullName: diagnosticName, status: "passed" },
+          { fullName: "other V1 case", status: "skipped" },
+        ],
+      },
+    ],
+  };
+  const selectedRecord = { ...record, testName: diagnosticName };
+  await writeFile(reportPath, `${JSON.stringify(passingReport)}\n`);
+  await writeFile(path, `${JSON.stringify(selectedRecord)}\n`);
+  expect(
+    (
+      await verifyBrowserCloseDiagnosticEvidence(
+        diagnosticDirectory,
+        directory,
+        sourceCommit,
+        "local-43-1",
+        0,
+      )
+    ).outcome,
+  ).toBe("passed");
+  const failedRecord = {
+    ...selectedRecord,
+    browserExit: { code: null, signal: "SIGKILL", observedMs: 2_300 },
+    graceful: { ...record.graceful, outcome: "timed-out", elapsedMs: 2_200 },
+    kill: {
+      attempts: 1,
+      startedMs: 2_200,
+      phaseDeadlineMs: 6_000,
+      phaseRemainingMs: 3_800,
+      budgetMs: 1_500,
+      elapsedMs: 100,
+      outcome: "completed",
+    },
+    listener: { ...record.listener, startedMs: 2_300, phaseRemainingMs: 4_700 },
+    closeTimeline: {
+      ...record.closeTimeline,
+      finalMs: 2_300,
+      disconnected: { firstMs: 2_200, count: 1 },
+      serverClose: { firstMs: 2_300, count: 1 },
+      processExit: { firstMs: 2_300, count: 1 },
+      rawClose: { calledMs: 2, settledMs: null, outcome: "pending" },
+      closeWrapper: {
+        calledMs: 2,
+        settledMs: null,
+        outcome: "pending",
+        timeoutObservedMs: 2_002,
+      },
+      rawKill: { calledMs: 2_200, settledMs: 2_300, outcome: "fulfilled" },
+    },
+    cleanupElapsedMs: 2_300,
+  };
+  const failingReport = structuredClone(passingReport);
+  failingReport.success = false;
+  failingReport.numPassedTests = 0;
+  failingReport.numFailedTests = 1;
+  failingReport.testResults[0].status = "failed";
+  failingReport.testResults[0].assertionResults[0].status = "failed";
+  await writeFile(path, `${JSON.stringify(failedRecord)}\n`);
+  await writeFile(reportPath, `${JSON.stringify(failingReport)}\n`);
+  const validatedFailure = await verifyBrowserCloseDiagnosticEvidence(
+    diagnosticDirectory,
+    directory,
+    sourceCommit,
+    "local-43-1",
+    1,
+  );
+  expect(validatedFailure.outcome).toBe("failed");
+  const identity = { sourceCommit, tree: "c".repeat(40), ref: "refs/heads/diagnostic" };
+  await writeFile(resolve(diagnosticDirectory, "identity.json"), `${JSON.stringify(identity)}\n`);
+  await writeFile(resolve(diagnosticDirectory, "execution.json"), '[{"exitCode":1}]\n');
+  await writeFile(resolve(diagnosticDirectory, "environment.json"), '{"node":"26.10.0"}\n');
+  const manifest = await writeBrowserCloseDiagnosticManifest({
+    diagnosticDirectory,
+    cleanupDirectory: directory,
+    environmentPath: resolve(diagnosticDirectory, "environment.json"),
+    identity,
+    runId: "local-43-1",
+    verified: validatedFailure,
+    exitStatus: 1,
+    provenance: {
+      ...identity,
+      runId: "local-43-1",
+      playwright: "1.63.0",
+      playwrightCore: "1.63.0",
+      chromiumRevision: "1243",
+      chromiumVersion: "153.0.8010.12",
+      browserReportedVersion: "153.0.8010.12",
+    },
+  });
+  expect(manifest).toMatchObject({ outcome: "failed", vitestExitCode: 1, evidenceValidated: true });
+  expect(Object.keys(manifest.hashes)).toContain("browser-cleanup/42-1.json");
+  expect(JSON.parse(await readFile(resolve(diagnosticDirectory, "failure.json"), "utf8"))).toEqual({
+    classification: "validated-test-failure",
+    vitestExitCode: 1,
+  });
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      0,
+    ),
+  ).rejects.toThrow(/disagree/);
+  await rm(resolve(diagnosticDirectory, "result.json"));
+  await rm(resolve(diagnosticDirectory, "failure.json"));
+  await writeFile(reportPath, "{not-json}\n");
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      1,
+    ),
+  ).rejects.toThrow(/JSON/);
+  expect(
+    await writeNoConclusionDiagnosticFailure(diagnosticDirectory, new SyntaxError("invalid JSON")),
+  ).toEqual({ classification: "no-conclusion", errorName: "SyntaxError" });
+  await expect(readFile(resolve(diagnosticDirectory, "result.json"), "utf8")).rejects.toMatchObject(
+    {
+      code: "ENOENT",
+    },
+  );
+  await rm(reportPath);
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      1,
+    ),
+  ).rejects.toThrow(/ENOENT/);
+  await writeFile(reportPath, `${JSON.stringify(failingReport)}\n`);
+  await writeFile(
+    resolve(directory, "42-2.json"),
+    `${JSON.stringify(forInvocation("42-2", { testName: diagnosticName }))}\n`,
+  );
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      1,
+    ),
+  ).rejects.toThrow(/invocation identity/);
+  await rm(resolve(directory, "42-2.json"));
+  await rm(path);
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      1,
+    ),
+  ).rejects.toThrow(/count/);
+  await writeFile(path, `${JSON.stringify({ ...failedRecord, final: false })}\n`);
+  await expect(
+    verifyBrowserCloseDiagnosticEvidence(
+      diagnosticDirectory,
+      directory,
+      sourceCommit,
+      "local-43-1",
+      1,
+    ),
+  ).rejects.toThrow(/incomplete/);
+  await writeFile(path, `${JSON.stringify(record)}\n`);
   await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 2)).rejects.toThrow(/count/);
   await writeFile(path, `${JSON.stringify({ ...record, final: false })}\n`);
   await expect(verifyBrowserCleanupEvidence(directory, sourceCommit, 1)).rejects.toThrow(
@@ -446,6 +640,66 @@ test("single diagnostic result cannot satisfy ordinary suite inventory", () => {
   expect(() => verifyBrowserCloseDiagnosticReport({ ...execution, numTotalTests: 3 })).toThrow(
     /exactly V1-L4/,
   );
+  const failure = structuredClone(execution);
+  failure.success = false;
+  failure.numPassedTests = 0;
+  failure.numFailedTests = 1;
+  failure.testResults[0].status = "failed";
+  failure.testResults[0].assertionResults[0].status = "failed";
+  expect(verifyBrowserCloseDiagnosticSelection(failure)).toMatchObject({ outcome: "failed" });
+  expect(() => verifyBrowserCloseDiagnosticReport(failure)).toThrow(/did not pass/);
+  expect(() => verifyBrowserCloseDiagnosticSelection({ ...failure, numFailedTests: 2 })).toThrow(
+    /exactly V1-L4/,
+  );
+  const extra = structuredClone(failure);
+  extra.testResults[0].assertionResults[1].status = "failed";
+  expect(() => verifyBrowserCloseDiagnosticSelection(extra)).toThrow(/exactly V1-L4/);
+});
+
+test("diagnostic provenance distinguishes observed and unobserved browser versions", () => {
+  const installed = {
+    sourceCommit: "a".repeat(40),
+    tree: "b".repeat(40),
+    runId: "github-42-1",
+    githubRunId: "42",
+    githubRunAttempt: "1",
+    playwright: "1.63.0",
+    playwrightCore: "1.63.0",
+    chromiumRevision: "1243",
+    chromiumVersion: "153.0.8010.12",
+    browserReportedVersion: null,
+  };
+  expect(bindDiagnosticBrowserVersion(installed, { browserVersion: null })).toMatchObject({
+    browserReportedVersion: null,
+  });
+  expect(
+    bindDiagnosticBrowserVersion(installed, { browserVersion: "153.0.8010.12" }),
+  ).toMatchObject({
+    browserReportedVersion: "153.0.8010.12",
+  });
+  expect(() => bindDiagnosticBrowserVersion(installed, { browserVersion: "152.0.0.0" })).toThrow(
+    /differs/,
+  );
+  expect(() => bindDiagnosticBrowserVersion(installed, {})).toThrow(/differs/);
+  const observed = bindDiagnosticBrowserVersion(installed, {
+    browserVersion: "153.0.8010.12",
+  });
+  expect(
+    validDiagnosticBrowserProvenance(
+      observed,
+      { sourceCommit: installed.sourceCommit, tree: installed.tree },
+      installed.runId,
+      { browserVersion: "153.0.8010.12" },
+    ),
+  ).toBe(true);
+  expect(
+    validDiagnosticBrowserProvenance(
+      observed,
+      { sourceCommit: "wrong", tree: installed.tree },
+      installed.runId,
+      { browserVersion: "153.0.8010.12" },
+    ),
+  ).toBe(false);
 });
 
 test("timeline gate rejects missing final, invalid time and mismatched invocation", () => {
@@ -796,7 +1050,7 @@ test("rejects removal of a gate test below the required floor", () => {
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 36 }, (_, index) => ({
+    ...Array.from({ length: 37 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -804,7 +1058,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 35 tests; needs 36/,
+    /discovered 36 tests; needs 37/,
   );
 });
 
