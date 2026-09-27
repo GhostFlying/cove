@@ -817,8 +817,19 @@ class CoveClient implements Client {
     let cancellationStarted = false;
     let deferredUncertainReason: LocalErrorReason | undefined;
     let timer: Disposable | undefined;
+    let timerDisposalRequested = false;
+    let timerDisposalStarted = false;
     let disposition: TransferDisposition | undefined;
 
+    const disposeTimerOnce = (): void => {
+      timerDisposalRequested = true;
+      if (!timer || timerDisposalStarted) return;
+      // Clear ownership before dispose() can synchronously reenter this RPC.
+      const ownedTimer = timer;
+      timer = undefined;
+      timerDisposalStarted = true;
+      safeDispose(ownedTimer);
+    };
     const cancelOnce = (): void => {
       cancellationRequested = true;
       if (!cancellation || cancellationStarted) return;
@@ -827,7 +838,7 @@ class CoveClient implements Client {
       disposition = mergeDisposition(disposition, safeCancel(cancellation));
     };
     const complete = (outcome: CallOutcome<ResultFor<M>>): void => {
-      safeDispose(timer);
+      disposeTimerOnce();
       cancelOnce();
       this.pendingRpcs.delete(requestId);
       if (operation) this.activeOperationIntents.delete(operation.operationId);
@@ -862,7 +873,7 @@ class CoveClient implements Client {
     const uncertainOrLocal = (reason: LocalErrorReason): void => {
       if (settlement !== "active") return;
       settlement = "settling";
-      safeDispose(timer);
+      disposeTimerOnce();
       cancelOnce();
       if (postInProgress && !cancellation) {
         deferredUncertainReason = reason;
@@ -879,10 +890,11 @@ class CoveClient implements Client {
     this.emitState();
 
     try {
-      timer = this.options.scheduler.setTimer(this.rpcTimeoutMs, () => {
+      const returnedTimer = this.options.scheduler.setTimer(this.rpcTimeoutMs, () => {
         uncertainOrLocal("timeout");
       });
-      if (settlement !== "active") safeDispose(timer);
+      timer = returnedTimer;
+      if (timerDisposalRequested || settlement !== "active") disposeTimerOnce();
     } catch {
       uncertainOrLocal("invalid-state");
       return promise;
@@ -930,13 +942,15 @@ class CoveClient implements Client {
                   disposition = mergeDisposition(disposition, next);
                 },
                 onResponse: (response) => {
+                  if (settlement === "settled") return;
+                  // Receiving any response proves handoff before guards or response access.
+                  disposition = mergeDisposition(disposition, "handed-off");
                   if (
                     settlement !== "active" ||
                     generation !== this.generation ||
                     this.status !== "connected"
                   )
                     return;
-                  disposition = mergeDisposition(disposition, "handed-off");
                   if (response.body.byteLength > responseCap) {
                     uncertainOrLocal("response-too-large");
                     return;
