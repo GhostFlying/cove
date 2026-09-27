@@ -71,7 +71,10 @@ test("native helper repair isolates the checkout from a hardlinked package sourc
   await writeFile(native, "native fixture");
   await writeFile(source, "helper fixture", { mode: 0o644 });
   await link(source, helper);
-  const lookup = () => ({ native: { coveBoundedWriterVersion: 2 } });
+  const lookup = () => ({
+    native: { coveBoundedWriterVersion: 3 },
+    checkBoundedPtySupport: () => ({ supported: true, contractVersion: 3 }),
+  });
   lookup.resolve = () => join(packageRoot, "package.json");
   lookup.cache = { [await realpath(native)]: {} };
   let result;

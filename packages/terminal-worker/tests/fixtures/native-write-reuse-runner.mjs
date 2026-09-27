@@ -56,7 +56,7 @@ function destroyOnce() {
 
 let failure;
 try {
-  assert.equal(pty.native.coveBoundedWriterVersion, 2);
+  assert.equal(pty.native.coveBoundedWriterVersion, 3);
   scratch = mkdtempSync(join(tmpdir(), "cove-n1-reuse-"));
   terminal = pty.spawn(process.execPath, [fixture, nonce], {
     cols: 80,

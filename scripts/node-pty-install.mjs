@@ -18,7 +18,10 @@ export async function prepareNodePty(lookup = packageRequire, checkout = root) {
     throw new Error(`Unexpected node-pty version ${manifest.version}`);
   const packageRoot = await realpath(dirname(manifestPath));
   const loadedPackage = lookup("node-pty");
-  if (loadedPackage.native?.coveBoundedWriterVersion !== 2)
+  if (
+    loadedPackage.native?.coveBoundedWriterVersion !== 3 ||
+    loadedPackage.checkBoundedPtySupport?.().supported !== true
+  )
     throw new Error("node-pty bounded writer native capability is unavailable");
   const nativeBinary = Object.keys(lookup.cache).find(
     (path) => path.startsWith(`${packageRoot}${sep}`) && path.endsWith(".node"),
