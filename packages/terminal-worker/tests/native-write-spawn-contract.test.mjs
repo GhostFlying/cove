@@ -193,39 +193,51 @@ test("public preflight and pre-entry failures are side-effect-free", async () =>
     invalidElement = assertSpawnError(error, /Invalid bounded PTY spawn arguments/);
   }
   assert.deepEqual(await invalidElement.cleanup, { kind: "confirmed-clean" });
-  const marker = pty.native.coveBoundedWriterVersion;
+  const originalFork = pty.native.fork;
+  let nativeForkCalls = 0;
+  pty.native.fork = (...args) => {
+    nativeForkCalls++;
+    return originalFork(...args);
+  };
   try {
-    pty.native.coveBoundedWriterVersion = 2;
-    assert.deepEqual(pty.checkBoundedPtySupport(), {
-      supported: false,
-      reason: "binding-mismatch",
-    });
-    let failure;
+    const marker = pty.native.coveBoundedWriterVersion;
     try {
-      pty.spawn(process.execPath, [], options);
-    } catch (error) {
-      failure = assertSpawnError(error, /Bounded PTY support unavailable/);
+      pty.native.coveBoundedWriterVersion = 2;
+      assert.deepEqual(pty.checkBoundedPtySupport(), {
+        supported: false,
+        reason: "binding-mismatch",
+      });
+      let failure;
+      try {
+        pty.spawn(process.execPath, [], options);
+      } catch (error) {
+        failure = assertSpawnError(error, /Bounded PTY support unavailable/);
+      }
+      assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
+      assert.equal(nativeForkCalls, 0);
+    } finally {
+      pty.native.coveBoundedWriterVersion = marker;
     }
-    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
-  } finally {
-    pty.native.coveBoundedWriterVersion = marker;
-  }
-  const originalSignalOwned = UnixTerminal.prototype.signalOwned;
-  try {
-    UnixTerminal.prototype.signalOwned = undefined;
-    assert.deepEqual(pty.checkBoundedPtySupport(), {
-      supported: false,
-      reason: "binding-mismatch",
-    });
-    let failure;
+    const originalSignalOwned = UnixTerminal.prototype.signalOwned;
     try {
-      pty.spawn(process.execPath, [], options);
-    } catch (error) {
-      failure = assertSpawnError(error, /Bounded PTY support unavailable/);
+      UnixTerminal.prototype.signalOwned = undefined;
+      assert.deepEqual(pty.checkBoundedPtySupport(), {
+        supported: false,
+        reason: "binding-mismatch",
+      });
+      let failure;
+      try {
+        pty.spawn(process.execPath, [], options);
+      } catch (error) {
+        failure = assertSpawnError(error, /Bounded PTY support unavailable/);
+      }
+      assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
+      assert.equal(nativeForkCalls, 0);
+    } finally {
+      UnixTerminal.prototype.signalOwned = originalSignalOwned;
     }
-    assert.deepEqual(await failure.cleanup, { kind: "confirmed-clean" });
   } finally {
-    UnixTerminal.prototype.signalOwned = originalSignalOwned;
+    pty.native.fork = originalFork;
   }
   assert.equal(descriptorCount(), baseline);
 });
