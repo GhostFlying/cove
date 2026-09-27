@@ -1,0 +1,16 @@
+# M0 W1a first worker slice — candidate results
+
+Status: independently reviewed and finitely verified local candidate, **not accepted or merged**. This is the first run-pump/model-bridge slice only; control, holder, input, pipe and later worker/runtime slices remain outside this candidate.
+
+The owned checkout is `/Users/luchengxuan/WORKSPACE/cove-worktrees/m0-terminal-view`, branch `p/luchengxuan/m0-16-worker-execution-core`, based on accepted main `a4e50cb27b26db91a64c9711c5531e68f47c8c6c`. The clean functional head is `6596092369d4cd5ae0d95ef34da0cc252d0e5445`, tree `1f7d5f7361ee06c42c04c5663598b03cdf727a9a`. The reviewed correction plan is [m0-worker-execution-core-correction.md](m0-worker-execution-core-correction.md); its final pre-code addendum is commit `b7dfff6775ba21fd97ff416cbe034b99211f0b5c`.
+
+One session binds an accepted N2 PTY to one authoritative T2 model. It copies and accounts for callback bytes before queueing, serializes parse/fact settlement, routes automatic query replies to the same bounded native writer, fences stale callbacks, and publishes a single bounded disposal receipt. The public session is a facade without native ingress. The correction freezes initial writer/stop observations so callers cannot alter lifecycle evidence, and the fake adapter now covers synchronous cleanup exceptions and rejected writer completion. No accepted N2/T2/protocol/native patch, dependency pin or lockfile changed.
+
+## Verified evidence and limits
+
+- The author's pinned macOS full `pnpm check` at **earlier** head `ac75a631f714a0a9e09f710cce5d3af41080ae03` passed 44 suites / 396 tests, all gate stages; log `/tmp/cove-m0-w1a-author-full-ac75a63.log` SHA-256 `9b92128156f6712440b295dee8b8019899263bdbcb9aa1b58266711ea5955ad4`. It does not certify the later `6596092` correction.
+- At `6596092`, pinned Prettier/Oxlint on affected files, terminal-worker TypeScript build, fake session suite 26/26 and directly affected tooling suite 31/31 passed. Actual `vitest list --json` plus `verifyDiscovery` admitted 44 required suites / 398 listed tests, including the raised fake floor of 26 and unchanged real floor of 1. No broad local gate was repeated at this head.
+- Independent immutable-source review `/tmp/cove-m0-w1a-final-delta-review/report.md` SHA-256 `c0d84a27e557591705faa04bf4f0a34580608c7ba76c41cfb5c47e50b3535df2` approved `6596092` for its bounded source scope, closing F2 and T1 while retaining prior F1/F3/F4 findings as closed.
+- Independent compiled-public finite validation `/tmp/cove-m0-w1a-first-verify/f2t1-659-report.md` SHA-256 `0cf4b4fed0e85599509af88e757145db588217b2ca5170bf3610ecdf1f955f37` passed five newly authored mutation/cleanup/writer negatives and the registered fake suite 26/26. The earlier F1–F4 finite report at `ac75` remains SHA-256 `8b1f97a1ed895d2edff455c16c2a4f64ea091b8a673e5e0b149dfdcb9623d5ed`; neither report is a full-gate or Linux result.
+
+Remaining gates are the exact final-head macOS/Linux required checks and downloaded artifact readback, independent integration assessment after any base change, rebase-only commit mapping, and final-main CI/artifact verification. No W1a completion, W1b/W2/P2, sustained 100-PTY qualification, devbox Linux login or real Codex/TraeX/Claude Code workload is claimed. M0 remains active and M1 entry requires user review.
