@@ -30,18 +30,23 @@ async function within(promise, deadline, label) {
 }
 
 async function until(predicate, deadline, label) {
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error("Timed out awaiting " + label);
+  while (true) {
+    remaining(deadline, label);
+    if (predicate()) return;
     await new Promise((resolveWait) => setTimeout(resolveWait, 10));
   }
 }
 
-function inspectOwned(pid, mode, nonce) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+function inspectOwned(pid, mode, nonce, deadline, runPs = spawnSync) {
+  const result = runPs("ps", ["-p", String(pid), "-o", "command="], {
     encoding: "utf8",
-    timeout: 1_000,
+    timeout: Math.min(1_000, remaining(deadline, "owned fixture identity")),
   });
+  if (result.error) {
+    throw new Error(`Owned fixture ${pid} identity is unverifiable`, { cause: result.error });
+  }
   if (result.status !== 0) {
+    remaining(deadline, "owned fixture identity");
     try {
       process.kill(pid, 0);
     } catch (error) {
@@ -56,21 +61,22 @@ function inspectOwned(pid, mode, nonce) {
   return true;
 }
 
-function ownedGroup(pid, mode, nonce) {
-  expect(inspectOwned(pid, mode, nonce)).toBe(true);
+function ownedGroup(pid, mode, nonce, deadline) {
+  expect(inspectOwned(pid, mode, nonce, deadline)).toBe(true);
   const result = spawnSync("ps", ["-p", String(pid), "-o", "pgid="], {
     encoding: "utf8",
-    timeout: 1_000,
+    timeout: Math.min(1_000, remaining(deadline, "owned fixture group")),
   });
   if (result.status !== 0) throw new Error(`Owned fixture ${pid} group is unverifiable`);
-  expect(inspectOwned(pid, mode, nonce)).toBe(true);
+  expect(inspectOwned(pid, mode, nonce, deadline)).toBe(true);
   const group = Number(result.stdout.trim());
   expect(Number.isSafeInteger(group) && group > 0).toBe(true);
   return group;
 }
 
-function stopVerified(pid, mode, nonce) {
-  if (!inspectOwned(pid, mode, nonce)) return;
+function stopVerified(pid, mode, nonce, deadline, runPs = spawnSync) {
+  if (!inspectOwned(pid, mode, nonce, deadline, runPs)) return;
+  remaining(deadline, "owned fixture stop");
   try {
     process.kill(pid, "SIGKILL");
   } catch (error) {
@@ -78,10 +84,10 @@ function stopVerified(pid, mode, nonce) {
   }
 }
 
-function discoverOwnedHelpers(nonce) {
-  const result = spawnSync("ps", ["-axo", "pid=,command="], {
+function discoverOwnedHelpers(nonce, deadline, runPs = spawnSync) {
+  const result = runPs("ps", ["-axo", "pid=,command="], {
     encoding: "utf8",
-    timeout: 1_000,
+    timeout: Math.min(1_000, remaining(deadline, "owned helper discovery")),
   });
   if (result.status !== 0) throw new Error("Owned helper discovery is unverifiable");
   const pids = [];
@@ -89,7 +95,7 @@ function discoverOwnedHelpers(nonce) {
     const match = line.trim().match(/^(\d+)\s+(.+)$/);
     if (!match || !match[2].includes(fixture) || !match[2].includes(` helper ${nonce}`)) continue;
     const pid = Number(match[1]);
-    if (inspectOwned(pid, "helper", nonce)) pids.push(pid);
+    if (inspectOwned(pid, "helper", nonce, deadline, runPs)) pids.push(pid);
   }
   return pids;
 }
@@ -145,8 +151,7 @@ function spawnOwned(nativeFactory, mode, nonce, sessions) {
   return session;
 }
 
-async function cleanupAll(sessions, helpers) {
-  const deadline = Date.now() + 5_000;
+async function cleanupAll(sessions, helpers, deadline, runPs = spawnSync) {
   const failures = [];
   const observations = [];
   for (const session of sessions) {
@@ -161,14 +166,14 @@ async function cleanupAll(sessions, helpers) {
       failures.push(error);
     }
     try {
-      stopVerified(session.pty.pid, session.mode, session.nonce);
+      stopVerified(session.pty.pid, session.mode, session.nonce, deadline, runPs);
     } catch (error) {
       failures.push(error);
     }
     observations.push(within(session.pty.writerCompletion, deadline, "writer close"));
     observations.push(
       until(
-        () => !inspectOwned(session.pty.pid, session.mode, session.nonce),
+        () => !inspectOwned(session.pty.pid, session.mode, session.nonce, deadline, runPs),
         deadline,
         "owned leader absence",
       ),
@@ -176,13 +181,13 @@ async function cleanupAll(sessions, helpers) {
   }
   for (const helper of helpers) {
     try {
-      stopVerified(helper.pid, "helper", helper.nonce);
+      stopVerified(helper.pid, "helper", helper.nonce, deadline, runPs);
     } catch (error) {
       failures.push(error);
     }
     observations.push(
       until(
-        () => !inspectOwned(helper.pid, "helper", helper.nonce),
+        () => !inspectOwned(helper.pid, "helper", helper.nonce, deadline, runPs),
         deadline,
         "owned helper absence",
       ),
@@ -194,12 +199,13 @@ async function cleanupAll(sessions, helpers) {
   // A body failure before the helper PID appears in output still owns its nonce.
   for (const session of sessions.filter((value) => value.mode === "leader-with-helper")) {
     try {
-      const discovered = discoverOwnedHelpers(session.nonce);
-      for (const pid of discovered) stopVerified(pid, "helper", session.nonce);
+      remaining(deadline, "owned helper discovery");
+      const discovered = discoverOwnedHelpers(session.nonce, deadline, runPs);
+      for (const pid of discovered) stopVerified(pid, "helper", session.nonce, deadline, runPs);
       await Promise.all(
         discovered.map((pid) =>
           until(
-            () => !inspectOwned(pid, "helper", session.nonce),
+            () => !inspectOwned(pid, "helper", session.nonce, deadline, runPs),
             deadline,
             "discovered helper absence",
           ),
@@ -212,7 +218,7 @@ async function cleanupAll(sessions, helpers) {
   if (failures.length) throw new AggregateError(failures, "Owned adapter fixture cleanup failed");
 }
 
-async function runOwned(body) {
+async function runOwned(body, { cleanupMs = 5_000, runPs = spawnSync } = {}) {
   const sessions = [];
   const helpers = [];
   const deadline = Date.now() + 8_000;
@@ -223,7 +229,7 @@ async function runOwned(body) {
     failure = error;
   }
   try {
-    await cleanupAll(sessions, helpers);
+    await cleanupAll(sessions, helpers, Date.now() + cleanupMs, runPs);
   } catch (error) {
     failure = failure ? new AggregateError([failure, error], "Body and cleanup failed") : error;
   }
@@ -351,12 +357,12 @@ test("leader release does not wait for a same-group HUP-resistant helper", async
     );
     expect(Number.isSafeInteger(helperPid) && helperPid > 0).toBe(true);
     helpers.push({ pid: helperPid, nonce: session.nonce });
-    expect(ownedGroup(session.pty.pid, session.mode, session.nonce)).toBe(
-      ownedGroup(helperPid, "helper", session.nonce),
+    expect(ownedGroup(session.pty.pid, session.mode, session.nonce, deadline)).toBe(
+      ownedGroup(helperPid, "helper", session.nonce, deadline),
     );
     const result = await within(session.pty.stop(), deadline, "leader stop with helper");
     expect(result).toMatchObject({ kind: "exited", cleanup: { verified: false } });
-    expect(inspectOwned(helperPid, "helper", session.nonce)).toBe(true);
+    expect(inspectOwned(helperPid, "helper", session.nonce, deadline)).toBe(true);
     await expect(within(session.pty.writerCompletion, deadline, "writer close")).resolves.toEqual({
       kind: "closed",
     });
@@ -404,6 +410,51 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   expect(
     caught.errors[1].errors.some((error) => /injected first stop failure/.test(String(error))),
   ).toBe(true);
-  expect(inspectOwned(first.pty.pid, first.mode, first.nonce)).toBe(false);
-  expect(inspectOwned(second.pty.pid, second.mode, second.nonce)).toBe(false);
+  expect(inspectOwned(first.pty.pid, first.mode, first.nonce, Date.now() + 1_000)).toBe(false);
+  expect(inspectOwned(second.pty.pid, second.mode, second.nonce, Date.now() + 1_000)).toBe(false);
+
+  const stopCalls = [];
+  const probeTimeouts = [];
+  const stalledProbe = (_file, _args, options) => {
+    probeTimeouts.push(options.timeout);
+    const end = Date.now() + options.timeout;
+    while (Date.now() < end) {
+      // Model a synchronous ps that remains blocked for its admitted timeout.
+    }
+    return { status: null, error: Object.assign(new Error("ps timed out"), { code: "ETIMEDOUT" }) };
+  };
+  const fakeSession = (pid, mode) => ({
+    mode,
+    nonce: "controlled-slow-probe",
+    pty: {
+      pid,
+      retireInput() {},
+      stop() {
+        stopCalls.push(pid);
+        return Promise.resolve({ kind: "unverifiable" });
+      },
+      writerCompletion: Promise.resolve({ kind: "closed" }),
+    },
+  });
+  const controlledPrimary = new Error("controlled body failure");
+  const started = Date.now();
+  let controlledFailure;
+  try {
+    await runOwned(
+      async ({ sessions }) => {
+        sessions.push(fakeSession(10_001, "leader-with-helper"), fakeSession(10_002, "live-hup"));
+        throw controlledPrimary;
+      },
+      { cleanupMs: 120, runPs: stalledProbe },
+    );
+  } catch (error) {
+    controlledFailure = error;
+  }
+  expect(controlledFailure).toBeInstanceOf(AggregateError);
+  expect(controlledFailure.errors[0]).toBe(controlledPrimary);
+  expect(stopCalls).toEqual([10_001, 10_002]);
+  expect(probeTimeouts).toHaveLength(1);
+  expect(probeTimeouts[0]).toBeGreaterThan(0);
+  expect(probeTimeouts[0]).toBeLessThanOrEqual(120);
+  expect(Date.now() - started).toBeLessThan(1_000);
 });
