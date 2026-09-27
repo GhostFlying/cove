@@ -1,6 +1,6 @@
 # Cove current handoff
 
-Updated: 2026-09-27. Verify live GitHub/checkout state before resuming. Accepted behavior remains in the design documents; exact task evidence belongs to linked Issues/PRs.
+Updated: 2026-09-28. Verify live GitHub/checkout state before resuming. Accepted behavior remains in the design documents; exact task evidence belongs to linked Issues/PRs.
 
 ## Authorized stage
 
@@ -21,6 +21,13 @@ The user decided experimental versions before Cove's first formal versioned rele
 ## Historical dispatch records (superseded current-state claims)
 
 The following checkpoint descriptions retain their original evidence and dates. Their old owner, blocker and next-step statements are superseded by the current state above.
+
+**W1 commands source checkpoint, 2026-09-28 (before main composition):** The original W1 author branch recorded the following provisional state. These statements are historical and do not supersede the current integrated status.
+
+W1a commands correction is an **unaccepted local author candidate** in the terminal-view checkout, with implementation commits `2a1c29999fd5b2270789dfb6c561ad5663788485` (complete retention/control/fault boundary, tree `da74f47cea3a0b89c1b23e0d237a066079799ad1`) and `970983627b614fbce52af44a62f2cf3304698862` (counter boundary, tree `2a979d65cfa280a923822324f1cc793a28dc542f`). [Commands results](tasks/m0-worker-execution-commands-results.md) records the exact author checks, 4112-byte logical control proof, source-review findings and pending gates. Independent exact-head source/finite/native review, the coherent full registered gate, dual-OS hosted evidence, integration and final-main acceptance remain ahead. The older W1a first-slice candidate paragraph below is historical and does not describe this branch's current head.
+
+W1a first run-pump/model-bridge slice is a clean local candidate at `6596092369d4cd5ae0d95ef34da0cc252d0e5445`, tree `1f7d5f7361ee06c42c04c5663598b03cdf727a9a`, in the terminal-view checkout. Earlier `ac75` author full check passed 44/396, while this final head passed affected build/fake/tooling checks and actual discovery 44/398; do not transfer the old full result to the new head. Independent source review SHA-256 `c0d84a27e557591705faa04bf4f0a34580608c7ba76c41cfb5c47e50b3535df2` and independent finite compiled-public report SHA-256 `0cf4b4fed0e85599509af88e757145db588217b2ca5170bf3610ecdf1f955f37` approve the bounded correction. [W1a results](tasks/m0-worker-execution-core-results.md) retain exact evidence and limits. Exact-head hosted macOS/Linux checks, integration mapping and final-main acceptance remain; this is neither complete W1 nor permission to start W1b.
+
 
 **Latest accepted checkpoint, 2026-09-26:** QI PR [#39](https://github.com/GhostFlying/cove/pull/39) is merged, and its post-merge browser cleanup blocker is repaired in PR [#41](https://github.com/GhostFlying/cove/pull/41). The latter rebase-merged at main `77de10a2f91fb3eb0fc42c7fc27dd5270ce56704`; all four source-to-main trees, full messages and single parents match. Independent native verification `49d9a00237028b982cff3e1247b1fe799f7a99c5dabf21924048e6162163d5be` and separate TraeX Sol review `15f2f6f09087b43d512ef72ab3f05590148398c73c5d7acd59e7128527b9c834` approved the functional source. Exact-head [run 36252137955](https://github.com/GhostFlying/cove/actions/runs/36252137955) and final-main [run 36252543953](https://github.com/GhostFlying/cove/actions/runs/36252543953) passed macOS/Linux; both final-main artifacts match the exact commit/tree and report 31/31 required suites, 276/276 tests, zero failed/pending/todo. [Issue #40](https://github.com/GhostFlying/cove/issues/40) is closed. The historical red runs remain recorded there; the actual Playwright delay cause was not established. This completed QI's held final-main dependency and released N1, not N2.
 
