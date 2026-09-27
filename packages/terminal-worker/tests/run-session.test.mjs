@@ -203,6 +203,26 @@ test("fault delivered during native spawn stops the returned owner before parsin
   }
 });
 
+test("early copied output is released when spawn faults before owner attachment", async () => {
+  const owned = start("early-queued-fault", {
+    onSpawn(observer) {
+      observer.onData(Buffer.from("queued"));
+      observer.onFault({ kind: "binding", reason: "fixture-fault" });
+    },
+  });
+  try {
+    expect(owned.session.snapshot()).toMatchObject({
+      faulted: true,
+      queuedBytes: 0,
+      queuedItems: 0,
+    });
+    expect(owned.state.stopped).toBe(1);
+    expect(owned.events).toEqual([]);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
 test("two sessions progress independently while one drains several output chunks", async () => {
   const order = [];
   const first = start("first", { onFact: ({ event }) => order.push(`first:${event.seq}`) });
