@@ -34,12 +34,17 @@ interface ProbeBrowser {
   newPage(): Promise<ProbePage>;
   version(): string;
   close(): Promise<void>;
+  isConnected(): boolean;
+  on(event: "disconnected", listener: () => void): void;
+  off(event: "disconnected", listener: () => void): void;
 }
 interface BrowserServer {
   wsEndpoint(): string;
   process(): BrowserProcess;
   close(): Promise<void>;
   kill(): Promise<void>;
+  on(event: "close", listener: () => void): void;
+  off(event: "close", listener: () => void): void;
 }
 interface BrowserProcess {
   pid?: number;
@@ -92,6 +97,149 @@ interface ManagedBrowserEvidenceOptions {
   sourceDirty: boolean;
 }
 
+type TimelineOutcome = "not-called" | "pending" | "fulfilled" | "rejected" | "threw";
+
+interface TimelineCall {
+  calledMs: number | null;
+  settledMs: number | null;
+  outcome: TimelineOutcome;
+}
+
+interface TimelineEvent {
+  firstMs: number | null;
+  count: number;
+}
+
+// Public lifecycle events locate an observed wait stage, not a private close RPC acknowledgement.
+export class BrowserCloseTimeline {
+  readonly record: {
+    cleanupStartedMs: number | null;
+    finalMs: number | null;
+    connectedBeforeClose: boolean | null;
+    connectedAtFinal: boolean | null;
+    disconnected: TimelineEvent;
+    serverClose: TimelineEvent;
+    processExit: TimelineEvent;
+    rawClose: TimelineCall;
+    closeWrapper: TimelineCall & { timeoutObservedMs: number | null };
+    rawKill: TimelineCall;
+  };
+  private finalized = false;
+  private readonly origin: number;
+  private browser?: ProbeBrowser;
+  private server?: BrowserServer;
+  private process?: BrowserProcess;
+  private readonly onDisconnected = () => this.mark(this.record.disconnected);
+  private readonly onServerClose = () => this.mark(this.record.serverClose);
+  private readonly onProcessExit = () => this.mark(this.record.processExit);
+
+  constructor(origin = performance.now()) {
+    this.origin = origin;
+    const event = (): TimelineEvent => ({ firstMs: null, count: 0 });
+    const call = (): TimelineCall => ({ calledMs: null, settledMs: null, outcome: "not-called" });
+    this.record = {
+      cleanupStartedMs: null,
+      finalMs: null,
+      connectedBeforeClose: null,
+      connectedAtFinal: null,
+      disconnected: event(),
+      serverClose: event(),
+      processExit: event(),
+      rawClose: call(),
+      closeWrapper: { ...call(), timeoutObservedMs: null },
+      rawKill: call(),
+    };
+  }
+
+  private now(): number {
+    return Math.max(0, Math.round(performance.now() - this.origin));
+  }
+
+  private mark(event: TimelineEvent): void {
+    if (this.finalized) return;
+    if (event.firstMs === null) event.firstMs = this.now();
+    event.count = Math.min(2, event.count + 1);
+  }
+
+  attachServer(server: BrowserServer, process: BrowserProcess): void {
+    this.server = server;
+    this.process = process;
+    server.on("close", this.onServerClose);
+    process.on("exit", this.onProcessExit);
+  }
+
+  attachBrowser(browser: ProbeBrowser): void {
+    this.browser = browser;
+    browser.on("disconnected", this.onDisconnected);
+  }
+
+  beginCleanup(): void {
+    this.record.cleanupStartedMs = this.now();
+  }
+
+  beforeClose(): void {
+    this.record.connectedBeforeClose = this.connectionState();
+  }
+
+  private connectionState(): boolean | null {
+    try {
+      return this.browser?.isConnected() ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  invoke(kind: "rawClose" | "rawKill", operation: () => Promise<void>): Promise<void> {
+    const call = this.record[kind];
+    call.calledMs = this.now();
+    call.outcome = "pending";
+    let result: Promise<void>;
+    try {
+      result = operation();
+    } catch (error) {
+      call.settledMs = this.now();
+      call.outcome = "threw";
+      throw error;
+    }
+    void result.then(
+      () => this.settle(call, "fulfilled"),
+      () => this.settle(call, "rejected"),
+    );
+    return result;
+  }
+
+  observeWrapper(operation: Promise<void>): void {
+    const wrapper = this.record.closeWrapper;
+    wrapper.calledMs = this.now();
+    wrapper.outcome = "pending";
+    void operation.then(
+      () => this.settle(wrapper, "fulfilled"),
+      () => this.settle(wrapper, "rejected"),
+    );
+  }
+
+  markWrapperTimeout(): void {
+    if (this.finalized) return;
+    this.record.closeWrapper.timeoutObservedMs = this.now();
+  }
+
+  private settle(call: TimelineCall, outcome: "fulfilled" | "rejected"): void {
+    if (this.finalized) return;
+    call.settledMs = this.now();
+    call.outcome = outcome;
+  }
+
+  finalize(): void {
+    if (this.finalized) return;
+    this.record.connectedAtFinal = this.connectionState();
+    this.record.finalMs = this.now();
+    this.finalized = true;
+    this.browser?.off("disconnected", this.onDisconnected);
+    this.server?.off("close", this.onServerClose);
+    this.process?.off("exit", this.onProcessExit);
+  }
+}
+
 export function observeLateBrowserClose(
   operation: Promise<void>,
   phase: BrowserCleanupPhase,
@@ -114,13 +262,17 @@ export async function within<T>(
   operation: Promise<T>,
   milliseconds: number,
   label: string,
+  onTimeout?: () => void,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       operation,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds);
+        timer = setTimeout(() => {
+          onTimeout?.();
+          reject(new Error(`${label} timed out`));
+        }, milliseconds);
       }),
     ]);
   } finally {
@@ -252,6 +404,7 @@ export async function withManagedBrowser<T>(
   });
   let browserServer: BrowserServer | undefined;
   let browserProcess: BrowserProcess | undefined;
+  const closeTimeline = new BrowserCloseTimeline(workStarted);
   let exitEvent: { code: number | null; signal: string | null; at: number } | undefined;
   const onBrowserExit = (code: number | null, signal: string | null) => {
     exitEvent = { code, signal, at: performance.now() };
@@ -297,6 +450,7 @@ export async function withManagedBrowser<T>(
     });
     browserProcess = browserServer.process();
     browserProcess.on("exit", onBrowserExit);
+    closeTimeline.attachServer(browserServer, browserProcess);
     if (profile === "environment" && process.env.COVE_PROBE_INJECT_WORK_FAILURE === "1")
       throw new Error("Injected browser work failure");
     if (profile === "query" && process.env.COVE_QUERY_INJECT_WORK_FAILURE === "1")
@@ -305,6 +459,7 @@ export async function withManagedBrowser<T>(
     browser = await chromium.connect(browserServer.wsEndpoint(), {
       timeout: remaining(5_000, "Chromium connect"),
     });
+    closeTimeline.attachBrowser(browser);
     const browserVersion = browser.version();
     const reportedVersion =
       profile === "environment"
@@ -350,6 +505,7 @@ export async function withManagedBrowser<T>(
   const pageCleanup: PageCleanupRecord[] = [];
   let cleanupEvidenceFinalized = false;
   const cleanupStarted = performance.now();
+  closeTimeline.beginCleanup();
   const cleanupDeadline = cleanupStarted + 7_000;
   const phase = (deadline: number): BrowserCleanupPhase => ({
     attempts: 0,
@@ -527,14 +683,20 @@ export async function withManagedBrowser<T>(
         profile === "query" ? gracefulCloseDeadline : browserDeadline,
       );
       graceful.attempts = 1;
-      const actualClose = injectedCloseHang ? new Promise<void>(() => {}) : browserServer.close();
+      closeTimeline.beforeClose();
+      const actualClose = injectedCloseHang
+        ? new Promise<void>(() => {})
+        : closeTimeline.invoke("rawClose", () => browserServer.close());
       const closeOperation = closeDelay
         ? actualClose.then(
             () => new Promise<void>((resolveDelay) => setTimeout(resolveDelay, closeDelay)),
           )
         : actualClose;
+      closeTimeline.observeWrapper(closeOperation);
       observeLateBrowserClose(closeOperation, graceful, () => cleanupEvidenceFinalized);
-      await within(closeOperation, graceful.budgetMs, "Browser close");
+      await within(closeOperation, graceful.budgetMs, "Browser close", () =>
+        closeTimeline.markWrapperTimeout(),
+      );
       graceful.outcome = "completed";
     } catch (error) {
       graceful.outcome =
@@ -546,7 +708,7 @@ export async function withManagedBrowser<T>(
       try {
         kill.budgetMs = cleanupRemaining(profile === "query" ? 1_500 : 2_000, browserDeadline);
         kill.attempts = 1;
-        const actualKill = browserServer.kill();
+        const actualKill = closeTimeline.invoke("rawKill", () => browserServer.kill());
         const killOperation = actualKill.then(async () => {
           if (killDelay)
             await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, killDelay));
@@ -593,6 +755,7 @@ export async function withManagedBrowser<T>(
     listener.elapsedMs = Math.round(performance.now() - listenerStarted);
   }
   cleanupEvidenceFinalized = true;
+  closeTimeline.finalize();
   browserProcess?.off("exit", onBrowserExit);
   const browserState = browserProcess ?? browserServer?.process();
   const cleanupEvidence = {
@@ -624,6 +787,13 @@ export async function withManagedBrowser<T>(
     graceful: { ...graceful },
     kill: { ...kill },
     listener: { ...listener },
+    closeTimeline: {
+      ...closeTimeline.record,
+      finalized: true,
+      invocationId: evidenceOptions?.invocationId ?? null,
+      runId: evidenceOptions?.runId ?? null,
+      sourceCommit: evidenceOptions?.sourceCommit ?? null,
+    },
     disposedPages,
     pages: pageCleanup.map((record) => ({
       ...record,

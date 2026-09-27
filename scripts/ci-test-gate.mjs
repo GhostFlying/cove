@@ -11,6 +11,98 @@ const evidenceDir = join(root, ".cache/ci");
 const resultPath = join(evidenceDir, "vitest-results.json");
 const junitPath = join(evidenceDir, "vitest-results.xml");
 const vitest = join(root, "node_modules/vitest/vitest.mjs");
+const diagnosticDir = join(evidenceDir, "browser-close-diagnostic");
+const diagnosticName =
+  "V1-L4 publishes focus before input but not for selection scrolling appearance or show";
+const diagnosticFile = "packages/terminal-web/tests/view-lifecycle.test.mjs";
+const diagnosticBase = "c47b11dffe5690e359e04d873428e5d107182bf0";
+const diagnosticFiles = new Set([
+  ".github/workflows/check.yml",
+  "docs/handoff.md",
+  "docs/tasks/m0-p3a-browser-close-diagnostic-plan.md",
+  "docs/tasks/m0-p3a-browser-close-diagnostic-results.md",
+  "packages/terminal-web/probes/node/managed-browser.ts",
+  "packages/terminal-web/probes/managed-browser-timeline.test.mjs",
+  "packages/terminal-web/tests/view-browser-runner.mjs",
+  "scripts/ci-test-gate.mjs",
+  "tests/tooling/ci-test-gate.test.mjs",
+]);
+
+export function validateBrowserCloseDiagnosticInvocation(input) {
+  if (
+    input.eventName !== "workflow_dispatch" ||
+    input.mode !== "browser-close-v1-l4" ||
+    input.ref !== "refs/heads/p/luchengxuan/m0-browser-close-diagnostic" ||
+    !/^[a-f0-9]{40}$/.test(input.expectedSha ?? "") ||
+    input.head !== input.expectedSha ||
+    input.githubSha !== input.expectedSha ||
+    input.dirty !== false ||
+    input.baseIsAncestor !== true ||
+    !Array.isArray(input.changedFiles) ||
+    input.changedFiles.length === 0 ||
+    input.changedFiles.some((file) => !diagnosticFiles.has(file))
+  )
+    throw new Error("Browser-close diagnostic dispatch identity or source scope is invalid");
+  return { mode: input.mode, ref: input.ref, sourceCommit: input.head, base: diagnosticBase };
+}
+
+export function verifyBrowserCloseDiagnosticReport(report) {
+  const suites = report?.testResults;
+  const assertions = suites?.[0]?.assertionResults;
+  if (!Array.isArray(suites) || suites.length !== 1 || !Array.isArray(assertions))
+    throw new Error("Browser-close diagnostic did not pass exactly V1-L4");
+  const passed = assertions.filter((assertion) => assertion.status === "passed");
+  if (
+    report.success !== true ||
+    report.numTotalTests !== assertions?.length ||
+    report.numPassedTests !== 1 ||
+    report.numFailedTests !== 0 ||
+    report.numPendingTests !== assertions.length - 1 ||
+    report.numTodoTests !== 0 ||
+    repositoryPath(suites[0].name) !== diagnosticFile ||
+    suites[0].status !== "passed" ||
+    passed.length !== 1 ||
+    passed[0].fullName !== diagnosticName ||
+    assertions.some((assertion) =>
+      assertion.status === "passed"
+        ? assertion.fullName !== diagnosticName
+        : assertion.status !== "skipped",
+    )
+  )
+    throw new Error("Browser-close diagnostic did not pass exactly V1-L4");
+  return [{ file: diagnosticFile, name: diagnosticName }];
+}
+
+function gitText(...args) {
+  const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+  if (result.status !== 0 || result.error)
+    throw new Error(`Diagnostic git identity failed: ${args[0]}`);
+  return result.stdout.trim();
+}
+
+async function diagnosticIdentity() {
+  const head = gitText("rev-parse", "HEAD");
+  const ancestry = spawnSync("git", ["merge-base", "--is-ancestor", diagnosticBase, "HEAD"], {
+    cwd: root,
+  });
+  const identity = validateBrowserCloseDiagnosticInvocation({
+    eventName: process.env.GITHUB_EVENT_NAME,
+    mode: process.env.COVE_DIAGNOSTIC_MODE,
+    ref: process.env.GITHUB_REF,
+    expectedSha: process.env.COVE_DIAGNOSTIC_EXPECTED_SHA,
+    githubSha: process.env.GITHUB_SHA,
+    head,
+    dirty: gitText("status", "--porcelain", "--untracked-files=normal") !== "",
+    baseIsAncestor: ancestry.status === 0,
+    changedFiles: gitText("diff", "--name-only", diagnosticBase, "HEAD").split("\n"),
+  });
+  await mkdir(diagnosticDir, { recursive: true });
+  await writeFile(
+    join(diagnosticDir, "identity.json"),
+    `${JSON.stringify({ ...identity, tree: gitText("rev-parse", "HEAD^{tree}") }, null, 2)}\n`,
+  );
+  return identity;
+}
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
@@ -32,7 +124,7 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 32 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 36 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 7 },
   {
@@ -184,6 +276,11 @@ export const requiredSuites = [
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/query-input.test.mjs",
     minimumTests: 11,
+  },
+  {
+    project: "terminal-web-probes",
+    file: "packages/terminal-web/probes/managed-browser-timeline.test.mjs",
+    minimumTests: 5,
   },
   {
     project: "terminal-web",
@@ -530,6 +627,15 @@ function browserEvidenceInteger(value, minimum, maximum) {
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
 
+function evidenceKeys(value, keys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).sort().join(",") === [...keys].sort().join(",")
+  );
+}
+
 function validBrowserCleanupPhase(phase, deadline, maximumBudget) {
   if (!phase || !browserEvidenceInteger(phase.attempts, 0, 1) || phase.phaseDeadlineMs !== deadline)
     return false;
@@ -575,6 +681,95 @@ function validBrowserPageRecord(page, index) {
     (close.outcome !== "completed" || (close.attempts === 1 && close.budgetMs > 0)) &&
     (close.lateOutcome === undefined ||
       (close.outcome === "timed-out" && ["completed", "rejected"].includes(close.lateOutcome)))
+  );
+}
+
+function validTimelineEvent(event, finalMs) {
+  return (
+    evidenceKeys(event, ["firstMs", "count"]) &&
+    browserEvidenceInteger(event.count, 0, 2) &&
+    (event.count === 0 ? event.firstMs === null : browserEvidenceInteger(event.firstMs, 0, finalMs))
+  );
+}
+
+function validTimelineCall(call, finalMs) {
+  if (
+    !evidenceKeys(call, ["calledMs", "settledMs", "outcome"]) ||
+    !["not-called", "pending", "fulfilled", "rejected", "threw"].includes(call.outcome)
+  )
+    return false;
+  if (call.outcome === "not-called") return call.calledMs === null && call.settledMs === null;
+  if (!browserEvidenceInteger(call.calledMs, 0, finalMs)) return false;
+  if (call.outcome === "pending") return call.settledMs === null;
+  return browserEvidenceInteger(call.settledMs, call.calledMs, finalMs);
+}
+
+export function validBrowserCloseTimeline(timeline, record) {
+  const finalMs = timeline?.finalMs;
+  const cleanupMs = timeline?.cleanupStartedMs;
+  if (
+    !evidenceKeys(timeline, [
+      "cleanupStartedMs",
+      "finalMs",
+      "connectedBeforeClose",
+      "connectedAtFinal",
+      "disconnected",
+      "serverClose",
+      "processExit",
+      "rawClose",
+      "closeWrapper",
+      "rawKill",
+      "finalized",
+      "invocationId",
+      "runId",
+      "sourceCommit",
+    ]) ||
+    timeline?.finalized !== true ||
+    timeline.invocationId !== record.invocationId ||
+    timeline.runId !== record.runId ||
+    timeline.sourceCommit !== record.sourceCommit ||
+    !browserEvidenceInteger(cleanupMs, 0, 60_000) ||
+    !browserEvidenceInteger(finalMs, cleanupMs, 60_000) ||
+    ![true, false, null].includes(timeline.connectedBeforeClose) ||
+    ![true, false, null].includes(timeline.connectedAtFinal) ||
+    !validTimelineEvent(timeline.disconnected, finalMs) ||
+    !validTimelineEvent(timeline.serverClose, finalMs) ||
+    !validTimelineEvent(timeline.processExit, finalMs) ||
+    !validTimelineCall(timeline.rawClose, finalMs) ||
+    !evidenceKeys(timeline.closeWrapper, [
+      "calledMs",
+      "settledMs",
+      "outcome",
+      "timeoutObservedMs",
+    ]) ||
+    !validTimelineCall(
+      {
+        calledMs: timeline.closeWrapper.calledMs,
+        settledMs: timeline.closeWrapper.settledMs,
+        outcome: timeline.closeWrapper.outcome,
+      },
+      finalMs,
+    ) ||
+    !validTimelineCall(timeline.rawKill, finalMs)
+  )
+    return false;
+  const timeout = timeline.closeWrapper.timeoutObservedMs;
+  return (
+    timeline.closeWrapper.outcome !== "threw" &&
+    (timeout === null ||
+      (browserEvidenceInteger(timeout, timeline.closeWrapper.calledMs ?? 0, finalMs) &&
+        record.graceful.outcome === "timed-out")) &&
+    (timeline.closeWrapper.outcome === "not-called"
+      ? record.graceful.attempts === 0 || timeline.rawClose.outcome === "threw"
+      : record.graceful.attempts === 1) &&
+    (record.kill.attempts === 0) === (timeline.rawKill.outcome === "not-called") &&
+    (timeline.rawClose.outcome === "not-called" || timeline.rawClose.calledMs >= cleanupMs) &&
+    (timeline.rawKill.outcome === "not-called" || timeline.rawKill.calledMs >= cleanupMs) &&
+    (!record.browserExit ||
+      (timeline.processExit.count > 0 &&
+        Math.abs(timeline.processExit.firstMs - cleanupMs - record.browserExit.observedMs) <= 3)) &&
+    finalMs - cleanupMs <= record.cleanupElapsedMs + 3 &&
+    record.cleanupElapsedMs - (finalMs - cleanupMs) <= 1_000
   );
 }
 
@@ -645,7 +840,8 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
       record.browserPid <= 0 ||
       record.browserExited !== true ||
       record.listenerClosed !== true ||
-      !validBrowserCleanupRecord(record)
+      !validBrowserCleanupRecord(record) ||
+      !validBrowserCloseTimeline(record.closeTimeline, record)
     )
       throw new Error(`Browser cleanup evidence incomplete: ${name}`);
     if (record.testName !== null) {
@@ -667,7 +863,91 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
   return { runId: marker.runId, recordCount: cases.length };
 }
 
+async function browserCloseDiagnostic() {
+  const identity = await diagnosticIdentity();
+  await environment();
+  const runId = `github-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`;
+  if (!/^github-\d+-\d+$/.test(runId)) throw new Error("Diagnostic run identity is unavailable");
+  await prepareBrowserCleanupEvidence(identity.sourceCommit, runId);
+  process.env.COVE_BROWSER_CLEANUP_RUN_ID = runId;
+  const output = join(diagnosticDir, "vitest-results.json");
+  const result = await recordedCommand(
+    "browser-close-v1-l4",
+    process.execPath,
+    [
+      vitest,
+      "run",
+      "--project",
+      "terminal-web",
+      diagnosticFile,
+      "--testNamePattern",
+      `^${diagnosticName}$`,
+      "--reporter=default",
+      "--reporter=json",
+      `--outputFile.json=${output}`,
+    ],
+    join(diagnosticDir, "execution.json"),
+    90_000,
+  );
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (result.status !== 0) throw new Error(`Browser-close diagnostic exited ${result.status}`);
+  const cases = verifyBrowserCloseDiagnosticReport(JSON.parse(await readFile(output, "utf8")));
+  const cleanup = await verifyBrowserCleanupEvidence(
+    join(evidenceDir, "browser-cleanup"),
+    identity.sourceCommit,
+    cases,
+  );
+  if (cleanup.recordCount !== 1)
+    throw new Error("Browser-close diagnostic ran multiple browser invocations");
+  const caseFiles = (await readdir(join(evidenceDir, "browser-cleanup"))).filter(
+    (name) => name !== "run.json",
+  );
+  const record = JSON.parse(
+    await readFile(join(evidenceDir, "browser-cleanup", caseFiles[0]), "utf8"),
+  );
+  if (
+    record.primaryOutcome !== "completed" ||
+    record.graceful.outcome !== "completed" ||
+    record.closeTimeline.rawClose.outcome !== "fulfilled"
+  )
+    throw new Error("Browser-close diagnostic did not finish graceful cleanup");
+  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const artifactFiles = [
+    join(diagnosticDir, "identity.json"),
+    join(diagnosticDir, "vitest-results.json"),
+    join(evidenceDir, "browser-cleanup", "run.json"),
+    join(evidenceDir, "browser-cleanup", caseFiles[0]),
+    join(evidenceDir, "environment.json"),
+  ];
+  const hashes = Object.fromEntries(
+    await Promise.all(
+      artifactFiles.map(async (file) => [
+        relative(evidenceDir, file),
+        digest(await readFile(file)),
+      ]),
+    ),
+  );
+  await writeFile(
+    join(diagnosticDir, "result.json"),
+    `${JSON.stringify({ ...identity, tree: gitText("rev-parse", "HEAD^{tree}"), runId, case: cases[0], hashes }, null, 2)}\n`,
+  );
+}
+
 async function main() {
+  if (process.argv[2] === "--diagnostic-identity") return diagnosticIdentity();
+  if (process.argv[2] === "--browser-close-diagnostic") {
+    try {
+      return await browserCloseDiagnostic();
+    } catch (error) {
+      await mkdir(diagnosticDir, { recursive: true });
+      await writeFile(
+        join(diagnosticDir, "failure.json"),
+        `${JSON.stringify({ errorName: error instanceof Error ? error.name : "unknown" })}\n`,
+      );
+      throw error;
+    }
+  }
   await mkdir(evidenceDir, { recursive: true });
   await rm(join(evidenceDir, "smoke"), { recursive: true, force: true });
   await Promise.all(
