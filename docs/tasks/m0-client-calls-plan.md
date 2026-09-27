@@ -84,3 +84,7 @@ N2 现已在 main `a4e50cb27b26db91a64c9711c5531e68f47c8c6c`（tree `a9ba760e687
 Root 后续明确派发独立 TraeX GPT-5.6 Sol xhigh 作者，只独占 `packages/client/src/**`、`packages/client/tests/**` 及局部 fixture，先冻结真实公共 API、两个非空 suite 和 registration request。`/root/m0_t1_impl` 是本方案/结果、`docs/relay-protocol.md` 响应 header 及所有 manifest/lock/exports/tsconfig/root reference/Vitest/CI/tooling 的**唯一**登记者；作者源与登记在同一可构建原子功能提交汇合，不能预建空 package/export/suite。两者不得同时写同一文件或使用同一 mutable install/build。登记时仍须与并行 W1a 共享配置串行协调，保留已接受全部套件 floors。
 
 任务范围限于本文件上述同步 `createClient`、双通道同次握手一致性、六方法类型化 RPC、显式 operation 查询、有限取消与不可变诊断。实际浏览器/Node transport、订阅/恢复/input/preview/controller、P2/H1/C3、devbox SSH 重试和 M1 都不在首切片。作者先做包内编译及两个真实 suite，注册后做完整 `pnpm check`；独立作者之外的源码审查、编译公共导出负例、exact-head 双 OS、rebase/final-main 证据全部是后续门禁。
+
+## 登记纠正计划（2026-09-27）
+
+首次完整门禁在用例发现阶段停止：`connection-rpc.test.mjs` 运行 27 个展开用例，但门禁发现器报告 22 个声明；三个 `test.each` 表格在该发现器中各占一个声明。此前把运行用例数 27 写成发现下限，导致实际非空套件被拒。保持作者六文件字节不变，仅把该 suite 的发现下限及直接 tooling 断言改为实测 22；运行阶段仍要求所有 27 个用例通过，`compiled-client` 下限 4 不变。随后先跑相关 tooling，再在新冻结提交上执行一次完整门禁；原失败日志保留为登记诊断。
