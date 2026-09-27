@@ -544,6 +544,28 @@ test("bounded native writer owner and fd-reuse suites cannot disappear or shrink
   }
 });
 
+test("native adapter factory, input, and real PTY suites cannot disappear or shrink", async () => {
+  for (const [name, minimumTests] of [
+    ["native-adapter-factory", 18],
+    ["native-adapter-input", 7],
+    ["native-adapter-real", 6],
+  ]) {
+    const file = `packages/terminal-worker/tests/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "terminal-worker", minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(file);
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests/);
+    const short = Array.from({ length: minimumTests - 1 }, (_, index) => ({
+      projectName: "terminal-worker",
+      file: resolve(root, file),
+      name: `case ${index}`,
+    }));
+    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(
+      `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
+    );
+  }
+});
+
 test("rejects a test file excluded by the Vitest project", () => {
   expect(() =>
     verifyDiscovery(discoveredCases, [first, second, "tests/tooling/forgotten.test.ts"], suites),
@@ -611,7 +633,7 @@ test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   const complete = [
     ...discoveredCases.slice(0, 2),
-    ...Array.from({ length: 30 }, (_, index) => ({
+    ...Array.from({ length: 31 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -619,7 +641,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 29 tests; needs 30/,
+    /discovered 30 tests; needs 31/,
   );
 });
 
