@@ -28,3 +28,7 @@ W1a does **not** include the executable `main.ts`, `pipe-endpoint.ts`, hello/rea
 The first functional freeze is `07fa6479249e10a4fe56bfc93047a991e27e813e`. Self-review found that N2 can report a synchronous I/O fault from `pause()`. The fault callback must retire/stop without calling `pause()` again, and the caller may record a paused state only if no fault intervened. Add a fake synchronous pause-failure regression, then freeze a separate atomic source correction before the full gate.
 
 The corrected freeze `4185bfb17231863746bd63137018e157cf22031a` exposed one related early-spawn ownership case: queued callback copies must be released if N2 reports a fault before its returned owner can be attached. Clear only that pending queue on the faulted attach path and prove it with an onData-then-onFault spawn fixture before the one full gate.
+
+## Consumer fault reporting correction
+
+Full author gate on `26b9276e549eb60f468d6d1079f553dad7bebd71` passed 44 files and 384 tests. Independent preflight found that a parsed-fact consumer exception is internally fenced but not publicly observable, contrary to the W1 plan. Add a distinct consumer fault to the existing diagnostic callback and a read-only `consumerFenced` snapshot bit, once per failure. Continue T2 parsing and automatic query output, and retain the full result as historical evidence before this follow-up.

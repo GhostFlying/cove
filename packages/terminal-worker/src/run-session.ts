@@ -33,10 +33,13 @@ export interface RunSessionOptions {
   readonly spawn: Omit<NativeSpawnSpec, "cols" | "rows">;
   readonly factory: NativePtyFactory;
   readonly onFact?: (fact: Fact) => void;
-  readonly onFault?: (
-    fault: NativePtyFault | { readonly kind: "pump"; readonly reason: string },
-  ) => void;
+  readonly onFault?: (fault: RunSessionFault) => void;
 }
+
+export type RunSessionFault =
+  | NativePtyFault
+  | { readonly kind: "pump"; readonly reason: string }
+  | { readonly kind: "consumer"; readonly reason: "parsed-fact-observer-threw" };
 
 export interface RunSessionSnapshot {
   readonly receivedSeq: number;
@@ -48,6 +51,7 @@ export interface RunSessionSnapshot {
   readonly exited: boolean;
   readonly faulted: boolean;
   readonly counterExhausted: boolean;
+  readonly consumerFenced: boolean;
   readonly disposed: boolean;
 }
 
@@ -204,6 +208,7 @@ export class RunSession {
       exited: this.#exited,
       faulted: this.#faulted,
       counterExhausted: this.#counterExhausted,
+      consumerFenced: this.#consumerFenced,
       disposed: this.#disposed,
     };
   }
@@ -260,6 +265,11 @@ export class RunSession {
               this.#onFact?.(item.fact);
             } catch {
               this.#consumerFenced = true;
+              try {
+                this.#onFault?.({ kind: "consumer", reason: "parsed-fact-observer-threw" });
+              } catch {
+                // A diagnostic callback cannot interrupt authoritative parsing.
+              }
             }
           }
         }
