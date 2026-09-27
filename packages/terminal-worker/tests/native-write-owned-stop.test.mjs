@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import { constants } from "node:os";
 import { resolve } from "node:path";
 import { test } from "vitest";
 
@@ -280,6 +281,80 @@ test("native reap forbids a new signal while JavaScript exit delivery is held", 
   }
   if (failure) throw failure;
 }, 10_000);
+
+for (const [phase, scope, expected] of [
+  ["owned-kill-esrch", "leader", { kind: "unverifiable", reason: "not-found" }],
+  [
+    "owned-kill-eperm",
+    "leader",
+    {
+      kind: "unverifiable",
+      reason: "signal-failed",
+      errorCode: String(constants.errno.EPERM),
+    },
+  ],
+  [
+    "owned-getpgid-esrch",
+    "initial-process-group",
+    {
+      kind: "unverifiable",
+      reason: "not-found",
+    },
+  ],
+  [
+    "owned-getpgid-eperm",
+    "initial-process-group",
+    {
+      kind: "unverifiable",
+      reason: "scope-unavailable",
+      errorCode: String(constants.errno.EPERM),
+    },
+  ],
+  [
+    "owned-group-unqualified",
+    "initial-process-group",
+    {
+      kind: "unverifiable",
+      reason: "scope-unavailable",
+    },
+  ],
+]) {
+  test(`native ${phase} classifies without signaling an unowned process`, async () => {
+    const originalFork = pty.native.fork;
+    let nativeResult;
+    let session;
+    let failure;
+    try {
+      pty.native.fork = (...args) => {
+        nativeResult = originalFork(...args.slice(0, -1), phase, args.at(-1));
+        return nativeResult;
+      };
+      session = start("ignore-hup");
+      pty.native.fork = originalFork;
+      await until(
+        () => session.text().includes(`READY ${session.nonce}`),
+        2_000,
+        "fault-selector leader did not become ready",
+      );
+      assert.deepEqual(session.terminal.signalOwned("SIGKILL", scope), expected);
+      assert.equal(inspectOwned(session.terminal.pid, session.mode, session.nonce), true);
+      assert.equal(nativeResult.stopOwnedChild(9), true);
+      await within(session.exited, 2_000, "owned rollback stop did not deliver exit");
+      assert.deepEqual(await session.terminal.boundedWriteCompletion, { kind: "closed" });
+    } catch (error) {
+      failure = error;
+    } finally {
+      pty.native.fork = originalFork;
+      try {
+        if (nativeResult) nativeResult.stopOwnedChild(9);
+        if (session) await cleanup(session);
+      } catch (error) {
+        failure = preserveCleanupFailure(failure, error);
+      }
+    }
+    if (failure) throw failure;
+  }, 10_000);
+}
 
 test("missing per-instance signal method is a post-entry ownership failure", async () => {
   const originalFork = pty.native.fork;
