@@ -140,6 +140,7 @@ function spawnOwned(nativeFactory, mode, nonce, sessions) {
   const session = {
     pty: result.pty,
     rescueStop: result.pty?.stop.bind(result.pty),
+    writerClosed: false,
     mode,
     nonce,
     bytes: () => Buffer.concat(chunks),
@@ -197,6 +198,7 @@ async function settleOwnedLeader(session, deadline, runPs, sendSignal) {
   try {
     const writer = await within(session.pty.writerCompletion, deadline, "writer close");
     if (writer?.kind !== "closed") throw new Error("Owned writer close is unverified");
+    session.writerClosed = true;
   } catch (error) {
     failures.push(error);
   }
@@ -452,8 +454,8 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   ).toBe(true);
   expect(first.exit()).toBeDefined();
   expect(second.exit()).toBeDefined();
-  await expect(first.pty.writerCompletion).resolves.toEqual({ kind: "closed" });
-  await expect(second.pty.writerCompletion).resolves.toEqual({ kind: "closed" });
+  expect(first.writerClosed).toBe(true);
+  expect(second.writerClosed).toBe(true);
 
   const stopCalls = [];
   const probeTimeouts = [];
@@ -568,4 +570,9 @@ test("fixture cleanup preserves a body failure and continues after one stop fail
   const writerUncertain = await controlled({ exitCode: 0 }, { kind: "close-uncertain" }, foreignPs);
   expect(writerUncertain.failure).toBeInstanceOf(AggregateError);
   expect(writerUncertain.signals).toEqual([]);
+  const pendingStarted = Date.now();
+  const writerPending = await controlled({ exitCode: 0 }, new Promise(() => {}), foreignPs);
+  expect(writerPending.failure).toBeInstanceOf(AggregateError);
+  expect(Date.now() - pendingStarted).toBeLessThan(1_000);
+  expect(writerPending.signals).toEqual([]);
 });
