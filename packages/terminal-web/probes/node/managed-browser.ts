@@ -772,6 +772,7 @@ export async function withManagedBrowser<T>(
     primaryErrorName:
       primaryError instanceof Error ? primaryError.name : primaryError ? "unknown" : null,
     browserPid: browserState?.pid ?? null,
+    browserVersion: contextRecord?.browserVersion ?? null,
     browserExited: browserState
       ? browserState.exitCode !== null || browserState.signalCode !== null
       : true,

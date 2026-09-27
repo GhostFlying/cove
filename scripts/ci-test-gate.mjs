@@ -20,6 +20,7 @@ const diagnosticFiles = new Set([
   ".github/workflows/check.yml",
   "docs/handoff.md",
   "docs/tasks/m0-p3a-browser-close-diagnostic-plan.md",
+  "docs/tasks/m0-p3a-browser-close-diagnostic-repair-plan.md",
   "docs/tasks/m0-p3a-browser-close-diagnostic-results.md",
   "packages/terminal-web/probes/node/managed-browser.ts",
   "packages/terminal-web/probes/managed-browser-timeline.test.mjs",
@@ -46,31 +47,35 @@ export function validateBrowserCloseDiagnosticInvocation(input) {
   return { mode: input.mode, ref: input.ref, sourceCommit: input.head, base: diagnosticBase };
 }
 
-export function verifyBrowserCloseDiagnosticReport(report) {
+export function verifyBrowserCloseDiagnosticSelection(report) {
   const suites = report?.testResults;
   const assertions = suites?.[0]?.assertionResults;
   if (!Array.isArray(suites) || suites.length !== 1 || !Array.isArray(assertions))
-    throw new Error("Browser-close diagnostic did not pass exactly V1-L4");
-  const passed = assertions.filter((assertion) => assertion.status === "passed");
+    throw new Error("Browser-close diagnostic did not execute exactly V1-L4");
+  const executed = assertions.filter((assertion) => assertion.status !== "skipped");
+  const status = executed[0]?.status;
   if (
-    report.success !== true ||
-    report.numTotalTests !== assertions?.length ||
-    report.numPassedTests !== 1 ||
-    report.numFailedTests !== 0 ||
+    !["passed", "failed"].includes(status) ||
+    report.success !== (status === "passed") ||
+    report.numTotalTests !== assertions.length ||
+    report.numPassedTests !== (status === "passed" ? 1 : 0) ||
+    report.numFailedTests !== (status === "failed" ? 1 : 0) ||
     report.numPendingTests !== assertions.length - 1 ||
     report.numTodoTests !== 0 ||
     repositoryPath(suites[0].name) !== diagnosticFile ||
-    suites[0].status !== "passed" ||
-    passed.length !== 1 ||
-    passed[0].fullName !== diagnosticName ||
-    assertions.some((assertion) =>
-      assertion.status === "passed"
-        ? assertion.fullName !== diagnosticName
-        : assertion.status !== "skipped",
-    )
+    suites[0].status !== status ||
+    executed.length !== 1 ||
+    executed[0].fullName !== diagnosticName
   )
+    throw new Error("Browser-close diagnostic did not execute exactly V1-L4");
+  return { outcome: status, cases: [{ file: diagnosticFile, name: diagnosticName }] };
+}
+
+export function verifyBrowserCloseDiagnosticReport(report) {
+  const selected = verifyBrowserCloseDiagnosticSelection(report);
+  if (selected.outcome !== "passed")
     throw new Error("Browser-close diagnostic did not pass exactly V1-L4");
-  return [{ file: diagnosticFile, name: diagnosticName }];
+  return selected.cases;
 }
 
 function gitText(...args) {
@@ -97,11 +102,73 @@ async function diagnosticIdentity() {
     changedFiles: gitText("diff", "--name-only", diagnosticBase, "HEAD").split("\n"),
   });
   await mkdir(diagnosticDir, { recursive: true });
+  const fullIdentity = { ...identity, tree: gitText("rev-parse", "HEAD^{tree}") };
   await writeFile(
     join(diagnosticDir, "identity.json"),
-    `${JSON.stringify({ ...identity, tree: gitText("rev-parse", "HEAD^{tree}") }, null, 2)}\n`,
+    `${JSON.stringify(fullIdentity, null, 2)}\n`,
   );
-  return identity;
+  return fullIdentity;
+}
+
+async function installedBrowserProvenance(identity, runId) {
+  const requireWeb = createRequire(join(root, "packages/terminal-web/package.json"));
+  const playwrightPath = requireWeb.resolve("playwright/package.json");
+  const requirePlaywright = createRequire(playwrightPath);
+  const corePath = requirePlaywright.resolve("playwright-core/package.json");
+  const [playwright, core, browsers] = await Promise.all([
+    readFile(playwrightPath, "utf8").then(JSON.parse),
+    readFile(corePath, "utf8").then(JSON.parse),
+    readFile(join(dirname(corePath), "browsers.json"), "utf8").then(JSON.parse),
+  ]);
+  const chromium = browsers.browsers?.filter((entry) => entry.name === "chromium");
+  const provenance = {
+    sourceCommit: identity.sourceCommit,
+    tree: identity.tree,
+    runId,
+    githubRunId: process.env.GITHUB_RUN_ID,
+    githubRunAttempt: process.env.GITHUB_RUN_ATTEMPT,
+    playwright: playwright.version ?? null,
+    playwrightCore: core.version ?? null,
+    chromiumRevision: chromium?.[0]?.revision ?? null,
+    chromiumVersion: chromium?.[0]?.browserVersion ?? null,
+    browserReportedVersion: null,
+  };
+  await writeFile(
+    join(diagnosticDir, "provenance.json"),
+    `${JSON.stringify(provenance, null, 2)}\n`,
+  );
+  if (
+    provenance.playwright !== "1.63.0" ||
+    provenance.playwrightCore !== "1.63.0" ||
+    chromium?.length !== 1 ||
+    provenance.chromiumRevision !== "1243" ||
+    !/^\d+(?:\.\d+){1,3}$/.test(provenance.chromiumVersion ?? "")
+  )
+    throw new Error("Browser-close diagnostic installed browser dependency differs from pins");
+  return provenance;
+}
+
+export function bindDiagnosticBrowserVersion(provenance, record) {
+  const version = record.browserVersion;
+  if (version !== null && version !== provenance.chromiumVersion)
+    throw new Error("Browser-close diagnostic reported browser version differs from installed pin");
+  return { ...provenance, browserReportedVersion: version };
+}
+
+export function validDiagnosticBrowserProvenance(provenance, identity, runId, record) {
+  return (
+    provenance.sourceCommit === identity.sourceCommit &&
+    provenance.tree === identity.tree &&
+    provenance.runId === runId &&
+    provenance.playwright === "1.63.0" &&
+    provenance.playwrightCore === "1.63.0" &&
+    provenance.chromiumRevision === "1243" &&
+    /^\d+(?:\.\d+){1,3}$/.test(provenance.chromiumVersion ?? "") &&
+    provenance.browserReportedVersion === record.browserVersion &&
+    (record.browserVersion === null || record.browserVersion === provenance.chromiumVersion) &&
+    (!runId.startsWith("github-") ||
+      runId === `github-${provenance.githubRunId}-${provenance.githubRunAttempt}`)
+  );
 }
 
 // Adding a real suite requires registering its project and file here in the same PR.
@@ -124,7 +191,7 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 36 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 37 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 7 },
   {
@@ -838,6 +905,11 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
         : typeof record.testName !== "string" || !record.testName) ||
       !Number.isSafeInteger(record.browserPid) ||
       record.browserPid <= 0 ||
+      (record.browserVersion !== null &&
+        (typeof record.browserVersion !== "string" ||
+          !/^\d+(?:\.\d+){1,3}$/.test(record.browserVersion) ||
+          record.browserVersion.length > 80)) ||
+      (record.primaryOutcome === "completed" && record.browserVersion === null) ||
       record.browserExited !== true ||
       record.listenerClosed !== true ||
       !validBrowserCleanupRecord(record) ||
@@ -863,6 +935,107 @@ export async function verifyBrowserCleanupEvidence(directory, sourceCommit, expe
   return { runId: marker.runId, recordCount: cases.length };
 }
 
+export async function verifyBrowserCloseDiagnosticEvidence(
+  diagnosticDirectory,
+  cleanupDirectory,
+  sourceCommit,
+  runId,
+  exitStatus,
+) {
+  const report = JSON.parse(
+    await readFile(join(diagnosticDirectory, "vitest-results.json"), "utf8"),
+  );
+  const selection = verifyBrowserCloseDiagnosticSelection(report);
+  if (
+    !Number.isSafeInteger(exitStatus) ||
+    exitStatus < 0 ||
+    exitStatus > 255 ||
+    (selection.outcome === "passed" ? exitStatus !== 0 : exitStatus === 0)
+  )
+    throw new Error("Browser-close diagnostic exit and selected case disagree");
+  const cleanup = await verifyBrowserCleanupEvidence(
+    cleanupDirectory,
+    sourceCommit,
+    selection.cases,
+  );
+  if (cleanup.recordCount !== 1 || cleanup.runId !== runId)
+    throw new Error("Browser-close diagnostic cleanup invocation identity is incomplete");
+  const caseFiles = (await readdir(cleanupDirectory)).filter((name) => name !== "run.json");
+  const record = JSON.parse(await readFile(join(cleanupDirectory, caseFiles[0]), "utf8"));
+  if (
+    selection.outcome === "passed" &&
+    (record.primaryOutcome !== "completed" ||
+      record.graceful.outcome !== "completed" ||
+      record.closeTimeline.rawClose.outcome !== "fulfilled")
+  )
+    throw new Error("Browser-close diagnostic did not finish graceful cleanup");
+  return { ...selection, record, caseFile: caseFiles[0] };
+}
+
+export async function writeBrowserCloseDiagnosticManifest({
+  diagnosticDirectory,
+  cleanupDirectory,
+  environmentPath,
+  identity,
+  runId,
+  verified,
+  exitStatus,
+  provenance,
+}) {
+  if (!validDiagnosticBrowserProvenance(provenance, identity, runId, verified.record))
+    throw new Error("Browser-close diagnostic provenance is incomplete");
+  await writeFile(
+    join(diagnosticDirectory, "provenance.json"),
+    `${JSON.stringify(provenance, null, 2)}\n`,
+  );
+  const files = {
+    "identity.json": join(diagnosticDirectory, "identity.json"),
+    "provenance.json": join(diagnosticDirectory, "provenance.json"),
+    "vitest-results.json": join(diagnosticDirectory, "vitest-results.json"),
+    "execution.json": join(diagnosticDirectory, "execution.json"),
+    "browser-cleanup/run.json": join(cleanupDirectory, "run.json"),
+    [`browser-cleanup/${verified.caseFile}`]: join(cleanupDirectory, verified.caseFile),
+    "environment.json": environmentPath,
+  };
+  const hashes = Object.fromEntries(
+    await Promise.all(
+      Object.entries(files).map(async ([name, file]) => [
+        name,
+        createHash("sha256")
+          .update(await readFile(file))
+          .digest("hex"),
+      ]),
+    ),
+  );
+  const result = {
+    ...identity,
+    runId,
+    case: verified.cases[0],
+    outcome: verified.outcome,
+    vitestExitCode: exitStatus,
+    gracefulOutcome: verified.record.graceful.outcome,
+    evidenceValidated: true,
+    hashes,
+  };
+  if (verified.outcome === "failed")
+    await writeFile(
+      join(diagnosticDirectory, "failure.json"),
+      `${JSON.stringify({ classification: "validated-test-failure", vitestExitCode: exitStatus })}\n`,
+    );
+  await writeFile(join(diagnosticDirectory, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+  return result;
+}
+
+export async function writeNoConclusionDiagnosticFailure(directory, error) {
+  await mkdir(directory, { recursive: true });
+  const failure = {
+    classification: "no-conclusion",
+    errorName: error instanceof Error ? error.name : "unknown",
+  };
+  await writeFile(join(directory, "failure.json"), `${JSON.stringify(failure)}\n`);
+  return failure;
+}
+
 async function browserCloseDiagnostic() {
   const identity = await diagnosticIdentity();
   await environment();
@@ -870,6 +1043,7 @@ async function browserCloseDiagnostic() {
   if (!/^github-\d+-\d+$/.test(runId)) throw new Error("Diagnostic run identity is unavailable");
   await prepareBrowserCleanupEvidence(identity.sourceCommit, runId);
   process.env.COVE_BROWSER_CLEANUP_RUN_ID = runId;
+  const installed = await installedBrowserProvenance(identity, runId);
   const output = join(diagnosticDir, "vitest-results.json");
   const result = await recordedCommand(
     "browser-close-v1-l4",
@@ -891,60 +1065,35 @@ async function browserCloseDiagnostic() {
   );
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
-  if (result.status !== 0) throw new Error(`Browser-close diagnostic exited ${result.status}`);
-  const cases = verifyBrowserCloseDiagnosticReport(JSON.parse(await readFile(output, "utf8")));
-  const cleanup = await verifyBrowserCleanupEvidence(
+  const verified = await verifyBrowserCloseDiagnosticEvidence(
+    diagnosticDir,
     join(evidenceDir, "browser-cleanup"),
     identity.sourceCommit,
-    cases,
+    runId,
+    result.status,
   );
-  if (cleanup.recordCount !== 1)
-    throw new Error("Browser-close diagnostic ran multiple browser invocations");
-  const caseFiles = (await readdir(join(evidenceDir, "browser-cleanup"))).filter(
-    (name) => name !== "run.json",
-  );
-  const record = JSON.parse(
-    await readFile(join(evidenceDir, "browser-cleanup", caseFiles[0]), "utf8"),
-  );
-  if (
-    record.primaryOutcome !== "completed" ||
-    record.graceful.outcome !== "completed" ||
-    record.closeTimeline.rawClose.outcome !== "fulfilled"
-  )
-    throw new Error("Browser-close diagnostic did not finish graceful cleanup");
-  const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
-  const artifactFiles = [
-    join(diagnosticDir, "identity.json"),
-    join(diagnosticDir, "vitest-results.json"),
-    join(evidenceDir, "browser-cleanup", "run.json"),
-    join(evidenceDir, "browser-cleanup", caseFiles[0]),
-    join(evidenceDir, "environment.json"),
-  ];
-  const hashes = Object.fromEntries(
-    await Promise.all(
-      artifactFiles.map(async (file) => [
-        relative(evidenceDir, file),
-        digest(await readFile(file)),
-      ]),
-    ),
-  );
-  await writeFile(
-    join(diagnosticDir, "result.json"),
-    `${JSON.stringify({ ...identity, tree: gitText("rev-parse", "HEAD^{tree}"), runId, case: cases[0], hashes }, null, 2)}\n`,
-  );
+  const provenance = bindDiagnosticBrowserVersion(installed, verified.record);
+  await writeBrowserCloseDiagnosticManifest({
+    diagnosticDirectory: diagnosticDir,
+    cleanupDirectory: join(evidenceDir, "browser-cleanup"),
+    environmentPath: join(evidenceDir, "environment.json"),
+    identity,
+    runId,
+    verified,
+    exitStatus: result.status,
+    provenance,
+  });
+  return verified.outcome === "passed";
 }
 
 async function main() {
   if (process.argv[2] === "--diagnostic-identity") return diagnosticIdentity();
   if (process.argv[2] === "--browser-close-diagnostic") {
     try {
-      return await browserCloseDiagnostic();
+      if (!(await browserCloseDiagnostic())) process.exitCode = 1;
+      return;
     } catch (error) {
-      await mkdir(diagnosticDir, { recursive: true });
-      await writeFile(
-        join(diagnosticDir, "failure.json"),
-        `${JSON.stringify({ errorName: error instanceof Error ? error.name : "unknown" })}\n`,
-      );
+      await writeNoConclusionDiagnosticFailure(diagnosticDir, error);
       throw error;
     }
   }
