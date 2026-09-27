@@ -185,6 +185,10 @@ function rpcResult(id, result) {
   return { jsonrpc: "2.0", id, result };
 }
 
+function rpcError(id, code, message, data) {
+  return { jsonrpc: "2.0", id, error: { code, message, ...(data ? { data } : {}) } };
+}
+
 function runRecord(overrides = {}) {
   return {
     run,
@@ -212,6 +216,21 @@ function operation(operationId, method, overrides = {}) {
     run,
     ...overrides,
   };
+}
+
+function createParams(operationId) {
+  return {
+    operationId,
+    expectedRelayInstanceId: ids.relayInstanceId,
+    executable: "/bin/sh",
+    argv: [],
+    cwd: "/tmp",
+    geometry: { cols: 80, rows: 24 },
+  };
+}
+
+function stopParams(operationId) {
+  return { operationId, expectedRelayInstanceId: ids.relayInstanceId, run };
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -583,6 +602,512 @@ describe("bounded typed RPC", () => {
     expect(context.client.snapshot().pendingRpcCount).toBe(0);
   });
 
+  test("treats create disposed inside post before its handle returns as unknown", async () => {
+    const context = harness();
+    await connectHarness(context);
+    let posts = 0;
+    let cancellations = 0;
+    context.http.post = () => {
+      posts += 1;
+      context.client.dispose();
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "handed-off";
+        },
+      };
+    };
+
+    const outcome = await context.client.call("terminal.create", createParams("op-dispose-post"));
+    expect(outcome).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { method: "terminal.create", operationId: "op-dispose-post" },
+    });
+    expect(posts).toBe(1);
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot()).toMatchObject({ status: "disposed", pendingRpcCount: 0 });
+  });
+
+  test("does not downgrade a handed-off stop when timeout fires inside post", async () => {
+    const context = harness({ options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    let cancellations = 0;
+    context.http.post = (_request, callbacks) => {
+      callbacks.onDisposition("handed-off");
+      context.scheduler.advance(10);
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "not-sent";
+        },
+      };
+    };
+
+    expect(await context.client.call("terminal.stop", stopParams("op-timeout-post"))).toMatchObject(
+      {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-timeout-post" },
+      },
+    );
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("fences a create that synchronously reconnects inside post and ignores its late callback", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const ordinaryPost = context.http.post;
+    let reconnect;
+    let rpcCallbacks;
+    let rpcRequest;
+    let cancellations = 0;
+    context.http.post = (request, callbacks) => {
+      const decoded = JSON.parse(fatalDecoder.decode(request.body));
+      if (decoded.jsonrpc !== "2.0") return ordinaryPost(request, callbacks);
+      rpcRequest = decoded;
+      rpcCallbacks = callbacks;
+      reconnect = context.client.reconnect();
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "unknown";
+        },
+      };
+    };
+
+    const call = context.client.call("terminal.create", createParams("op-reconnect-post"));
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-reconnect-post" },
+    });
+    await flush();
+    context.http.respond(1, bootstrap());
+    context.terminal.text(1, bootstrap({}, true));
+    expect(await reconnect).toMatchObject({ ok: true });
+    rpcCallbacks.onResponse({
+      status: 200,
+      headers: headers(),
+      body: encoder.encode(
+        JSON.stringify(
+          rpcResult(rpcRequest.id, {
+            operation: operation("op-reconnect-post", "terminal.create"),
+          }),
+        ),
+      ),
+    });
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot()).toMatchObject({ status: "connected", pendingRpcCount: 0 });
+  });
+
+  test("treats a write whose post throws after entry as unknown", async () => {
+    const context = harness();
+    await connectHarness(context);
+    let posts = 0;
+    context.http.post = () => {
+      posts += 1;
+      throw new Error("post failed after possible handoff");
+    };
+
+    expect(
+      await context.client.call("terminal.create", createParams("op-post-throw")),
+    ).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-post-throw" },
+    });
+    expect(posts).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  async function postEntryReentryResult({ method, operationId, trigger, handedOff }) {
+    const context = harness({ options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    const ordinaryPost = context.http.post;
+    let callbacks;
+    let request;
+    let reconnect;
+    let posts = 0;
+    let cancellations = 0;
+    context.http.post = (nextRequest, nextCallbacks) => {
+      posts += 1;
+      request = JSON.parse(fatalDecoder.decode(nextRequest.body));
+      callbacks = nextCallbacks;
+      if (handedOff) callbacks.onDisposition("handed-off");
+      if (trigger === "dispose") context.client.dispose();
+      if (trigger === "timeout") context.scheduler.advance(10);
+      if (trigger === "reconnect") {
+        context.http.post = ordinaryPost;
+        reconnect = context.client.reconnect();
+      }
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return handedOff ? "not-sent" : "unknown";
+        },
+      };
+    };
+
+    const params =
+      method === "terminal.create" ? createParams(operationId) : stopParams(operationId);
+    const outcome = await context.client.call(method, params);
+
+    let reconnectOutcome;
+    if (reconnect) {
+      await flush();
+      context.http.respond(1, bootstrap());
+      context.terminal.text(1, bootstrap({}, true));
+      reconnectOutcome = await reconnect;
+    }
+    callbacks.onFailure({ disposition: "not-sent", reason: "transport" });
+    callbacks.onResponse({
+      status: 200,
+      headers: headers(),
+      body: encoder.encode(
+        JSON.stringify(
+          rpcResult(request.id, { operation: operation(operationId, method, { run }) }),
+        ),
+      ),
+    });
+    return { outcome, posts, cancellations, reconnectOutcome, snapshot: context.client.snapshot() };
+  }
+
+  test("keeps handed-off create unknown when dispose reenters before handle return", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.create",
+        operationId: "op-create-dispose-handed",
+        trigger: "dispose",
+        handedOff: true,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.create", operationId: "op-create-dispose-handed" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "disposed", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps stop unknown when dispose reenters before handle return without disposition", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.stop",
+        operationId: "op-stop-dispose-none",
+        trigger: "dispose",
+        handedOff: false,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-stop-dispose-none" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "disposed", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps handed-off stop unknown when dispose reenters before handle return", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.stop",
+        operationId: "op-stop-dispose-handed",
+        trigger: "dispose",
+        handedOff: true,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-stop-dispose-handed" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "disposed", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps handed-off create unknown when reconnect reenters before handle return", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.create",
+        operationId: "op-create-reconnect-handed",
+        trigger: "reconnect",
+        handedOff: true,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.create", operationId: "op-create-reconnect-handed" },
+      },
+      posts: 1,
+      cancellations: 1,
+      reconnectOutcome: { ok: true },
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps stop unknown when reconnect reenters before handle return without disposition", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.stop",
+        operationId: "op-stop-reconnect-none",
+        trigger: "reconnect",
+        handedOff: false,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-stop-reconnect-none" },
+      },
+      posts: 1,
+      cancellations: 1,
+      reconnectOutcome: { ok: true },
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps handed-off stop unknown when reconnect reenters before handle return", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.stop",
+        operationId: "op-stop-reconnect-handed",
+        trigger: "reconnect",
+        handedOff: true,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-stop-reconnect-handed" },
+      },
+      posts: 1,
+      cancellations: 1,
+      reconnectOutcome: { ok: true },
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps create unknown when timeout fires before handle return without disposition", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.create",
+        operationId: "op-create-timeout-none",
+        trigger: "timeout",
+        handedOff: false,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.create", operationId: "op-create-timeout-none" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps handed-off create unknown when timeout fires before handle return", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.create",
+        operationId: "op-create-timeout-handed",
+        trigger: "timeout",
+        handedOff: true,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.create", operationId: "op-create-timeout-handed" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps stop unknown when timeout fires before handle return without disposition", async () => {
+    expect(
+      await postEntryReentryResult({
+        method: "terminal.stop",
+        operationId: "op-stop-timeout-none",
+        trigger: "timeout",
+        handedOff: false,
+      }),
+    ).toMatchObject({
+      outcome: {
+        ok: false,
+        kind: "operation-unknown",
+        operation: { method: "terminal.stop", operationId: "op-stop-timeout-none" },
+      },
+      posts: 1,
+      cancellations: 1,
+      snapshot: { status: "connected", pendingRpcCount: 0 },
+    });
+  });
+
+  test("keeps pre-post credential failure and timeout as not sent with zero RPC posts", async () => {
+    let credentialCalls = 0;
+    const rejected = harness({
+      options: {
+        credentials: () => {
+          credentialCalls += 1;
+          if (credentialCalls === 1) {
+            return { authorization: "Bearer bootstrap", terminalSecret: "a".repeat(43) };
+          }
+          return Promise.reject(new Error("credential unavailable"));
+        },
+      },
+    });
+    await connectHarness(rejected);
+    expect(
+      await rejected.client.call("terminal.create", createParams("op-credential-rejected")),
+    ).toMatchObject({ ok: false, kind: "operation-not-sent" });
+    expect(rejected.http.requests).toHaveLength(1);
+
+    let releaseCredentials;
+    credentialCalls = 0;
+    const timedOut = harness({
+      options: {
+        rpcTimeoutMs: 10,
+        credentials: () => {
+          credentialCalls += 1;
+          if (credentialCalls === 1) {
+            return { authorization: "Bearer bootstrap", terminalSecret: "a".repeat(43) };
+          }
+          return new Promise((resolve) => {
+            releaseCredentials = resolve;
+          });
+        },
+      },
+    });
+    await connectHarness(timedOut);
+    const call = timedOut.client.call("terminal.stop", stopParams("op-credential-timeout"));
+    await flush();
+    timedOut.scheduler.advance(10);
+    expect(await call).toMatchObject({ ok: false, kind: "operation-not-sent" });
+    expect(timedOut.http.requests).toHaveLength(1);
+    releaseCredentials({ authorization: "Bearer late", terminalSecret: "b".repeat(43) });
+    await flush();
+    expect(timedOut.http.requests).toHaveLength(1);
+  });
+
+  test("does not downgrade unknown disposition when cancellation reports not sent", async () => {
+    const context = harness({ options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    let cancellations = 0;
+    context.http.post = (_request, callbacks) => {
+      callbacks.onDisposition("unknown");
+      return {
+        cancel: () => {
+          cancellations += 1;
+          return "not-sent";
+        },
+      };
+    };
+    const call = context.client.call("terminal.stop", stopParams("op-unknown-no-downgrade"));
+    await flush();
+    context.scheduler.advance(10);
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-unknown-no-downgrade" },
+    });
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("keeps a synchronous success when late-handle cancellation reenters failure", async () => {
+    const context = harness();
+    await connectHarness(context);
+    let cancellations = 0;
+    context.http.post = (request, callbacks) => {
+      const decoded = JSON.parse(fatalDecoder.decode(request.body));
+      callbacks.onDisposition("handed-off");
+      callbacks.onResponse({
+        status: 200,
+        headers: headers(),
+        body: encoder.encode(JSON.stringify(rpcResult(decoded.id, { runs: [] }))),
+      });
+      return {
+        cancel: () => {
+          cancellations += 1;
+          callbacks.onFailure({ disposition: "unknown", reason: "transport" });
+          return "handed-off";
+        },
+      };
+    };
+
+    expect(await context.client.call("terminal.list", { limit: 1 })).toEqual({
+      ok: true,
+      value: { runs: [] },
+    });
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("bounds cancel failure reentry during timeout cleanup", async () => {
+    const context = harness({ options: { rpcTimeoutMs: 10 } });
+    await connectHarness(context);
+    let cancellations = 0;
+    context.http.post = (_request, callbacks) => {
+      callbacks.onDisposition("handed-off");
+      return {
+        cancel: () => {
+          cancellations += 1;
+          callbacks.onFailure({ disposition: "unknown", reason: "transport" });
+          return "unknown";
+        },
+      };
+    };
+
+    const call = context.client.call("terminal.stop", stopParams("op-timeout-reentry"));
+    await flush();
+    context.scheduler.advance(10);
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-timeout-reentry" },
+    });
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot().pendingRpcCount).toBe(0);
+  });
+
+  test("bounds reentrant and throwing cancellation during dispose cleanup", async () => {
+    const context = harness();
+    await connectHarness(context);
+    let cancellations = 0;
+    context.http.post = (_request, callbacks) => ({
+      cancel: () => {
+        cancellations += 1;
+        callbacks.onFailure({ disposition: "not-sent", reason: "transport" });
+        throw new Error("cancel failed");
+      },
+    });
+
+    const call = context.client.call("terminal.create", createParams("op-dispose-reentry"));
+    await flush();
+    context.client.dispose();
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-dispose-reentry" },
+    });
+    expect(cancellations).toBe(1);
+    expect(context.client.snapshot()).toMatchObject({ status: "disposed", pendingRpcCount: 0 });
+  });
+
   async function rejectsMismatchedResult(response, responseHeaders = headers()) {
     const context = harness();
     await connectHarness(context);
@@ -867,6 +1392,132 @@ describe("bounded typed RPC", () => {
       { headers: headers() },
     );
     expect(await read).toEqual({ ok: false, kind: "rpc-error", error });
+  });
+
+  test("treats a correlated internal error for create as operation unknown", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.create", createParams("op-internal"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcError(request.id, -32603, "Internal error"), {
+      headers: headers(),
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-internal" },
+      error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" },
+    });
+  });
+
+  test("treats a non-result-unknown domain error with unknown acceptance as operation unknown", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.stop", stopParams("op-domain-unknown"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    const error = domainError("WORKER_UNAVAILABLE", "unknown");
+    context.http.respond(1, rpcError(request.id, error.code, error.message, error), {
+      headers: headers(),
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-domain-unknown" },
+      error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" },
+    });
+  });
+
+  test("treats a domain error with accepted disposition as operation unknown", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.create", createParams("op-domain-accepted"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    const error = domainError("BUSY", "accepted");
+    context.http.respond(1, rpcError(request.id, error.code, error.message, error), {
+      headers: headers(),
+    });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-domain-accepted" },
+    });
+  });
+
+  test("preserves an explicit not-accepted domain write error", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.create", createParams("op-domain-rejected"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    const error = domainError("BUSY");
+    context.http.respond(1, rpcError(request.id, error.code, error.message, error), {
+      headers: headers(),
+    });
+    expect(await call).toEqual({ ok: false, kind: "rpc-error", error });
+  });
+
+  test("preserves a correlated invalid-params pre-dispatch write error", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.stop", stopParams("op-invalid-params"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcError(request.id, -32602, "Invalid params"), {
+      headers: headers(),
+    });
+    expect(await call).toEqual({
+      ok: false,
+      kind: "rpc-error",
+      error: { code: -32602, message: "Invalid params" },
+    });
+  });
+
+  test("preserves a correlated method-not-found pre-dispatch write error", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.create", createParams("op-method-not-found"));
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcError(request.id, -32601, "Method not found"), {
+      headers: headers(),
+    });
+    expect(await call).toEqual({
+      ok: false,
+      kind: "rpc-error",
+      error: { code: -32601, message: "Method not found" },
+    });
+  });
+
+  test("does not treat an unbound null-id invalid-request response as rejection proof", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.create", createParams("op-null-id"));
+    await flush();
+    context.http.respond(1, rpcError(null, -32600, "Invalid Request"), { headers: headers() });
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { operationId: "op-null-id" },
+    });
+  });
+
+  test("keeps a correlated internal error on a read as rpc error", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const call = context.client.call("terminal.list", { limit: 1 });
+    await flush();
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[1].request.body));
+    context.http.respond(1, rpcError(request.id, -32603, "Internal error"), {
+      headers: headers(),
+    });
+    expect(await call).toEqual({
+      ok: false,
+      kind: "rpc-error",
+      error: { code: -32603, message: "Internal error" },
+    });
   });
 
   test("settles handed-off write as unknown on timeout/dispose and ignores late success", async () => {

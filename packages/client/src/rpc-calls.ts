@@ -2,6 +2,7 @@ import { M0_LIMITS, type EffectiveBudgets } from "@cove/protocol/budgets";
 import { sameRunRef, type RunRef } from "@cove/protocol/identity";
 import {
   RPC_METHODS,
+  STANDARD_RPC_ERRORS,
   validateRpcMethodParams,
   validateRpcResponse,
   validateRpcResultForCall,
@@ -122,6 +123,14 @@ export type CheckedRpcResponse<M extends RpcMethod> =
   | { readonly kind: "success"; readonly value: ResultFor<M> }
   | { readonly kind: "rpc-error"; readonly response: Extract<RpcResponse, { error: unknown }> }
   | { readonly kind: "invalid" };
+
+export function rpcErrorProvesWriteNotAccepted(
+  response: Extract<RpcResponse, { error: unknown }>,
+): boolean {
+  if (response.error.data) return response.error.data.acceptance === "not-accepted";
+  const code = response.error.code;
+  return code === STANDARD_RPC_ERRORS.methodNotFound || code === STANDARD_RPC_ERRORS.invalidParams;
+}
 
 export function checkRpcResponse<M extends RpcMethod>(
   method: M,
