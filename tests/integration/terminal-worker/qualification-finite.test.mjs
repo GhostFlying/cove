@@ -235,3 +235,150 @@ test("compiled public pipe owns callback EPIPE and subsequent asynchronous error
     blocked: false,
   });
 });
+
+test("logical shutdown retains handed-off bytes until the Writable physically closes", async () => {
+  const callbacks = [];
+  const output = new Writable({
+    highWaterMark: 1,
+    write(_chunk, _encoding, callback) {
+      callbacks.push(callback);
+    },
+  });
+  const input = new PassThrough();
+  const pipe = runWorkerPipe(input, output, {
+    buildVersion: "independent-held-open",
+    createExecution: () => ({
+      execute: async (request) => ({
+        type: "error",
+        worker: request.worker,
+        run: request.run,
+        requestId: request.requestId,
+        commandType: request.type,
+        error: domainError("CAPABILITY_UNAVAILABLE"),
+      }),
+      snapshot: () => ({}),
+      shutdown: async () => [receipt],
+    }),
+  });
+  try {
+    input.write(encode(hello));
+    expect(callbacks).toHaveLength(1);
+    callbacks.shift()();
+    await tick();
+    input.write(
+      encode({
+        type: "preview-refresh",
+        worker: hello.worker,
+        run: {
+          serverId: hello.worker.serverId,
+          relayInstanceId: hello.worker.relayInstanceId,
+          runId: "r",
+        },
+        requestId: "held-open-reply",
+      }),
+    );
+    await until(() => callbacks.length === 1, 8000, "held transport callback");
+    const handedOff = pipe.snapshot();
+    expect(handedOff.responseItems).toBe(1);
+    expect(handedOff.transportBytes).toBeGreaterThan(0);
+    const closed = await pipe.shutdown("finite-held-open");
+    const beforePhysicalClose = pipe.snapshot();
+    preserveFinite("fake-held-open-before-close", { handedOff, beforePhysicalClose, closed });
+    expect(output.closed).toBe(false);
+    expect(closed.uncertainRequestIds).toEqual(["held-open-reply"]);
+    expect(beforePhysicalClose.responseItems).toBe(1);
+    expect(beforePhysicalClose.transportBytes).toBeGreaterThan(0);
+    const terminalClose = new Promise((resolve) => output.once("close", resolve));
+    output.destroy();
+    await terminalClose;
+    await tick();
+    expect(output.closed).toBe(true);
+    const afterPhysicalClose = pipe.snapshot();
+    preserveFinite("fake-held-open-after-close", {
+      beforePhysicalClose,
+      afterPhysicalClose,
+      closed,
+    });
+    expect(afterPhysicalClose).toMatchObject({
+      state: "closed",
+      responseItems: 0,
+      transportBytes: 0,
+      ordinaryAccountedBytes: 0,
+      queuedBytes: 0,
+      outstandingRequests: 0,
+      blocked: false,
+    });
+    expect(await pipe.shutdown("later-close")).toBe(closed);
+  } finally {
+    output.destroy();
+    input.destroy();
+  }
+});
+
+test("late callback after terminal close cannot revive response debt or alter first cause", async () => {
+  const callbacks = [];
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      callbacks.push(callback);
+    },
+  });
+  const input = new PassThrough();
+  const pipe = runWorkerPipe(input, output, {
+    buildVersion: "independent-late-callback",
+    createExecution: () => ({
+      execute: async (request) => ({
+        type: "error",
+        worker: request.worker,
+        run: request.run,
+        requestId: request.requestId,
+        commandType: request.type,
+        error: domainError("CAPABILITY_UNAVAILABLE"),
+      }),
+      snapshot: () => ({}),
+      shutdown: async () => [receipt],
+    }),
+  });
+  try {
+    input.write(encode(hello));
+    callbacks.shift()();
+    await tick();
+    input.write(
+      encode({
+        type: "preview-refresh",
+        worker: hello.worker,
+        run: {
+          serverId: hello.worker.serverId,
+          relayInstanceId: hello.worker.relayInstanceId,
+          runId: "r",
+        },
+        requestId: "late-callback-reply",
+      }),
+    );
+    await until(() => callbacks.length === 1, 8000, "late callback retained");
+    const before = pipe.snapshot();
+    expect(before.responseItems).toBe(1);
+    output.emit("close");
+    const closed = await pipe.closed;
+    const afterClose = pipe.snapshot();
+    callbacks.shift()();
+    await tick();
+    const afterCallback = pipe.snapshot();
+    preserveFinite("fake-late-callback", { before, afterClose, afterCallback, closed });
+    expect(closed).toMatchObject({
+      reason: "stdout-close",
+      uncertainRequestIds: ["late-callback-reply"],
+      disposalReceipts: [receipt],
+    });
+    for (const state of [afterClose, afterCallback])
+      expect(state).toMatchObject({
+        responseItems: 0,
+        transportBytes: 0,
+        ordinaryAccountedBytes: 0,
+        blocked: false,
+      });
+    expect(await pipe.shutdown("repeat")).toBe(closed);
+  } finally {
+    output.destroy();
+    input.destroy();
+  }
+});
