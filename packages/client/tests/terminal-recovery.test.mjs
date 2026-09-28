@@ -129,6 +129,9 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
     raw(bytes) {
       callbacks.onBinary(bytes);
     },
+    close() {
+      callbacks.onClose();
+    },
     commands,
     onCommand,
   };
@@ -154,7 +157,8 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
           else {
             const command = readCommand(message);
             commands.push(command);
-            peer.onCommand(command, peer);
+            const disposition = peer.onCommand(command, peer);
+            return disposition ?? "handed-off";
           }
           return "handed-off";
         },
@@ -325,6 +329,178 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("revokes old connection before synchronous unavailable listeners can reenter", async () => {
+    const rendered = view();
+    let attachSerial = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach")
+        reply(command, peer, subscription("view-1", `subscription-${++attachSerial}`));
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const first = controller.attach();
+    baseline(peer, subscription("view-1", "subscription-1"));
+    expect((await first).ok).toBe(true);
+    let reentered;
+    controller.onState((snapshot) => {
+      if (snapshot.phase !== "unavailable" || reentered) return;
+      reentered = {
+        attach: controller.attach(),
+        open: client.openTerminal({
+          run,
+          viewId: "second",
+          view: view().terminalView,
+          initialAppearance: DEFAULT_APPEARANCE,
+        }),
+        reconnect: client.reconnect(),
+      };
+    });
+    const before = peer.commands.length;
+    peer.close();
+    expect(peer.commands).toHaveLength(before);
+    expect(await reentered.attach).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(reentered.open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(await reentered.reconnect).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    expect(client.snapshot().status).toBe("unverifiable");
+    expect((await client.reconnect()).ok).toBe(true);
+    const second = controller.attach();
+    baseline(peer, subscription("view-1", "subscription-2"));
+    expect((await second).ok).toBe(true);
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("guards nested reconnect and dispose notifications before adapter cleanup", async () => {
+    const rendered = view();
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    const nested = [];
+    controller.onState((snapshot) => {
+      if (snapshot.phase === "unavailable") {
+        nested.push({
+          open: client.openTerminal({
+            run,
+            viewId: "nested",
+            view: view().terminalView,
+            initialAppearance: DEFAULT_APPEARANCE,
+          }),
+          reconnect: client.reconnect(),
+        });
+      }
+    });
+    const before = peer.commands.length;
+    expect((await client.reconnect()).ok).toBe(true);
+    expect(peer.commands).toHaveLength(before);
+    expect(nested).toHaveLength(1);
+    expect(nested[0].open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(await nested[0].reconnect).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    client.dispose();
+    expect(nested).toHaveLength(2);
+    expect(nested[1].open).toMatchObject({ ok: false, error: { reason: "disposed" } });
+    expect(await nested[1].reconnect).toMatchObject({ ok: false, error: { reason: "disposed" } });
+  });
+
+  test("keeps a healthy route after definite attach rejection but retires unknown acceptance", async () => {
+    const first = view();
+    let secondMode = "not-sent";
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach" && command.viewId === "a")
+        reply(command, peer, subscription("a"));
+      if (command.type === "attach" && command.viewId === "b") {
+        if (secondMode === "not-sent") return "not-sent";
+        peer.emit(4, {
+          type: "error",
+          requestId: command.requestId,
+          run,
+          commandType: "attach",
+          error: domainError("BUSY", secondMode),
+        });
+        return secondMode === "accepted" ? "not-sent" : "unknown";
+      } else settleControl(command, peer);
+    });
+    const a = client.openTerminal({
+      run,
+      viewId: "a",
+      view: first.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const b = client.openTerminal({
+      run,
+      viewId: "b",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const ap = a.attach();
+    baseline(peer, subscription("a"));
+    expect((await ap).ok).toBe(true);
+    expect((await b.attach()).ok).toBe(false);
+    expect(client.snapshot().status).toBe("connected");
+    secondMode = "not-accepted";
+    expect((await b.attach()).ok).toBe(false);
+    expect(client.snapshot().status).toBe("connected");
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("a"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(a.snapshot().appliedSeq).toBe(4);
+    secondMode = "accepted";
+    expect((await b.attach()).ok).toBe(false);
+    expect(client.snapshot().status).toBe("unverifiable");
+    a.dispose();
+    b.dispose();
+    client.dispose();
+  });
+
+  test("does not downgrade an inline accepted attach result after adapter throws", async () => {
+    const rendered = view();
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        reply(command, peer, subscription("view-1"));
+        throw new Error("late adapter contradiction");
+      }
+      settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    expect(client.snapshot().status).toBe("connected");
+    controller.dispose();
+    client.dispose();
+  });
   test("offers no replay and waits for old view work before a fresh baseline", async () => {
     const gate = deferred();
     const rendered = view({ eventGate: gate });
