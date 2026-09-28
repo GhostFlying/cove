@@ -198,6 +198,10 @@ export type TerminalInputOutcome =
       readonly error: ClientError | DomainError;
     };
 
+export type TerminalInputNotice =
+  | { readonly kind: "input"; readonly outcome: TerminalInputOutcome }
+  | { readonly kind: "renderer-rejection"; readonly error: DomainError };
+
 export interface TerminalSnapshot {
   readonly phase:
     "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
@@ -228,6 +232,7 @@ export interface TerminalController {
     source: TerminalInputSource;
     bytes: Uint8Array;
   }): Promise<TerminalInputOutcome>;
+  onInputOutcome(listener: (notice: TerminalInputNotice) => void): Disposable;
   setVisibility(visible: boolean): void;
   snapshot(): TerminalSnapshot;
   onState(listener: (snapshot: TerminalSnapshot) => void): Disposable;
