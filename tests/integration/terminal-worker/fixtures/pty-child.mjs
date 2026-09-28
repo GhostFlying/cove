@@ -30,20 +30,47 @@ if (mode === "interactive") {
     const reply = bytes.indexOf(Buffer.from("\u001b[0n"));
     const input = bytes.indexOf(Buffer.from([0x00, 0x80, 0xff, 0xe2, 0x82, 0xac, 0x51]));
     if (reply < 0 || input < 0) return;
+    let windowSizeAfter = null;
+    try {
+      windowSizeAfter = execFileSync("/bin/stty", ["size"], {
+        stdio: ["inherit", "pipe", "ignore"],
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      /* The parent also checks the resize result. */
+    }
     writeFileSync(
       `${receiptDir}/finish.json`,
-      JSON.stringify({ nonce, pid: process.pid, receivedHex: bytes.toString("hex"), reply, input }),
+      JSON.stringify({
+        nonce,
+        pid: process.pid,
+        receivedHex: bytes.toString("hex"),
+        reply,
+        input,
+        windowSizeAfter,
+      }),
     );
     process.stdout.write(Buffer.from(`DONE:${nonce}\n`));
     process.exit(23);
   });
 } else if (mode === "bulk") {
   let emitted = 0;
+  let stalled = false;
   const timer = setInterval(() => {
-    if (emitted >= 384 * 1024) return;
+    if (emitted >= 192 * 1024 || stalled) return;
     process.stdout.write(Buffer.alloc(8192, 0x42));
     emitted += 8192;
-    if (emitted === 384 * 1024)
+    if (emitted === 64 * 1024) {
+      stalled = true;
+      writeFileSync(
+        `${receiptDir}/stall.json`,
+        JSON.stringify({ nonce, pid: process.pid, emitted }),
+      );
+      setTimeout(() => {
+        stalled = false;
+      }, 1500);
+    }
+    if (emitted === 192 * 1024)
       writeFileSync(
         `${receiptDir}/finish.json`,
         JSON.stringify({ nonce, pid: process.pid, emitted }),
