@@ -353,7 +353,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
-    minimumTests: 23,
+    minimumTests: 26,
   },
   {
     project: "terminal-web-probes",
@@ -388,6 +388,18 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
+    template: "public pipe rejects %s before real execution",
+    names: [
+      "public pipe rejects status with bytes before real execution",
+      "public pipe rejects set-control with bytes before real execution",
+      "public pipe rejects empty spawn before real execution",
+      "public pipe rejects short spawn before real execution",
+      "public pipe rejects empty input before real execution",
+    ],
+  },
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-adapter-input.test.mjs",
