@@ -7,7 +7,9 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,14 +24,22 @@ import {
   stopVerified,
   until,
   verifyWorkerIdentity,
+  workerIdentityAnchors,
 } from "./pipe-harness.mjs";
 
 const pid = 11060;
 const started = "Mon Sep 28 18:16:48 2026";
 const bin = "/tmp/cove-qual-bin-example/node_modules/.bin/cove-terminal-worker";
 const compiled = "/home/runner/work/cove/cove/packages/terminal-worker/dist/src/main.js";
-const resolver = (path) =>
-  path.endsWith("/packages/terminal-worker/dist/src/main.js") ? compiled : path;
+const workerEntry = join(repo, "packages/terminal-worker/dist/src/main.js");
+const linuxEntry = `${dirname(bin)}/../../../../home/runner/work/cove/cove/packages/terminal-worker/dist/src/main.js`;
+const canonicalBin = "/canonical/cove-terminal-worker";
+const resolverMap = new Map([
+  [bin, canonicalBin],
+  [workerEntry, compiled],
+  [linuxEntry, compiled],
+]);
+const resolver = (path) => resolverMap.get(path) ?? path;
 const parse = (command, expectedPid = pid) =>
   parseWorkerProcessRow(`${pid} ${started} ${command}`, expectedPid, bin, {
     resolveEntry: resolver,
@@ -56,9 +66,7 @@ const preserve = (directory, names) => {
 
 test("structured worker identity accepts one owned shim-to-compiled exec and rejects ambiguity", () => {
   const shim = parse(`/bin/sh ${bin}`);
-  const linux = parse(
-    `node ${dirname(bin)}/../../../../home/runner/work/cove/cove/packages/terminal-worker/dist/src/main.js`,
-  );
+  const linux = parse(`node ${linuxEntry}`);
   const mac = parse(
     `${process.execPath} ${join(repo, "packages/terminal-worker/dist/src/main.js")}`,
   );
@@ -77,11 +85,93 @@ test("structured worker identity accepts one owned shim-to-compiled exec and rej
   );
 });
 
+test("saved Darwin alias rows keep one exact installed and compiled identity", () => {
+  const observedBin =
+    "/var/folders/_1/sj9wh3913439fyzt6694p4hr0000gp/T/cove-qual-bin-nug2LQ/node_modules/.bin/cove-terminal-worker";
+  const observedEntry =
+    "/private/var/folders/_1/sj9wh3913439fyzt6694p4hr0000gp/T/cove-qual-bin-nug2LQ/node_modules/.bin/../../../../../../../../../Users/luchengxuan/WORKSPACE/cove-worktrees/m0-terminal-recovery/packages/terminal-worker/dist/src/main.js";
+  const aliasResolver = (path) =>
+    new Map([
+      [observedBin, canonicalBin],
+      [workerEntry, compiled],
+      [observedEntry, compiled],
+    ]).get(path) ?? path;
+  const anchors = workerIdentityAnchors(observedBin, aliasResolver);
+  const shim = parseWorkerProcessRow(
+    `3408 Tue Sep 29 04:32:56 2026     /bin/sh ${observedBin}`,
+    3408,
+    observedBin,
+    { resolveEntry: aliasResolver, anchors },
+  );
+  const exec = parseWorkerProcessRow(
+    `3408 Tue Sep 29 04:32:56 2026     node ${observedEntry}`,
+    3408,
+    observedBin,
+    { resolveEntry: aliasResolver, anchors },
+  );
+  expect(shim).toMatchObject({ kind: "owned", form: "installed-shim" });
+  expect(exec).toMatchObject({ kind: "owned", form: "compiled-entry" });
+  expect(sameOwnedWorker(shim, exec)).toBe(true);
+  const wrongAnchors = { ...anchors, installed: "/canonical/another-installation" };
+  expect(
+    parseWorkerProcessRow(shim.raw, 3408, observedBin, {
+      resolveEntry: aliasResolver,
+      anchors: wrongAnchors,
+    }).kind,
+  ).toBe("unverifiable");
+});
+
+test("real filesystem alias and parent traversal resolve only the expected entry", () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-entry-alias-"));
+  try {
+    const packageDir = join(directory, "real", "package");
+    const otherDir = join(directory, "other");
+    mkdirSync(packageDir, { recursive: true });
+    mkdirSync(otherDir);
+    const target = join(packageDir, "main.js");
+    const other = join(otherDir, "main.js");
+    const shim = join(directory, "cove-terminal-worker");
+    writeFileSync(target, "// expected\n");
+    writeFileSync(other, "// unrelated\n");
+    writeFileSync(shim, "#!/bin/sh\n");
+    symlinkSync(packageDir, join(directory, "alias"));
+    const observed = `${directory}/alias/../real/package/main.js`;
+    const anchors = { installed: realpathSync(shim), compiled: realpathSync(target) };
+    const row = (script) => `${pid} ${started} node ${script}`;
+    expect(parseWorkerProcessRow(row(observed), pid, shim, { anchors })).toMatchObject({
+      kind: "owned",
+      form: "compiled-entry",
+      canonical: anchors.compiled,
+    });
+    expect(parseWorkerProcessRow(row(other), pid, shim, { anchors })).toMatchObject({
+      kind: "unverifiable",
+      reason: "unrelated-argv",
+    });
+    expect(
+      parseWorkerProcessRow(row(join(directory, "missing", "main.js")), pid, shim, { anchors }),
+    ).toMatchObject({ kind: "unverifiable", reason: "candidate-resolution-failed" });
+    const denied = (path) => {
+      if (path === observed) throw Object.assign(Error("denied"), { code: "EACCES" });
+      return realpathSync(path);
+    };
+    expect(
+      parseWorkerProcessRow(row(observed), pid, shim, { anchors, resolveEntry: denied }),
+    ).toMatchObject({ kind: "unverifiable", reason: "candidate-resolution-failed" });
+    expect(parseWorkerProcessRow(row(`${observed} --extra`), pid, shim, { anchors }).kind).toBe(
+      "unverifiable",
+    );
+    const missingAnchors = workerIdentityAnchors(join(directory, "missing-bin"));
+    expect(
+      parseWorkerProcessRow(row(observed), pid, shim, { anchors: missingAnchors }),
+    ).toMatchObject({ kind: "unverifiable", reason: "expected-anchor-unavailable" });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("real SIGTERM branch signals once only for a fresh matching compiled birth", () => {
   const initial = parse(`/bin/sh ${bin}`);
-  const matching = parse(
-    `node ${dirname(bin)}/../../../../home/runner/work/cove/cove/packages/terminal-worker/dist/src/main.js`,
-  );
+  const matching = parse(`node ${linuxEntry}`);
   const signals = [];
   let fresh = matching;
   const harness = {
