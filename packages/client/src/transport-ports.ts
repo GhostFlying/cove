@@ -38,6 +38,7 @@ export interface HttpPort {
 }
 
 export interface TerminalConnection extends Disposable {
+  // Admission must be immediate and bounded; handed-off does not prove remote acceptance.
   send(message: string | Uint8Array): TransferDisposition;
   close(): void;
 }

@@ -1,0 +1,786 @@
+import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError, type DomainError } from "@cove/protocol/errors";
+import {
+  nextCounter,
+  sameConnectionRef,
+  sameRunRef,
+  sameSubscriptionRef,
+  type RunRef,
+  type SubscriptionRef,
+} from "@cove/protocol/identity";
+import { BASELINE_ENCODING, PROFILE, type Appearance } from "@cove/protocol/profile";
+import type { Geometry } from "@cove/protocol/profile";
+import {
+  validateBaselineDescriptor,
+  type BaselineDescriptor,
+  type ExternalTerminalEvent,
+  type TerminalCommand,
+} from "@cove/protocol/terminal";
+import type {
+  ClientError,
+  LocalErrorReason,
+  TerminalController,
+  TerminalOutcome,
+  TerminalReady,
+  TerminalSnapshot,
+} from "./client.js";
+import type { NegotiatedConnection } from "./connection-session.js";
+import { TerminalLane, type CommandOutcome } from "./terminal-delivery.js";
+import type { Disposable, Scheduler } from "./transport-ports.js";
+import type { TerminalView } from "@cove/protocol/view";
+
+type RecoveryReason = "gap" | "released-view" | "resize-context" | "expired";
+type Phase = "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
+
+interface Operation {
+  readonly kind: "attach" | "recover";
+  readonly token: number;
+  readonly promise: Promise<TerminalOutcome<TerminalReady>>;
+  readonly resolve: (result: TerminalOutcome<TerminalReady>) => void;
+  timer?: Disposable;
+  settled: boolean;
+  mode?: "baseline" | "replay";
+  atSeq?: number;
+  markerAttempted: boolean;
+}
+
+interface QueuedEvent {
+  readonly event: ExternalTerminalEvent;
+  readonly payload: Uint8Array;
+  readonly charge: number;
+  readonly token: number;
+}
+
+export interface ControllerHost {
+  readonly lane: TerminalLane;
+  readonly scheduler: Scheduler;
+  binding(): NegotiatedConnection | undefined;
+  generation(): number;
+  retireConnection(): void;
+  remove(controller: RoutedTerminalController): void;
+}
+
+function localError(reason: LocalErrorReason): ClientError {
+  return { category: "local", reason };
+}
+
+function errorOutcome(error: ClientError | DomainError): TerminalOutcome<TerminalReady> {
+  return { ok: false, error };
+}
+
+function key(ref: SubscriptionRef): string {
+  const { run, connection, subscriptionId, viewId } = ref;
+  return JSON.stringify([
+    run.serverId,
+    run.relayInstanceId,
+    run.runId,
+    connection.connectionId,
+    connection.generation,
+    subscriptionId,
+    viewId,
+  ]);
+}
+
+function safeDispose(disposable: Disposable | undefined): void {
+  try {
+    disposable?.dispose();
+  } catch {
+    /* Local retirement continues. */
+  }
+}
+
+export class RoutedTerminalController implements TerminalController {
+  private phase: Phase = "idle";
+  private ref: SubscriptionRef | undefined;
+  private operation: Operation | undefined;
+  private token = 0;
+  private viewGeneration = 0;
+  private listener: Disposable | undefined;
+  private appliedSeq = 0;
+  private retainedModel = false;
+  private retainedGeometry: Geometry | undefined;
+  private baseline: BaselineDescriptor | undefined;
+  private baselineOrdinal = 0;
+  private baselineBytes = 0;
+  private readonly queue: QueuedEvent[] = [];
+  private queuedBytes = 0;
+  private activeBytes = 0;
+  private drainToken = 0;
+  private drainingToken = -1;
+  private ackInFlight = false;
+  private pendingAck: number | undefined;
+  private progressInFlight = false;
+  private pendingProgress: number | undefined;
+  private retired = new Set<string>();
+  private autoRecoveryUsed = false;
+  private readonly listeners = new Set<(snapshot: TerminalSnapshot) => void>();
+
+  constructor(
+    private readonly host: ControllerHost,
+    private readonly run: RunRef,
+    private readonly viewId: string,
+    private view: TerminalView,
+    private readonly appearance: Appearance,
+  ) {}
+
+  attach(): Promise<TerminalOutcome<TerminalReady>> {
+    if (this.operation)
+      return this.operation.kind === "attach"
+        ? this.operation.promise
+        : Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
+    if (this.ref) return Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (this.retired.size >= 256)
+      return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
+    const binding = this.host.binding();
+    if (!binding) return Promise.resolve(errorOutcome(localError("invalid-state")));
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
+    const operation = this.beginOperation(binding, "attach");
+    if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (operation.settled) return operation.promise;
+    const command: TerminalCommand = {
+      type: "attach",
+      requestId,
+      run: this.run,
+      connection: binding.connection,
+      viewId: this.viewId,
+      profile: PROFILE,
+      encoding: BASELINE_ENCODING,
+    };
+    this.sendMarker(command, operation);
+    return operation.promise;
+  }
+
+  recover(reason: RecoveryReason): Promise<TerminalOutcome<TerminalReady>> {
+    if (
+      reason !== "gap" &&
+      reason !== "released-view" &&
+      reason !== "resize-context" &&
+      reason !== "expired"
+    )
+      return Promise.resolve(errorOutcome(localError("invalid-request")));
+    if (this.operation)
+      return this.operation.kind === "recover"
+        ? this.operation.promise
+        : Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
+    const ref = this.ref;
+    const binding = this.host.binding();
+    if (!ref || !binding || this.phase !== "ready")
+      return Promise.resolve(errorOutcome(localError("invalid-state")));
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
+    let resume:
+      | {
+          appliedSeq: number;
+          profile: typeof PROFILE;
+          encoding: typeof BASELINE_ENCODING;
+          geometry: Geometry;
+        }
+      | undefined;
+    if (
+      this.retainedModel &&
+      this.retainedGeometry &&
+      reason !== "gap" &&
+      reason !== "resize-context"
+    ) {
+      let measured: Geometry;
+      try {
+        measured = this.view.measureGrid();
+      } catch {
+        return Promise.resolve(errorOutcome(localError("invalid-state")));
+      }
+      if (
+        measured.cols === this.retainedGeometry.cols &&
+        measured.rows === this.retainedGeometry.rows
+      ) {
+        resume = {
+          appliedSeq: this.appliedSeq,
+          profile: PROFILE,
+          encoding: BASELINE_ENCODING,
+          geometry: this.retainedGeometry,
+        };
+      }
+    }
+    const operation = this.beginOperation(binding, "recover");
+    if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (operation.settled) return operation.promise;
+    this.host.lane.cancelUnsentControl(ref);
+    const command: TerminalCommand = {
+      type: "recover",
+      requestId,
+      run: this.run,
+      subscription: ref,
+      reason,
+      ...(resume ? { resume } : {}),
+    };
+    this.sendMarker(command, operation);
+    return operation.promise;
+  }
+
+  async detach(): Promise<TerminalOutcome> {
+    if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
+    const ref = this.ref;
+    const unknownAttach =
+      this.operation?.kind === "attach" && this.operation.markerAttempted && !ref;
+    this.retire(localError("invalid-state"));
+    if (unknownAttach) this.host.retireConnection();
+    if (!ref || !this.host.binding()) return { ok: true, value: undefined };
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+    const result = await this.host.lane.send(
+      { type: "detach", requestId, run: this.run, subscription: ref },
+      5_000,
+    );
+    if (!result.ok && this.currentConnection(ref)) this.host.retireConnection();
+    return result.ok ? { ok: true, value: undefined } : { ok: false, error: result.error };
+  }
+
+  async replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>> {
+    if (this.phase === "disposed") return errorOutcome(localError("disposed"));
+    void this.detach();
+    safeDispose(this.listener);
+    try {
+      this.view.dispose();
+    } catch {
+      /* Replacement remains local. */
+    }
+    this.view = view;
+    this.viewGeneration = nextCounter(this.viewGeneration) ?? Number.MAX_SAFE_INTEGER;
+    return this.attach();
+  }
+
+  setVisibility(visible: boolean): void {
+    if (this.phase === "disposed") return;
+    try {
+      this.view.setVisibility(visible);
+    } catch {
+      this.fail(localError("invalid-state"));
+    }
+  }
+
+  snapshot(): TerminalSnapshot {
+    return Object.freeze({
+      phase: this.phase,
+      appliedSeq: this.appliedSeq,
+      viewGeneration: this.viewGeneration,
+      queuedBytes: this.queuedBytes,
+      activeParseBytes: this.activeBytes,
+      ...(this.ref ? { subscription: this.ref } : {}),
+    });
+  }
+
+  onState(listener: (snapshot: TerminalSnapshot) => void): Disposable {
+    if (this.phase === "disposed") return { dispose() {} };
+    this.listeners.add(listener);
+    let active = true;
+    return {
+      dispose: () => {
+        if (active) {
+          active = false;
+          this.listeners.delete(listener);
+        }
+      },
+    };
+  }
+
+  dispose(): void {
+    if (this.phase === "disposed") return;
+    const ref = this.ref;
+    const unknownAttach =
+      this.operation?.kind === "attach" && this.operation.markerAttempted && !this.ref;
+    this.retire(localError("disposed"));
+    this.phase = "disposed";
+    safeDispose(this.listener);
+    this.listener = undefined;
+    try {
+      this.view.dispose();
+    } catch {
+      /* All local ownership still retires. */
+    }
+    this.publish();
+    this.listeners.clear();
+    this.host.remove(this);
+    if (unknownAttach) this.host.retireConnection();
+    else if (ref) this.releaseRemote(ref);
+  }
+
+  connectionLost(): void {
+    if (this.phase === "disposed") return;
+    this.retire(localError("transport"));
+    this.retired.clear();
+    this.phase = "unavailable";
+    this.publish();
+  }
+
+  receive(event: ExternalTerminalEvent, bytes: Uint8Array): void {
+    if (
+      !this.ref ||
+      this.phase === "disposed" ||
+      this.phase === "await-marker" ||
+      this.phase === "unavailable" ||
+      this.phase === "idle"
+    )
+      return;
+    const ref =
+      event.type === "baseline-start"
+        ? event.descriptor.subscription
+        : event.type === "run-event"
+          ? event.subscription
+          : event.type === "baseline-chunk" || event.type === "baseline-end"
+            ? event.subscription
+            : undefined;
+    if (!ref || !sameSubscriptionRef(ref, this.ref)) return;
+    const binding = this.host.binding();
+    if (!binding) return;
+    const charge = bytes.byteLength + JSON.stringify(event).length * 3;
+    if (
+      this.queue.length >= binding.effectiveBudgets.postNEvents ||
+      this.queuedBytes + this.activeBytes + charge >
+        binding.effectiveBudgets.subscriptionCreditBytes
+    ) {
+      this.fail(localError("capacity"));
+      return;
+    }
+    this.queue.push({ event, payload: new Uint8Array(bytes), charge, token: this.token });
+    this.queuedBytes += charge;
+    this.drain();
+  }
+
+  private beginOperation(
+    binding: NegotiatedConnection,
+    kind: "attach" | "recover",
+  ): Operation | null {
+    const token = nextCounter(this.token);
+    if (token === null) return null;
+    this.token = token;
+    // The correlated result is the downlink barrier; same-ref events before it are stale.
+    this.clearQueued();
+    this.baseline = undefined;
+    this.drainToken = token;
+    this.phase = "await-marker";
+    this.retainedModel = this.retainedModel && !!this.ref;
+    this.ackInFlight = false;
+    this.pendingAck = undefined;
+    this.progressInFlight = false;
+    this.pendingProgress = undefined;
+    let resolve!: (result: TerminalOutcome<TerminalReady>) => void;
+    const promise = new Promise<TerminalOutcome<TerminalReady>>((settle) => {
+      resolve = settle;
+    });
+    const operation: Operation = {
+      kind,
+      token,
+      promise,
+      resolve,
+      settled: false,
+      markerAttempted: false,
+    };
+    this.operation = operation;
+    if (kind === "recover") {
+      try {
+        this.bindFailure(this.viewGeneration, token);
+      } catch {
+        this.fail(localError("invalid-state"), token);
+      }
+    }
+    if (operation.settled) return operation;
+    this.publish();
+    try {
+      const timer = this.host.scheduler.setTimer(
+        Math.min(binding.effectiveBudgets.recoveryDeadlineMs, M0_LIMITS.recoveryDeadlineMs),
+        () => this.fail(localError("timeout"), token),
+      );
+      operation.timer = timer;
+      if (operation.settled) safeDispose(timer);
+    } catch {
+      this.fail(localError("invalid-state"), token);
+    }
+    return operation;
+  }
+
+  private sendMarker(command: TerminalCommand, operation: Operation): void {
+    let handled = false;
+    const handle = (outcome: CommandOutcome): void => {
+      if (handled) return;
+      handled = true;
+      if (this.operation !== operation || operation.settled) return;
+      if (!outcome.ok) {
+        this.fail(outcome.error, operation.token);
+        return;
+      }
+      const result = outcome.result;
+      if (
+        (command.type === "attach" && result.type !== "attach-result") ||
+        (command.type === "recover" && result.type !== "recover-result")
+      ) {
+        this.fail(localError("invalid-response"), operation.token);
+        return;
+      }
+      if (result.type !== "attach-result" && result.type !== "recover-result") return;
+      if (command.type === "attach") {
+        if (
+          this.retired.has(key(result.subscription)) ||
+          !sameRunRef(result.subscription.run, this.run) ||
+          !this.host.lane.register(result.subscription, (event, bytes) =>
+            this.receive(event, bytes),
+          )
+        ) {
+          this.fail(localError("invalid-response"), operation.token);
+          return;
+        }
+        this.ref = result.subscription;
+      }
+      operation.mode = result.mode;
+      operation.atSeq = result.atSeq;
+      if (result.mode === "replay" && !this.retainedModel) {
+        this.fail(localError("invalid-response"), operation.token);
+        return;
+      }
+      this.phase = result.mode === "baseline" ? "baseline" : "replay";
+      this.publish();
+      if (result.mode === "replay" && result.atSeq === this.appliedSeq) this.commit(operation);
+    };
+    operation.markerAttempted = true;
+    const deadline = Math.min(
+      this.host.binding()?.effectiveBudgets.recoveryDeadlineMs ?? M0_LIMITS.recoveryDeadlineMs,
+      M0_LIMITS.recoveryDeadlineMs,
+    );
+    void this.host.lane.send(command, deadline, undefined, handle).then(handle);
+  }
+
+  private drain(): void {
+    const drainToken = this.drainToken;
+    if (this.drainingToken === drainToken) return;
+    this.drainingToken = drainToken;
+    void (async () => {
+      let frames = 0;
+      let bytes = 0;
+      while (this.queue.length && this.drainToken === drainToken && this.phase !== "disposed") {
+        const item = this.queue.shift()!;
+        this.queuedBytes -= item.charge;
+        this.activeBytes += item.charge;
+        try {
+          await this.apply(item);
+        } catch {
+          if (item.token === this.token) this.fail(localError("invalid-state"), item.token);
+        } finally {
+          this.activeBytes -= item.charge;
+        }
+        frames++;
+        bytes += item.charge;
+        if (frames >= 32 || bytes >= 256 * 1024) {
+          frames = 0;
+          bytes = 0;
+          try {
+            await this.host.scheduler.yieldTurn();
+          } catch {
+            if (drainToken === this.drainToken) this.fail(localError("invalid-state"));
+          }
+        }
+      }
+      if (this.drainingToken === drainToken) this.drainingToken = -1;
+      if (this.queue.length && this.phase !== "disposed") this.drain();
+    })();
+  }
+
+  private async apply(item: QueuedEvent): Promise<void> {
+    const event = item.event;
+    const operation = this.operation;
+    if (item.token !== this.token || !this.ref) return;
+    if (event.type === "baseline-start") {
+      if (this.phase !== "baseline" || !operation || this.baseline) throw new Error("start order");
+      const descriptor = validateBaselineDescriptor(event.descriptor);
+      if (
+        !descriptor ||
+        !sameSubscriptionRef(descriptor.subscription, this.ref) ||
+        descriptor.atSeq !== operation.atSeq ||
+        descriptor.vtBytes > (this.host.binding()?.effectiveBudgets.baselineVtBytes ?? 0) ||
+        descriptor.tailBytes > (this.host.binding()?.effectiveBudgets.baselineTailBytes ?? 0) ||
+        descriptor.chunkCount > (this.host.binding()?.effectiveBudgets.baselineChunks ?? 0) ||
+        descriptor.coverage.normal.historyLines >
+          (this.host.binding()?.effectiveBudgets.historyLines ?? 0)
+      )
+        throw new Error("descriptor");
+      this.baseline = descriptor;
+      this.baselineOrdinal = 0;
+      this.baselineBytes = 0;
+      const generation = nextCounter(this.viewGeneration);
+      if (generation === null) throw new Error("view generation");
+      this.viewGeneration = generation;
+      this.bindFailure(generation, item.token);
+      await this.view.initialize({
+        profile: PROFILE,
+        encoding: BASELINE_ENCODING,
+        geometry: descriptor.captureGeometry,
+        appearance: this.appearance,
+        viewGeneration: generation,
+      });
+      if (item.token !== this.token) return;
+      await this.view.beginBaseline(descriptor);
+      return;
+    }
+    if (event.type === "baseline-chunk") {
+      if (
+        this.phase !== "baseline" ||
+        !this.baseline ||
+        event.baselineId !== this.baseline.baselineId ||
+        event.ordinal !== this.baselineOrdinal ||
+        item.payload.byteLength < 1 ||
+        item.payload.byteLength > 65_536
+      )
+        throw new Error("chunk order");
+      this.baselineOrdinal++;
+      this.baselineBytes += item.payload.byteLength;
+      if (this.baselineBytes > this.baseline.vtBytes + this.baseline.tailBytes)
+        throw new Error("chunk size");
+      await this.view.writeBaselineChunk(item.payload);
+      if (item.token === this.token) this.sendProgress(event.ordinal);
+      return;
+    }
+    if (event.type === "baseline-end") {
+      if (
+        this.phase !== "baseline" ||
+        !operation ||
+        !this.baseline ||
+        event.baselineId !== this.baseline.baselineId ||
+        event.chunkCount !== this.baseline.chunkCount ||
+        this.baselineOrdinal !== this.baseline.chunkCount ||
+        event.totalBytes !== this.baseline.vtBytes + this.baseline.tailBytes ||
+        this.baselineBytes !== event.totalBytes ||
+        event.atSeq !== this.baseline.atSeq
+      )
+        throw new Error("baseline end");
+      await this.view.finishBaseline();
+      if (item.token !== this.token) return;
+      this.appliedSeq = event.atSeq;
+      this.retainedModel = true;
+      this.retainedGeometry = this.baseline.currentGeometry;
+      this.baseline = undefined;
+      this.commit(operation);
+      return;
+    }
+    if (event.type !== "run-event" || (this.phase !== "replay" && this.phase !== "ready"))
+      throw new Error("event phase");
+    const fact = event.event;
+    if (
+      fact.seq !== this.appliedSeq + 1 ||
+      (this.phase === "replay" && operation && fact.seq > (operation.atSeq ?? -1)) ||
+      (fact.type === "resize" && fact.requiresBaseline)
+    ) {
+      this.triggerRecovery(fact.type === "resize" ? "resize-context" : "gap");
+      return;
+    }
+    await this.view.applyEvent(fact, item.payload);
+    if (item.token !== this.token) return;
+    this.appliedSeq = fact.seq;
+    if (fact.type === "resize") this.retainedGeometry = fact.geometry;
+    if (this.phase === "replay" && operation && this.appliedSeq === operation.atSeq)
+      this.commit(operation);
+    else if (this.phase === "ready") this.sendAck(this.appliedSeq);
+    this.publish();
+  }
+
+  private commit(operation: Operation): void {
+    if (this.operation !== operation || !this.ref || operation.settled) return;
+    // Parsed N is usable only after ACK N enters the ordered uplink.
+    this.sendAck(this.appliedSeq, () => {
+      if (this.operation !== operation || operation.settled) return;
+      this.phase = "ready";
+      this.retainedModel = true;
+      this.autoRecoveryUsed = false;
+      this.settle(operation, {
+        ok: true,
+        value: { subscription: this.ref!, atSeq: this.appliedSeq },
+      });
+      this.publish();
+    });
+  }
+
+  private sendAck(seq: number, onHandoff?: () => void): void {
+    const ref = this.ref;
+    if (!ref) return;
+    if (this.ackInFlight) {
+      this.pendingAck = Math.max(this.pendingAck ?? seq, seq);
+      return;
+    }
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) {
+      this.fail(domainError("COUNTER_EXHAUSTED"));
+      return;
+    }
+    this.ackInFlight = true;
+    const token = this.token;
+    let handled = false;
+    const handle = (outcome: CommandOutcome): void => {
+      if (handled) return;
+      handled = true;
+      if (token !== this.token) return;
+      this.ackInFlight = false;
+      if (!outcome.ok) {
+        this.fail(outcome.error, token);
+        return;
+      }
+      const next = this.pendingAck;
+      this.pendingAck = undefined;
+      if (next !== undefined && next > seq) this.sendAck(next);
+    };
+    void this.host.lane
+      .send(
+        { type: "applied-ack", requestId, run: this.run, subscription: ref, appliedSeq: seq },
+        5_000,
+        () => {
+          if (token === this.token) onHandoff?.();
+        },
+        handle,
+      )
+      .then(handle);
+  }
+
+  private sendProgress(ordinal: number): void {
+    const ref = this.ref;
+    const descriptor = this.baseline;
+    if (!ref || !descriptor) return;
+    if (this.progressInFlight) {
+      this.pendingProgress = Math.max(this.pendingProgress ?? ordinal, ordinal);
+      return;
+    }
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) {
+      this.fail(domainError("COUNTER_EXHAUSTED"));
+      return;
+    }
+    this.progressInFlight = true;
+    const token = this.token;
+    let handled = false;
+    const handle = (outcome: CommandOutcome): void => {
+      if (handled) return;
+      handled = true;
+      if (token !== this.token) return;
+      this.progressInFlight = false;
+      if (!outcome.ok) {
+        this.fail(outcome.error, token);
+        return;
+      }
+      const next = this.pendingProgress;
+      this.pendingProgress = undefined;
+      if (next !== undefined && next > ordinal) this.sendProgress(next);
+    };
+    void this.host.lane
+      .send(
+        {
+          type: "baseline-progress",
+          requestId,
+          run: this.run,
+          subscription: ref,
+          baselineId: descriptor.baselineId,
+          lastParsedOrdinal: ordinal,
+        },
+        5_000,
+        undefined,
+        handle,
+      )
+      .then(handle);
+  }
+
+  private triggerRecovery(reason: RecoveryReason): void {
+    if (this.autoRecoveryUsed || this.phase !== "ready") {
+      this.fail(localError("invalid-state"));
+      return;
+    }
+    this.autoRecoveryUsed = true;
+    this.retainedModel = false;
+    void this.recover(reason);
+  }
+
+  private fail(error: ClientError | DomainError, token = this.token): void {
+    if (token !== this.token || this.phase === "disposed") return;
+    const ref = this.ref;
+    const unknownAttach =
+      this.operation?.kind === "attach" && this.operation.markerAttempted && !this.ref;
+    this.retire(error);
+    this.phase = "unavailable";
+    this.publish();
+    if (unknownAttach) this.host.retireConnection();
+    else if (ref) this.releaseRemote(ref);
+  }
+
+  private releaseRemote(ref: SubscriptionRef): void {
+    if (!this.currentConnection(ref)) return;
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) {
+      this.host.retireConnection();
+      return;
+    }
+    void this.host.lane
+      .send({ type: "detach", requestId, run: this.run, subscription: ref }, 5_000)
+      .then((outcome) => {
+        if (!outcome.ok && this.currentConnection(ref)) this.host.retireConnection();
+      });
+  }
+
+  private currentConnection(ref: SubscriptionRef): boolean {
+    const connection = this.host.binding()?.connection;
+    return !!connection && sameConnectionRef(connection, ref.connection);
+  }
+
+  private retire(error: ClientError | DomainError): void {
+    this.token = nextCounter(this.token) ?? -1;
+    this.drainToken = this.token;
+    this.clearQueued();
+    // Keep activeBytes charged until an old parser actually settles.
+    safeDispose(this.listener);
+    this.listener = undefined;
+    const ref = this.ref;
+    if (ref) {
+      this.host.lane.cancelUnsentControl(ref);
+      this.host.lane.retire(ref);
+      this.retired.add(key(ref));
+      this.ref = undefined;
+    }
+    this.baseline = undefined;
+    this.retainedModel = false;
+    this.retainedGeometry = undefined;
+    this.ackInFlight = false;
+    this.pendingAck = undefined;
+    this.progressInFlight = false;
+    this.pendingProgress = undefined;
+    if (this.operation) this.settle(this.operation, errorOutcome(error));
+  }
+
+  private settle(operation: Operation, result: TerminalOutcome<TerminalReady>): void {
+    if (operation.settled) return;
+    operation.settled = true;
+    safeDispose(operation.timer);
+    if (this.operation === operation) this.operation = undefined;
+    operation.resolve(result);
+  }
+
+  private clearQueued(): void {
+    this.queue.length = 0;
+    this.queuedBytes = 0;
+  }
+
+  private bindFailure(generation: number, token: number): void {
+    safeDispose(this.listener);
+    this.listener = undefined;
+    const listener = this.view.onFailure((error) => {
+      if (generation !== this.viewGeneration || token !== this.token) return;
+      if (error.kind !== "INPUT_REJECTED") this.fail(error, token);
+    });
+    if (token !== this.token) safeDispose(listener);
+    else this.listener = listener;
+  }
+
+  private publish(): void {
+    const snapshot = this.snapshot();
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(snapshot);
+      } catch {
+        /* Observers do not control lifecycle. */
+      }
+    }
+  }
+}
