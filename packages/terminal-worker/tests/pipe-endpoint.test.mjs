@@ -266,7 +266,7 @@ test("exact pipe ingress cap crosses decoder slices while cap plus one is reject
   valid.input.write(fixture.bytes);
   for (let attempt = 0; attempt < 100 && valid.calls.length < fixture.count; attempt++)
     await tick();
-  expect(valid.calls, JSON.stringify(valid.pipe.snapshot())).toHaveLength(fixture.count);
+  expect(valid.calls).toHaveLength(fixture.count);
   expect(valid.pipe.snapshot().state).toBe("ready");
   expect(valid.pipe.snapshot().peakDecodeSliceBytes).toBeLessThanOrEqual(256 * 1024);
   expect(valid.frames()).toHaveLength(fixture.count + 1);
