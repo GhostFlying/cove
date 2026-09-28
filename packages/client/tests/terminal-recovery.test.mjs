@@ -118,10 +118,11 @@ async function settle() {
   for (let index = 0; index < 15; index++) await Promise.resolve();
 }
 
-async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
+async function harness(onCommand = () => {}, schedulerOverride, budgets = {}, codecOverride) {
   let callbacks;
   let request = 0;
   const commands = [];
+  const sentFrames = [];
   const peer = {
     emit(kind, metadata, payload) {
       callbacks.onBinary(frame(kind, metadata, payload));
@@ -133,6 +134,7 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
       callbacks.onClose();
     },
     commands,
+    sentFrames,
     onCommand,
   };
   const http = {
@@ -157,6 +159,7 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
           else {
             const command = readCommand(message);
             commands.push(command);
+            sentFrames.push({ command, bytes: message.byteLength });
             const disposition = peer.onCommand(command, peer);
             return disposition ?? "handed-off";
           }
@@ -176,7 +179,7 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
       authorization: "Bearer test",
       terminalSecret: "a".repeat(43),
     }),
-    codec: {
+    codec: codecOverride ?? {
       encode: (value) => encoder.encode(value),
       decodeFatal: (bytes) => decoder.decode(bytes),
     },
@@ -195,6 +198,11 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
 
 function subscription(viewId, subscriptionId = `subscription-${viewId}`) {
   return { run, connection, viewId, subscriptionId };
+}
+
+function paddedId(prefix, index, length) {
+  const stem = `${prefix}${index}-`;
+  return stem + "x".repeat(length - stem.length);
 }
 
 function descriptor(ref, atSeq = 3) {
@@ -466,6 +474,156 @@ describe("public terminal subscription and recovery", () => {
     expect(nested).toHaveLength(2);
     expect(nested[1].open).toMatchObject({ ok: false, error: { reason: "disposed" } });
     expect(await nested[1].reconnect).toMatchObject({ ok: false, error: { reason: "disposed" } });
+  });
+
+  test("same-stack local capacity refusal cannot retire a healthy connection", async () => {
+    const refs = new Map();
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, refs.get(command.viewId));
+        else if (command.type !== "detach") settleControl(command, peer);
+      },
+      undefined,
+      {
+        subscriptionCreditBytes: 69_648,
+        outboundConnectionBytes: 69_648,
+        reservedControlBytes: 4_112,
+      },
+    );
+    refs.set("healthy", subscription("healthy"));
+    const healthy = client.openTerminal({
+      run,
+      viewId: "healthy",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const healthyAttach = healthy.attach();
+    baseline(peer, refs.get("healthy"));
+    expect((await healthyAttach).ok).toBe(true);
+    await settle();
+
+    let rejected;
+    for (let index = 0; index < 255; index++) {
+      const viewId = paddedId("v", index, 100);
+      refs.set(viewId, subscription(viewId, paddedId("s", index, 128)));
+      const controller = client.openTerminal({
+        run,
+        viewId,
+        view: view().terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      const before = peer.commands.length;
+      const pending = controller.attach();
+      if (peer.commands.length === before) {
+        rejected = { controller, pending };
+        break;
+      }
+      baseline(peer, refs.get(viewId));
+      expect((await pending).ok).toBe(true);
+      void controller.detach(); // Hold public detach commands to exhaust the negotiated outbound cap.
+      controller.dispose();
+    }
+    expect(rejected).toBeDefined();
+    expect(peer.sentFrames.filter(({ command }) => command.type === "detach").length).toBeLessThan(
+      256,
+    );
+    const before = peer.commands.length;
+    const immediateDetach = rejected.controller.detach();
+    expect(peer.commands).toHaveLength(before);
+    expect(await rejected.pending).toMatchObject({ ok: false, error: { reason: "capacity" } });
+    expect((await immediateDetach).ok).toBe(true);
+    expect(client.snapshot().status).toBe("connected");
+
+    const disposeViewId = paddedId("d", 0, 100);
+    refs.set(disposeViewId, subscription(disposeViewId, paddedId("z", 0, 128)));
+    const disposed = client.openTerminal({
+      run,
+      viewId: disposeViewId,
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const disposedPending = disposed.attach();
+    expect(peer.commands).toHaveLength(before);
+    disposed.dispose();
+    expect((await disposedPending).ok).toBe(false);
+    expect(client.snapshot().status).toBe("connected");
+
+    for (const command of peer.commands.filter((item) => item.type === "detach"))
+      peer.emit(2, {
+        type: "detach-result",
+        requestId: command.requestId,
+        run,
+        subscription: command.subscription,
+        detached: true,
+      });
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: refs.get("healthy"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(healthy.snapshot().appliedSeq).toBe(4);
+    healthy.dispose();
+    rejected.controller.dispose();
+    client.dispose();
+  });
+
+  test("same-stack encode refusal is definite without a socket send", async () => {
+    const codec = {
+      encode: (value) => {
+        if (value.includes('"type":"attach"') && value.includes('"viewId":"reject"'))
+          throw new Error("local encoder refusal");
+        return encoder.encode(value);
+      },
+      decodeFatal: (bytes) => decoder.decode(bytes),
+    };
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription(command.viewId));
+        else settleControl(command, peer);
+      },
+      undefined,
+      {},
+      codec,
+    );
+    const healthy = client.openTerminal({
+      run,
+      viewId: "healthy",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const hp = healthy.attach();
+    baseline(peer, subscription("healthy"));
+    expect((await hp).ok).toBe(true);
+    const rejected = client.openTerminal({
+      run,
+      viewId: "reject",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const before = peer.commands.length;
+    const pending = rejected.attach();
+    rejected.dispose();
+    expect(peer.commands).toHaveLength(before);
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-request" } });
+    expect(client.snapshot().status).toBe("connected");
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("healthy"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(healthy.snapshot().appliedSeq).toBe(4);
+    healthy.dispose();
+    client.dispose();
   });
 
   test("keeps a healthy route after definite attach rejection but retires unknown acceptance", async () => {
