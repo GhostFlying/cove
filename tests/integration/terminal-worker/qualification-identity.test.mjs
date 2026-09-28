@@ -19,6 +19,7 @@ import {
   childPipe,
   admitWorkerStartup,
   hello,
+  observeWorkerProcess,
   parseWorkerProcessRow,
   preserveWorkerHarness,
   psIdentity,
@@ -378,6 +379,86 @@ test("pending startup reaches fixed deadline without hello or signal", async () 
   );
   expect(harness.startupState).toBe("failed");
   expect(sends).toEqual([]);
+});
+
+test("late admission uses integer observer budgets and retains the fixed deadline", async () => {
+  const shim = parse(`/bin/sh ${bin}`);
+  const exec = parse(`node ${linuxEntry}`);
+  const accepted = startupHarness(shim, [shim, exec, exec]);
+  const budgets = [];
+  const original = accepted.harness.observe;
+  accepted.harness.observe = (...args) => {
+    if (args[2] !== undefined) budgets.push(args[2]);
+    return original(...args);
+  };
+  await startWorkerPipe(accepted.harness, hello, { deadlineMs: 180 });
+  expect(accepted.sends).toEqual([hello]);
+  expect(budgets.length).toBeGreaterThanOrEqual(2);
+  expect(budgets.every((value) => Number.isInteger(value) && value > 0 && value <= 180)).toBe(true);
+  expect(accepted.harness.startupSamples.at(-1)).toEqual(exec);
+
+  const timedOut = startupHarness(shim, [shim]);
+  const timeoutBudgets = [];
+  timedOut.harness.observe = (_pid, _bin, timeout) => {
+    timeoutBudgets.push(timeout);
+    return shim;
+  };
+  await expect(startWorkerPipe(timedOut.harness, hello, { deadlineMs: 130 })).rejects.toThrow(
+    "worker startup admission deadline",
+  );
+  expect(timedOut.sends).toEqual([]);
+  expect(
+    timeoutBudgets.every((value) => Number.isInteger(value) && value > 0 && value <= 130),
+  ).toBe(true);
+  const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
+  if (evidenceRoot)
+    writeFileSync(
+      join(evidenceRoot, `admission-budgets-${process.pid}.json`),
+      JSON.stringify({ accepted: budgets, timedOut: timeoutBudgets }, null, 2) + "\n",
+    );
+});
+
+test("real ps observation normalizes fractional timeout before execFileSync", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-observer-budget-"));
+  const entry = controlledBin(directory);
+  const child = spawn(entry, [], { stdio: ["pipe", "ignore", "ignore"] });
+  const exit = new Promise((resolve) =>
+    child.once("exit", (code, signal) => resolve({ code, signal })),
+  );
+  const errors = [];
+  child.on("error", (error) => errors.push(error));
+  let observed;
+  try {
+    observed = await until(
+      () => {
+        const row = observeWorkerProcess(child.pid, entry, {
+          timeoutMs: 250.75,
+          anchors: workerIdentityAnchors(entry, realpathSync, entry),
+        });
+        return row.kind === "owned" ? row : null;
+      },
+      2000,
+      "owned fractional-budget observation",
+    );
+    expect(observed.form).toBe("compiled-entry");
+    expect(() => observeWorkerProcess(child.pid, entry, { timeoutMs: 0.5 })).toThrow(
+      "invalid worker observation timeout",
+    );
+    const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
+    if (evidenceRoot)
+      writeFileSync(
+        join(evidenceRoot, `actual-observer-budget-${process.pid}.json`),
+        JSON.stringify({ observed, requestedTimeout: 250.75, errors: errors.length }, null, 2) +
+          "\n",
+      );
+  } finally {
+    child.stdin.end();
+    await until(() => child.exitCode !== null || child.signalCode !== null, 3000, "owned exit");
+    await exit;
+    rmSync(directory, { recursive: true, force: true });
+  }
+  expect(errors).toEqual([]);
+  expect(observed).toMatchObject({ kind: "owned", pid: child.pid });
 });
 
 test("changed birth and wrong full entry cannot transition into acceptance", async () => {
