@@ -466,7 +466,10 @@ class WorkerPipeCore {
     record.phase = "executing";
     this.#reservedReplyBytes += MAX_REPLY_BYTES;
     this.#recordPeak();
-    void this.#execution!.execute(record.command, payload).then(
+    // Validated zero-length wire payloads are absent at the execution boundary.
+    const executionPayload =
+      record.command.type === "spawn" || record.command.type === "input" ? payload : undefined;
+    void this.#execution!.execute(record.command, executionPayload).then(
       (response) => this.#completeCommand(record, response),
       () => this.#completeCommand(record, this.#unknownError(record.command)),
     );
