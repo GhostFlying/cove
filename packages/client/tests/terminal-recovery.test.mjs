@@ -594,6 +594,45 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
+  test("drops a precomputed replay offer when measuring the view starts parse work", async () => {
+    const gate = deferred();
+    const rendered = view({ eventGate: gate });
+    let recovery;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else if (command.type === "recover") recovery = command;
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    await settle();
+    rendered.terminalView.measureGrid = () => {
+      peer.emit(
+        3,
+        {
+          type: "run-event",
+          subscription: subscription("view-1"),
+          event: { type: "output", run, seq: 4 },
+        },
+        new Uint8Array([65]),
+      );
+      return geometry;
+    };
+    const pending = controller.recover("expired");
+    expect(recovery).not.toHaveProperty("resume");
+    controller.dispose();
+    gate.resolve();
+    expect((await pending).ok).toBe(false);
+    client.dispose();
+  });
+
   test("rejects a lower no-resume result while preserving the proven cursor", async () => {
     const rendered = view();
     let recovery;
