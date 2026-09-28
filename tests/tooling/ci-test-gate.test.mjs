@@ -6,6 +6,7 @@ import {
   readVitestOwnedTestFiles,
   recordedCommand,
   prepareBrowserCleanupEvidence,
+  prepareWorkerQualificationEvidence,
   verifyBrowserCleanupEvidence,
   validBrowserCloseTimeline,
   validateBrowserCloseDiagnosticInvocation,
@@ -208,6 +209,43 @@ test("browser cleanup evidence reset removes stale cases and binds the current s
   await expect(prepareBrowserCleanupEvidence("wrong", "local-42-2", directory)).rejects.toThrow(
     /identity/,
   );
+});
+
+test("worker qualification evidence keeps one run's receipts and rejects stale reuse", async () => {
+  const directory = await mkdtemp(resolve(tmpdir(), "cove-worker-qualification-"));
+  temporaryDirectories.push(directory);
+  const provenance = {
+    sourceCommit: "a".repeat(40),
+    tree: "b".repeat(40),
+    sourceDirty: false,
+    runId: "github-42-1",
+    githubRunId: "42",
+    githubRunAttempt: "1",
+    githubSha: "a".repeat(40),
+    node: "26.10.0",
+    pnpm: "12.6.0",
+    nodeAbi: "147",
+    platform: "linux",
+    arch: "x64",
+  };
+  const runDirectory = await prepareWorkerQualificationEvidence(provenance, directory);
+  expect(JSON.parse(await readFile(resolve(runDirectory, "run.json"), "utf8"))).toEqual(provenance);
+  await writeFile(resolve(runDirectory, "receipt.json"), '{"final":true}\n');
+  await expect(prepareWorkerQualificationEvidence(provenance, directory)).rejects.toMatchObject({
+    code: "EEXIST",
+  });
+  expect(await readFile(resolve(runDirectory, "receipt.json"), "utf8")).toBe('{"final":true}\n');
+  for (const invalid of [
+    { sourceDirty: true },
+    { runId: "../escape" },
+    { githubRunAttempt: "2" },
+    { githubSha: "c".repeat(40) },
+    { tree: "wrong" },
+  ]) {
+    await expect(
+      prepareWorkerQualificationEvidence({ ...provenance, ...invalid }, directory),
+    ).rejects.toThrow(/identity is invalid/);
+  }
 });
 
 test("browser cleanup artifact gate rejects incomplete, stale and unbounded records", async () => {
@@ -1029,6 +1067,9 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
 test("compiled worker qualification suites cannot disappear or shrink", async () => {
   for (const [name, minimumTests] of [
     ["public-delivery", 1],
+    ["qualification-identity", 23],
+    ["fifo-reader-ownership", 3],
+    ["qualification-bulk-control", 1],
     ["pipe-main-real", 6],
     ["qualification-finite", 7],
     ["physical-stall", 1],
@@ -1051,41 +1092,42 @@ test("compiled worker qualification suites cannot disappear or shrink", async ()
 });
 
 test("finite worker templates require every exact expanded runtime identity", () => {
-  for (const expansion of finiteRuntimeExpansions) {
-    const suite = { project: expansion.project, file: expansion.file, minimumTests: 1 };
-    const discovered = [
-      {
-        projectName: expansion.project,
-        file: resolve(root, expansion.file),
-        name: expansion.template,
-      },
-    ];
+  const groups = Map.groupBy(finiteRuntimeExpansions, ({ project, file }) => `${project}:${file}`);
+  for (const expansions of groups.values()) {
+    const { project, file } = expansions[0];
+    const suite = { project, file, minimumTests: expansions.length };
+    const discovered = expansions.map((expansion) => ({
+      projectName: project,
+      file: resolve(root, file),
+      name: expansion.template,
+    }));
+    const names = expansions.flatMap((expansion) => expansion.names);
     const execution = {
       success: true,
-      numTotalTests: expansion.names.length,
-      numPassedTests: expansion.names.length,
+      numTotalTests: names.length,
+      numPassedTests: names.length,
       numFailedTests: 0,
       numPendingTests: 0,
       numTodoTests: 0,
       testResults: [
         {
-          name: resolve(root, expansion.file),
+          name: resolve(root, file),
           status: "passed",
-          assertionResults: expansion.names.map((fullName) => ({ fullName, status: "passed" })),
+          assertionResults: names.map((fullName) => ({ fullName, status: "passed" })),
         },
       ],
     };
-    expect(verifyInventory(discovered, execution, [expansion.file], [suite])).toEqual([
+    expect(verifyInventory(discovered, execution, [file], [suite])).toEqual([
       {
-        project: expansion.project,
-        file: expansion.file,
-        discovered: 1,
-        passed: expansion.names.length,
+        project,
+        file,
+        discovered: expansions.length,
+        passed: names.length,
       },
     ]);
     const missing = structuredClone(execution);
     missing.testResults[0].assertionResults.pop();
-    expect(() => verifyInventory(discovered, missing, [expansion.file], [suite])).toThrow(
+    expect(() => verifyInventory(discovered, missing, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
     const extra = structuredClone(execution);
@@ -1093,17 +1135,17 @@ test("finite worker templates require every exact expanded runtime identity", ()
       fullName: "unregistered extra parameter",
       status: "passed",
     });
-    expect(() => verifyInventory(discovered, extra, [expansion.file], [suite])).toThrow(
+    expect(() => verifyInventory(discovered, extra, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
     const duplicate = structuredClone(execution);
-    duplicate.testResults[0].assertionResults.at(-1).fullName = expansion.names[0];
-    expect(() => verifyInventory(discovered, duplicate, [expansion.file], [suite])).toThrow(
+    duplicate.testResults[0].assertionResults.at(-1).fullName = names[0];
+    expect(() => verifyInventory(discovered, duplicate, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
     const renamed = structuredClone(execution);
     renamed.testResults[0].assertionResults.at(-1).fullName = "unregistered parameter";
-    expect(() => verifyInventory(discovered, renamed, [expansion.file], [suite])).toThrow(
+    expect(() => verifyInventory(discovered, renamed, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
   }
