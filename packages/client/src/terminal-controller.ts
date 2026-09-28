@@ -190,6 +190,8 @@ export class RoutedTerminalController implements TerminalController {
     const binding = this.host.binding();
     if (!ref || !binding || this.phase !== "ready")
       return Promise.resolve(errorOutcome(localError("invalid-state")));
+    const priorToken = this.token;
+    const priorView = this.view;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
     if (!requestId) return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
     let resume:
@@ -225,6 +227,15 @@ export class RoutedTerminalController implements TerminalController {
         };
       }
     }
+    if (
+      this.token !== priorToken ||
+      this.view !== priorView ||
+      this.ref !== ref ||
+      this.phase !== "ready" ||
+      this.host.binding() !== binding
+    )
+      return Promise.resolve(errorOutcome(localError("invalid-state")));
+    if ([...this.viewWork.values()].some((work) => work.view === this.view)) resume = undefined;
     const operation = this.beginOperation(binding, "recover");
     if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (operation.settled) return operation.promise;
