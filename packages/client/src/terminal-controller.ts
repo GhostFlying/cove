@@ -19,6 +19,7 @@ import {
 } from "@cove/protocol/profile";
 import {
   validateBaselineDescriptor,
+  MAX_PAYLOAD_BYTES,
   type BaselineDescriptor,
   type ExternalTerminalEvent,
   type TerminalCommand,
@@ -28,6 +29,9 @@ import type {
   LocalErrorReason,
   TerminalController,
   TerminalControlReceipt,
+  TerminalInputOutcome,
+  TerminalInputReceipt,
+  TerminalInputSource,
   TerminalOutcome,
   TerminalReady,
   TerminalSnapshot,
@@ -113,6 +117,37 @@ function identityCopy(ref: SubscriptionRef): SubscriptionRef {
   });
 }
 
+function inputReceipt(
+  source: TerminalInputSource,
+  total: number,
+  inputId: number | null,
+  writtenBytes = 0,
+  unknownBytes = 0,
+): TerminalInputReceipt {
+  return Object.freeze({
+    inputId,
+    source,
+    writtenBytes,
+    unknownBytes,
+    notSentBytes: total - writtenBytes - unknownBytes,
+  });
+}
+
+function inputFailure(
+  source: TerminalInputSource,
+  total: number,
+  error: ClientError | DomainError,
+  inputId: number | null = null,
+  writtenBytes = 0,
+  unknownBytes = 0,
+): TerminalInputOutcome {
+  return {
+    ok: false,
+    error,
+    value: inputReceipt(source, total, inputId, writtenBytes, unknownBytes),
+  };
+}
+
 export class RoutedTerminalController implements TerminalController {
   private phase: Phase = "idle";
   private ref: SubscriptionRef | undefined;
@@ -121,9 +156,14 @@ export class RoutedTerminalController implements TerminalController {
   private viewGeneration = 0;
   private listener: Disposable | undefined;
   private focusListener: Disposable | undefined;
+  private inputListener: Disposable | undefined;
   private readonly control = new TerminalControl();
   private localFocusSequence = 0;
   private localFocusGeneration = 0;
+  private inputIntentSequence = 0;
+  private retainedInputBytes = 0;
+  private pendingInputIntents = 0;
+  private inputTail: Promise<void> = Promise.resolve();
   private appliedSeq = 0;
   private provenSeq = 0;
   private retainedModel = false;
@@ -258,6 +298,7 @@ export class RoutedTerminalController implements TerminalController {
     this.control.resetForRecovery();
     this.host.lane.cancelUnsent(ref, ["focus", "blur", "resize", "appearance", "input"]);
     this.host.lane.cancelUnsentControl(ref);
+    this.publish();
     const command: TerminalCommand = {
       type: "recover",
       requestId,
@@ -302,6 +343,7 @@ export class RoutedTerminalController implements TerminalController {
     if (this.retiring) return errorOutcome(localError("invalid-state"));
     this.releaseListener();
     this.releaseFocusListener();
+    this.releaseInputListener();
     try {
       this.view.dispose();
     } catch {
@@ -326,6 +368,7 @@ export class RoutedTerminalController implements TerminalController {
     if (this.retiring) return { ok: false, error: localError("invalid-state") };
     if (typeof foreground !== "boolean" || typeof focused !== "boolean")
       return { ok: false, error: localError("invalid-request") };
+    if (!foreground || !focused) void this.blur();
     this.control.setTarget(foreground, focused);
     if (!this.control.wantsFocus && this.ref)
       this.host.lane.cancelUnsent(this.ref, ["focus", "resize", "appearance", "input"]);
@@ -404,6 +447,8 @@ export class RoutedTerminalController implements TerminalController {
         )
       ) {
         this.control.failFocus(intent);
+        if (outcome.result.type === "focus-result")
+          this.releaseStaleFocus(ref, outcome.result.epoch);
         receipt = { ok: false, error: localError("invalid-state") };
       } else {
         receipt = {
@@ -436,7 +481,7 @@ export class RoutedTerminalController implements TerminalController {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     const ref = this.ref;
     const epoch = ref ? this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) : null;
-    this.control.invalidate();
+    this.control.setTarget(this.control.hostForeground, false);
     if (ref) this.host.lane.cancelUnsent(ref, ["focus", "resize", "appearance", "input"]);
     this.publish();
     if (!ref || epoch === null || !this.currentConnection(ref))
@@ -463,6 +508,214 @@ export class RoutedTerminalController implements TerminalController {
     const parsed = validateAppearance(appearance);
     if (!parsed) return { ok: false, error: localError("invalid-request") };
     return this.sendGrantedControl("appearance", { appearance: parsed });
+  }
+
+  sendInput(input: {
+    source: TerminalInputSource;
+    bytes: Uint8Array;
+  }): Promise<TerminalInputOutcome> {
+    const source = input?.source;
+    const bytes = input?.bytes;
+    const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
+    const reject = (error: ClientError | DomainError): Promise<TerminalInputOutcome> =>
+      Promise.resolve(inputFailure(source, total, error));
+    if (
+      !["keyboard", "paste", "mouse"].includes(source) ||
+      !(bytes instanceof Uint8Array) ||
+      total < 1
+    )
+      return reject(localError("invalid-request"));
+    if (this.phase === "disposed") return reject(localError("disposed"));
+    const ref = this.ref;
+    const binding = this.host.binding();
+    const token = this.token;
+    const generation = this.viewGeneration;
+    const intent = this.control.intentVersion;
+    if (
+      !ref ||
+      !binding ||
+      this.phase !== "ready" ||
+      !this.control.wantsFocus ||
+      (this.control.pendingIntent === undefined &&
+        this.control.epoch === undefined &&
+        !this.control.ready(ref, generation, this.appliedSeq))
+    )
+      return reject(localError("invalid-state"));
+    const cap = Math.min(binding.effectiveBudgets.inputQueueBytes, M0_LIMITS.inputQueueBytes);
+    if (
+      total > cap ||
+      this.retainedInputBytes + total > cap ||
+      this.pendingInputIntents >= M0_LIMITS.pendingWorkerCommands - 32
+    )
+      return reject(localError("capacity"));
+    const inputId = nextCounter(this.inputIntentSequence);
+    if (inputId === null) return reject(domainError("COUNTER_EXHAUSTED"));
+    let owned: Uint8Array;
+    try {
+      owned = new Uint8Array(bytes);
+    } catch {
+      return reject(localError("capacity"));
+    }
+    this.inputIntentSequence = inputId;
+    this.retainedInputBytes += total;
+    this.pendingInputIntents++;
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const prior = this.inputTail;
+    this.inputTail = prior.then(() => turn);
+    this.publish();
+    return this.deliverInput(
+      owned,
+      source,
+      inputId,
+      ref,
+      binding,
+      token,
+      generation,
+      intent,
+      prior,
+      releaseTurn,
+    );
+  }
+
+  private async deliverInput(
+    owned: Uint8Array,
+    source: TerminalInputSource,
+    inputId: number,
+    ref: SubscriptionRef,
+    binding: NegotiatedConnection,
+    token: number,
+    generation: number,
+    intent: number,
+    prior: Promise<void>,
+    releaseTurn: () => void,
+  ): Promise<TerminalInputOutcome> {
+    const total = owned.byteLength;
+    const reject = (
+      error: ClientError | DomainError,
+      written = 0,
+      unknown = 0,
+    ): TerminalInputOutcome => inputFailure(source, total, error, inputId, written, unknown);
+    let written = 0;
+    let unknown = 0;
+    try {
+      await prior;
+      if (
+        (this.control.pendingIntent === intent || this.control.epoch !== undefined) &&
+        !this.control.ready(ref, generation, this.appliedSeq)
+      ) {
+        const ready = await this.waitForInputAuthority(ref, token, generation, intent);
+        if (!ready) return reject(localError("invalid-state"));
+      }
+      const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
+      if (
+        this.token !== token ||
+        this.ref !== ref ||
+        this.host.binding() !== binding ||
+        this.phase !== "ready" ||
+        this.control.intentVersion !== intent ||
+        epoch === null
+      )
+        return reject(localError("invalid-state"));
+      while (written < total) {
+        const end = Math.min(total, written + MAX_PAYLOAD_BYTES);
+        const chunk = owned.subarray(written, end);
+        const requestId = this.host.lane.nextRequestId(this.host.generation());
+        const inputSeq = this.host.lane.nextInputSeq(ref);
+        if (!requestId || inputSeq === null)
+          return reject(domainError("COUNTER_EXHAUSTED"), written);
+        const outcome = await this.host.lane.send(
+          { type: "input", requestId, run: this.run, subscription: ref, epoch, inputSeq },
+          5_000,
+          undefined,
+          undefined,
+          () =>
+            this.token === token &&
+            this.ref === ref &&
+            this.host.binding() === binding &&
+            this.phase === "ready" &&
+            this.control.intentVersion === intent &&
+            this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
+          chunk,
+        );
+        if (!outcome.ok) {
+          if (
+            outcome.uncertain ||
+            ("acceptance" in outcome.error && outcome.error.acceptance !== "not-accepted")
+          )
+            unknown += chunk.byteLength;
+          return reject(outcome.error, written, unknown);
+        }
+        if (outcome.result.type !== "input-result") {
+          unknown += chunk.byteLength;
+          return reject(localError("invalid-response"), written, unknown);
+        }
+        const length = outcome.result.writtenBytes;
+        if (length > chunk.byteLength) {
+          unknown += chunk.byteLength;
+          return reject(localError("invalid-response"), written, unknown);
+        }
+        written += length;
+        if (length < chunk.byteLength) {
+          unknown += chunk.byteLength - length;
+          return reject(domainError("RESULT_UNKNOWN", "unknown"), written, unknown);
+        }
+      }
+      return { ok: true, value: inputReceipt(source, total, inputId, written) };
+    } finally {
+      this.retainedInputBytes -= total;
+      this.pendingInputIntents--;
+      releaseTurn();
+      this.publish();
+    }
+  }
+
+  private waitForInputAuthority(
+    ref: SubscriptionRef,
+    token: number,
+    generation: number,
+    intent: number,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let listener: Disposable | undefined;
+      let timer: Disposable | undefined;
+      const finish = (ready: boolean): void => {
+        if (settled) return;
+        settled = true;
+        safeDispose(listener);
+        safeDispose(timer);
+        resolve(ready);
+      };
+      const check = (): void => {
+        if (
+          this.token !== token ||
+          this.ref !== ref ||
+          this.phase !== "ready" ||
+          this.control.intentVersion !== intent ||
+          !this.control.wantsFocus
+        ) {
+          finish(false);
+          return;
+        }
+        if (this.control.ready(ref, generation, this.appliedSeq)) {
+          finish(true);
+          return;
+        }
+        if (this.control.pendingIntent === undefined && this.control.epoch === undefined)
+          finish(false);
+      };
+      listener = this.onState(check);
+      try {
+        timer = this.host.scheduler.setTimer(5_000, () => finish(false));
+      } catch {
+        finish(false);
+      }
+      if (settled) safeDispose(timer);
+      check();
+    });
   }
 
   private async sendGrantedControl(
@@ -513,6 +766,23 @@ export class RoutedTerminalController implements TerminalController {
     return { ok: true, value: { epoch: result.epoch, atSeq: result.atSeq } };
   }
 
+  private releaseStaleFocus(ref: SubscriptionRef, epoch: number): void {
+    if (this.ref !== ref || !this.currentConnection(ref) || this.control.epoch === epoch) return;
+    const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!requestId) return;
+    void this.host.lane.send(
+      { type: "blur", requestId, run: this.run, subscription: ref, epoch },
+      5_000,
+      undefined,
+      undefined,
+      () =>
+        this.ref === ref &&
+        this.currentConnection(ref) &&
+        this.control.epoch !== epoch &&
+        this.phase === "ready",
+    );
+  }
+
   snapshot(): TerminalSnapshot {
     const inputReady =
       this.phase === "ready" &&
@@ -527,6 +797,8 @@ export class RoutedTerminalController implements TerminalController {
       activeParseBytes: this.activeBytes,
       ...(this.ref ? { subscription: identityCopy(this.ref) } : {}),
       inputReady,
+      retainedInputBytes: this.retainedInputBytes,
+      pendingInputIntents: this.pendingInputIntents,
       ...(this.control.epoch !== undefined ? { controlEpoch: this.control.epoch } : {}),
     });
   }
@@ -591,8 +863,10 @@ export class RoutedTerminalController implements TerminalController {
             ? event.subscription
             : undefined;
     if (!ref || !sameSubscriptionRef(ref, this.ref)) return;
-    if (event.type === "run-event" && event.event.type === "control")
+    if (event.type === "run-event" && event.event.type === "control") {
       this.control.observe(event.event, ref);
+      this.publish();
+    }
     if (event.type === "run-event" && event.event.type === "exit") this.control.exit();
     const binding = this.host.binding();
     if (!binding) return;
@@ -660,6 +934,8 @@ export class RoutedTerminalController implements TerminalController {
         if (!this.bindFailure(this.viewGeneration, token))
           this.fail(localError("invalid-state"), token);
         else if (!this.bindFocus(this.viewGeneration, token))
+          this.fail(localError("invalid-state"), token);
+        else if (!this.bindInput(this.viewGeneration, token))
           this.fail(localError("invalid-state"), token);
       } catch {
         this.fail(localError("invalid-state"), token);
@@ -817,6 +1093,7 @@ export class RoutedTerminalController implements TerminalController {
       const ref = this.ref;
       if (!this.bindFailure(generation, item.token)) return;
       if (!this.bindFocus(generation, item.token)) return;
+      if (!this.bindInput(generation, item.token)) return;
       if (
         item.token !== this.token ||
         this.viewGeneration !== generation ||
@@ -888,23 +1165,27 @@ export class RoutedTerminalController implements TerminalController {
     if (event.type !== "run-event" || (this.phase !== "replay" && this.phase !== "ready"))
       throw new Error("event phase");
     const fact = event.event;
+    const factType = fact.type;
+    const factSeq = fact.seq;
+    const appearance = fact.type === "appearance" ? validateAppearance(fact.appearance) : null;
+    const resizeGeometry = fact.type === "resize" ? { ...fact.geometry } : undefined;
     if (
-      fact.seq !== this.appliedSeq + 1 ||
-      (this.phase === "replay" && operation && fact.seq > (operation.atSeq ?? -1)) ||
-      (fact.type === "resize" && fact.requiresBaseline)
+      factSeq !== this.appliedSeq + 1 ||
+      (this.phase === "replay" && operation && factSeq > (operation.atSeq ?? -1)) ||
+      (factType === "resize" && fact.requiresBaseline)
     ) {
-      this.triggerRecovery(fact.type === "resize" ? "resize-context" : "gap");
+      this.triggerRecovery(factType === "resize" ? "resize-context" : "gap");
       return;
     }
     await this.view.applyEvent(fact, item.payload);
     this.finishViewWork(item);
     if (item.token !== this.token) return;
-    this.appliedSeq = fact.seq;
-    this.provenSeq = Math.max(this.provenSeq, fact.seq);
-    if (fact.type === "control") this.control.apply(fact);
-    if (fact.type === "appearance") this.appearance = fact.appearance;
-    if (fact.type === "exit") this.control.exit();
-    if (fact.type === "resize") this.retainedGeometry = fact.geometry;
+    this.appliedSeq = factSeq;
+    this.provenSeq = Math.max(this.provenSeq, factSeq);
+    if (factType === "control") this.control.apply(fact);
+    if (appearance) this.appearance = appearance;
+    if (factType === "exit") this.control.exit();
+    if (resizeGeometry) this.retainedGeometry = resizeGeometry;
     if (this.phase === "replay" && operation && this.appliedSeq === operation.atSeq)
       this.commit(operation);
     else if (this.phase === "ready") this.sendAck(this.appliedSeq);
@@ -1090,6 +1371,8 @@ export class RoutedTerminalController implements TerminalController {
     this.listener = undefined;
     const focusListener = this.focusListener;
     this.focusListener = undefined;
+    const inputListener = this.inputListener;
+    this.inputListener = undefined;
     this.control.resetForRecovery();
     this.token = nextCounter(this.token) ?? -1;
     this.drainToken = this.token;
@@ -1106,6 +1389,7 @@ export class RoutedTerminalController implements TerminalController {
       if (operation) this.settle(operation, errorOutcome(error));
       safeDispose(listener);
       safeDispose(focusListener);
+      safeDispose(inputListener);
       if (ref) {
         this.host.lane.cancelUnsent(ref, ["focus", "blur", "resize", "appearance", "input"]);
         this.host.lane.cancelUnsentControl(ref);
@@ -1134,6 +1418,7 @@ export class RoutedTerminalController implements TerminalController {
     this.control.dispose();
     this.releaseListener();
     this.releaseFocusListener();
+    this.releaseInputListener();
     try {
       this.view.dispose();
     } catch {
@@ -1167,6 +1452,46 @@ export class RoutedTerminalController implements TerminalController {
     const listener = this.focusListener;
     this.focusListener = undefined;
     safeDispose(listener);
+  }
+
+  private releaseInputListener(): void {
+    const listener = this.inputListener;
+    this.inputListener = undefined;
+    safeDispose(listener);
+  }
+
+  private bindInput(generation: number, token: number): boolean {
+    const view = this.view;
+    const ref = this.ref;
+    const operation = this.operation;
+    const phase = this.phase;
+    const current = (): boolean =>
+      generation === this.viewGeneration &&
+      token === this.token &&
+      view === this.view &&
+      ref === this.ref &&
+      operation === this.operation &&
+      phase === this.phase;
+    this.releaseInputListener();
+    if (!current() || this.inputListener) return false;
+    const listener = view.onInputIntent((intent) => {
+      if (
+        generation !== this.viewGeneration ||
+        token !== this.token ||
+        view !== this.view ||
+        ref !== this.ref ||
+        intent.viewGeneration !== generation ||
+        this.phase !== "ready"
+      )
+        return;
+      void this.sendInput({ source: intent.source, bytes: intent.bytes });
+    });
+    if (!current() || this.inputListener) {
+      safeDispose(listener);
+      return false;
+    }
+    this.inputListener = listener;
+    return true;
   }
 
   private bindFocus(generation: number, token: number): boolean {

@@ -179,6 +179,24 @@ export interface TerminalControlReceipt {
   readonly atSeq: number;
 }
 
+export type TerminalInputSource = "keyboard" | "paste" | "mouse";
+
+export interface TerminalInputReceipt {
+  readonly inputId: number | null;
+  readonly source: TerminalInputSource;
+  readonly writtenBytes: number;
+  readonly unknownBytes: number;
+  readonly notSentBytes: number;
+}
+
+export type TerminalInputOutcome =
+  | { readonly ok: true; readonly value: TerminalInputReceipt }
+  | {
+      readonly ok: false;
+      readonly value: TerminalInputReceipt;
+      readonly error: ClientError | DomainError;
+    };
+
 export interface TerminalSnapshot {
   readonly phase:
     "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
@@ -189,6 +207,8 @@ export interface TerminalSnapshot {
   readonly subscription?: SubscriptionRef;
   readonly inputReady: boolean;
   readonly controlEpoch?: number;
+  readonly retainedInputBytes: number;
+  readonly pendingInputIntents: number;
 }
 
 export interface TerminalController {
@@ -203,6 +223,10 @@ export interface TerminalController {
   blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>>;
   requestResize(geometry: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>>;
   updateAppearance(appearance: Appearance): Promise<TerminalOutcome<TerminalControlReceipt>>;
+  sendInput(input: {
+    source: TerminalInputSource;
+    bytes: Uint8Array;
+  }): Promise<TerminalInputOutcome>;
   setVisibility(visible: boolean): void;
   snapshot(): TerminalSnapshot;
   onState(listener: (snapshot: TerminalSnapshot) => void): Disposable;

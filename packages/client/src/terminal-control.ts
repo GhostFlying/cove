@@ -35,6 +35,7 @@ export class TerminalControl {
   private grant: Grant | undefined;
   private observed: ControlFact | undefined;
   private applied: ControlFact | undefined;
+  private readonly canonicalFacts = new WeakMap<object, ControlFact>();
   private reconnectFocus = false;
   private exited = false;
 
@@ -94,19 +95,34 @@ export class TerminalControl {
   }
 
   observe(fact: ControlFact, ref: SubscriptionRef): boolean {
+    const canonical: ControlFact = Object.freeze({
+      ...fact,
+      run: Object.freeze({ ...fact.run }),
+      holder: fact.holder
+        ? Object.freeze({
+            ...fact.holder,
+            connection: Object.freeze({ ...fact.holder.connection }),
+          })
+        : null,
+      geometry: Object.freeze({ ...fact.geometry }),
+    });
     const previous = this.observed;
-    if (previous && fact.epoch < previous.epoch) return false;
-    if (previous && fact.epoch === previous.epoch && fact.seq < previous.seq) return false;
-    this.observed = fact;
-    if (this.grant && (fact.epoch > this.grant.epoch || !heldBy(ref, fact))) {
+    if (previous && canonical.epoch < previous.epoch) return false;
+    if (previous && canonical.epoch === previous.epoch && canonical.seq < previous.seq)
+      return false;
+    this.canonicalFacts.set(fact, canonical);
+    this.observed = canonical;
+    if (this.grant && (canonical.epoch > this.grant.epoch || !heldBy(ref, canonical))) {
       this.grant = undefined;
       this.pending = undefined;
     }
     return true;
   }
 
-  apply(fact: ControlFact): void {
-    if (!this.applied || fact.epoch >= this.applied.epoch) this.applied = fact;
+  apply(fact: object): void {
+    const canonical = this.canonicalFacts.get(fact);
+    if (canonical && (!this.applied || canonical.epoch >= this.applied.epoch))
+      this.applied = canonical;
   }
 
   ready(ref: SubscriptionRef, viewGeneration: number, appliedSeq: number): boolean {

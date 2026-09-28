@@ -12,6 +12,7 @@ import {
   encodeTerminalFrame,
   externalEventSubscription,
   MAX_METADATA_BYTES,
+  MAX_PAYLOAD_BYTES,
   validateTerminalFrame,
   validateTerminalResultForCommand,
   type ExternalTerminalEvent,
@@ -78,6 +79,8 @@ export class TerminalLane {
   private retainedIngressBytes = 0;
   private requestSequence = 0;
   private readonly focusSequences = new Map<string, number>();
+  private readonly inputSequences = new Map<string, number>();
+  private lastSentRoute: string | undefined;
 
   constructor(
     private readonly owner: TerminalLaneOwner,
@@ -109,12 +112,20 @@ export class TerminalLane {
     return next;
   }
 
+  nextInputSeq(ref: SubscriptionRef): number | null {
+    const key = routeKey(ref);
+    const next = nextCounter(this.inputSequences.get(key) ?? 0);
+    if (next !== null) this.inputSequences.set(key, next);
+    return next;
+  }
+
   send(
     command: TerminalCommand,
     deadlineMs: number,
     onHandoff?: () => void,
     onSettled?: (outcome: CommandOutcome) => void,
     beforeSend?: () => boolean,
+    payload: Uint8Array = new Uint8Array(),
   ): Promise<CommandOutcome> {
     const rejectBeforeSend = (reason: LocalErrorReason): Promise<CommandOutcome> => {
       const outcome: CommandOutcome = {
@@ -133,13 +144,21 @@ export class TerminalLane {
     if (!binding || !this.owner.socket()) return rejectBeforeSend("invalid-state");
     if (this.pending.has(command.requestId) || this.pending.size >= M0_LIMITS.pendingWorkerCommands)
       return rejectBeforeSend("capacity");
+    if (
+      command.type === "input" &&
+      [...this.pending.values()].filter((pending) => pending.command.type === "input").length >=
+        M0_LIMITS.pendingWorkerCommands - 32
+    )
+      return rejectBeforeSend("capacity");
+    if (
+      (command.type !== "input" && payload.byteLength !== 0) ||
+      (command.type === "input" && payload.byteLength === 0) ||
+      payload.byteLength > MAX_PAYLOAD_BYTES
+    )
+      return rejectBeforeSend("invalid-request");
     let bytes: Uint8Array;
     try {
-      const encoded = encodeTerminalFrame(
-        1,
-        this.codec.encode(JSON.stringify(command)),
-        new Uint8Array(),
-      );
+      const encoded = encodeTerminalFrame(1, this.codec.encode(JSON.stringify(command)), payload);
       if (!encoded.ok) throw new Error("invalid command");
       bytes = encoded.value;
     } catch {
@@ -148,7 +167,13 @@ export class TerminalLane {
     const cap =
       binding.effectiveBudgets.outboundConnectionBytes +
       binding.effectiveBudgets.reservedControlBytes;
-    if (this.retainedOutboundBytes + bytes.byteLength > cap) return rejectBeforeSend("capacity");
+    if (
+      this.retainedOutboundBytes + bytes.byteLength > cap ||
+      (command.type === "input" &&
+        this.retainedOutboundBytes + bytes.byteLength >
+          binding.effectiveBudgets.outboundConnectionBytes)
+    )
+      return rejectBeforeSend("capacity");
 
     let resolve!: (value: CommandOutcome) => void;
     const promise = new Promise<CommandOutcome>((settle) => {
@@ -170,10 +195,11 @@ export class TerminalLane {
     this.retainedOutboundBytes += bytes.byteLength;
     try {
       const timer = this.scheduler.setTimer(deadlineMs, () => {
+        const uncertain = pending.attempting || pending.handedOff;
         this.finish(pending, {
           ok: false,
-          error: domainError("RESULT_UNKNOWN", "unknown"),
-          uncertain: true,
+          error: uncertain ? domainError("RESULT_UNKNOWN", "unknown") : localError("timeout"),
+          uncertain,
         });
       });
       pending.timer = timer;
@@ -357,8 +383,14 @@ export class TerminalLane {
     this.routes.clear();
     this.retiredRefs.clear();
     this.focusSequences.clear();
+    this.inputSequences.clear();
+    this.lastSentRoute = undefined;
     for (const pending of [...this.pending.values()])
-      this.finish(pending, { ok: false, error: localError(reason), uncertain: true });
+      this.finish(pending, {
+        ok: false,
+        error: localError(reason),
+        uncertain: pending.attempting || pending.handedOff,
+      });
     this.outbound.length = 0;
   }
 
@@ -375,7 +407,7 @@ export class TerminalLane {
     this.flushing = true;
     try {
       while (this.outbound.length) {
-        const pending = this.outbound.shift()!;
+        const pending = this.takeNextOutbound();
         if (pending.settled) continue;
         if (pending.beforeSend) {
           let eligible = false;
@@ -395,11 +427,13 @@ export class TerminalLane {
         }
         const socket = this.owner.socket();
         if (!socket) {
-          this.finish(pending, { ok: false, error: localError("transport"), uncertain: true });
+          this.finish(pending, { ok: false, error: localError("transport"), uncertain: false });
           continue;
         }
         let disposition: unknown;
         pending.attempting = true;
+        if ("subscription" in pending.command)
+          this.lastSentRoute = routeKey(pending.command.subscription);
         try {
           disposition = socket.send(pending.bytes);
         } catch {
@@ -421,6 +455,24 @@ export class TerminalLane {
     } finally {
       this.flushing = false;
     }
+  }
+
+  private takeNextOutbound(): PendingCommand {
+    const firstByRoute = new Map<string, number>();
+    for (let index = 0; index < this.outbound.length; index++) {
+      const pending = this.outbound[index]!;
+      const key =
+        "subscription" in pending.command
+          ? routeKey(pending.command.subscription)
+          : `request:${pending.command.requestId}`;
+      if (!firstByRoute.has(key)) firstByRoute.set(key, index);
+    }
+    const candidates = [...firstByRoute].filter(([, index]) => !this.outbound[index]!.settled);
+    const preferred = candidates.filter(([key]) => key !== this.lastSentRoute);
+    const pool = preferred.length ? preferred : candidates;
+    const control = pool.find(([, index]) => this.outbound[index]!.command.type !== "input");
+    const index = (control ?? pool[0])?.[1] ?? 0;
+    return this.outbound.splice(index, 1)[0]!;
   }
 
   private finish(pending: PendingCommand, outcome: CommandOutcome): void {
