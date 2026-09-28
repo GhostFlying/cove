@@ -19,6 +19,7 @@ import { Writable } from "node:stream";
 import {
   childPipe,
   admitWorkerStartup,
+  composeWorkerReceipt,
   hello,
   observeWorkerProcess,
   parseWorkerProcessRow,
@@ -371,6 +372,17 @@ test.each([
       expect(saved.stdinErrors.at(-1)?.phase ?? null).toBe(
         mode === "error" ? "hello-write" : mode === "close" ? null : "command-or-cleanup",
       );
+      writeFileSync(
+        join(directory, "main-write.json"),
+        JSON.stringify(composeWorkerReceipt(harness, { nonce }, primary), null, 2) + "\n",
+      );
+      const main = JSON.parse(readFileSync(join(directory, "main-write.json"), "utf8"));
+      expect(main.workerHarness.startupFailure?.code ?? null).toBe(
+        harness.startupFailure?.code ?? null,
+      );
+      expect(main.workerHarness.helloWrite.failure?.phase ?? null).toBe(
+        harness.helloWrite.failure?.phase ?? null,
+      );
     } finally {
       try {
         if (harness) preserveWorkerHarness(harness, directory, "before-cleanup", primary);
@@ -391,6 +403,7 @@ test.each([
         preserve(directory, [
           "acquired.json",
           "after-write.json",
+          "main-write.json",
           "before-cleanup.json",
           "after-cleanup.json",
         ]);
@@ -479,6 +492,108 @@ test("actual owned child pipe rejects one hello after local stdin closure", asyn
     true,
   );
 }, 10000);
+
+test("real-main receipt composition preserves admission failure before uncertain cleanup", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-main-receipt-"));
+  const exec = parse(`node ${linuxEntry}`);
+  const shim = parse(`/bin/sh ${bin}`);
+  const { harness, sends } = startupHarness(exec, [shim]);
+  let primary;
+  let cleanup;
+  try {
+    try {
+      await startWorkerPipe(harness, hello);
+    } catch (error) {
+      primary = error;
+    }
+    expect(sends).toEqual([]);
+    writeFileSync(
+      join(directory, "before-cleanup.json"),
+      JSON.stringify(composeWorkerReceipt(harness, { nonce: "main-receipt" }, primary), null, 2) +
+        "\n",
+    );
+    preserveWorkerHarness(harness, directory, "public-before", primary);
+    harness.child.stdin.destroyed = false;
+    harness.child.stdin.writableEnded = false;
+    harness.child.stdin.end = () => {
+      harness.child.stdin.writableEnded = true;
+    };
+    try {
+      await stopVerified(harness);
+    } catch (error) {
+      cleanup = error;
+    }
+    writeFileSync(
+      join(directory, "after-cleanup.json"),
+      JSON.stringify(composeWorkerReceipt(harness, { nonce: "main-receipt" }, primary), null, 2) +
+        "\n",
+    );
+    preserveWorkerHarness(harness, directory, "public-after", primary);
+    const before = JSON.parse(readFileSync(join(directory, "before-cleanup.json"), "utf8"));
+    const after = JSON.parse(readFileSync(join(directory, "after-cleanup.json"), "utf8"));
+    expect(JSON.parse(readFileSync(join(directory, "public-before.json"), "utf8"))).toEqual(
+      before.workerHarness,
+    );
+    expect(JSON.parse(readFileSync(join(directory, "public-after.json"), "utf8"))).toEqual(
+      after.workerHarness,
+    );
+    expect(before.workerHarness).toMatchObject({
+      admittedObservation: exec,
+      startupFailureObservation: shim,
+      startupState: "failed",
+      cleanupProofs: [],
+      cleanupSignals: [],
+      cleanupFailure: null,
+    });
+    expect(before.workerHarness.failure.message).toContain("worker exec identity uncertain");
+    expect(cleanup?.message).toContain("cleanup identity uncertain");
+    expect(after.workerHarness).toMatchObject({
+      admittedObservation: exec,
+      startupFailureObservation: shim,
+      cleanupProofs: [{ signal: "SIGTERM", observation: shim, authorized: false }],
+      cleanupSignals: [],
+      cleanupFailure: { message: expect.stringContaining("cleanup identity uncertain") },
+      exitObserved: false,
+    });
+    expect(after.workerHarness.failure).toEqual(before.workerHarness.failure);
+    preserve(directory, [
+      "before-cleanup.json",
+      "after-cleanup.json",
+      "public-before.json",
+      "public-after.json",
+    ]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 5000);
+
+test("orphan handoff receipt shape carries the same worker snapshot", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-handoff-receipt-"));
+  const exec = parse(`node ${linuxEntry}`);
+  const { harness } = startupHarness(exec, [exec]);
+  try {
+    await startWorkerPipe(harness, hello);
+    writeFileSync(
+      join(directory, "launch.json"),
+      JSON.stringify(composeWorkerReceipt(harness, { nonce: "handoff", workerPid: pid }), null, 2) +
+        "\n",
+    );
+    const saved = JSON.parse(readFileSync(join(directory, "launch.json"), "utf8"));
+    expect(saved).toMatchObject({
+      nonce: "handoff",
+      workerPid: pid,
+      workerHarness: {
+        admittedObservation: exec,
+        startupState: "admitted",
+        helloWrite: { attempted: true, status: "completed" },
+        cleanupProofs: [],
+      },
+    });
+    preserve(directory, ["launch.json"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("cleanup authorizes only a fresh compiled entry at the captured birth", async () => {
   const compiledEntry = parse(`node ${linuxEntry}`);
@@ -928,11 +1043,39 @@ test("launcher pre-handoff identity failure preserves receipt and cleans its own
     expect(failure).toMatchObject({ nonce, workerPid: expect.any(Number), cleanupErrors: [] });
     expect(failure.error.message).toContain("worker startup identity rejected");
     expect(failure.ptyStart).toBe(null);
+    expect(failure.workerHarnessReceiptRefs).toMatchObject({
+      "launcher-before-cleanup": {
+        file: "launcher-before-cleanup.json",
+        stage: "launcher-before-cleanup",
+        nonce,
+        workerPid: failure.workerPid,
+      },
+      "launcher-after-cleanup": {
+        file: "launcher-after-cleanup.json",
+        stage: "launcher-after-cleanup",
+        nonce,
+        workerPid: failure.workerPid,
+      },
+    });
     expect(existsSync(join(directory, "launch.json"))).toBe(false);
     expect(existsSync(join(directory, "start.json"))).toBe(false);
-    expect(
-      JSON.parse(readFileSync(join(directory, "launcher-after-cleanup.json"), "utf8")).exitCode,
-    ).toBe(0);
+    const before = JSON.parse(
+      readFileSync(join(directory, "launcher-before-cleanup.json"), "utf8"),
+    );
+    const after = JSON.parse(readFileSync(join(directory, "launcher-after-cleanup.json"), "utf8"));
+    expect(before).toMatchObject({
+      nonce,
+      pid: failure.workerPid,
+      startupState: "failed",
+      cleanupProofs: [],
+    });
+    expect(after).toMatchObject({
+      nonce,
+      pid: failure.workerPid,
+      startupState: "failed",
+      cleanupProofs: [{ signal: "SIGTERM", authorized: false }],
+      exitCode: 0,
+    });
     expect(await until(() => !psIdentity(failure.workerPid), 3000, "pre-handoff child exit")).toBe(
       true,
     );

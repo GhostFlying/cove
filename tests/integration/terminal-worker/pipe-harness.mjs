@@ -571,44 +571,46 @@ export function childPipe(
   return harness;
 }
 
+export function workerHarnessSnapshot(harness, error) {
+  const { child } = harness;
+  return structuredClone({
+    nonce: harness.nonce,
+    pid: child.pid ?? null,
+    initialObservation: harness.initialObservation,
+    firstObservation: harness.firstObservation,
+    provisionalBirth: harness.provisionalBirth ?? null,
+    admittedObservation: harness.admittedObservation ?? null,
+    startupState: harness.startupState ?? null,
+    startupFailure: harness.startupFailure ?? null,
+    startupFailureObservation: harness.startupFailureObservation ?? null,
+    helloWrite: harness.helloWrite ?? null,
+    stdinErrors: harness.stdinErrors ?? [],
+    cleanupProofs: harness.cleanupProofs ?? [],
+    cleanupSignals: harness.cleanupSignals ?? [],
+    cleanupFailure: harness.cleanupFailure ?? null,
+    startupDeadlineMs: harness.startupDeadlineMs ?? null,
+    spawnAt: harness.spawnAt ?? null,
+    startupSamples: harness.startupSamples ?? [],
+    expectedAnchors: harness.expectedAnchors,
+    currentObservation: child.pid ? sampleWorker(harness.observe, child.pid, harness.bin) : null,
+    exitCode: child.exitCode,
+    signalCode: child.signalCode,
+    exitObserved: harness.exitObserved ?? false,
+    stderrHex: Buffer.concat(harness.stderr).toString("hex"),
+    errors: harness.errors,
+    failure: error && { name: error.name, message: error.message },
+  });
+}
+
+export function composeWorkerReceipt(harness, details, error) {
+  return { ...details, workerHarness: harness ? workerHarnessSnapshot(harness, error) : null };
+}
+
 export function preserveWorkerHarness(harness, evidencePath, stage, error) {
   if (!evidencePath) return;
-  const { child } = harness;
   writeFileSync(
     join(evidencePath, `${stage}.json`),
-    JSON.stringify(
-      {
-        nonce: harness.nonce,
-        pid: child.pid ?? null,
-        initialObservation: harness.initialObservation,
-        firstObservation: harness.firstObservation,
-        provisionalBirth: harness.provisionalBirth ?? null,
-        admittedObservation: harness.admittedObservation ?? null,
-        startupState: harness.startupState ?? null,
-        startupFailure: harness.startupFailure ?? null,
-        startupFailureObservation: harness.startupFailureObservation ?? null,
-        helloWrite: harness.helloWrite ?? null,
-        stdinErrors: harness.stdinErrors ?? [],
-        cleanupProofs: harness.cleanupProofs ?? [],
-        cleanupSignals: harness.cleanupSignals ?? [],
-        cleanupFailure: harness.cleanupFailure ?? null,
-        startupDeadlineMs: harness.startupDeadlineMs ?? null,
-        spawnAt: harness.spawnAt ?? null,
-        startupSamples: harness.startupSamples ?? [],
-        expectedAnchors: harness.expectedAnchors,
-        currentObservation: child.pid
-          ? sampleWorker(harness.observe, child.pid, harness.bin)
-          : null,
-        exitCode: child.exitCode,
-        signalCode: child.signalCode,
-        exitObserved: harness.exitObserved ?? false,
-        stderrHex: Buffer.concat(harness.stderr).toString("hex"),
-        errors: harness.errors,
-        failure: error && { name: error.name, message: error.message },
-      },
-      null,
-      2,
-    ) + "\n",
+    JSON.stringify(workerHarnessSnapshot(harness, error), null, 2) + "\n",
   );
 }
 

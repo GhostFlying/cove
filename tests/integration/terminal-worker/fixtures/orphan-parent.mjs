@@ -1,7 +1,8 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   childPipe,
+  composeWorkerReceipt,
   fixture,
   hello,
   psIdentity,
@@ -45,7 +46,7 @@ try {
   writeFileSync(
     join(directory, "launch.json"),
     JSON.stringify(
-      {
+      composeWorkerReceipt(h, {
         nonce,
         parentPid: process.pid,
         workerPid: h.child.pid,
@@ -54,7 +55,7 @@ try {
         ptyStart: start,
         ptyIdentity: psIdentity(start.pid),
         responses: h.frames.map(({ metadata }) => metadata),
-      },
+      }),
       null,
       2,
     ) + "\n",
@@ -99,6 +100,14 @@ try {
         workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
         workerExitCode: h?.child.exitCode ?? null,
         workerSignalCode: h?.child.signalCode ?? null,
+        workerHarnessReceiptRefs: Object.fromEntries(
+          ["launcher-before-cleanup", "launcher-after-cleanup"].map((stage) => [
+            stage,
+            existsSync(join(directory, `${stage}.json`))
+              ? { file: `${stage}.json`, stage, nonce, workerPid: h?.child.pid ?? null }
+              : null,
+          ]),
+        ),
         ptyStart: start ?? null,
         error: { name: error.name, message: error.message, stack: error.stack },
         cleanupErrors: cleanupErrors.map((item) => ({ name: item.name, message: item.message })),
