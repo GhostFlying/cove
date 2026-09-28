@@ -351,6 +351,11 @@ export const requiredSuites = [
     minimumTests: 1,
   },
   {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
+    minimumTests: 23,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
