@@ -1025,6 +1025,28 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
   }
 });
 
+test("compiled worker qualification suites cannot disappear or shrink", async () => {
+  for (const [name, minimumTests] of [
+    ["public-delivery", 1],
+    ["pipe-main-real", 6],
+    ["worker-fairness-real", 1],
+  ]) {
+    const file = `tests/integration/terminal-worker/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "terminal-worker", minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(file);
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests/);
+    const short = Array.from({ length: minimumTests - 1 }, (_, index) => ({
+      projectName: "terminal-worker",
+      file: resolve(root, file),
+      name: `case ${index}`,
+    }));
+    expect(() => verifyDiscovery(short, [file], [suite])).toThrow(
+      `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
+    );
+  }
+});
+
 test("finite worker templates require every exact expanded runtime identity", () => {
   for (const expansion of finiteRuntimeExpansions) {
     const suite = { project: expansion.project, file: expansion.file, minimumTests: 1 };
@@ -1175,6 +1197,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-worker/tests"), { recursive: true });
+  await mkdir(resolve(checkout, "tests/integration/terminal-worker"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-web/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
@@ -1185,6 +1208,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/tests/engine.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-worker/tests/native.test.mjs"), "");
+  await writeFile(resolve(checkout, "tests/integration/terminal-worker/real.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/probes/browser.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/terminal-web/tests/view-input.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
@@ -1197,6 +1221,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
     "packages/terminal-web/probes/browser.test.mjs",
     "packages/terminal-web/tests/view-input.test.mjs",
     "packages/terminal-worker/tests/native.test.mjs",
+    "tests/integration/terminal-worker/real.test.mjs",
     "tests/tooling/excluded.spec.ts",
     "tests/tooling/registered.test.ts",
   ]);

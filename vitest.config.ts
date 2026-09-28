@@ -50,7 +50,10 @@ export default defineConfig({
         test: {
           name: "terminal-worker",
           environment: "node",
-          include: ["packages/terminal-worker/tests/**/*.test.mjs"],
+          include: [
+            "packages/terminal-worker/tests/**/*.test.mjs",
+            "tests/integration/terminal-worker/**/*.test.mjs",
+          ],
           testTimeout: 15_000,
           maxWorkers: 1,
         },
