@@ -814,4 +814,95 @@ describe("public terminal subscription and recovery", () => {
     controller.dispose();
     client.dispose();
   });
+
+  test("retired ref cap is shared by all controllers on the connection", async () => {
+    let serial = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        serial++;
+        reply(command, peer, subscription(command.viewId, `subscription-${serial}`));
+      } else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    });
+    const first = client.openTerminal({
+      run,
+      viewId: "first",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const second = client.openTerminal({
+      run,
+      viewId: "second",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    for (let index = 0; index < 256; index++) {
+      const attached = first.attach();
+      baseline(peer, subscription("first", `subscription-${index + 1}`));
+      expect((await attached).ok).toBe(true);
+      expect((await first.detach()).ok).toBe(true);
+    }
+    expect(await second.attach()).toMatchObject({
+      ok: false,
+      error: { kind: "COUNTER_EXHAUSTED" },
+    });
+    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(256);
+    first.dispose();
+    second.dispose();
+    client.dispose();
+  });
+  test("two active refs cannot overflow the last tombstone slot", async () => {
+    let serial = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        serial++;
+        reply(command, peer, subscription(command.viewId, `subscription-${serial}`));
+      } else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    });
+    const a = client.openTerminal({
+      run,
+      viewId: "a",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const b = client.openTerminal({
+      run,
+      viewId: "b",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    for (let index = 0; index < 255; index++) {
+      const attached = a.attach();
+      baseline(peer, subscription("a", `subscription-${index + 1}`));
+      expect((await attached).ok).toBe(true);
+      expect((await a.detach()).ok).toBe(true);
+    }
+    const ap = a.attach();
+    const bp = b.attach();
+    baseline(peer, subscription("a", "subscription-256"));
+    baseline(peer, subscription("b", "subscription-257"));
+    expect((await ap).ok).toBe(true);
+    expect((await bp).ok).toBe(true);
+    expect((await a.detach()).ok).toBe(true);
+    expect((await b.detach()).ok).toBe(true);
+    expect(client.snapshot().status).toBe("unverifiable");
+    a.dispose();
+    b.dispose();
+    client.dispose();
+  });
 });
