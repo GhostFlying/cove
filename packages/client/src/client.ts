@@ -56,6 +56,7 @@ import type {
 } from "./transport-ports.js";
 import { TerminalLane } from "./terminal-delivery.js";
 import { RoutedTerminalController } from "./terminal-controller.js";
+import { completeTerminalView } from "./terminal-view-contract.js";
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
 const MAX_CONNECTION_TIMEOUT_MS = 5_000;
@@ -557,26 +558,34 @@ class CoveClient implements Client {
       return { ok: false, error: localError("invalid-state") };
     if (!options || typeof options !== "object")
       return { ok: false, error: localError("invalid-request") };
-    const parsedRun = RunRefSchema.safeParse(options.run);
+    let run: TerminalOpenOptions["run"];
+    let viewId: TerminalOpenOptions["viewId"];
+    let view: TerminalOpenOptions["view"];
+    let initialAppearance: TerminalOpenOptions["initialAppearance"];
+    try {
+      ({ run, viewId, view, initialAppearance } = options);
+    } catch {
+      return { ok: false, error: localError("invalid-request") };
+    }
+    let parsedRun: ReturnType<typeof RunRefSchema.safeParse>;
+    let appearance: Appearance | null;
+    try {
+      parsedRun = RunRefSchema.safeParse(run);
+      appearance = validateAppearance(initialAppearance);
+    } catch {
+      return { ok: false, error: localError("invalid-request") };
+    }
     if (
       !parsedRun.success ||
       parsedRun.data.serverId !== binding.serverId ||
       parsedRun.data.relayInstanceId !== binding.relayInstanceId ||
-      !OpaqueIdSchema.safeParse(options.viewId).success ||
-      !options.view ||
-      typeof options.view.initialize !== "function" ||
-      typeof options.view.beginBaseline !== "function" ||
-      typeof options.view.writeBaselineChunk !== "function" ||
-      typeof options.view.finishBaseline !== "function" ||
-      typeof options.view.applyEvent !== "function" ||
-      typeof options.view.measureGrid !== "function" ||
-      typeof options.view.setVisibility !== "function" ||
-      typeof options.view.onFailure !== "function" ||
-      typeof options.view.dispose !== "function"
+      !OpaqueIdSchema.safeParse(viewId).success ||
+      !completeTerminalView(view) ||
+      !appearance
     )
       return { ok: false, error: localError("invalid-request") };
-    const appearance = validateAppearance(options.initialAppearance);
-    if (!appearance) return { ok: false, error: localError("invalid-request") };
+    if (this.status !== "connected" || this.connection !== binding)
+      return { ok: false, error: localError("invalid-state") };
     if (this.controllers.size >= binding.effectiveBudgets.subscriptionsPerConnection)
       return { ok: false, error: localError("capacity") };
     const controller = new RoutedTerminalController(
@@ -594,8 +603,8 @@ class CoveClient implements Client {
         },
       },
       Object.freeze(parsedRun.data),
-      options.viewId,
-      options.view,
+      viewId,
+      view,
       appearance,
     );
     this.controllers.add(controller);
