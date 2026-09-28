@@ -207,7 +207,7 @@ export const requiredSuites = [
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
-    minimumTests: 11,
+    minimumTests: 13,
   },
   {
     project: "terminal-engine",
@@ -322,12 +322,12 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-adapter-factory.test.mjs",
-    minimumTests: 18,
+    minimumTests: 22,
   },
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/native-adapter-input.test.mjs",
-    minimumTests: 7,
+    minimumTests: 14,
   },
   {
     project: "terminal-worker",
@@ -337,12 +337,12 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/run-session.test.mjs",
-    minimumTests: 26,
+    minimumTests: 32,
   },
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/worker-execution.test.mjs",
-    minimumTests: 21,
+    minimumTests: 30,
   },
   {
     project: "terminal-worker",
@@ -378,6 +378,35 @@ export const requiredSuites = [
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
     minimumTests: 10,
+  },
+];
+
+export const finiteRuntimeExpansions = [
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/native-adapter-input.test.mjs",
+    template: "settlement diagnostics retain only bounded %s",
+    names: [
+      "settlement diagnostics retain only bounded exact ASCII code",
+      "settlement diagnostics retain only bounded long ASCII code",
+      "settlement diagnostics retain only bounded non-ASCII code",
+      "settlement diagnostics retain only bounded exact UTF-8 message",
+      "settlement diagnostics retain only bounded long UTF-8 message",
+      "settlement diagnostics retain only bounded scalar at byte boundary",
+      "settlement diagnostics retain only bounded scalar crossing byte boundary",
+      "settlement diagnostics retain only bounded lone surrogate replacement",
+      "settlement diagnostics retain only bounded huge diagnostics",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-execution.test.mjs",
+    template: "worker ingress returns to its baseline after %s",
+    names: [
+      "worker ingress returns to its baseline after one chunk",
+      "worker ingress returns to its baseline after separate callbacks",
+      "worker ingress returns to its baseline after one split callback",
+    ],
   },
 ];
 
@@ -422,6 +451,7 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
     throw new Error("Vitest JSON result is absent or unsuccessful");
   }
   const results = new Map();
+  const resultSuites = new Map();
   for (const suite of report.testResults) {
     const file = repositoryPath(suite.name);
     if (!discoveredFiles.has(file) || results.has(file)) {
@@ -434,16 +464,48 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
       throw new Error(`Required suite has skipped, pending, or failed tests: ${file}`);
     }
     results.set(file, suite.assertionResults.length);
+    resultSuites.set(file, suite);
   }
+  let total = 0;
   for (const [key, count] of found) {
     const file = expected.get(key).file;
-    if (results.get(file) !== count) {
+    const expansions = finiteRuntimeExpansions.filter(
+      (item) => `${item.project}:${item.file}` === key,
+    );
+    let expectedCount = count;
+    if (expansions.length > 0) {
+      const names = discovered
+        .filter((test) => `${test.projectName}:${repositoryPath(test.file)}` === key)
+        .map((test) => test.name);
+      const identities = new Set(names);
+      if (identities.size !== names.length)
+        throw new Error(`Duplicate discovered identity: ${key}`);
+      for (const expansion of expansions) {
+        if (!identities.delete(expansion.template)) {
+          throw new Error(`Missing parameterized declaration: ${key}:${expansion.template}`);
+        }
+        for (const name of expansion.names) {
+          if (identities.has(name)) throw new Error(`Duplicate expanded identity: ${key}:${name}`);
+          identities.add(name);
+        }
+      }
+      const actual = resultSuites.get(file)?.assertionResults.map((test) => test.fullName) ?? [];
+      if (
+        new Set(actual).size !== actual.length ||
+        actual.some((name) => !identities.has(name)) ||
+        identities.size !== actual.length
+      ) {
+        throw new Error(`Parameterized runtime identities differ from discovery: ${key}`);
+      }
+      expectedCount = identities.size;
+    }
+    if (results.get(file) !== expectedCount) {
       throw new Error(
-        `Required suite ${key} executed ${results.get(file) ?? 0} of ${count} discovered tests`,
+        `Required suite ${key} executed ${results.get(file) ?? 0} of ${expectedCount} expected tests`,
       );
     }
+    total += expectedCount;
   }
-  const total = [...found.values()].reduce((sum, count) => sum + count, 0);
   if (
     total === 0 ||
     report.numTotalTests !== total ||
