@@ -1107,3 +1107,100 @@ test("EPIPE retains uncertainty for a response still buffered by stdout", async 
   expect(closed.reason).toBe("stdout-error");
   expect(closed.uncertainRequestIds).toContain("q");
 });
+
+test("write callback EPIPE keeps the later Writable error owned through close", async () => {
+  const callbacks = [];
+  const writes = [];
+  const shutdowns = [];
+  const events = [];
+  const disposal = Promise.withResolvers();
+  const output = new Writable({
+    write(chunk, _encoding, callback) {
+      writes.push(Buffer.from(chunk));
+      callbacks.push(callback);
+    },
+  });
+  const emit = output.emit;
+  output.emit = function (name, ...args) {
+    if (name === "error" || name === "close") events.push(name);
+    return emit.call(this, name, ...args);
+  };
+  const receipt = {
+    stop: { kind: "observed", result: { kind: "exited" } },
+    leader: { kind: "exit-observed" },
+    writer: { kind: "closed" },
+    ownershipEvidence: "closure-proven",
+  };
+  const h = createHarness({
+    output,
+    createExecution: () => ({
+      execute: async (command) => ({
+        type: "error",
+        worker,
+        run,
+        requestId: command.requestId,
+        commandType: command.type,
+        error: domainError("CAPABILITY_UNAVAILABLE"),
+      }),
+      snapshot: () => ({}),
+      shutdown: async (reason) => {
+        shutdowns.push(reason);
+        await disposal.promise;
+        return [receipt];
+      },
+    }),
+  });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  const command = { type: "preview-refresh", worker, run, requestId: "epipe-reply" };
+  h.input.write(encode(command));
+  await tick();
+  expect(writes).toHaveLength(2);
+  events.push("write-callback");
+  callbacks.shift()(Object.assign(new Error("broken pipe"), { code: "EPIPE" }));
+  await tick(); // Node emits error and close after the write callback.
+  expect(events).toEqual(["write-callback", "error", "close"]);
+  expect(output.closed).toBe(true);
+  expect(h.pipe.snapshot().state).toBe("closing");
+  expect(shutdowns).toEqual(["stdout-write-failed"]);
+  expect(h.pipe.shutdown("late-close")).toBe(h.pipe.closed);
+  disposal.resolve();
+  const closed = await h.pipe.closed;
+  expect(closed).toMatchObject({
+    reason: "stdout-write-failed",
+    uncertainRequestIds: ["epipe-reply"],
+    disposalReceipts: [receipt],
+    disposalUnverifiable: false,
+  });
+  expect(writes).toHaveLength(2);
+  expect(output.listenerCount("error")).toBe(0);
+});
+
+test("a late Writable error remains guarded after shutdown receipt until terminal close", async () => {
+  let finish;
+  const output = new Writable({
+    autoDestroy: false,
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+    final(callback) {
+      finish = callback;
+    },
+  });
+  const shutdowns = [];
+  const h = createHarness({ output, onShutdown: (reason) => shutdowns.push(reason) });
+  h.input.write(encode(hello));
+  await tick();
+  expect(h.pipe.snapshot().state).toBe("ready");
+  const closed = await h.pipe.shutdown("test-close");
+  expect(closed.reason).toBe("test-close");
+  expect(output.closed).toBe(false);
+  output.emit("error", Object.assign(new Error("late EPIPE"), { code: "EPIPE" }));
+  expect(shutdowns).toEqual(["test-close"]);
+  finish();
+  output.destroy();
+  await tick();
+  expect(output.closed).toBe(true);
+  expect(output.listenerCount("error")).toBe(0);
+});
