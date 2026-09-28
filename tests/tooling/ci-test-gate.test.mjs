@@ -17,6 +17,7 @@ import {
   writeBrowserCloseDiagnosticManifest,
   writeNoConclusionDiagnosticFailure,
   requiredSuites,
+  finiteRuntimeExpansions,
   verifyDiscovery,
   verifyInventory,
   viewEvidenceCases,
@@ -946,7 +947,7 @@ test("pragmatic logical-grid recovery suite is mandatory", async () => {
 
 test("compiled terminal adapter suites are all mandatory", async () => {
   for (const [name, minimumTests] of [
-    ["terminal-model", 11],
+    ["terminal-model", 13],
     ["engine-recovery", 9],
     ["engine-parser", 9],
     ["engine-query", 11],
@@ -999,11 +1000,11 @@ test("bounded native writer owner and fd-reuse suites cannot disappear or shrink
 
 test("native adapter and worker execution suites cannot disappear or shrink", async () => {
   for (const [name, minimumTests] of [
-    ["native-adapter-factory", 18],
-    ["native-adapter-input", 7],
+    ["native-adapter-factory", 22],
+    ["native-adapter-input", 14],
     ["native-adapter-real", 6],
-    ["run-session", 26],
-    ["worker-execution", 21],
+    ["run-session", 32],
+    ["worker-execution", 30],
     ["run-session-real", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
@@ -1018,6 +1019,65 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     }));
     expect(() => verifyDiscovery(short, [file], [suite])).toThrow(
       `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
+    );
+  }
+});
+
+test("finite worker templates require every exact expanded runtime identity", () => {
+  for (const expansion of finiteRuntimeExpansions) {
+    const suite = { project: expansion.project, file: expansion.file, minimumTests: 1 };
+    const discovered = [
+      {
+        projectName: expansion.project,
+        file: resolve(root, expansion.file),
+        name: expansion.template,
+      },
+    ];
+    const execution = {
+      success: true,
+      numTotalTests: expansion.names.length,
+      numPassedTests: expansion.names.length,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      testResults: [
+        {
+          name: resolve(root, expansion.file),
+          status: "passed",
+          assertionResults: expansion.names.map((fullName) => ({ fullName, status: "passed" })),
+        },
+      ],
+    };
+    expect(verifyInventory(discovered, execution, [expansion.file], [suite])).toEqual([
+      {
+        project: expansion.project,
+        file: expansion.file,
+        discovered: 1,
+        passed: expansion.names.length,
+      },
+    ]);
+    const missing = structuredClone(execution);
+    missing.testResults[0].assertionResults.pop();
+    expect(() => verifyInventory(discovered, missing, [expansion.file], [suite])).toThrow(
+      /Parameterized runtime identities differ/,
+    );
+    const extra = structuredClone(execution);
+    extra.testResults[0].assertionResults.push({
+      fullName: "unregistered extra parameter",
+      status: "passed",
+    });
+    expect(() => verifyInventory(discovered, extra, [expansion.file], [suite])).toThrow(
+      /Parameterized runtime identities differ/,
+    );
+    const duplicate = structuredClone(execution);
+    duplicate.testResults[0].assertionResults.at(-1).fullName = expansion.names[0];
+    expect(() => verifyInventory(discovered, duplicate, [expansion.file], [suite])).toThrow(
+      /Parameterized runtime identities differ/,
+    );
+    const renamed = structuredClone(execution);
+    renamed.testResults[0].assertionResults.at(-1).fullName = "unregistered parameter";
+    expect(() => verifyInventory(discovered, renamed, [expansion.file], [suite])).toThrow(
+      /Parameterized runtime identities differ/,
     );
   }
 });
