@@ -372,14 +372,15 @@ export class TerminalLane {
     this.pending.delete(pending.command.requestId);
     this.retainedOutboundBytes -= pending.bytes.byteLength;
     try {
-      pending.timer?.dispose();
-    } catch {
-      /* The timer no longer owns settlement. */
-    }
-    try {
       pending.onSettled?.(outcome);
     } catch {
       this.owner.invalid();
+    }
+    // A remote accepted/unknown result must fence connection authority before timer disposal can reenter.
+    try {
+      pending.timer?.dispose();
+    } catch {
+      /* The timer no longer owns settlement. */
     }
     pending.resolve(outcome);
   }

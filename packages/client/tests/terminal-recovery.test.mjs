@@ -432,6 +432,166 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
+  test("accepted and unknown no-ref attach failures fence before unavailable observers", async () => {
+    for (const initial of ["accepted", "unknown"]) {
+      let mode = initial;
+      const rendered = view();
+      const { client, peer } = await harness((command, peer) => {
+        if (command.type === "attach") {
+          if (mode === "accepted")
+            peer.emit(4, {
+              type: "error",
+              requestId: command.requestId,
+              run,
+              commandType: "attach",
+              error: domainError("BUSY", "accepted"),
+            });
+          else if (mode === "unknown") return "unknown";
+          else reply(command, peer, subscription("view-1"));
+        } else settleControl(command, peer);
+      });
+      const controller = client.openTerminal({
+        run,
+        viewId: "view-1",
+        view: rendered.terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      let reentered;
+      controller.onState((snapshot) => {
+        if (snapshot.phase !== "unavailable" || reentered) return;
+        reentered = {
+          attach: controller.attach(),
+          open: client.openTerminal({
+            run,
+            viewId: "nested",
+            view: view().terminalView,
+            initialAppearance: DEFAULT_APPEARANCE,
+          }),
+        };
+      });
+      const failed = await controller.attach();
+      expect(failed.ok).toBe(false);
+      expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(1);
+      expect(await reentered.attach).toMatchObject({
+        ok: false,
+        error: { reason: "invalid-state" },
+      });
+      expect(reentered.open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+      expect(client.snapshot().status).toBe("unverifiable");
+      mode = "success";
+      expect((await client.reconnect()).ok).toBe(true);
+      const next = controller.attach();
+      baseline(peer, subscription("view-1"));
+      expect((await next).ok).toBe(true);
+      controller.dispose();
+      client.dispose();
+    }
+  });
+
+  test("accepted no-ref retirement fences before operation-timer disposal reentry", async () => {
+    let controller;
+    let client;
+    let reentered;
+    const scheduler = {
+      nowMs: () => 0,
+      setTimer(delay) {
+        return {
+          dispose() {
+            if (delay !== M0_LIMITS.recoveryDeadlineMs || !controller || reentered) return;
+            reentered = {
+              status: client.snapshot().status,
+              attach: controller.attach(),
+              open: client.openTerminal({
+                run,
+                viewId: "nested",
+                view: view().terminalView,
+                initialAppearance: DEFAULT_APPEARANCE,
+              }),
+            };
+          },
+        };
+      },
+      yieldTurn: async () => {},
+    };
+    const setup = await harness((command, peer) => {
+      if (command.type === "attach")
+        peer.emit(4, {
+          type: "error",
+          requestId: command.requestId,
+          run,
+          commandType: "attach",
+          error: domainError("BUSY", "accepted"),
+        });
+    }, scheduler);
+    client = setup.client;
+    controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    expect((await controller.attach()).ok).toBe(false);
+    expect(setup.peer.commands.filter((command) => command.type === "attach")).toHaveLength(1);
+    expect(reentered.status).toBe("unverifiable");
+    expect((await reentered.attach).ok).toBe(false);
+    expect(reentered.open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("accepted result with a retired ref fences before unavailable publication", async () => {
+    const ref = subscription("view-1");
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, ref);
+      else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: ref,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    });
+    const first = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const firstAttach = first.attach();
+    baseline(peer, ref);
+    expect((await firstAttach).ok).toBe(true);
+    expect((await first.detach()).ok).toBe(true);
+    first.dispose();
+    const second = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    let reentered;
+    second.onState((snapshot) => {
+      if (snapshot.phase !== "unavailable" || reentered) return;
+      reentered = {
+        attach: second.attach(),
+        open: client.openTerminal({
+          run,
+          viewId: "nested",
+          view: view().terminalView,
+          initialAppearance: DEFAULT_APPEARANCE,
+        }),
+      };
+    });
+    expect((await second.attach()).ok).toBe(false);
+    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(2);
+    expect(await reentered.attach).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(reentered.open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(client.snapshot().status).toBe("unverifiable");
+    second.dispose();
+    client.dispose();
+  });
+
   test("guards nested reconnect and dispose notifications before adapter cleanup", async () => {
     const rendered = view();
     const { client, peer } = await harness((command, peer) => {

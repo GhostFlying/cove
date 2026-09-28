@@ -548,9 +548,9 @@ class CoveClient implements Client {
         scheduler: this.options.scheduler,
         binding: () => this.connection,
         generation: () => this.generation,
-        retireConnection: () => {
-          if (this.connectedAttempt)
-            this.loseConnectedAttempt(this.connectedAttempt, localError("transport"));
+        retireConnection: (origin, error) => {
+          const attempt = this.connectedAttempt;
+          if (attempt) this.loseConnectedAttempt(attempt, localError("transport"), origin, error);
         },
         remove: (item) => {
           this.controllers.delete(item);
@@ -885,7 +885,12 @@ class CoveClient implements Client {
     this.emitState();
   }
 
-  private loseConnectedAttempt(attempt: ConnectAttempt, error: ClientError): void {
+  private loseConnectedAttempt(
+    attempt: ConnectAttempt,
+    error: ClientError,
+    origin?: RoutedTerminalController,
+    originError?: ClientError | DomainError,
+  ): void {
     if (!this.currentAttempt(attempt) || !attempt.committed) return;
     this.retiringConnection = true;
     const controllers = [...this.controllers];
@@ -895,7 +900,8 @@ class CoveClient implements Client {
     this.status = error.category === "local" ? "unverifiable" : "incompatible";
     this.lastError = error;
     try {
-      for (const controller of controllers) controller.connectionLost();
+      for (const controller of controllers)
+        controller.connectionLost(controller === origin ? originError : undefined);
       this.terminalLane.close("transport");
       safeCancel(attempt.terminalCancellation);
       safeClose(attempt.terminalConnection);
