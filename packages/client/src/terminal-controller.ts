@@ -42,6 +42,7 @@ interface Operation {
   settled: boolean;
   mode?: "baseline" | "replay";
   atSeq?: number;
+  readonly priorParses: readonly Promise<void>[];
   markerAttempted: boolean;
 }
 
@@ -94,6 +95,7 @@ export class RoutedTerminalController implements TerminalController {
   private viewGeneration = 0;
   private listener: Disposable | undefined;
   private appliedSeq = 0;
+  private provenSeq = 0;
   private retainedModel = false;
   private retainedGeometry: Geometry | undefined;
   private baseline: BaselineDescriptor | undefined;
@@ -103,6 +105,10 @@ export class RoutedTerminalController implements TerminalController {
   private queuedBytes = 0;
   private activeBytes = 0;
   private activeItems = 0;
+  private readonly viewWork = new Map<
+    QueuedEvent,
+    { view: TerminalView; promise: Promise<void>; finish: () => void }
+  >();
   private drainToken = 0;
   private drainingToken = -1;
   private ackInFlight = false;
@@ -179,6 +185,7 @@ export class RoutedTerminalController implements TerminalController {
     if (
       this.retainedModel &&
       this.retainedGeometry &&
+      ![...this.viewWork.values()].some((work) => work.view === this.view) &&
       reason !== "gap" &&
       reason !== "resize-context"
     ) {
@@ -384,6 +391,9 @@ export class RoutedTerminalController implements TerminalController {
       resolve,
       settled: false,
       markerAttempted: false,
+      priorParses: [...this.viewWork.values()]
+        .filter((work) => work.view === this.view)
+        .map((work) => work.promise),
     };
     this.operation = operation;
     if (kind === "recover") {
@@ -442,6 +452,10 @@ export class RoutedTerminalController implements TerminalController {
       }
       operation.mode = result.mode;
       operation.atSeq = result.atSeq;
+      if (result.atSeq < this.provenSeq) {
+        this.fail(localError("invalid-response"), operation.token);
+        return;
+      }
       if (result.mode === "replay" && !this.retainedModel) {
         this.fail(localError("invalid-response"), operation.token);
         return;
@@ -470,6 +484,11 @@ export class RoutedTerminalController implements TerminalController {
         this.queuedBytes -= item.charge;
         this.activeBytes += item.charge;
         this.activeItems++;
+        let finishParse!: () => void;
+        const parseDone = new Promise<void>((resolve) => {
+          finishParse = resolve;
+        });
+        this.viewWork.set(item, { view: this.view, promise: parseDone, finish: finishParse });
         try {
           await this.apply(item);
         } catch {
@@ -478,6 +497,7 @@ export class RoutedTerminalController implements TerminalController {
           this.activeBytes -= item.charge;
           this.activeItems--;
           this.host.lane.releaseIngress(item.charge);
+          this.finishViewWork(item);
         }
         frames++;
         bytes += item.charge;
@@ -502,11 +522,14 @@ export class RoutedTerminalController implements TerminalController {
     if (item.token !== this.token || !this.ref) return;
     if (event.type === "baseline-start") {
       if (this.phase !== "baseline" || !operation || this.baseline) throw new Error("start order");
+      await Promise.all(operation.priorParses);
+      if (item.token !== this.token) return;
       const descriptor = validateBaselineDescriptor(event.descriptor);
       if (
         !descriptor ||
         !sameSubscriptionRef(descriptor.subscription, this.ref) ||
         descriptor.atSeq !== operation.atSeq ||
+        descriptor.atSeq < this.provenSeq ||
         descriptor.vtBytes > (this.host.binding()?.effectiveBudgets.baselineVtBytes ?? 0) ||
         descriptor.tailBytes > (this.host.binding()?.effectiveBudgets.baselineTailBytes ?? 0) ||
         descriptor.chunkCount > (this.host.binding()?.effectiveBudgets.baselineChunks ?? 0) ||
@@ -534,6 +557,7 @@ export class RoutedTerminalController implements TerminalController {
         run: Object.freeze({ ...descriptor.run }),
         subscription: identityCopy(descriptor.subscription),
       });
+      this.finishViewWork(item);
       return;
     }
     if (event.type === "baseline-chunk") {
@@ -551,6 +575,7 @@ export class RoutedTerminalController implements TerminalController {
       if (this.baselineBytes > this.baseline.vtBytes + this.baseline.tailBytes)
         throw new Error("chunk size");
       await this.view.writeBaselineChunk(item.payload);
+      this.finishViewWork(item);
       if (item.token === this.token) this.sendProgress(event.ordinal);
       return;
     }
@@ -568,8 +593,10 @@ export class RoutedTerminalController implements TerminalController {
       )
         throw new Error("baseline end");
       await this.view.finishBaseline();
+      this.finishViewWork(item);
       if (item.token !== this.token) return;
       this.appliedSeq = event.atSeq;
+      this.provenSeq = Math.max(this.provenSeq, event.atSeq);
       this.retainedModel = true;
       this.retainedGeometry = this.baseline.currentGeometry;
       this.baseline = undefined;
@@ -588,8 +615,10 @@ export class RoutedTerminalController implements TerminalController {
       return;
     }
     await this.view.applyEvent(fact, item.payload);
+    this.finishViewWork(item);
     if (item.token !== this.token) return;
     this.appliedSeq = fact.seq;
+    this.provenSeq = Math.max(this.provenSeq, fact.seq);
     if (fact.type === "resize") this.retainedGeometry = fact.geometry;
     if (this.phase === "replay" && operation && this.appliedSeq === operation.atSeq)
       this.commit(operation);
@@ -777,6 +806,13 @@ export class RoutedTerminalController implements TerminalController {
     for (const item of this.queue) this.host.lane.releaseIngress(item.charge);
     this.queue.length = 0;
     this.queuedBytes = 0;
+  }
+
+  private finishViewWork(item: QueuedEvent): void {
+    const work = this.viewWork.get(item);
+    if (!work) return;
+    this.viewWork.delete(item);
+    work.finish();
   }
 
   private bindFailure(generation: number, token: number): void {

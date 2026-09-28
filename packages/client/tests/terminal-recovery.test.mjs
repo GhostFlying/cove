@@ -243,6 +243,30 @@ function baseline(peer, ref) {
   });
 }
 
+function baselineTo(peer, ref, atSeq) {
+  const data = descriptor(ref, atSeq);
+  peer.emit(3, { type: "baseline-start", run, descriptor: data });
+  peer.emit(
+    3,
+    { type: "baseline-chunk", run, subscription: ref, baselineId: data.baselineId, ordinal: 0 },
+    new Uint8Array([27, 91, 72]),
+  );
+  peer.emit(
+    3,
+    { type: "baseline-chunk", run, subscription: ref, baselineId: data.baselineId, ordinal: 1 },
+    new Uint8Array([27, 91]),
+  );
+  peer.emit(3, {
+    type: "baseline-end",
+    run,
+    subscription: ref,
+    baselineId: data.baselineId,
+    chunkCount: 2,
+    totalBytes: 5,
+    atSeq,
+  });
+}
+
 async function baselineStepped(peer, ref) {
   const data = descriptor(ref);
   peer.emit(3, { type: "baseline-start", run, descriptor: data });
@@ -301,6 +325,108 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("offers no replay and waits for old view work before a fresh baseline", async () => {
+    const gate = deferred();
+    const rendered = view({ eventGate: gate });
+    let recovery;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else if (command.type === "recover") recovery = command;
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("view-1"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(controller.snapshot().activeParseBytes).toBeGreaterThan(0);
+    const pending = controller.recover("expired");
+    expect(recovery).not.toHaveProperty("resume");
+    reply(recovery, peer, subscription("view-1"), "baseline", 4);
+    baselineTo(peer, subscription("view-1"), 4);
+    await settle();
+    expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(1);
+    gate.resolve();
+    expect(await pending).toMatchObject({ ok: true, value: { atSeq: 4 } });
+    expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(2);
+    expect(
+      peer.commands
+        .filter((command) => command.type === "applied-ack")
+        .map((command) => command.appliedSeq),
+    ).toEqual([3, 4]);
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("rejects a lower no-resume result while preserving the proven cursor", async () => {
+    const rendered = view();
+    let recovery;
+    let attaches = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        attaches++;
+        reply(
+          command,
+          peer,
+          subscription("view-1", `subscription-${attaches}`),
+          "baseline",
+          attaches === 1 ? 3 : 4,
+        );
+      } else if (command.type === "recover") recovery = command;
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const first = controller.attach();
+    baseline(peer, subscription("view-1", "subscription-1"));
+    expect((await first).ok).toBe(true);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("view-1", "subscription-1"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(controller.snapshot().appliedSeq).toBe(4);
+    const beforeInitialize = rendered.facts.filter((fact) => fact[0] === "initialize").length;
+    const pending = controller.recover("gap");
+    expect(recovery).not.toHaveProperty("resume");
+    reply(recovery, peer, subscription("view-1", "subscription-1"), "baseline", 3);
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(controller.snapshot().appliedSeq).toBe(4);
+    expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(
+      beforeInitialize,
+    );
+    expect(
+      peer.commands.filter((command) => command.type === "detach").at(-1).subscription,
+    ).toEqual(subscription("view-1", "subscription-1"));
+    const second = controller.attach();
+    baselineTo(peer, subscription("view-1", "subscription-2"), 4);
+    expect(await second).toMatchObject({ ok: true, value: { atSeq: 4 } });
+    controller.dispose();
+    client.dispose();
+  });
   test("owns run and subscription identity apart from caller, ready, snapshot and view", async () => {
     const callerRun = { ...run };
     const rendered = view();
