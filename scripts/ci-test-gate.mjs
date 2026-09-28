@@ -338,7 +338,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/run-session.test.mjs",
-    minimumTests: 32,
+    minimumTests: 36,
   },
   {
     project: "terminal-worker",
@@ -353,7 +353,12 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
-    minimumTests: 26,
+    minimumTests: 32,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/main-shutdown.test.mjs",
+    minimumTests: 1,
   },
   {
     project: "terminal-worker",
@@ -364,6 +369,16 @@ export const requiredSuites = [
     project: "terminal-worker",
     file: "tests/integration/terminal-worker/pipe-main-real.test.mjs",
     minimumTests: 6,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-finite.test.mjs",
+    minimumTests: 7,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/physical-stall.test.mjs",
+    minimumTests: 1,
   },
   {
     project: "terminal-worker",

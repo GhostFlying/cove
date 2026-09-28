@@ -1004,10 +1004,11 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     ["native-adapter-factory", 22],
     ["native-adapter-input", 14],
     ["native-adapter-real", 6],
-    ["run-session", 32],
+    ["run-session", 36],
     ["worker-execution", 30],
     ["run-session-real", 1],
-    ["pipe-endpoint", 26],
+    ["pipe-endpoint", 32],
+    ["main-shutdown", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
@@ -1029,6 +1030,8 @@ test("compiled worker qualification suites cannot disappear or shrink", async ()
   for (const [name, minimumTests] of [
     ["public-delivery", 1],
     ["pipe-main-real", 6],
+    ["qualification-finite", 7],
+    ["physical-stall", 1],
     ["worker-fairness-real", 1],
   ]) {
     const file = `tests/integration/terminal-worker/${name}.test.mjs`;
