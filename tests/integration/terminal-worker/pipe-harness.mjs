@@ -266,14 +266,22 @@ export async function admitWorkerStartup(harness, { deadlineMs = 8000 } = {}) {
   } catch (error) {
     harness.startupState = "failed";
     harness.startupFailure = { name: error.name, message: error.message };
+    harness.startupFailureObservation = observation;
     throw error;
   }
 }
 
 export async function startWorkerPipe(harness, helloFrame = hello, options) {
   await admitWorkerStartup(harness, options);
-  verifyWorkerIdentity(harness);
-  harness.send(helloFrame);
+  try {
+    workerExecIdentity(harness);
+    harness.send(helloFrame);
+  } catch (error) {
+    harness.startupState = "failed";
+    harness.startupFailure = { name: error.name, message: error.message };
+    harness.startupFailureObservation = harness.lastObservation ?? null;
+    throw error;
+  }
 }
 
 export function verifyWorkerIdentity(harness) {
@@ -288,7 +296,13 @@ export function verifyWorkerIdentity(harness) {
 
 export function workerExecIdentity(harness) {
   const current = verifyWorkerIdentity(harness);
-  if (current.form !== "compiled-entry")
+  if (
+    current.form !== "compiled-entry" ||
+    (harness.provisionalBirth &&
+      (current.pid !== harness.provisionalBirth.pid ||
+        current.started !== harness.provisionalBirth.started)) ||
+    (harness.expectedAnchors && current.canonical !== harness.expectedAnchors.compiled)
+  )
     throw Error(`worker exec identity uncertain: current=${JSON.stringify(current)}`);
   return current.raw;
 }
@@ -479,6 +493,7 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
         admittedObservation: harness.admittedObservation ?? null,
         startupState: harness.startupState ?? null,
         startupFailure: harness.startupFailure ?? null,
+        startupFailureObservation: harness.startupFailureObservation ?? null,
         startupDeadlineMs: harness.startupDeadlineMs ?? null,
         spawnAt: harness.spawnAt ?? null,
         startupSamples: harness.startupSamples ?? [],

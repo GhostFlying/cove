@@ -83,6 +83,7 @@ const startupHarness = (first, sequence) => {
     child,
     bin,
     errors: [],
+    stderr: [],
     firstObservation: first,
     initialObservation: first,
     observe: () => sequence[Math.min(samples++, sequence.length - 1)],
@@ -246,6 +247,42 @@ test("direct expected compiled entry admits before caller hello", async () => {
   await startWorkerPipe(harness, hello);
   expect(harness.startupSamples).toEqual([exec]);
   expect(sends).toEqual([hello]);
+});
+
+test("final pre-hello proof rejects a same-birth shim and records terminal failure", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-prehello-"));
+  const exec = parse(`node ${linuxEntry}`);
+  const shim = parse(`/bin/sh ${bin}`);
+  const { harness, sends } = startupHarness(exec, [shim]);
+  try {
+    await expect(startWorkerPipe(harness, hello)).rejects.toThrow("worker exec identity uncertain");
+    expect(sends).toEqual([]);
+    expect(harness.admittedObservation).toEqual(exec);
+    preserveWorkerHarness(harness, directory, "prehello-failure");
+    const saved = JSON.parse(readFileSync(join(directory, "prehello-failure.json"), "utf8"));
+    expect(saved).toMatchObject({
+      startupState: "failed",
+      admittedObservation: exec,
+      startupFailureObservation: shim,
+      startupFailure: { message: expect.stringContaining("worker exec identity uncertain") },
+    });
+    preserve(directory, ["prehello-failure.json"]);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed hello write is terminal and does not retry", async () => {
+  const exec = parse(`node ${linuxEntry}`);
+  const { harness, sends } = startupHarness(exec, [exec]);
+  harness.send = () => {
+    sends.push(hello);
+    throw Error("controlled hello write failure");
+  };
+  await expect(startWorkerPipe(harness, hello)).rejects.toThrow("controlled hello write failure");
+  expect(sends).toEqual([hello]);
+  expect(harness.startupState).toBe("failed");
+  expect(harness.startupFailure.message).toBe("controlled hello write failure");
 });
 
 test("pending startup reaches fixed deadline without hello or signal", async () => {
