@@ -14,7 +14,7 @@ const run = { ...ids, runId: "run-1" };
 const connection = { connectionId: "connection-1", generation: 1 };
 const geometry = { cols: 80, rows: 24 };
 
-function bootstrap(terminal = false) {
+function bootstrap(terminal = false, budgets = {}) {
   return {
     type: "cove-bootstrap-result",
     bootstrapVersion: 1,
@@ -24,7 +24,7 @@ function bootstrap(terminal = false) {
     capabilities: [...M0_CAPABILITIES],
     profile: PROFILE,
     encoding: BASELINE_ENCODING,
-    effectiveBudgets: { ...M0_LIMITS },
+    effectiveBudgets: { ...M0_LIMITS, ...budgets },
     ...(terminal ? { connection } : {}),
   };
 }
@@ -71,7 +71,7 @@ function clock() {
   };
 }
 
-function view({ chunkGate } = {}) {
+function view({ chunkGate, eventGate } = {}) {
   const facts = [];
   const listeners = new Set();
   const terminalView = {
@@ -90,6 +90,7 @@ function view({ chunkGate } = {}) {
     },
     applyEvent: async (event, payload) => {
       facts.push(["event", event.seq, [...payload]]);
+      if (eventGate) await eventGate.promise;
     },
     measureGrid: () => geometry,
     setAppearance: () => {},
@@ -117,7 +118,7 @@ async function settle() {
   for (let index = 0; index < 15; index++) await Promise.resolve();
 }
 
-async function harness(onCommand = () => {}, schedulerOverride) {
+async function harness(onCommand = () => {}, schedulerOverride, budgets = {}) {
   let callbacks;
   let request = 0;
   const commands = [];
@@ -137,7 +138,7 @@ async function harness(onCommand = () => {}, schedulerOverride) {
         cb.onResponse({
           status: 200,
           headers: {},
-          body: encoder.encode(JSON.stringify(bootstrap())),
+          body: encoder.encode(JSON.stringify(bootstrap(false, budgets))),
         }),
       );
       return { cancel: () => "not-sent" };
@@ -149,7 +150,7 @@ async function harness(onCommand = () => {}, schedulerOverride) {
       cb.onOpen({
         send(message) {
           if (typeof message === "string")
-            cb.onText(encoder.encode(JSON.stringify(bootstrap(true))));
+            cb.onText(encoder.encode(JSON.stringify(bootstrap(true, budgets))));
           else {
             const command = readCommand(message);
             commands.push(command);
@@ -242,6 +243,32 @@ function baseline(peer, ref) {
   });
 }
 
+async function baselineStepped(peer, ref) {
+  const data = descriptor(ref);
+  peer.emit(3, { type: "baseline-start", run, descriptor: data });
+  await settle();
+  for (const [ordinal, bytes] of [
+    [0, new Uint8Array([27, 91, 72])],
+    [1, new Uint8Array([27, 91])],
+  ]) {
+    peer.emit(
+      3,
+      { type: "baseline-chunk", run, subscription: ref, baselineId: data.baselineId, ordinal },
+      bytes,
+    );
+    await settle();
+  }
+  peer.emit(3, {
+    type: "baseline-end",
+    run,
+    subscription: ref,
+    baselineId: data.baselineId,
+    chunkCount: 2,
+    totalBytes: 5,
+    atSeq: 3,
+  });
+}
+
 function reply(command, peer, ref, mode = "baseline", atSeq = 3) {
   peer.emit(2, {
     type: `${command.type}-result`,
@@ -274,6 +301,181 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("charges a held parse and the next frame against one connection ingress cap", async () => {
+    const gate = deferred();
+    const first = view({ eventGate: gate });
+    const second = view();
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription(command.viewId));
+        else settleControl(command, peer);
+      },
+      undefined,
+      { outboundConnectionBytes: 327_680 },
+    );
+    const a = client.openTerminal({
+      run,
+      viewId: "a",
+      view: first.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const b = client.openTerminal({
+      run,
+      viewId: "b",
+      view: second.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const ap = a.attach();
+    const bp = b.attach();
+    baseline(peer, subscription("a"));
+    baseline(peer, subscription("b"));
+    expect((await ap).ok).toBe(true);
+    expect((await bp).ok).toBe(true);
+    const event = (viewId) => ({
+      type: "run-event",
+      subscription: subscription(viewId),
+      event: { type: "output", run, seq: 4 },
+    });
+    peer.emit(3, event("a"), new Uint8Array(65_000));
+    await settle();
+    expect(a.snapshot().activeParseBytes).toBeGreaterThan(65_000);
+    peer.emit(3, event("b"), new Uint8Array(65_000));
+    await settle();
+    expect(second.facts.filter((fact) => fact[0] === "event")).toHaveLength(0);
+    expect(b.snapshot().phase).toBe("unavailable");
+    expect(client.snapshot().status).toBe("connected");
+    gate.resolve();
+    await settle();
+    expect(a.snapshot().activeParseBytes).toBe(0);
+    a.dispose();
+    b.dispose();
+    client.dispose();
+  });
+
+  test("counts active parse items with queued items before admitting post-N events", async () => {
+    const gate = deferred();
+    const rendered = view({ eventGate: gate });
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription("view-1"));
+        else settleControl(command, peer);
+      },
+      undefined,
+      { postNEvents: 2 },
+    );
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    await baselineStepped(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    for (const seq of [4, 5, 6])
+      peer.emit(
+        3,
+        {
+          type: "run-event",
+          subscription: subscription("view-1"),
+          event: { type: "output", run, seq },
+        },
+        new Uint8Array([seq]),
+      );
+    await settle();
+    expect(rendered.facts.filter((fact) => fact[0] === "event").map((fact) => fact[1])).toEqual([
+      4,
+    ]);
+    expect(controller.snapshot().phase).toBe("unavailable");
+    expect(controller.snapshot().activeParseBytes).toBeGreaterThan(0);
+    gate.resolve();
+    await settle();
+    expect(controller.snapshot().activeParseBytes).toBe(0);
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("keeps retired parse debt until settlement and admits a fitting healthy route", async () => {
+    const gate = deferred();
+    const first = view({ eventGate: gate });
+    const second = view();
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription(command.viewId));
+        else settleControl(command, peer);
+      },
+      undefined,
+      { outboundConnectionBytes: 327_680 },
+    );
+    const a = client.openTerminal({
+      run,
+      viewId: "a",
+      view: first.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const ap = a.attach();
+    baseline(peer, subscription("a"));
+    expect((await ap).ok).toBe(true);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("a"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array(65_000),
+    );
+    await settle();
+    a.dispose();
+    const b = client.openTerminal({
+      run,
+      viewId: "b",
+      view: second.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const bp = b.attach();
+    baseline(peer, subscription("b"));
+    expect((await bp).ok).toBe(true);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("b"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array(65_000),
+    );
+    await settle();
+    expect(second.facts.filter((fact) => fact[0] === "event")).toHaveLength(0);
+    gate.resolve();
+    await settle();
+    expect(a.snapshot().activeParseBytes).toBe(0);
+    const c = client.openTerminal({
+      run,
+      viewId: "c",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const cp = c.attach();
+    baseline(peer, subscription("c"));
+    expect((await cp).ok).toBe(true);
+    const smaller = new Uint8Array(32_000);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("c"),
+        event: { type: "output", run, seq: 4 },
+      },
+      smaller,
+    );
+    await settle();
+    expect(c.snapshot().appliedSeq).toBe(4);
+    b.dispose();
+    c.dispose();
+    client.dispose();
+  });
+
   test("waits for parse before progress and final ACK, preserving VT bytes", async () => {
     const gate = deferred();
     const rendered = view({ chunkGate: gate });

@@ -92,6 +92,7 @@ export class RoutedTerminalController implements TerminalController {
   private readonly queue: QueuedEvent[] = [];
   private queuedBytes = 0;
   private activeBytes = 0;
+  private activeItems = 0;
   private drainToken = 0;
   private drainingToken = -1;
   private ackInFlight = false;
@@ -321,14 +322,26 @@ export class RoutedTerminalController implements TerminalController {
     if (!binding) return;
     const charge = bytes.byteLength + JSON.stringify(event).length * 3;
     if (
-      this.queue.length >= binding.effectiveBudgets.postNEvents ||
+      this.queue.length + this.activeItems >= binding.effectiveBudgets.postNEvents ||
       this.queuedBytes + this.activeBytes + charge >
         binding.effectiveBudgets.subscriptionCreditBytes
     ) {
       this.fail(localError("capacity"));
       return;
     }
-    this.queue.push({ event, payload: new Uint8Array(bytes), charge, token: this.token });
+    if (!this.host.lane.reserveIngress(charge)) {
+      this.fail(localError("capacity"));
+      return;
+    }
+    let payload: Uint8Array;
+    try {
+      payload = new Uint8Array(bytes);
+    } catch {
+      this.host.lane.releaseIngress(charge);
+      this.fail(localError("capacity"));
+      return;
+    }
+    this.queue.push({ event, payload, charge, token: this.token });
     this.queuedBytes += charge;
     this.drain();
   }
@@ -445,12 +458,15 @@ export class RoutedTerminalController implements TerminalController {
         const item = this.queue.shift()!;
         this.queuedBytes -= item.charge;
         this.activeBytes += item.charge;
+        this.activeItems++;
         try {
           await this.apply(item);
         } catch {
           if (item.token === this.token) this.fail(localError("invalid-state"), item.token);
         } finally {
           this.activeBytes -= item.charge;
+          this.activeItems--;
+          this.host.lane.releaseIngress(item.charge);
         }
         frames++;
         bytes += item.charge;
@@ -743,6 +759,7 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   private clearQueued(): void {
+    for (const item of this.queue) this.host.lane.releaseIngress(item.charge);
     this.queue.length = 0;
     this.queuedBytes = 0;
   }

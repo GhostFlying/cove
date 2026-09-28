@@ -5,6 +5,7 @@ import {
   createTerminalDecoder,
   encodeTerminalFrame,
   externalEventSubscription,
+  MAX_METADATA_BYTES,
   validateTerminalFrame,
   validateTerminalResultForCommand,
   type ExternalTerminalEvent,
@@ -66,6 +67,7 @@ export class TerminalLane {
   private readonly outbound: PendingCommand[] = [];
   private flushing = false;
   private retainedOutboundBytes = 0;
+  private retainedIngressBytes = 0;
   private requestSequence = 0;
 
   constructor(
@@ -190,6 +192,25 @@ export class TerminalLane {
     }
   }
 
+  // Leases survive lane closure while retired view calls still retain their payloads.
+  reserveIngress(bytes: number): boolean {
+    const cap = this.owner.binding()?.effectiveBudgets.outboundConnectionBytes;
+    if (
+      !cap ||
+      !Number.isSafeInteger(bytes) ||
+      bytes < 0 ||
+      this.retainedIngressBytes + bytes > cap
+    )
+      return false;
+    this.retainedIngressBytes += bytes;
+    return true;
+  }
+
+  releaseIngress(bytes: number): void {
+    this.retainedIngressBytes -= bytes;
+    if (this.retainedIngressBytes < 0) throw new Error("ingress lease underflow");
+  }
+
   receive(message: Uint8Array, connection: ConnectionRef): void {
     const binding = this.owner.binding();
     if (
@@ -202,72 +223,83 @@ export class TerminalLane {
       this.owner.invalid();
       return;
     }
-    const decoder = createTerminalDecoder();
-    const read = decoder.read(message);
-    if (
-      read.status === "error" ||
-      read.consumedBytes !== message.byteLength ||
-      read.frames.length !== 1 ||
-      !decoder.finish().ok
-    ) {
+    // FrameDecoder temporarily owns a body and sliced metadata/payload beside input.
+    // This worst-case reservation precedes all decoder allocations and caller reentry.
+    const frameLease = message.byteLength * 3 + MAX_METADATA_BYTES * 3;
+    if (!this.reserveIngress(frameLease)) {
       this.owner.invalid();
       return;
     }
-    const frame = read.frames[0]!;
-    let metadata: unknown;
     try {
-      metadata = JSON.parse(this.codec.decodeFatal(frame.metadata));
-    } catch {
-      this.owner.invalid();
-      return;
-    }
-    const checked = validateTerminalFrame(frame, metadata, connection);
-    if (!checked.ok || frame.kind === 1) {
-      this.owner.invalid();
-      return;
-    }
-    const value = checked.value;
-    if (frame.kind === 3) {
-      const event = value as ExternalTerminalEvent;
-      const ref = externalEventSubscription(event);
-      if (!ref) return; // Preview belongs to the later P3d slice.
-      try {
-        this.routes.get(routeKey(ref))?.(event, frame.payload);
-      } catch {
-        this.owner.invalid();
-      }
-      return;
-    }
-    if (frame.kind !== 2 && frame.kind !== 4) {
-      this.owner.invalid();
-      return;
-    }
-    const reply = value as TerminalResult | TerminalError;
-    const pending = this.pending.get(reply.requestId);
-    if (!pending || pending.settled) return; // A retired command may finish late.
-    if (frame.kind === 4) {
-      const error = reply as TerminalError;
+      const decoder = createTerminalDecoder();
+      const read = decoder.read(message);
       if (
-        error.commandType !== pending.command.type ||
-        !sameRunRef(error.run, pending.command.run)
+        read.status === "error" ||
+        read.consumedBytes !== message.byteLength ||
+        read.frames.length !== 1 ||
+        !decoder.finish().ok
       ) {
         this.owner.invalid();
         return;
       }
-      this.finish(pending, {
-        ok: false,
-        error: error.error,
-        uncertain: error.error.acceptance === "unknown",
-      });
-      return;
+      const frame = read.frames[0]!;
+      let metadata: unknown;
+      try {
+        metadata = JSON.parse(this.codec.decodeFatal(frame.metadata));
+      } catch {
+        this.owner.invalid();
+        return;
+      }
+      const checked = validateTerminalFrame(frame, metadata, connection);
+      if (!checked.ok || frame.kind === 1) {
+        this.owner.invalid();
+        return;
+      }
+      const value = checked.value;
+      if (frame.kind === 3) {
+        const event = value as ExternalTerminalEvent;
+        const ref = externalEventSubscription(event);
+        if (!ref) return; // Preview belongs to the later P3d slice.
+        try {
+          this.routes.get(routeKey(ref))?.(event, frame.payload);
+        } catch {
+          this.owner.invalid();
+        }
+        return;
+      }
+      if (frame.kind !== 2 && frame.kind !== 4) {
+        this.owner.invalid();
+        return;
+      }
+      const reply = value as TerminalResult | TerminalError;
+      const pending = this.pending.get(reply.requestId);
+      if (!pending || pending.settled) return; // A retired command may finish late.
+      if (frame.kind === 4) {
+        const error = reply as TerminalError;
+        if (
+          error.commandType !== pending.command.type ||
+          !sameRunRef(error.run, pending.command.run)
+        ) {
+          this.owner.invalid();
+          return;
+        }
+        this.finish(pending, {
+          ok: false,
+          error: error.error,
+          uncertain: error.error.acceptance === "unknown",
+        });
+        return;
+      }
+      const result = reply as TerminalResult;
+      if (!validateTerminalResultForCommand(pending.command, result)) {
+        this.owner.invalid();
+        return;
+      }
+      this.notifyHandoff(pending);
+      this.finish(pending, { ok: true, result });
+    } finally {
+      this.releaseIngress(frameLease);
     }
-    const result = reply as TerminalResult;
-    if (!validateTerminalResultForCommand(pending.command, result)) {
-      this.owner.invalid();
-      return;
-    }
-    this.notifyHandoff(pending);
-    this.finish(pending, { ok: true, result });
   }
 
   close(reason: LocalErrorReason): void {
