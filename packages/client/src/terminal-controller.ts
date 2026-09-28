@@ -44,6 +44,7 @@ interface Operation {
   atSeq?: number;
   readonly priorParses: readonly Promise<void>[];
   markerAttempted: boolean;
+  attachDisposition?: "not-accepted" | "accepted" | "unknown";
 }
 
 interface QueuedEvent {
@@ -226,8 +227,7 @@ export class RoutedTerminalController implements TerminalController {
   async detach(): Promise<TerminalOutcome> {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     const ref = this.ref;
-    const unknownAttach =
-      this.operation?.kind === "attach" && this.operation.markerAttempted && !ref;
+    const unknownAttach = this.mayHaveUnidentifiedAttach();
     this.retire(localError("invalid-state"));
     if (unknownAttach) this.host.retireConnection();
     if (!ref || !this.host.binding()) return { ok: true, value: undefined };
@@ -292,8 +292,7 @@ export class RoutedTerminalController implements TerminalController {
   dispose(): void {
     if (this.phase === "disposed") return;
     const ref = this.ref;
-    const unknownAttach =
-      this.operation?.kind === "attach" && this.operation.markerAttempted && !this.ref;
+    const unknownAttach = this.mayHaveUnidentifiedAttach();
     this.retire(localError("disposed"));
     this.phase = "disposed";
     safeDispose(this.listener);
@@ -425,9 +424,17 @@ export class RoutedTerminalController implements TerminalController {
       handled = true;
       if (this.operation !== operation || operation.settled) return;
       if (!outcome.ok) {
+        if (operation.kind === "attach")
+          operation.attachDisposition =
+            "acceptance" in outcome.error
+              ? outcome.error.acceptance
+              : outcome.uncertain
+                ? "unknown"
+                : "not-accepted";
         this.fail(outcome.error, operation.token);
         return;
       }
+      if (operation.kind === "attach") operation.attachDisposition = "accepted";
       const result = outcome.result;
       if (
         (command.type === "attach" && result.type !== "attach-result") ||
@@ -741,8 +748,7 @@ export class RoutedTerminalController implements TerminalController {
   private fail(error: ClientError | DomainError, token = this.token): void {
     if (token !== this.token || this.phase === "disposed") return;
     const ref = this.ref;
-    const unknownAttach =
-      this.operation?.kind === "attach" && this.operation.markerAttempted && !this.ref;
+    const unknownAttach = this.mayHaveUnidentifiedAttach();
     this.retire(error);
     this.phase = "unavailable";
     this.publish();
@@ -762,6 +768,16 @@ export class RoutedTerminalController implements TerminalController {
       .then((outcome) => {
         if (!outcome.ok && this.currentConnection(ref)) this.host.retireConnection();
       });
+  }
+
+  private mayHaveUnidentifiedAttach(): boolean {
+    const operation = this.operation;
+    return (
+      operation?.kind === "attach" &&
+      operation.markerAttempted &&
+      operation.attachDisposition !== "not-accepted" &&
+      !this.ref
+    );
   }
 
   private currentConnection(ref: SubscriptionRef): boolean {

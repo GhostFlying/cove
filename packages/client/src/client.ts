@@ -369,6 +369,7 @@ class CoveClient implements Client {
   private requestSequence = 0;
   private peakPendingRpcCount = 0;
   private suppressRpcState = false;
+  private retiringConnection = false;
   private readonly terminalLane: TerminalLane;
   private readonly controllers = new Set<RoutedTerminalController>();
 
@@ -397,6 +398,8 @@ class CoveClient implements Client {
   connect(): Promise<ConnectOutcome> {
     if (this.status === "disposed")
       return Promise.resolve({ ok: false, error: localError("disposed") });
+    if (this.retiringConnection)
+      return Promise.resolve({ ok: false, error: localError("invalid-state") });
     if (!this.optionsValid)
       return Promise.resolve({ ok: false, error: localError("invalid-options") });
     if (this.attempt) return this.attempt.promise;
@@ -410,16 +413,24 @@ class CoveClient implements Client {
   reconnect(): Promise<ConnectOutcome> {
     if (this.status === "disposed")
       return Promise.resolve({ ok: false, error: localError("disposed") });
+    if (this.retiringConnection)
+      return Promise.resolve({ ok: false, error: localError("invalid-state") });
     if (!this.optionsValid)
       return Promise.resolve({ ok: false, error: localError("invalid-options") });
     this.fenceConnection("invalid-state");
-    this.status = "idle";
-    this.lastError = undefined;
-    this.emitState();
-    if (this.status !== "idle")
+    const statusAfterFence = this.snapshot().status;
+    if (statusAfterFence !== "idle")
       return Promise.resolve({
         ok: false,
-        error: localError(this.status === "disposed" ? "disposed" : "invalid-state"),
+        error: localError(statusAfterFence === "disposed" ? "disposed" : "invalid-state"),
+      });
+    this.lastError = undefined;
+    this.emitState();
+    const statusAfterPublish = this.snapshot().status;
+    if (statusAfterPublish !== "idle")
+      return Promise.resolve({
+        ok: false,
+        error: localError(statusAfterPublish === "disposed" ? "disposed" : "invalid-state"),
       });
     return this.beginConnect();
   }
@@ -876,50 +887,69 @@ class CoveClient implements Client {
 
   private loseConnectedAttempt(attempt: ConnectAttempt, error: ClientError): void {
     if (!this.currentAttempt(attempt) || !attempt.committed) return;
-    for (const controller of [...this.controllers]) controller.connectionLost();
-    this.terminalLane.close("transport");
+    this.retiringConnection = true;
+    const controllers = [...this.controllers];
     attempt.fenced = true;
     this.connectedAttempt = undefined;
     this.connection = undefined;
     this.status = error.category === "local" ? "unverifiable" : "incompatible";
     this.lastError = error;
-    safeCancel(attempt.terminalCancellation);
-    safeClose(attempt.terminalConnection);
-    this.suppressRpcState = true;
-    this.cancelPendingRpcs("transport");
-    this.suppressRpcState = false;
-    this.emitState();
+    try {
+      for (const controller of controllers) controller.connectionLost();
+      this.terminalLane.close("transport");
+      safeCancel(attempt.terminalCancellation);
+      safeClose(attempt.terminalConnection);
+      this.suppressRpcState = true;
+      try {
+        this.cancelPendingRpcs("transport");
+      } finally {
+        this.suppressRpcState = false;
+      }
+      this.emitState();
+    } finally {
+      this.retiringConnection = false;
+    }
   }
 
   private fenceConnection(reason: LocalErrorReason): void {
-    for (const controller of [...this.controllers]) controller.connectionLost();
-    this.terminalLane.close(reason);
+    if (this.retiringConnection) return;
+    this.retiringConnection = true;
+    const controllers = [...this.controllers];
+    const attempt = this.attempt;
+    const connected = this.connectedAttempt;
     const nextGeneration = nextCounter(this.generation);
     if (nextGeneration !== null) this.generation = nextGeneration;
-    const attempt = this.attempt;
-    if (attempt && !attempt.finished) {
-      const error = localError(reason);
-      attempt.finished = true;
-      attempt.fenced = true;
-      safeDispose(attempt.timer);
-      safeCancel(attempt.httpCancellation);
-      safeCancel(attempt.terminalCancellation);
-      safeClose(attempt.terminalConnection);
-      attempt.resolve(Object.freeze({ ok: false, error }));
-    }
+    if (attempt) attempt.fenced = true;
+    if (connected) connected.fenced = true;
     this.attempt = undefined;
-    const connected = this.connectedAttempt;
-    if (connected) {
-      connected.fenced = true;
-      safeCancel(connected.terminalCancellation);
-      safeClose(connected.terminalConnection);
-    }
     this.connectedAttempt = undefined;
     this.connection = undefined;
     this.status = reason === "disposed" ? "disposed" : "idle";
-    this.suppressRpcState = true;
-    this.cancelPendingRpcs(reason);
-    this.suppressRpcState = false;
+    try {
+      for (const controller of controllers) controller.connectionLost();
+      this.terminalLane.close(reason);
+      if (attempt && !attempt.finished) {
+        const error = localError(reason);
+        attempt.finished = true;
+        safeDispose(attempt.timer);
+        safeCancel(attempt.httpCancellation);
+        safeCancel(attempt.terminalCancellation);
+        safeClose(attempt.terminalConnection);
+        attempt.resolve(Object.freeze({ ok: false, error }));
+      }
+      if (connected) {
+        safeCancel(connected.terminalCancellation);
+        safeClose(connected.terminalConnection);
+      }
+      this.suppressRpcState = true;
+      try {
+        this.cancelPendingRpcs(reason);
+      } finally {
+        this.suppressRpcState = false;
+      }
+    } finally {
+      this.retiringConnection = false;
+    }
   }
 
   private currentAttempt(attempt: ConnectAttempt): boolean {
