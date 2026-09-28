@@ -1,6 +1,14 @@
 import { expect, test, beforeAll, afterAll } from "vitest";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_APPEARANCE } from "../../../packages/protocol/dist/profile.js";
@@ -20,6 +28,7 @@ import {
   stopVerified,
   subscription,
   until,
+  verifyWorkerIdentity,
   workerExecIdentity,
 } from "./pipe-harness.mjs";
 
@@ -32,10 +41,10 @@ afterAll(() => delivery?.cleanup());
 async function withWorker(label, body) {
   const temp = mkdtempSync(join(tmpdir(), `cove-qual-${label}-`));
   const nonce = `${label}-${process.pid}-${Date.now()}`;
-  const h = childPipe(delivery.bin, nonce);
   const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
   const evidencePath = evidenceRoot ? join(evidenceRoot, nonce) : undefined;
   if (evidencePath) mkdirSync(evidencePath, { recursive: true });
+  let h;
   let start;
   let startIdentity;
   let execIdentity;
@@ -53,22 +62,25 @@ async function withWorker(label, body) {
       JSON.stringify(
         {
           nonce,
-          workerPid: h.child.pid,
-          workerInitialIdentity: h.identity,
+          workerPid: h?.child.pid ?? null,
+          workerInitialIdentity: h?.identity ?? null,
+          workerInitialObservation: h?.initialObservation ?? null,
+          workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
           workerExecIdentity: execIdentity ?? null,
-          workerCurrentIdentity: psIdentity(h.child.pid),
-          workerExitCode: h.child.exitCode,
-          workerSignalCode: h.child.signalCode,
+          workerCurrentIdentity: h?.child.pid ? psIdentity(h.child.pid) : null,
+          workerExitCode: h?.child.exitCode ?? null,
+          workerSignalCode: h?.child.signalCode ?? null,
           ptyStart: start ?? null,
           ptyStartIdentity: startIdentity ?? null,
           ptyCurrentIdentity: start ? psIdentity(start.pid) : null,
-          returnedFrames: h.frames.map(({ metadata, payload, kind }) => ({
+          returnedFrames: (h?.frames ?? []).map(({ metadata, payload, kind }) => ({
             metadata,
             payloadHex: payload.toString("hex"),
             kind,
           })),
-          stdoutChunkSizes: h.rawSizes,
-          stderrHex: Buffer.concat(h.stderr).toString("hex"),
+          stdoutChunkSizes: h?.rawSizes ?? [],
+          stderrHex: Buffer.concat(h?.stderr ?? []).toString("hex"),
+          failure: primary && { name: primary.name, message: primary.message },
         },
         null,
         2,
@@ -76,6 +88,8 @@ async function withWorker(label, body) {
     );
   };
   try {
+    h = childPipe(delivery.bin, nonce, { evidencePath });
+    verifyWorkerIdentity(h);
     h.send(hello);
     expect((await h.wait((m) => m.type === "ready", "ready")).metadata.pipeVersion).toBe(2);
     execIdentity = workerExecIdentity(h);
@@ -101,7 +115,7 @@ async function withWorker(label, body) {
       cleanupErrors.push(error);
     }
     try {
-      await stopVerified(h);
+      if (h) await stopVerified(h);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -334,7 +348,14 @@ test("compiled public main disposes an owned PTY after its parent process disapp
   const cleanupErrors = [];
   const preserve = (stage) => {
     if (!evidencePath) return;
-    for (const name of ["start.json", "launch.json", "launcher-failure.json"]) {
+    for (const name of [
+      "start.json",
+      "launch.json",
+      "launcher-failure.json",
+      "acquired.json",
+      "launcher-before-cleanup.json",
+      "launcher-after-cleanup.json",
+    ]) {
       const source = join(temp, name);
       if (existsSync(source)) copyFileSync(source, join(evidencePath, name));
     }
@@ -346,10 +367,14 @@ test("compiled public main disposes an owned PTY after its parent process disapp
           launcherPid: launcher.pid,
           launcherExitCode: launcher.exitCode,
           launcherStderrHex: Buffer.concat(launcherStderr).toString("hex"),
+          launcherFailure: existsSync(join(temp, "launcher-failure.json"))
+            ? JSON.parse(readFileSync(join(temp, "launcher-failure.json"), "utf8"))
+            : null,
           workerPid: launch?.workerPid ?? null,
           workerCurrentIdentity: launch ? psIdentity(launch.workerPid) : null,
           ptyPid: launch?.ptyStart.pid ?? null,
           ptyCurrentIdentity: launch ? psIdentity(launch.ptyStart.pid) : null,
+          failure: primary && { name: primary.name, message: primary.message },
         },
         null,
         2,
@@ -376,6 +401,8 @@ test("compiled public main disposes an owned PTY after its parent process disapp
     launch = await receipt(join(temp, "launch.json"), "orphan launch receipt");
     expect(launch.nonce).toBe(nonce);
     expect(launch.ptyStart.nonce).toBe(nonce);
+    expect(launch.workerExecIdentity).toContain("/packages/terminal-worker/dist/src/main.js");
+    expect(launch.ptyIdentity).toContain(nonce);
     preserve("parent-exited");
     expect(await until(() => !psIdentity(launch.workerPid), 8000, "orphan worker exit")).toBe(true);
     expect(await until(() => !psIdentity(launch.ptyStart.pid), 8000, "orphan PTY exit")).toBe(true);
