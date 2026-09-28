@@ -337,6 +337,101 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("fatal failure during listener registration cannot initialize a renderer", async () => {
+    const rendered = view();
+    let disposed = 0;
+    rendered.terminalView.onFailure = (listener) => {
+      listener(domainError("RECOVERY_UNAVAILABLE"));
+      return {
+        dispose() {
+          disposed++;
+        },
+      };
+    };
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const pending = controller.attach();
+    peer.emit(3, { type: "baseline-start", run, descriptor: descriptor(subscription("view-1")) });
+    expect((await pending).ok).toBe(false);
+    await settle();
+    expect(disposed).toBe(1);
+    expect(
+      rendered.facts.filter((fact) => ["initialize", "begin", "chunk", "finish"].includes(fact[0])),
+    ).toEqual([]);
+    expect(
+      peer.commands.filter(
+        (command) => command.type === "applied-ack" || command.type === "baseline-progress",
+      ),
+    ).toEqual([]);
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("advisory failure during listener registration still permits baseline", async () => {
+    const rendered = view();
+    rendered.terminalView.onFailure = (listener) => {
+      listener(domainError("INPUT_REJECTED"));
+      return { dispose() {} };
+    };
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const pending = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await pending).ok).toBe(true);
+    expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(1);
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("old listener disposal reentry cannot register or initialize stale recovery", async () => {
+    const rendered = view();
+    let controller;
+    let retireOnDispose = false;
+    let disposals = 0;
+    rendered.terminalView.onFailure = () => ({
+      dispose() {
+        disposals++;
+        if (retireOnDispose) controller.dispose();
+      },
+    });
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else settleControl(command, peer);
+    });
+    controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const pending = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await pending).ok).toBe(true);
+    retireOnDispose = true;
+    const recovered = await controller.recover("expired");
+    expect(recovered.ok).toBe(false);
+    expect(controller.snapshot().phase).toBe("disposed");
+    expect(peer.commands.filter((command) => command.type === "recover")).toEqual([]);
+    expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(1);
+    expect(disposals).toBe(1);
+    client.dispose();
+  });
   test("consumes rejected and hostile observer thenables without waiting for them", async () => {
     const unhandled = [];
     const catchUnhandled = (reason) => unhandled.push(reason);

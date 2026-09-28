@@ -277,7 +277,7 @@ export class RoutedTerminalController implements TerminalController {
   async replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>> {
     if (this.phase === "disposed") return errorOutcome(localError("disposed"));
     void this.detach();
-    safeDispose(this.listener);
+    this.releaseListener();
     try {
       this.view.dispose();
     } catch {
@@ -330,8 +330,7 @@ export class RoutedTerminalController implements TerminalController {
     const ref = this.ref;
     this.retire(localError("disposed"));
     this.phase = "disposed";
-    safeDispose(this.listener);
-    this.listener = undefined;
+    this.releaseListener();
     try {
       this.view.dispose();
     } catch {
@@ -431,7 +430,8 @@ export class RoutedTerminalController implements TerminalController {
     this.operation = operation;
     if (kind === "recover") {
       try {
-        this.bindFailure(this.viewGeneration, token);
+        if (!this.bindFailure(this.viewGeneration, token))
+          this.fail(localError("invalid-state"), token);
       } catch {
         this.fail(localError("invalid-state"), token);
       }
@@ -584,8 +584,19 @@ export class RoutedTerminalController implements TerminalController {
       const generation = nextCounter(this.viewGeneration);
       if (generation === null) throw new Error("view generation");
       this.viewGeneration = generation;
-      this.bindFailure(generation, item.token);
-      await this.view.initialize({
+      const view = this.view;
+      const ref = this.ref;
+      if (!this.bindFailure(generation, item.token)) return;
+      if (
+        item.token !== this.token ||
+        this.viewGeneration !== generation ||
+        this.view !== view ||
+        this.ref !== ref ||
+        this.operation !== operation ||
+        this.phase !== "baseline"
+      )
+        return;
+      await view.initialize({
         profile: PROFILE,
         encoding: BASELINE_ENCODING,
         geometry: descriptor.captureGeometry,
@@ -593,7 +604,7 @@ export class RoutedTerminalController implements TerminalController {
         viewGeneration: generation,
       });
       if (item.token !== this.token) return;
-      await this.view.beginBaseline({
+      await view.beginBaseline({
         ...descriptor,
         run: Object.freeze({ ...descriptor.run }),
         subscription: identityCopy(descriptor.subscription),
@@ -828,8 +839,7 @@ export class RoutedTerminalController implements TerminalController {
     this.drainToken = this.token;
     this.clearQueued();
     // Keep activeBytes charged until an old parser actually settles.
-    safeDispose(this.listener);
-    this.listener = undefined;
+    this.releaseListener();
     const ref = this.ref;
     let remembered = true;
     if (ref) {
@@ -869,15 +879,42 @@ export class RoutedTerminalController implements TerminalController {
     work.finish();
   }
 
-  private bindFailure(generation: number, token: number): void {
-    safeDispose(this.listener);
+  private releaseListener(): void {
+    const listener = this.listener;
     this.listener = undefined;
-    const listener = this.view.onFailure((error) => {
-      if (generation !== this.viewGeneration || token !== this.token) return;
+    safeDispose(listener);
+  }
+
+  private bindFailure(generation: number, token: number): boolean {
+    const view = this.view;
+    const ref = this.ref;
+    const operation = this.operation;
+    const phase = this.phase;
+    const current = (): boolean =>
+      generation === this.viewGeneration &&
+      token === this.token &&
+      view === this.view &&
+      ref === this.ref &&
+      operation === this.operation &&
+      phase === this.phase;
+    this.releaseListener();
+    if (!current() || this.listener) return false;
+    const listener = view.onFailure((error) => {
+      if (
+        generation !== this.viewGeneration ||
+        token !== this.token ||
+        view !== this.view ||
+        ref !== this.ref
+      )
+        return;
       if (error.kind !== "INPUT_REJECTED") this.fail(error, token);
     });
-    if (token !== this.token) safeDispose(listener);
-    else this.listener = listener;
+    if (!current() || this.listener) {
+      safeDispose(listener);
+      return false;
+    }
+    this.listener = listener;
+    return true;
   }
 
   private publish(): void {
