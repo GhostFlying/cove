@@ -23,6 +23,7 @@ import {
   receipt,
   repo,
   run,
+  signalVerifiedWorkerExec,
   spawnCommand,
   stopPtyIfOwned,
   stopVerified,
@@ -67,6 +68,7 @@ async function withWorker(label, body) {
           workerInitialObservation: h?.initialObservation ?? null,
           workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
           workerExecIdentity: execIdentity ?? null,
+          workerSignalObservation: h?.signalObservation ?? null,
           workerCurrentIdentity: h?.child.pid ? psIdentity(h.child.pid) : null,
           workerExitCode: h?.child.exitCode ?? null,
           workerSignalCode: h?.child.signalCode ?? null,
@@ -276,8 +278,7 @@ test("compiled public main releases owned PTY on SIGTERM", async () => {
     h.send(spawn.metadata, spawn.payload);
     expect((await response(h, spawn.metadata)).metadata.outcome).toBe("accepted");
     const start = await startPty();
-    expect(psIdentity(h.child.pid)).toContain("/packages/terminal-worker/dist/src/main.js");
-    h.child.kill("SIGTERM");
+    signalVerifiedWorkerExec(h, "SIGTERM");
     expect(await h.exit).toEqual({ code: 0, signal: null });
     expect(await until(() => !psIdentity(start.pid), 8000, "PTY disposal on SIGTERM")).toBe(true);
   });
