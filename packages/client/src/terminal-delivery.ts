@@ -1,6 +1,12 @@
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError, type DomainError } from "@cove/protocol/errors";
-import { sameRunRef, type ConnectionRef, type SubscriptionRef } from "@cove/protocol/identity";
+import {
+  nextCounter,
+  sameRunRef,
+  sameSubscriptionRef,
+  type ConnectionRef,
+  type SubscriptionRef,
+} from "@cove/protocol/identity";
 import {
   createTerminalDecoder,
   encodeTerminalFrame,
@@ -27,7 +33,9 @@ interface PendingCommand {
   readonly resolve: (outcome: CommandOutcome) => void;
   readonly onHandoff: (() => void) | undefined;
   readonly onSettled: ((outcome: CommandOutcome) => void) | undefined;
+  readonly beforeSend: (() => boolean) | undefined;
   timer?: Disposable;
+  attempting: boolean;
   handedOff: boolean;
   handoffNotified: boolean;
   settled: boolean;
@@ -69,6 +77,7 @@ export class TerminalLane {
   private retainedOutboundBytes = 0;
   private retainedIngressBytes = 0;
   private requestSequence = 0;
+  private readonly focusSequences = new Map<string, number>();
 
   constructor(
     private readonly owner: TerminalLaneOwner,
@@ -92,11 +101,20 @@ export class TerminalLane {
     return `${supplied.slice(0, 128 - suffix.length)}${suffix}`;
   }
 
+  nextFocusSeq(ref: SubscriptionRef): number | null {
+    const { connection, viewId } = ref;
+    const key = JSON.stringify([connection.connectionId, connection.generation, viewId]);
+    const next = nextCounter(this.focusSequences.get(key) ?? 0);
+    if (next !== null) this.focusSequences.set(key, next);
+    return next;
+  }
+
   send(
     command: TerminalCommand,
     deadlineMs: number,
     onHandoff?: () => void,
     onSettled?: (outcome: CommandOutcome) => void,
+    beforeSend?: () => boolean,
   ): Promise<CommandOutcome> {
     const rejectBeforeSend = (reason: LocalErrorReason): Promise<CommandOutcome> => {
       const outcome: CommandOutcome = {
@@ -142,6 +160,8 @@ export class TerminalLane {
       resolve,
       onHandoff,
       onSettled,
+      beforeSend,
+      attempting: false,
       handedOff: false,
       handoffNotified: false,
       settled: false,
@@ -192,8 +212,27 @@ export class TerminalLane {
       const command = pending.command;
       if (
         (command.type === "applied-ack" || command.type === "baseline-progress") &&
+        !pending.attempting &&
         !pending.handedOff &&
         routeKey(command.subscription) === routeKey(ref)
+      )
+        this.finish(pending, {
+          ok: false,
+          error: localError("invalid-state"),
+          uncertain: false,
+        });
+    }
+  }
+
+  cancelUnsent(ref: SubscriptionRef, types: readonly TerminalCommand["type"][]): void {
+    for (const pending of this.pending.values()) {
+      const command = pending.command;
+      if (
+        "subscription" in command &&
+        sameSubscriptionRef(command.subscription, ref) &&
+        types.includes(command.type) &&
+        !pending.attempting &&
+        !pending.handedOff
       )
         this.finish(pending, {
           ok: false,
@@ -317,6 +356,7 @@ export class TerminalLane {
   close(reason: LocalErrorReason): void {
     this.routes.clear();
     this.retiredRefs.clear();
+    this.focusSequences.clear();
     for (const pending of [...this.pending.values()])
       this.finish(pending, { ok: false, error: localError(reason), uncertain: true });
     this.outbound.length = 0;
@@ -337,12 +377,29 @@ export class TerminalLane {
       while (this.outbound.length) {
         const pending = this.outbound.shift()!;
         if (pending.settled) continue;
+        if (pending.beforeSend) {
+          let eligible = false;
+          try {
+            eligible = pending.beforeSend();
+          } catch {
+            /* A failed authority check cannot authorize a handoff. */
+          }
+          if (!eligible) {
+            this.finish(pending, {
+              ok: false,
+              error: localError("invalid-state"),
+              uncertain: false,
+            });
+            continue;
+          }
+        }
         const socket = this.owner.socket();
         if (!socket) {
           this.finish(pending, { ok: false, error: localError("transport"), uncertain: true });
           continue;
         }
         let disposition: unknown;
+        pending.attempting = true;
         try {
           disposition = socket.send(pending.bytes);
         } catch {
