@@ -776,34 +776,43 @@ describe("client control authority", () => {
     expect(unknown.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
   });
 
-  test.each(["unknown", "throw"])(
-    "adapter %s on input directs inspect-run without resend",
-    async (mode) => {
-      const { controller, peer } = await harness({
-        onCommand: ({ command }) => {
-          if (command.type !== "input") return undefined;
-          if (mode === "throw") throw new Error("adapter uncertainty");
-          return "unknown";
-        },
-      });
-      await grant(controller, peer);
-      const notices = [];
-      controller.onInputOutcome((notice) => notices.push(notice));
-      const result = await controller.sendInput({
-        source: "keyboard",
-        bytes: new Uint8Array([1, 2, 3]),
-      });
-      expect(result).toMatchObject({
-        ok: false,
-        value: { writtenBytes: 0, unknownBytes: 3, notSentBytes: 0 },
-      });
-      expect(result.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
-      expect("operationId" in result.error).toBe(false);
-      expect(notices).toHaveLength(1);
-      expect(notices[0].outcome).toEqual(result);
-      expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
-    },
-  );
+  async function checkAdapterUncertainty(mode) {
+    const { controller, peer } = await harness({
+      onCommand: ({ command }) => {
+        if (command.type !== "input") return undefined;
+        if (mode === "throw") throw new Error("adapter uncertainty");
+        return "unknown";
+      },
+    });
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) => notices.push(notice));
+    const result = await controller.sendInput({
+      source: "keyboard",
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      value: { writtenBytes: 0, unknownBytes: 3, notSentBytes: 0 },
+    });
+    expect("operationId" in result.error).toBe(false);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].outcome).toEqual(result);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+    return result;
+  }
+
+  test("adapter unknown on input directs inspect-run without resend", async () => {
+    expect((await checkAdapterUncertainty("unknown")).error).toEqual(
+      domainError("RESULT_UNKNOWN", "unknown", "input"),
+    );
+  });
+
+  test("adapter throw on input directs inspect-run without resend", async () => {
+    expect((await checkAdapterUncertainty("throw")).error).toEqual(
+      domainError("RESULT_UNKNOWN", "unknown", "input"),
+    );
+  });
 
   test("prehandoff input timeout stays definite while noninput unknown stays generic", async () => {
     const scheduler = clock();
