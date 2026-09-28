@@ -731,7 +731,7 @@ export class RoutedTerminalController implements TerminalController {
         written += length;
         if (length < chunk.byteLength) {
           unknown += chunk.byteLength - length;
-          return reject(domainError("RESULT_UNKNOWN", "unknown"), written, unknown);
+          return reject(domainError("RESULT_UNKNOWN", "unknown", "input"), written, unknown);
         }
       }
       return { ok: true, value: inputReceipt(source, total, inputId, written) };
