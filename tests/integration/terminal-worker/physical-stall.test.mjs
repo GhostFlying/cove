@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { WriteStream } from "node:fs";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,31 +20,66 @@ import {
 } from "./pipe-harness.mjs";
 
 test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", async () => {
-  const requestCount = 320;
   const delivery = installedBin();
   const publicFile = join(delivery.consumerRoot, "physical-stall-public.mjs");
   writeFileSync(publicFile, 'export { runWorkerPipe } from "@cove/terminal-worker/pipe";\n');
   const { runWorkerPipe } = await import(pathToFileURL(publicFile).href);
-  const temp = mkdtempSync(join(tmpdir(), "cove-qual-os-pipe-"));
-  const nonce = `os-pipe-${process.pid}-${Date.now()}`;
+  const temp = mkdtempSync(join(tmpdir(), "cove-qual-os-fifo-"));
+  const nonce = `os-fifo-${process.pid}-${Date.now()}`;
+  const fifoPath = join(temp, "reader.fifo");
   const receiptPath = join(temp, "drain.json");
   const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
   const evidencePath = evidenceRoot ? join(evidenceRoot, nonce) : undefined;
   if (evidencePath) mkdirSync(evidencePath, { recursive: true });
-  const reader = spawn(
-    process.execPath,
-    [new URL("./fixtures/stalled-pipe-reader.mjs", import.meta.url).pathname, nonce, receiptPath],
-    { stdio: ["pipe", "ignore", "pipe", "ipc"] },
-  );
-  const stderr = [];
-  reader.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  let reader;
+  try {
+    execFileSync("/usr/bin/mkfifo", [fifoPath], { timeout: 5000 });
+    reader = spawn(
+      process.execPath,
+      [
+        new URL("./fixtures/fifo-reader.mjs", import.meta.url).pathname,
+        nonce,
+        fifoPath,
+        receiptPath,
+      ],
+      { stdio: ["ignore", "ignore", "pipe", "ipc"] },
+    );
+  } catch (error) {
+    rmSync(temp, { recursive: true, force: true });
+    delivery.cleanup();
+    throw error;
+  }
   const readerExit = new Promise((resolve) =>
     reader.once("exit", (code, signal) => resolve({ code, signal })),
   );
+  const stderr = [];
+  reader.stderr.on("data", (bytes) => stderr.push(Buffer.from(bytes)));
+  const writes = [];
   const ingress = new PassThrough();
+  let armed = false;
+  let pipe;
+  let firstFalse;
+  let resolveFalse;
+  const actualFalse = new Promise((resolve) => {
+    resolveFalse = resolve;
+  });
+  class ObservedFifoWriter extends WriteStream {
+    write(bytes, ...args) {
+      const accepted = super.write(bytes, ...args);
+      writes.push({ bytes: bytes.length, accepted, armed });
+      if (armed && !accepted) {
+        firstFalse ??= pipe.snapshot();
+        // Endpoint completion microtasks enqueue the next reply before OS drain can run.
+        queueMicrotask(() => queueMicrotask(() => resolveFalse(pipe.snapshot())));
+      }
+      return accepted;
+    }
+  }
+  const writer = new ObservedFifoWriter(fifoPath, { highWaterMark: 128 });
+  writer.on("drain", () => writes.push({ event: "drain", armed }));
   const pending = [];
   const target = run("physical-stall");
-  const pipe = runWorkerPipe(ingress, reader.stdin, {
+  pipe = runWorkerPipe(ingress, writer, {
     buildVersion: "physical-stall-qualification",
     createExecution: () => ({
       execute: async (request) => ({
@@ -64,7 +100,7 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
   });
   let initialIdentity;
   let held;
-  let firstWave;
+  let readySettled;
   let blocked;
   let stoppedDequeue;
   let drained;
@@ -83,15 +119,18 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
           initialIdentity,
           currentIdentity: psIdentity(reader.pid),
           held,
-          firstWave,
+          readySettled,
           blocked,
           stoppedDequeue,
+          firstFalse,
           drained,
+          writes,
           observedClose,
           childReceipt: childReceipt && { total: childReceipt.total, pid: childReceipt.pid },
           requests: pending.map((item) => item.requestId),
           pipe: pipe.snapshot(),
           stderr: Buffer.concat(stderr).toString("utf8"),
+          failure: primary && { name: primary.name, message: primary.message },
         },
         null,
         2,
@@ -101,75 +140,81 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
   try {
     held = await Promise.race([
       new Promise((resolve) => reader.once("message", resolve)),
-      new Promise((_, reject) => setTimeout(() => reject(Error("reader ready timeout")), 8000)),
+      new Promise((_, reject) => setTimeout(() => reject(Error("FIFO reader open timeout")), 8000)),
     ]);
     initialIdentity = psIdentity(reader.pid);
-    expect(held).toMatchObject({ nonce, pid: reader.pid, state: "held-open-unread" });
+    expect(held).toMatchObject({ nonce, pid: reader.pid, state: "fifo-open-unread" });
     expect(initialIdentity).toContain(nonce);
     ingress.write(encode(hello));
-    for (let index = 0; index < requestCount / 2; index++) {
-      const request = command("preview-refresh", target);
-      pending.push(request);
-      ingress.write(encode(request));
-    }
-    firstWave = await until(
+    readySettled = await until(
       () => {
         const snap = pipe.snapshot();
-        return snap.blocked || snap.state !== "ready" || snap.outstandingRequests <= 32
-          ? snap
-          : null;
+        return snap.state === "ready" && !snap.blocked && snap.transportBytes === 0 ? snap : null;
       },
       8000,
-      "first OS-pipe wave settles below reservation pressure",
+      "ready frame settled on OS FIFO",
     );
-    expect(firstWave.state).toBe("ready");
-    preserve("first-wave");
-    if (!firstWave.blocked)
-      for (let index = requestCount / 2; index < requestCount; index++) {
-        const request = command("preview-refresh", target);
-        pending.push(request);
-        ingress.write(encode(request));
-      }
-    blocked = await until(
-      () => {
-        const snap = pipe.snapshot();
-        return snap.blocked || snap.state !== "ready" ? snap : null;
-      },
-      8000,
-      "physical writer blocked with retained responses",
-    );
+    expect(writes.some((item) => item.accepted === false && item.armed === false)).toBe(true);
+    preserve("ready-settled");
+    armed = true;
+    const first = [command("preview-refresh", target), command("preview-refresh", target)];
+    pending.push(...first);
+    ingress.write(Buffer.concat(first.map((item) => encode(item))));
+    blocked = await Promise.race([
+      actualFalse,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(Error("real write(false) timeout")), 8000),
+      ),
+    ]);
+    stoppedDequeue = pipe.snapshot();
     expect(blocked.state).toBe("ready");
+    expect(blocked.blocked).toBe(true);
     expect(blocked.transportBytes).toBeGreaterThan(0);
-    expect(blocked.responseItems).toBeGreaterThan(0);
+    expect(blocked.transportBytes).toBe(firstFalse.transportBytes);
+    expect(blocked.queuedBytes).toBeGreaterThan(firstFalse.queuedBytes);
+    expect(blocked.responseItems).toBeGreaterThanOrEqual(2);
+    expect(writes.some((item) => item.armed && item.accepted === false)).toBe(true);
+    expect(stoppedDequeue.transportBytes).toBe(blocked.transportBytes);
+    expect(stoppedDequeue.queuedBytes).toBeGreaterThanOrEqual(blocked.queuedBytes);
+    expect(writes.at(-1)?.event).not.toBe("drain");
     expect(blocked.peakAccountedBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
     preserve("blocked-before-drain");
-    const deferred = command("preview-refresh", target);
-    pending.push(deferred);
-    ingress.write(encode(deferred));
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    stoppedDequeue = pipe.snapshot();
-    expect(stoppedDequeue.blocked).toBe(true);
-    expect(stoppedDequeue.transportBytes).toBe(blocked.transportBytes);
-    expect(stoppedDequeue.queuedBytes).toBeGreaterThan(blocked.queuedBytes);
-    preserve("stopped-dequeue");
     reader.send("drain");
+    for (let index = first.length; index < 320; index += 32) {
+      const batch = Array.from({ length: Math.min(32, 320 - index) }, () =>
+        command("preview-refresh", target),
+      );
+      pending.push(...batch);
+      ingress.write(Buffer.concat(batch.map((item) => encode(item))));
+      await until(
+        () => pipe.snapshot().outstandingRequests <= 32,
+        8000,
+        "bounded FIFO request batch",
+      );
+    }
     drained = await until(
       () => {
         const snap = pipe.snapshot();
-        return !snap.blocked && snap.outstandingRequests === 0 && snap.responseItems === 0
+        return !snap.blocked &&
+          snap.outstandingRequests === 0 &&
+          snap.responseItems === 0 &&
+          snap.transportBytes === 0 &&
+          snap.ordinaryAccountedBytes === 0
           ? snap
           : null;
       },
       8000,
-      "physical drain and response retirement",
+      "physical FIFO drain and response retirement",
     );
     const closed = await pipe.shutdown("physical-stall-complete");
-    expect(closed.disposalUnverifiable).toBe(false);
-    childReceipt = await receipt(receiptPath, "OS pipe reader drain receipt");
+    expect(closed).toMatchObject({ disposalUnverifiable: false, uncertainRequestIds: [] });
+    expect(await until(() => writer.closed, 5000, "OS FIFO writer close")).toBe(true);
+    childReceipt = await receipt(receiptPath, "same FIFO reader drain receipt");
     expect(childReceipt).toMatchObject({ nonce, pid: reader.pid });
     expect(await readerExit).toEqual({ code: 0, signal: null });
     const decoder = createPipeDecoder();
     const raw = Buffer.from(childReceipt.hex, "hex");
+    expect(raw.length).toBe(childReceipt.total);
     const replies = [];
     for (let offset = 0; offset < raw.length;) {
       const result = decoder.read(raw.subarray(offset));
@@ -196,12 +241,17 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
     }
     try {
       await pipe.shutdown("physical-stall-finally");
+      writer.destroy();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
       const current = psIdentity(reader.pid);
       if (current && current !== initialIdentity)
         cleanupErrors.push(Error(`reader identity drift: ${current}`));
       else if (current) {
         reader.kill("SIGTERM");
-        await until(() => !psIdentity(reader.pid), 5000, "owned reader exit");
+        await until(() => !psIdentity(reader.pid), 5000, "owned FIFO reader exit");
       }
     } catch (error) {
       cleanupErrors.push(error);
@@ -217,7 +267,7 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
   if (cleanupErrors.length)
     throw new AggregateError(
       [...(primary ? [primary] : []), ...cleanupErrors],
-      "OS pipe cleanup failed",
+      "OS FIFO cleanup failed",
     );
   if (primary) throw primary;
 });
