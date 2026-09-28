@@ -39,6 +39,7 @@ import type {
 import type { NegotiatedConnection } from "./connection-session.js";
 import { TerminalLane, type CommandOutcome } from "./terminal-delivery.js";
 import { TerminalControl } from "./terminal-control.js";
+import { completeTerminalView } from "./terminal-view-contract.js";
 import type { Disposable, Scheduler } from "./transport-ports.js";
 import type { TerminalView } from "@cove/protocol/view";
 
@@ -335,8 +336,24 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   async replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>> {
-    if (this.phase === "disposed") return errorOutcome(localError("disposed"));
+    if (this.snapshot().phase === "disposed") return errorOutcome(localError("disposed"));
     if (this.retiring) return errorOutcome(localError("invalid-state"));
+    const phase = this.phase;
+    const token = this.token;
+    const ref = this.ref;
+    const previousView = this.view;
+    const binding = this.host.binding();
+    if (!completeTerminalView(view)) return errorOutcome(localError("invalid-request"));
+    if (this.phase === "disposed") return errorOutcome(localError("disposed"));
+    if (
+      this.retiring ||
+      this.phase !== phase ||
+      this.token !== token ||
+      this.ref !== ref ||
+      this.view !== previousView ||
+      this.host.binding() !== binding
+    )
+      return errorOutcome(localError("invalid-state"));
     this.control.replaceView();
     void this.detach();
     if (this.snapshot().phase === "disposed") return errorOutcome(localError("disposed"));

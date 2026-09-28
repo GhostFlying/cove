@@ -50,6 +50,7 @@ function view(onApply) {
   const focusListeners = new Set();
   const inputListeners = new Set();
   const applied = [];
+  let disposed = 0;
   const terminalView = {
     initialize: async () => {},
     beginBaseline: async () => {},
@@ -71,13 +72,18 @@ function view(onApply) {
       return { dispose: () => focusListeners.delete(listener) };
     },
     onFailure: () => ({ dispose() {} }),
-    dispose: () => {},
+    dispose: () => {
+      disposed++;
+    },
   };
   return {
     terminalView,
     focus: (intent) => focusListeners.forEach((listener) => listener(intent)),
     input: (intent) => inputListeners.forEach((listener) => listener(intent)),
     applied,
+    get disposed() {
+      return disposed;
+    },
   };
 }
 
@@ -104,12 +110,16 @@ function clock() {
   };
 }
 
-async function harness({ budgets = {}, scheduler, onCommand, onApply } = {}) {
+async function harness({ budgets = {}, scheduler, onCommand, onApply, autoOpen = true } = {}) {
   const commands = [];
+  let currentRef = ref;
   let callbacks;
   let request = 0;
   const peer = {
     commands,
+    get currentRef() {
+      return currentRef;
+    },
     emit(kind, metadata, payload) {
       callbacks.onBinary(frame(kind, metadata, payload));
     },
@@ -118,18 +128,18 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply } = {}) {
         type: `${command.type}-result`,
         requestId: command.requestId,
         run,
-        subscription: ref,
+        subscription: currentRef,
         ...extra,
       });
     },
     event(event) {
-      this.emit(3, { type: "run-event", subscription: ref, event });
+      this.emit(3, { type: "run-event", subscription: currentRef, event });
     },
     baseline(atSeq = 0) {
       const descriptor = {
         baselineId: "baseline-1",
         run,
-        subscription: ref,
+        subscription: currentRef,
         profile: PROFILE,
         encoding: BASELINE_ENCODING,
         checkpointSeq: atSeq,
@@ -152,13 +162,19 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply } = {}) {
       this.emit(3, { type: "baseline-start", run, descriptor });
       this.emit(
         3,
-        { type: "baseline-chunk", run, subscription: ref, baselineId: "baseline-1", ordinal: 0 },
+        {
+          type: "baseline-chunk",
+          run,
+          subscription: currentRef,
+          baselineId: "baseline-1",
+          ordinal: 0,
+        },
         new Uint8Array([65]),
       );
       this.emit(3, {
         type: "baseline-end",
         run,
-        subscription: ref,
+        subscription: currentRef,
         baselineId: "baseline-1",
         chunkCount: 1,
         totalBytes: 1,
@@ -205,8 +221,14 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply } = {}) {
             const entry = decodeCommand(message);
             commands.push(entry);
             const { command } = entry;
+            if (
+              command.type === "attach" &&
+              commands.filter(({ command: item }) => item.type === "attach").length > 1
+            )
+              currentRef = { ...ref, subscriptionId: "subscription-2" };
             const disposition = onCommand?.(entry, peer);
-            if (command.type === "attach") peer.result(command, { mode: "baseline", atSeq: 0 });
+            if (command.type === "attach")
+              peer.result(command, { mode: "baseline", atSeq: currentRef === ref ? 0 : 1 });
             if (command.type === "applied-ack")
               peer.result(command, { appliedSeq: command.appliedSeq });
             if (command.type === "baseline-progress")
@@ -225,6 +247,7 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply } = {}) {
   });
   expect((await client.connect()).ok).toBe(true);
   const mounted = view(onApply);
+  if (!autoOpen) return { client, peer, mounted };
   const opened = client.openTerminal({
     run,
     viewId: ref.viewId,
@@ -259,6 +282,117 @@ async function grant(controller, peer) {
 }
 
 describe("client control authority", () => {
+  test("compiled public open rejects every incomplete view before reserving or sending", async () => {
+    const { client, peer, mounted } = await harness({ autoOpen: false });
+    const ports = [
+      "initialize",
+      "beginBaseline",
+      "writeBaselineChunk",
+      "finishBaseline",
+      "applyEvent",
+      "measureGrid",
+      "setAppearance",
+      "setVisibility",
+      "onInputIntent",
+      "onFocusIntent",
+      "onFailure",
+      "dispose",
+    ];
+    for (const port of ports) {
+      for (const absent of [true, false]) {
+        const candidate = { ...mounted.terminalView };
+        if (absent) delete candidate[port];
+        else candidate[port] = 7;
+        const opened = client.openTerminal({
+          run,
+          viewId: ref.viewId,
+          view: candidate,
+          initialAppearance: DEFAULT_APPEARANCE,
+        });
+        expect(opened).toMatchObject({
+          ok: false,
+          error: { category: "local", reason: "invalid-request" },
+        });
+        expect(peer.commands).toHaveLength(0);
+        expect(mounted.disposed).toBe(0);
+      }
+    }
+    const throwing = { ...mounted.terminalView };
+    Object.defineProperty(throwing, "onInputIntent", {
+      get() {
+        throw new Error("accessor");
+      },
+    });
+    expect(
+      client.openTerminal({
+        run,
+        viewId: ref.viewId,
+        view: throwing,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }),
+    ).toMatchObject({ ok: false, error: { category: "local", reason: "invalid-request" } });
+    expect(peer.commands).toHaveLength(0);
+    const valid = client.openTerminal({
+      run,
+      viewId: ref.viewId,
+      view: mounted.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    });
+    expect(valid.ok).toBe(true);
+    const attached = valid.value.attach();
+    peer.baseline();
+    await settle();
+    expect((await attached).ok).toBe(true);
+  });
+
+  test("invalid replacement preserves the granted old view; complete replacement fences it", async () => {
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const prior = controller.snapshot();
+    const commandCount = peer.commands.length;
+    const incomplete = { ...view().terminalView, onInputIntent: undefined };
+    const refused = await controller.replaceView(incomplete);
+    expect(refused).toMatchObject({
+      ok: false,
+      error: { category: "local", reason: "invalid-request" },
+    });
+    expect(controller.snapshot()).toEqual(prior);
+    expect(peer.commands).toHaveLength(commandCount);
+    expect(mounted.disposed).toBe(0);
+    const throwing = { ...view().terminalView };
+    Object.defineProperty(throwing, "onFocusIntent", {
+      get() {
+        throw new Error("accessor");
+      },
+    });
+    expect(await controller.replaceView(throwing)).toMatchObject({
+      ok: false,
+      error: { category: "local", reason: "invalid-request" },
+    });
+    expect(controller.snapshot()).toEqual(prior);
+    expect(peer.commands).toHaveLength(commandCount);
+    mounted.input({
+      viewGeneration: prior.viewGeneration,
+      source: "keyboard",
+      bytes: new Uint8Array([65]),
+    });
+    await settle();
+    const input = peer.commands.at(-1).command;
+    expect(input.type).toBe("input");
+    peer.result(input, { epoch: 1, inputSeq: input.inputSeq, status: "written", writtenBytes: 1 });
+    await settle();
+    const replacement = view();
+    const pending = controller.replaceView(replacement.terminalView);
+    peer.baseline(1);
+    await settle();
+    expect((await pending).ok).toBe(true);
+    expect(mounted.disposed).toBe(1);
+    const count = peer.commands.length;
+    mounted.focus({ viewGeneration: prior.viewGeneration, focusSeq: 2, focused: true, geometry });
+    expect(peer.commands).toHaveLength(count);
+    expect(controller.snapshot().inputReady).toBe(false);
+  });
+
   test("focus result alone cannot grant; ordered matching holder can, newer received epoch revokes", async () => {
     const { controller, peer } = await harness();
     expect(controller.setInputTarget(true, true).ok).toBe(true);
