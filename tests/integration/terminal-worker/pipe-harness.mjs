@@ -1,7 +1,7 @@
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
@@ -92,43 +92,69 @@ const workerEntry = join(repo, "packages/terminal-worker/dist/src/main.js");
 const startPattern =
   /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
 
-export function parseWorkerProcessRow(raw, pid, bin, { resolveEntry = realpathSync } = {}) {
+export function workerIdentityAnchors(bin, resolveEntry = realpathSync) {
+  try {
+    return { installed: resolveEntry(bin), compiled: resolveEntry(workerEntry) };
+  } catch (error) {
+    return { error: `${error.code ?? error.name ?? "unknown"}: ${error.message}` };
+  }
+}
+
+export function parseWorkerProcessRow(
+  raw,
+  pid,
+  bin,
+  { resolveEntry = realpathSync, anchors = workerIdentityAnchors(bin, resolveEntry) } = {},
+) {
   if (typeof raw !== "string" || raw.includes("\n"))
     return { kind: "unverifiable", raw, reason: "missing-or-multiple-rows" };
   const match = startPattern.exec(raw.trim());
   if (!match || Number(match[1]) !== pid)
     return { kind: "unverifiable", raw, reason: "malformed-or-wrong-pid" };
   const [, , started, commandLine] = match;
-  for (const prefix of ["", "/bin/sh ", "/usr/bin/env sh "]) {
+  const base = { pid, started, commandLine, raw };
+  if (commandLine === "(sh)") return { kind: "unverifiable", ...base, reason: "pre-exec-shell" };
+  if (anchors.error || !anchors.installed || !anchors.compiled)
+    return {
+      kind: "unverifiable",
+      ...base,
+      reason: "expected-anchor-unavailable",
+      anchorError: anchors.error,
+    };
+  let form;
+  let candidate;
+  for (const prefix of ["/bin/sh ", "/usr/bin/env sh "]) {
     if (!commandLine.startsWith(prefix)) continue;
-    const candidate = commandLine.slice(prefix.length);
-    if (candidate === bin)
-      return { kind: "owned", pid, started, commandLine, form: "installed-shim", raw };
-    try {
-      if (
-        basename(candidate) === basename(bin) &&
-        realpathSync(dirname(candidate)) === realpathSync(dirname(bin)) &&
-        realpathSync(candidate) === realpathSync(bin)
-      )
-        return { kind: "owned", pid, started, commandLine, form: "installed-shim", raw };
-    } catch {
-      /* A missing installation cannot establish ownership. */
-    }
+    form = "installed-shim";
+    candidate = commandLine.slice(prefix.length);
+    break;
   }
-  const nodePrefixes = [`${process.execPath} `, `${realpathSync(process.execPath)} `, `node `];
-  for (const prefix of nodePrefixes) {
-    if (!commandLine.startsWith(prefix)) continue;
-    const script = commandLine.slice(prefix.length);
-    const expectedPrefix = `${dirname(bin)}/`;
-    if (script !== workerEntry && !script.startsWith(expectedPrefix)) continue;
-    try {
-      if (resolveEntry(script) === resolveEntry(workerEntry))
-        return { kind: "owned", pid, started, commandLine, form: "compiled-entry", raw };
-    } catch {
-      /* An unresolved script path cannot establish ownership. */
+  if (!form)
+    for (const prefix of [`${process.execPath} `, `${realpathSync(process.execPath)} `, "node "]) {
+      if (!commandLine.startsWith(prefix)) continue;
+      form = "compiled-entry";
+      candidate = commandLine.slice(prefix.length);
+      break;
     }
+  if (!form && commandLine.startsWith("/")) {
+    form = "installed-shim";
+    candidate = commandLine;
   }
-  return { kind: "unverifiable", pid, started, commandLine, raw, reason: "unrelated-argv" };
+  if (!form || !candidate || candidate.includes(" "))
+    return { kind: "unverifiable", ...base, reason: "unrelated-argv" };
+  try {
+    const canonical = resolveEntry(candidate);
+    const expected = form === "installed-shim" ? anchors.installed : anchors.compiled;
+    if (canonical === expected) return { kind: "owned", ...base, form, canonical, expected };
+    return { kind: "unverifiable", ...base, reason: "unrelated-argv", canonical, expected };
+  } catch (error) {
+    return {
+      kind: "unverifiable",
+      ...base,
+      reason: "candidate-resolution-failed",
+      resolutionError: `${error.code ?? error.name ?? "unknown"}: ${error.message}`,
+    };
+  }
 }
 
 export function observeWorkerProcess(pid, bin, options = {}) {
@@ -263,6 +289,11 @@ export async function stopPtyIfOwned(start, nonce) {
 }
 
 export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidencePath } = {}) {
+  const expectedAnchors = workerIdentityAnchors(bin);
+  const boundObserve =
+    observe === observeWorkerProcess
+      ? (pid, path) => observeWorkerProcess(pid, path, { anchors: expectedAnchors })
+      : observe;
   const child = spawn(bin, [], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, COVE_QUALIFICATION_NONCE: nonce },
@@ -315,13 +346,14 @@ export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidence
       label,
     );
   const initialObservation = child.pid
-    ? sampleWorker(observe, child.pid, bin)
+    ? sampleWorker(boundObserve, child.pid, bin)
     : { kind: "unverifiable", reason: "spawn-without-pid" };
   const harness = {
     child,
     bin,
     nonce,
-    observe,
+    observe: boundObserve,
+    expectedAnchors,
     initialObservation,
     lastObservation: initialObservation,
     identity: initialObservation.raw ?? null,
@@ -351,6 +383,7 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
         nonce: harness.nonce,
         pid: child.pid ?? null,
         initialObservation: harness.initialObservation,
+        expectedAnchors: harness.expectedAnchors,
         currentObservation: child.pid
           ? sampleWorker(harness.observe, child.pid, harness.bin)
           : null,
