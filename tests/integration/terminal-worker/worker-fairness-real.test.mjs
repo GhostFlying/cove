@@ -5,6 +5,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createServer } from "node:net";
 import { createPipeDecoder, validatePipeFrame } from "../../../packages/protocol/dist/pipe.js";
 import {
   budgets,
@@ -41,6 +42,7 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   mkdirSync(interactiveDir);
   const bulkNonce = `bulk-${process.pid}-${Date.now()}`;
   const interactiveNonce = `interactive-${process.pid}-${Date.now()}`;
+  const ackPath = join(temp, "bulk-ack.sock");
   const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
   const evidencePath = evidenceRoot ? join(evidenceRoot, `fairness-${bulkNonce}`) : undefined;
   if (evidencePath) mkdirSync(evidencePath, { recursive: true });
@@ -52,6 +54,57 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   const faults = [];
   const flow = [];
   const callbacks = [];
+  const ackEvents = [];
+  const ackErrors = [];
+  let ackSocket;
+  let ackHello;
+  let ackInput = "";
+  let ackSeq = 0;
+  let ackPendingBytes = 0;
+  const ackServer = createServer((socket) => {
+    if (ackSocket) {
+      socket.destroy();
+      ackErrors.push("second-control-peer");
+      return;
+    }
+    ackSocket = socket;
+    socket.on("error", (error) => ackErrors.push(`control-socket:${error.code ?? error.message}`));
+    socket.on("data", (chunk) => {
+      ackInput += chunk.toString("utf8");
+      if (ackInput.length > 4096) {
+        ackErrors.push("control-frame-overflow");
+        socket.destroy();
+        return;
+      }
+      while (ackInput.includes("\n")) {
+        const index = ackInput.indexOf("\n");
+        let frame;
+        try {
+          frame = JSON.parse(ackInput.slice(0, index));
+        } catch {
+          ackErrors.push("invalid-control-frame");
+          socket.destroy();
+          return;
+        }
+        ackInput = ackInput.slice(index + 1);
+        if (
+          ackHello ||
+          frame.type !== "hello" ||
+          frame.nonce !== bulkNonce ||
+          !Number.isInteger(frame.pid) ||
+          !psIdentity(frame.pid)?.includes(bulkNonce)
+        ) {
+          ackErrors.push("control-peer-identity");
+          socket.destroy();
+          return;
+        }
+        ackHello = frame;
+        ackEvents.push({ type: "hello", nonce: frame.nonce, pid: frame.pid });
+        socket.write(`${JSON.stringify({ type: "start", nonce: bulkNonce })}\n`);
+      }
+    });
+  });
+  ackServer.on("error", (error) => ackErrors.push(`control-server:${error.code ?? error.message}`));
   const bulkDigest = createHash("sha256");
   const interactiveRaw = [];
   const native = createNativePtyFactory({
@@ -72,6 +125,31 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
         onData(bytes) {
           observer.onData(bytes);
           callbacks.push({ label, bytes: bytes.length });
+          if (label !== "bulk") return;
+          if (ackSeq >= 768) {
+            ackErrors.push("native-output-after-final-ack");
+            return;
+          }
+          if (
+            !ackHello ||
+            !ackSocket ||
+            ackErrors.length ||
+            !Buffer.from(bytes).every((byte) => byte === 0x42)
+          ) {
+            ackErrors.push("native-callback-outside-owned-chunk");
+            return;
+          }
+          ackPendingBytes += bytes.length;
+          if (ackPendingBytes > 1024) {
+            ackErrors.push("native-callback-crossed-unacknowledged-chunk");
+            return;
+          }
+          if (ackPendingBytes === 1024) {
+            ackEvents.push({ type: "ack", nonce: bulkNonce, seq: ackSeq, bytes: ackPendingBytes });
+            ackSocket.write(`${JSON.stringify({ type: "ack", nonce: bulkNonce, seq: ackSeq })}\n`);
+            ackSeq++;
+            ackPendingBytes = 0;
+          }
         },
       });
       if (created.kind !== "created") return created;
@@ -83,7 +161,14 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
                 ?.snapshot()
                 .sessions.find((item) => item.run.runId === label);
               target[key]();
-              flow.push({ label, kind: key, snapshot: before?.snapshot ?? null });
+              flow.push({
+                label,
+                kind: key,
+                snapshot: before?.snapshot ?? null,
+                parsedBytes: facts
+                  .filter((fact) => fact.runId === label && fact.type === "output")
+                  .reduce((sum, fact) => sum + fact.bytes, 0),
+              });
             };
           const value = target[key];
           return typeof value === "function" ? value.bind(target) : value;
@@ -162,7 +247,13 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       ["bulk", bulkDir],
       ["interactive", interactiveDir],
     ])
-      for (const name of ["start.json", "stall.json", "finish.json", "initial-emission.json"]) {
+      for (const name of [
+        "start.json",
+        "stall.json",
+        "finish.json",
+        "emission-failure.json",
+        "initial-emission.json",
+      ]) {
         const source = join(dir, name);
         if (existsSync(source)) copyFileSync(source, join(evidencePath, `${label}-${name}`));
       }
@@ -183,6 +274,11 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
           faults,
           flow,
           callbacks,
+          ackHello,
+          ackEvents,
+          ackErrors,
+          ackSeq,
+          ackPendingBytes,
           interactiveRawHex: Buffer.concat(interactiveRaw).toString("hex"),
           metrics,
           pipe: pipe.snapshot(),
@@ -201,6 +297,10 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     await stopPtyIfOwned(start, nonce);
   };
   try {
+    await new Promise((resolve, reject) => {
+      ackServer.once("error", reject);
+      ackServer.listen(ackPath, resolve);
+    });
     ingress.write(encode(hello));
     const ready = await until(
       () => messages.find((item) => item.metadata.type === "ready"),
@@ -212,11 +312,15 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     const bulkSpawn = spawnCommand(
       bulkRun,
       process.execPath,
-      [fixture, "bulk", bulkNonce, bulkDir],
+      [fixture, "bulk", bulkNonce, bulkDir, ackPath],
       repo,
     );
     expect((await send(bulkSpawn.metadata, bulkSpawn.payload)).outcome).toBe("accepted");
     bulkStart = await receipt(join(bulkDir, "start.json"));
+    expect(await until(() => ackHello, 8000, "owned bulk acknowledgement peer")).toMatchObject({
+      nonce: bulkNonce,
+      pid: bulkStart.pid,
+    });
     bulkIdentity = psIdentity(bulkStart.pid);
     expect(bulkStart.nonce).toBe(bulkNonce);
     expect(bulkIdentity).toContain(bulkNonce);
@@ -296,6 +400,8 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       scheduled: 768 * 1024,
       emitted: 768 * 1024,
       callbackError: null,
+      acknowledged: 768,
+      chunks: 768,
     });
     await until(
       () =>
@@ -310,13 +416,35 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     expect(bulkOutput.reduce((sum, fact) => sum + fact.bytes, 0)).toBe(768 * 1024);
     expect(bulkDigest.digest("hex")).toBe(bulkFinish.sha256);
     expect(Buffer.concat(interactiveRaw).subarray(0, 7).toString("hex")).toBe("410080ffe282ac");
-    expect(callbacks.filter((item) => item.label === "bulk").length).toBeGreaterThan(256);
+    expect(callbacks.filter((item) => item.label === "bulk").length).toBeGreaterThanOrEqual(768);
+    expect(ackErrors).toEqual([]);
+    expect(ackSeq).toBe(768);
+    expect(ackPendingBytes).toBe(0);
     expect(flow.some((item) => item.label === "bulk" && item.kind === "pause")).toBe(true);
     expect(flow.some((item) => item.label === "bulk" && item.kind === "resume")).toBe(true);
+    const itemPauses = flow.filter((item) => item.label === "bulk" && item.kind === "pause");
     expect(
-      flow
-        .filter((item) => item.label === "bulk" && item.kind === "pause")
-        .every((item) => item.snapshot && item.snapshot.queuedItems < 256),
+      itemPauses.some(
+        (item) =>
+          item.snapshot &&
+          item.snapshot.queuedItems >= 192 &&
+          item.snapshot.queuedItems < 256 &&
+          item.snapshot.queuedBytes < budgets.parseHighBytes,
+      ),
+    ).toBe(true);
+    const itemResumes = flow.filter((item) => item.label === "bulk" && item.kind === "resume");
+    expect(
+      itemResumes.every(
+        (item) =>
+          item.snapshot &&
+          item.snapshot.queuedItems <= 64 &&
+          item.snapshot.queuedBytes <= budgets.parseLowBytes,
+      ),
+    ).toBe(true);
+    expect(
+      itemResumes.some((resume) =>
+        itemPauses.some((pause) => resume.parsedBytes > pause.parsedBytes),
+      ),
     ).toBe(true);
     for (const id of ["bulk", "interactive"]) {
       const ordered = facts.filter((fact) => fact.runId === id).map((fact) => fact.seq);
@@ -368,6 +496,12 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     }
     try {
       closed = await pipe.shutdown("fairness-qualification-end");
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      ackSocket?.destroy();
+      if (ackServer.listening) await new Promise((resolve) => ackServer.close(resolve));
     } catch (error) {
       cleanupErrors.push(error);
     }
