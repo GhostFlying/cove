@@ -185,6 +185,7 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 export const requiredSuites = [
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
+  { project: "client", file: "packages/client/tests/terminal-recovery.test.mjs", minimumTests: 40 },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
