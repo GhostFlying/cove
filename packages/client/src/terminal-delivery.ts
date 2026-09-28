@@ -62,6 +62,7 @@ export class TerminalLane {
     string,
     (event: ExternalTerminalEvent, bytes: Uint8Array) => void
   >();
+  private readonly retiredRefs = new Set<string>();
   private readonly outbound: PendingCommand[] = [];
   private flushing = false;
   private retainedOutboundBytes = 0;
@@ -160,13 +161,17 @@ export class TerminalLane {
     receive: (event: ExternalTerminalEvent, bytes: Uint8Array) => void,
   ): boolean {
     const key = routeKey(ref);
-    if (this.routes.has(key)) return false;
+    if (this.routes.has(key) || this.retiredRefs.has(key)) return false;
     this.routes.set(key, receive);
     return true;
   }
 
-  retire(ref: SubscriptionRef): void {
-    this.routes.delete(routeKey(ref));
+  retire(ref: SubscriptionRef): boolean {
+    const key = routeKey(ref);
+    this.routes.delete(key);
+    if (!this.retiredRefs.has(key) && this.retiredRefs.size >= 256) return false;
+    this.retiredRefs.add(key);
+    return true;
   }
 
   cancelUnsentControl(ref: SubscriptionRef): void {
@@ -267,6 +272,7 @@ export class TerminalLane {
 
   close(reason: LocalErrorReason): void {
     this.routes.clear();
+    this.retiredRefs.clear();
     for (const pending of [...this.pending.values()])
       this.finish(pending, { ok: false, error: localError(reason), uncertain: true });
     this.outbound.length = 0;
@@ -274,6 +280,10 @@ export class TerminalLane {
 
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  get retiredCount(): number {
+    return this.retiredRefs.size;
   }
 
   private flush(): void {

@@ -68,19 +68,6 @@ function errorOutcome(error: ClientError | DomainError): TerminalOutcome<Termina
   return { ok: false, error };
 }
 
-function key(ref: SubscriptionRef): string {
-  const { run, connection, subscriptionId, viewId } = ref;
-  return JSON.stringify([
-    run.serverId,
-    run.relayInstanceId,
-    run.runId,
-    connection.connectionId,
-    connection.generation,
-    subscriptionId,
-    viewId,
-  ]);
-}
-
 function safeDispose(disposable: Disposable | undefined): void {
   try {
     disposable?.dispose();
@@ -111,7 +98,6 @@ export class RoutedTerminalController implements TerminalController {
   private pendingAck: number | undefined;
   private progressInFlight = false;
   private pendingProgress: number | undefined;
-  private retired = new Set<string>();
   private autoRecoveryUsed = false;
   private readonly listeners = new Set<(snapshot: TerminalSnapshot) => void>();
 
@@ -130,7 +116,7 @@ export class RoutedTerminalController implements TerminalController {
         : Promise.resolve(errorOutcome(localError("invalid-state")));
     if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
     if (this.ref) return Promise.resolve(errorOutcome(localError("invalid-state")));
-    if (this.retired.size >= 256)
+    if (this.host.lane.retiredCount >= 256)
       return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
     const binding = this.host.binding();
     if (!binding) return Promise.resolve(errorOutcome(localError("invalid-state")));
@@ -308,8 +294,7 @@ export class RoutedTerminalController implements TerminalController {
 
   connectionLost(): void {
     if (this.phase === "disposed") return;
-    this.retire(localError("transport"));
-    this.retired.clear();
+    this.retire(localError("transport"), false);
     this.phase = "unavailable";
     this.publish();
   }
@@ -421,7 +406,6 @@ export class RoutedTerminalController implements TerminalController {
       if (result.type !== "attach-result" && result.type !== "recover-result") return;
       if (command.type === "attach") {
         if (
-          this.retired.has(key(result.subscription)) ||
           !sameRunRef(result.subscription.run, this.run) ||
           !this.host.lane.register(result.subscription, (event, bytes) =>
             this.receive(event, bytes),
@@ -725,7 +709,7 @@ export class RoutedTerminalController implements TerminalController {
     return !!connection && sameConnectionRef(connection, ref.connection);
   }
 
-  private retire(error: ClientError | DomainError): void {
+  private retire(error: ClientError | DomainError, rememberRef = true): void {
     this.token = nextCounter(this.token) ?? -1;
     this.drainToken = this.token;
     this.clearQueued();
@@ -733,10 +717,10 @@ export class RoutedTerminalController implements TerminalController {
     safeDispose(this.listener);
     this.listener = undefined;
     const ref = this.ref;
+    let remembered = true;
     if (ref) {
       this.host.lane.cancelUnsentControl(ref);
-      this.host.lane.retire(ref);
-      this.retired.add(key(ref));
+      if (rememberRef) remembered = this.host.lane.retire(ref);
       this.ref = undefined;
     }
     this.baseline = undefined;
@@ -747,6 +731,7 @@ export class RoutedTerminalController implements TerminalController {
     this.progressInFlight = false;
     this.pendingProgress = undefined;
     if (this.operation) this.settle(this.operation, errorOutcome(error));
+    if (!remembered) this.host.retireConnection();
   }
 
   private settle(operation: Operation, result: TerminalOutcome<TerminalReady>): void {
