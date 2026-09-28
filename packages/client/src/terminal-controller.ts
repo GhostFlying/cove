@@ -79,6 +79,23 @@ function safeDispose(disposable: Disposable | undefined): void {
   }
 }
 
+function consumeObserverResult(value: unknown): void {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return;
+  try {
+    const then = (value as { then?: unknown }).then;
+    if (typeof then !== "function") return;
+    const derived: unknown = then.call(
+      value,
+      () => undefined,
+      () => undefined,
+    );
+    if (derived && derived !== value)
+      void Promise.resolve(derived).then(undefined, () => undefined);
+  } catch {
+    /* A hostile observer cannot interrupt state publication. */
+  }
+}
+
 function identityCopy(ref: SubscriptionRef): SubscriptionRef {
   return Object.freeze({
     run: Object.freeze({ ...ref.run }),
@@ -846,7 +863,7 @@ export class RoutedTerminalController implements TerminalController {
     const snapshot = this.snapshot();
     for (const listener of [...this.listeners]) {
       try {
-        listener(snapshot);
+        consumeObserverResult(listener(snapshot));
       } catch {
         /* Observers do not control lifecycle. */
       }

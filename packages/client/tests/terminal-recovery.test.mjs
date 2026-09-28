@@ -329,6 +329,52 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("consumes rejected and hostile observer thenables without waiting for them", async () => {
+    const unhandled = [];
+    const catchUnhandled = (reason) => unhandled.push(reason);
+    process.on("unhandledRejection", catchUnhandled);
+    let client;
+    try {
+      const setup = await harness((command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription("view-1"));
+        else settleControl(command, peer);
+      });
+      client = setup.client;
+      const controller = client.openTerminal({
+        run,
+        viewId: "view-1",
+        view: view().terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      controller.onState(() => Promise.reject(new Error("native rejection")));
+      controller.onState(() => ({
+        then(_resolve, reject) {
+          reject(new Error("thenable rejection"));
+          return Promise.reject(new Error("derived rejection"));
+        },
+      }));
+      controller.onState(() =>
+        Object.defineProperty({}, "then", {
+          get() {
+            throw new Error("then getter");
+          },
+        }),
+      );
+      controller.onState(() => new Promise(() => {}));
+      controller.onState(() => {
+        throw new Error("sync observer");
+      });
+      const attached = controller.attach();
+      baseline(setup.peer, subscription("view-1"));
+      expect((await attached).ok).toBe(true);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+      controller.dispose();
+    } finally {
+      client?.dispose();
+      process.off("unhandledRejection", catchUnhandled);
+    }
+  });
   test("revokes old connection before synchronous unavailable listeners can reenter", async () => {
     const rendered = view();
     let attachSerial = 0;
