@@ -509,10 +509,11 @@ class CoveClient implements Client {
       return { ok: false, error: localError("invalid-state") };
     if (!options || typeof options !== "object")
       return { ok: false, error: localError("invalid-request") };
+    const parsedRun = RunRefSchema.safeParse(options.run);
     if (
-      !RunRefSchema.safeParse(options.run).success ||
-      options.run.serverId !== binding.serverId ||
-      options.run.relayInstanceId !== binding.relayInstanceId ||
+      !parsedRun.success ||
+      parsedRun.data.serverId !== binding.serverId ||
+      parsedRun.data.relayInstanceId !== binding.relayInstanceId ||
       !OpaqueIdSchema.safeParse(options.viewId).success ||
       !options.view ||
       typeof options.view.initialize !== "function" ||
@@ -544,7 +545,7 @@ class CoveClient implements Client {
           this.controllers.delete(item);
         },
       },
-      options.run,
+      Object.freeze(parsedRun.data),
       options.viewId,
       options.view,
       appearance,

@@ -301,6 +301,54 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("owns run and subscription identity apart from caller, ready, snapshot and view", async () => {
+    const callerRun = { ...run };
+    const rendered = view();
+    let viewMutation;
+    const originalBegin = rendered.terminalView.beginBaseline;
+    rendered.terminalView.beginBaseline = async (incoming) => {
+      viewMutation = Reflect.set(incoming.subscription.connection, "connectionId", "changed");
+      await originalBegin(incoming);
+    };
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") reply(command, peer, subscription("view-1"));
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run: callerRun,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    callerRun.runId = "changed";
+    const attached = controller.attach();
+    expect(peer.commands.find((command) => command.type === "attach").run).toEqual(run);
+    baseline(peer, subscription("view-1"));
+    const ready = await attached;
+    expect(ready.ok).toBe(true);
+    expect(viewMutation).toBe(false);
+    const snap = controller.snapshot();
+    expect(ready.value.subscription).not.toBe(snap.subscription);
+    expect(Reflect.set(ready.value.subscription, "subscriptionId", "changed")).toBe(false);
+    expect(Reflect.set(snap.subscription.run, "runId", "changed")).toBe(false);
+    expect(Reflect.set(snap.subscription.connection, "connectionId", "changed")).toBe(false);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("view-1"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(controller.snapshot().appliedSeq).toBe(4);
+    expect(
+      peer.commands.filter((command) => command.type === "applied-ack").at(-1).subscription,
+    ).toEqual(subscription("view-1"));
+    controller.dispose();
+    client.dispose();
+  });
   test("charges a held parse and the next frame against one connection ingress cap", async () => {
     const gate = deferred();
     const first = view({ eventGate: gate });
