@@ -736,6 +736,56 @@ describe("public terminal subscription and recovery", () => {
     controller.dispose();
     client.dispose();
   });
+  test("admits a legal full payload within the negotiated aggregate sum", async () => {
+    const gate = deferred();
+    const rendered = view({ eventGate: gate });
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription("view-1"));
+        else settleControl(command, peer);
+      },
+      undefined,
+      {
+        subscriptionCreditBytes: 262_144,
+        outboundConnectionBytes: 262_144,
+        reservedControlBytes: 65_536,
+      },
+    );
+    const controller = client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: rendered.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const attached = controller.attach();
+    baseline(peer, subscription("view-1"));
+    expect((await attached).ok).toBe(true);
+    await settle();
+    const ackBefore = peer.commands.filter((command) => command.type === "applied-ack").length;
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("view-1"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array(65_536),
+    );
+    await settle();
+    expect(rendered.facts.filter((fact) => fact[0] === "event")).toHaveLength(1);
+    expect(controller.snapshot().phase).toBe("ready");
+    expect(peer.commands.filter((command) => command.type === "applied-ack")).toHaveLength(
+      ackBefore,
+    );
+    gate.resolve();
+    await settle();
+    expect(
+      peer.commands.filter((command) => command.type === "applied-ack").at(-1).appliedSeq,
+    ).toBe(4);
+    controller.dispose();
+    client.dispose();
+  });
+
   test("charges a held parse and the next frame against one connection ingress cap", async () => {
     const gate = deferred();
     const first = view({ eventGate: gate });
@@ -746,7 +796,7 @@ describe("public terminal subscription and recovery", () => {
         else settleControl(command, peer);
       },
       undefined,
-      { outboundConnectionBytes: 327_680 },
+      { outboundConnectionBytes: 262_144, reservedControlBytes: 65_536 },
     );
     const a = client.openTerminal({
       run,
@@ -840,7 +890,7 @@ describe("public terminal subscription and recovery", () => {
         else settleControl(command, peer);
       },
       undefined,
-      { outboundConnectionBytes: 327_680 },
+      { outboundConnectionBytes: 262_144, reservedControlBytes: 65_536 },
     );
     const a = client.openTerminal({
       run,

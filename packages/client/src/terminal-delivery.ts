@@ -194,7 +194,8 @@ export class TerminalLane {
 
   // Leases survive lane closure while retired view calls still retain their payloads.
   reserveIngress(bytes: number): boolean {
-    const cap = this.owner.binding()?.effectiveBudgets.outboundConnectionBytes;
+    const budgets = this.owner.binding()?.effectiveBudgets;
+    const cap = budgets ? budgets.outboundConnectionBytes + budgets.reservedControlBytes : 0;
     if (
       !cap ||
       !Number.isSafeInteger(bytes) ||
