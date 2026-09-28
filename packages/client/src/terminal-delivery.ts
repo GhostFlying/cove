@@ -198,7 +198,13 @@ export class TerminalLane {
         const uncertain = pending.attempting || pending.handedOff;
         this.finish(pending, {
           ok: false,
-          error: uncertain ? domainError("RESULT_UNKNOWN", "unknown") : localError("timeout"),
+          error: uncertain
+            ? domainError(
+                "RESULT_UNKNOWN",
+                "unknown",
+                pending.command.type === "input" ? "input" : undefined,
+              )
+            : localError("timeout"),
           uncertain,
         });
       });
@@ -447,7 +453,11 @@ export class TerminalLane {
             error:
               disposition === "not-sent"
                 ? localError("transport")
-                : domainError("RESULT_UNKNOWN", "unknown"),
+                : domainError(
+                    "RESULT_UNKNOWN",
+                    "unknown",
+                    pending.command.type === "input" ? "input" : undefined,
+                  ),
             uncertain: disposition !== "not-sent",
           });
         }

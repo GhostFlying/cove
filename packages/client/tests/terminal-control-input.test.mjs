@@ -102,12 +102,18 @@ async function settle() {
 
 function clock() {
   let now = 0;
+  let expireNextSet = false;
   const timers = new Set();
   return {
     nowMs: () => now,
     setTimer(delay, callback) {
       const timer = { deadline: now + delay, callback };
       timers.add(timer);
+      if (expireNextSet) {
+        expireNextSet = false;
+        timers.delete(timer);
+        callback();
+      }
       return { dispose: () => timers.delete(timer) };
     },
     yieldTurn: async () => {},
@@ -115,6 +121,9 @@ function clock() {
       now += ms;
       for (const timer of [...timers])
         if (timer.deadline <= now && timers.delete(timer)) timer.callback();
+    },
+    expireNextSet() {
+      expireNextSet = true;
     },
   };
 }
@@ -669,6 +678,7 @@ describe("client control authority", () => {
       unknownBytes: 2,
       notSentBytes: 0,
     });
+    expect(result.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
   });
 
@@ -745,6 +755,7 @@ describe("client control authority", () => {
       ok: false,
       value: { writtenBytes: 0, unknownBytes: 0, notSentBytes: 2 },
     });
+    expect(notSent.error).toEqual({ category: "local", reason: "transport" });
     expect(refused.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
 
     const scheduler = clock();
@@ -761,7 +772,88 @@ describe("client control authority", () => {
       ok: false,
       value: { writtenBytes: 0, unknownBytes: 2, notSentBytes: 0 },
     });
+    expect(result.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     expect(unknown.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test.each(["unknown", "throw"])(
+    "adapter %s on input directs inspect-run without resend",
+    async (mode) => {
+      const { controller, peer } = await harness({
+        onCommand: ({ command }) => {
+          if (command.type !== "input") return undefined;
+          if (mode === "throw") throw new Error("adapter uncertainty");
+          return "unknown";
+        },
+      });
+      await grant(controller, peer);
+      const notices = [];
+      controller.onInputOutcome((notice) => notices.push(notice));
+      const result = await controller.sendInput({
+        source: "keyboard",
+        bytes: new Uint8Array([1, 2, 3]),
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        value: { writtenBytes: 0, unknownBytes: 3, notSentBytes: 0 },
+      });
+      expect(result.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+      expect("operationId" in result.error).toBe(false);
+      expect(notices).toHaveLength(1);
+      expect(notices[0].outcome).toEqual(result);
+      expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+    },
+  );
+
+  test("prehandoff input timeout stays definite while noninput unknown stays generic", async () => {
+    const scheduler = clock();
+    const { controller, peer } = await harness({ scheduler });
+    await grant(controller, peer);
+    scheduler.expireNextSet();
+    const noHandoff = await controller.sendInput({
+      source: "keyboard",
+      bytes: new Uint8Array([1]),
+    });
+    expect(noHandoff).toMatchObject({
+      ok: false,
+      error: { category: "local", reason: "timeout" },
+      value: { unknownBytes: 0, notSentBytes: 1 },
+    });
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(0);
+
+    const other = await harness({
+      onCommand: ({ command }) => (command.type === "focus" ? "unknown" : undefined),
+    });
+    other.controller.setInputTarget(true, true);
+    const focus = await other.controller.requestFocus();
+    expect(focus.ok).toBe(false);
+    expect(focus.error).toEqual(domainError("RESULT_UNKNOWN", "unknown"));
+    expect(focus.error.nextAction).toBe("query-operation");
+    expect("subject" in focus.error).toBe(false);
+  });
+
+  test("validated remote input uncertainty is preserved as received", async () => {
+    const remote = domainError("RESULT_UNKNOWN", "unknown", "input");
+    const { controller, peer } = await harness({
+      onCommand: ({ command }, activePeer) => {
+        if (command.type === "input")
+          activePeer.emit(4, {
+            type: "error",
+            requestId: command.requestId,
+            run,
+            commandType: "input",
+            error: remote,
+          });
+      },
+    });
+    await grant(controller, peer);
+    const result = await controller.sendInput({ source: "paste", bytes: new Uint8Array([1, 2]) });
+    expect(result).toMatchObject({
+      ok: false,
+      value: { writtenBytes: 0, unknownBytes: 2, notSentBytes: 0 },
+    });
+    expect(result.error).toEqual(remote);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
   });
 
   test("observer disposal during input admission prevents any input handoff", async () => {
@@ -925,6 +1017,7 @@ describe("client control authority", () => {
       kind: "input",
       outcome: { ok: false, value: { unknownBytes: 1, notSentBytes: 0 } },
     });
+    expect(notices[0].outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     unknown.peer.result(pendingCommand, {
       epoch: 1,
       inputSeq: pendingCommand.inputSeq,
