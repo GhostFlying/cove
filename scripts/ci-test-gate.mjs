@@ -12,6 +12,7 @@ const resultPath = join(evidenceDir, "vitest-results.json");
 const junitPath = join(evidenceDir, "vitest-results.xml");
 const vitest = join(root, "node_modules/vitest/vitest.mjs");
 const diagnosticDir = join(evidenceDir, "browser-close-diagnostic");
+const qualificationRoot = join(evidenceDir, "worker-qualification");
 const diagnosticName =
   "V1-L4 publishes focus before input but not for selection scrolling appearance or show";
 const diagnosticFile = "packages/terminal-web/tests/view-lifecycle.test.mjs";
@@ -367,6 +368,21 @@ export const requiredSuites = [
   },
   {
     project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-identity.test.mjs",
+    minimumTests: 23,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/fifo-reader-ownership.test.mjs",
+    minimumTests: 3,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-bulk-control.test.mjs",
+    minimumTests: 1,
+  },
+  {
+    project: "terminal-worker",
     file: "tests/integration/terminal-worker/pipe-main-real.test.mjs",
     minimumTests: 6,
   },
@@ -418,6 +434,37 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-identity.test.mjs",
+    template: "owned Writable hello %s uses shared childPipe send and error wiring",
+    names: [
+      "owned Writable hello async callback error uses shared childPipe send and error wiring",
+      "owned Writable hello false-return completion uses shared childPipe send and error wiring",
+      "owned Writable hello missing completion uses shared childPipe send and error wiring",
+      "owned Writable hello premature close uses shared childPipe send and error wiring",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-identity.test.mjs",
+    template: "cleanup escalation resamples %s before SIGKILL",
+    names: [
+      "cleanup escalation resamples shim before SIGKILL",
+      "cleanup escalation resamples changed birth before SIGKILL",
+      "cleanup escalation resamples wrong entry before SIGKILL",
+      "cleanup escalation resamples compiled before SIGKILL",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/qualification-identity.test.mjs",
+    template: "pending real shim cleanup preserves timeout and %s",
+    names: [
+      "pending real shim cleanup preserves timeout and EOF exit",
+      "pending real shim cleanup preserves timeout and unresolved EOF",
+    ],
+  },
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
@@ -817,6 +864,35 @@ export async function prepareBrowserCleanupEvidence(
     join(directory, "run.json"),
     `${JSON.stringify({ sourceCommit, runId, githubCommit: process.env.GITHUB_SHA ?? null })}\n`,
   );
+}
+
+export async function prepareWorkerQualificationEvidence(
+  provenance,
+  directory = qualificationRoot,
+) {
+  const { sourceCommit, tree, sourceDirty, runId, githubRunId, githubRunAttempt, githubSha } =
+    provenance;
+  const github = /^github-(\d+)-(\d+)$/.exec(runId ?? "");
+  if (
+    !/^[a-f0-9]{40}$/.test(sourceCommit ?? "") ||
+    !/^[a-f0-9]{40}$/.test(tree ?? "") ||
+    sourceDirty !== false ||
+    !/^(?:github|local)-[A-Za-z0-9-]{1,72}$/.test(runId ?? "") ||
+    (github
+      ? githubRunId !== github[1] || githubRunAttempt !== github[2] || githubSha !== sourceCommit
+      : githubRunId !== null || githubRunAttempt !== null || githubSha !== null) ||
+    !/^\d+\.\d+\.\d+$/.test(provenance.node ?? "") ||
+    !/^\d+\.\d+\.\d+$/.test(provenance.pnpm ?? "") ||
+    !/^\d+$/.test(provenance.nodeAbi ?? "") ||
+    !["darwin", "linux", "win32"].includes(provenance.platform) ||
+    !/^[a-z0-9]+$/.test(provenance.arch ?? "")
+  )
+    throw new Error("Worker qualification evidence identity is invalid");
+  await mkdir(directory, { recursive: true });
+  const runDirectory = join(directory, runId);
+  await mkdir(runDirectory);
+  await writeFile(join(runDirectory, "run.json"), `${JSON.stringify(provenance, null, 2)}\n`);
+  return runDirectory;
 }
 
 function browserEvidenceInteger(value, minimum, maximum) {
@@ -1246,7 +1322,7 @@ async function main() {
   );
   let stage = "environment";
   try {
-    await environment();
+    const toolchain = await environment();
     if (process.argv[2] === "--environment") return;
     if (process.argv.length > 2) throw new Error(`Unknown argument: ${process.argv[2]}`);
     const checkout = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
@@ -1272,6 +1348,24 @@ async function main() {
     const sources = await readVitestOwnedTestFiles();
     // Validate discovery before running, then validate actual execution from a fresh report.
     verifyDiscovery(discovered, sources);
+    stage = "qualification-evidence";
+    process.env.COVE_QUALIFICATION_EVIDENCE_DIR = await prepareWorkerQualificationEvidence({
+      sourceCommit,
+      tree: gitText("rev-parse", "HEAD^{tree}"),
+      sourceDirty: gitText("status", "--porcelain", "--untracked-files=normal") !== "",
+      runId,
+      githubRunId: process.env.GITHUB_RUN_ID ?? null,
+      githubRunAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+      githubSha: process.env.GITHUB_SHA ?? null,
+      node: toolchain.node,
+      pnpm: toolchain.pnpm,
+      nodeAbi: toolchain.nodeAbi,
+      platform: toolchain.platform,
+      arch: toolchain.arch,
+      osRelease: toolchain.osRelease,
+      runnerOs: toolchain.runnerOs,
+      runnerArch: toolchain.runnerArch,
+    });
     stage = "vitest";
     const runArgs = [
       vitest,
