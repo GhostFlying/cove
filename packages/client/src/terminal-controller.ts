@@ -30,6 +30,7 @@ import type {
   TerminalController,
   TerminalControlReceipt,
   TerminalInputOutcome,
+  TerminalInputNotice,
   TerminalInputReceipt,
   TerminalInputSource,
   TerminalOutcome,
@@ -190,6 +191,8 @@ export class RoutedTerminalController implements TerminalController {
   private retiring = false;
   private disposalComplete = false;
   private readonly listeners = new Set<(snapshot: TerminalSnapshot) => void>();
+  private readonly inputOutcomeListeners = new Set<(notice: TerminalInputNotice) => void>();
+  private pendingInputNotifications = 0;
 
   constructor(
     private readonly host: ControllerHost,
@@ -534,8 +537,11 @@ export class RoutedTerminalController implements TerminalController {
     const source = input?.source;
     const bytes = input?.bytes;
     const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
-    const reject = (error: ClientError | DomainError): Promise<TerminalInputOutcome> =>
-      Promise.resolve(inputFailure(source, total, error));
+    const reject = (error: ClientError | DomainError): Promise<TerminalInputOutcome> => {
+      const outcome = inputFailure(source, total, error);
+      this.publishInputOutcome(outcome);
+      return Promise.resolve(outcome);
+    };
     if (
       !["keyboard", "paste", "mouse"].includes(source) ||
       !(bytes instanceof Uint8Array) ||
@@ -582,6 +588,7 @@ export class RoutedTerminalController implements TerminalController {
     });
     const prior = this.inputTail;
     this.inputTail = prior.then(() => turn);
+    this.pendingInputNotifications++;
     this.publish();
     return this.deliverInput(
       owned,
@@ -594,7 +601,51 @@ export class RoutedTerminalController implements TerminalController {
       intent,
       prior,
       releaseTurn,
-    );
+    ).then((outcome) => {
+      try {
+        this.publishInputOutcome(outcome);
+        return outcome;
+      } finally {
+        this.pendingInputNotifications--;
+        if (this.phase === "disposed" && this.pendingInputNotifications === 0)
+          this.inputOutcomeListeners.clear();
+      }
+    });
+  }
+
+  onInputOutcome(listener: (notice: TerminalInputNotice) => void): Disposable {
+    if (this.phase === "disposed") return { dispose() {} };
+    this.inputOutcomeListeners.add(listener);
+    let active = true;
+    return {
+      dispose: () => {
+        if (!active) return;
+        active = false;
+        this.inputOutcomeListeners.delete(listener);
+      },
+    };
+  }
+
+  private publishInputOutcome(outcome: TerminalInputOutcome): void {
+    const notice: TerminalInputNotice = Object.freeze({
+      kind: "input",
+      outcome: Object.freeze({
+        ...outcome,
+        value: Object.freeze({ ...outcome.value }),
+        ...(!outcome.ok ? { error: Object.freeze({ ...outcome.error }) } : {}),
+      }),
+    });
+    this.publishInputNotice(notice);
+  }
+
+  private publishInputNotice(notice: TerminalInputNotice): void {
+    for (const listener of [...this.inputOutcomeListeners]) {
+      try {
+        consumeObserverResult(listener(notice));
+      } catch {
+        /* An observer cannot interrupt input settlement. */
+      }
+    }
   }
 
   private async deliverInput(
@@ -617,6 +668,7 @@ export class RoutedTerminalController implements TerminalController {
     ): TerminalInputOutcome => inputFailure(source, total, error, inputId, written, unknown);
     let written = 0;
     let unknown = 0;
+    let inFlightBytes = 0;
     try {
       await prior;
       if (
@@ -643,6 +695,7 @@ export class RoutedTerminalController implements TerminalController {
         const inputSeq = this.host.lane.nextInputSeq(ref);
         if (!requestId || inputSeq === null)
           return reject(domainError("COUNTER_EXHAUSTED"), written);
+        inFlightBytes = chunk.byteLength;
         const outcome = await this.host.lane.send(
           { type: "input", requestId, run: this.run, subscription: ref, epoch, inputSeq },
           5_000,
@@ -657,6 +710,7 @@ export class RoutedTerminalController implements TerminalController {
             this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
           chunk,
         );
+        inFlightBytes = 0;
         if (!outcome.ok) {
           if (
             outcome.uncertain ||
@@ -681,6 +735,15 @@ export class RoutedTerminalController implements TerminalController {
         }
       }
       return { ok: true, value: inputReceipt(source, total, inputId, written) };
+    } catch {
+      unknown += inFlightBytes;
+      return reject(
+        inFlightBytes
+          ? domainError("RESULT_UNKNOWN", "unknown", "input")
+          : localError("invalid-state"),
+        written,
+        unknown,
+      );
     } finally {
       this.retainedInputBytes -= total;
       this.pendingInputIntents--;
@@ -1443,6 +1506,7 @@ export class RoutedTerminalController implements TerminalController {
     }
     this.publish();
     this.listeners.clear();
+    if (this.pendingInputNotifications === 0) this.inputOutcomeListeners.clear();
     this.host.remove(this);
   }
 
@@ -1498,7 +1562,7 @@ export class RoutedTerminalController implements TerminalController {
         view !== this.view ||
         ref !== this.ref ||
         intent.viewGeneration !== generation ||
-        this.phase !== "ready"
+        this.phase === "disposed"
       )
         return;
       void this.sendInput({ source: intent.source, bytes: intent.bytes });
@@ -1582,7 +1646,13 @@ export class RoutedTerminalController implements TerminalController {
         ref !== this.ref
       )
         return;
-      if (error.kind !== "INPUT_REJECTED") this.fail(error, token);
+      if (error.kind === "INPUT_REJECTED") {
+        this.publishInputNotice(
+          Object.freeze({ kind: "renderer-rejection", error: Object.freeze({ ...error }) }),
+        );
+      } else {
+        this.fail(error, token);
+      }
     });
     if (!current() || this.listener) {
       safeDispose(listener);

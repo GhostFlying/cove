@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { createClient } from "@cove/client";
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { createTerminalDecoder, encodeTerminalFrame } from "@cove/protocol/terminal";
 
@@ -49,6 +50,8 @@ function decodeCommand(bytes) {
 function view(onApply) {
   const focusListeners = new Set();
   const inputListeners = new Set();
+  const failureListeners = new Set();
+  const capturedInputListeners = [];
   const applied = [];
   let disposed = 0;
   const terminalView = {
@@ -65,13 +68,17 @@ function view(onApply) {
     setVisibility: () => {},
     onInputIntent: (listener) => {
       inputListeners.add(listener);
+      capturedInputListeners.push(listener);
       return { dispose: () => inputListeners.delete(listener) };
     },
     onFocusIntent: (listener) => {
       focusListeners.add(listener);
       return { dispose: () => focusListeners.delete(listener) };
     },
-    onFailure: () => ({ dispose() {} }),
+    onFailure: (listener) => {
+      failureListeners.add(listener);
+      return { dispose: () => failureListeners.delete(listener) };
+    },
     dispose: () => {
       disposed++;
     },
@@ -80,6 +87,8 @@ function view(onApply) {
     terminalView,
     focus: (intent) => focusListeners.forEach((listener) => listener(intent)),
     input: (intent) => inputListeners.forEach((listener) => listener(intent)),
+    fail: (error) => failureListeners.forEach((listener) => listener(error)),
+    staleInput: (intent) => capturedInputListeners[0]?.(intent),
     applied,
     get disposed() {
       return disposed;
@@ -785,5 +794,197 @@ describe("client control authority", () => {
       value: { writtenBytes: 1, unknownBytes: 0, notSentBytes: 0 },
     });
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test("view and direct input share one public terminal outcome path", async () => {
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) => notices.push(notice));
+    mounted.input({
+      viewGeneration: controller.snapshot().viewGeneration,
+      source: "mouse",
+      bytes: new Uint8Array([0, 255]),
+    });
+    await settle();
+    const viewCommand = peer.commands.at(-1).command;
+    peer.result(viewCommand, {
+      epoch: 1,
+      inputSeq: viewCommand.inputSeq,
+      status: "written",
+      writtenBytes: 2,
+    });
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      kind: "input",
+      outcome: {
+        ok: true,
+        value: { inputId: 1, source: "mouse", writtenBytes: 2, unknownBytes: 0, notSentBytes: 0 },
+      },
+    });
+    expect(Object.isFrozen(notices[0].outcome.value)).toBe(true);
+    const direct = controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
+    await settle();
+    const directCommand = peer.commands.at(-1).command;
+    peer.result(directCommand, {
+      epoch: 1,
+      inputSeq: directCommand.inputSeq,
+      status: "written",
+      writtenBytes: 1,
+    });
+    const result = await direct;
+    expect(notices).toHaveLength(2);
+    expect(notices[1].outcome).toEqual(result);
+  });
+
+  test("current nonadmitting view input is rejected visibly, obsolete callback is silent", async () => {
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) => notices.push(notice));
+    const generation = controller.snapshot().viewGeneration;
+    const recovering = controller.recover("gap");
+    const beforeInput = peer.commands.filter(({ command }) => command.type === "input").length;
+    mounted.input({ viewGeneration: generation, source: "paste", bytes: new Uint8Array([65, 66]) });
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      kind: "input",
+      outcome: { ok: false, value: { inputId: null, notSentBytes: 2 } },
+    });
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
+      beforeInput,
+    );
+    const recoverCommand = peer.commands.findLast(
+      ({ command }) => command.type === "recover",
+    ).command;
+    peer.result(recoverCommand, { mode: "baseline", atSeq: 1 });
+    peer.baseline(1);
+    await settle();
+    expect((await recovering).ok).toBe(true);
+    const beforeStale = notices.length;
+    mounted.staleInput({
+      viewGeneration: generation,
+      source: "keyboard",
+      bytes: new Uint8Array([67]),
+    });
+    expect(notices).toHaveLength(beforeStale);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
+      beforeInput,
+    );
+  });
+
+  test("renderer INPUT_REJECTED is a separate no-ID advisory and leaves control healthy", async () => {
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) => notices.push(notice));
+    mounted.fail(domainError("INPUT_REJECTED"));
+    expect(notices).toEqual([{ kind: "renderer-rejection", error: domainError("INPUT_REJECTED") }]);
+    expect("outcome" in notices[0]).toBe(false);
+    expect(controller.snapshot().inputReady).toBe(true);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(0);
+  });
+
+  test("view-origin not-sent and unknown each notify once; late result cannot replay", async () => {
+    const refused = await harness({
+      onCommand: ({ command }) => (command.type === "input" ? "not-sent" : undefined),
+    });
+    await grant(refused.controller, refused.peer);
+    const refusedNotices = [];
+    refused.controller.onInputOutcome((notice) => refusedNotices.push(notice));
+    refused.mounted.input({
+      viewGeneration: refused.controller.snapshot().viewGeneration,
+      source: "paste",
+      bytes: new Uint8Array([1]),
+    });
+    await settle();
+    expect(refusedNotices).toHaveLength(1);
+    expect(refusedNotices[0]).toMatchObject({
+      kind: "input",
+      outcome: { ok: false, value: { unknownBytes: 0, notSentBytes: 1 } },
+    });
+
+    const scheduler = clock();
+    const unknown = await harness({ scheduler });
+    await grant(unknown.controller, unknown.peer);
+    const notices = [];
+    unknown.controller.onInputOutcome((notice) => notices.push(notice));
+    unknown.mounted.input({
+      viewGeneration: unknown.controller.snapshot().viewGeneration,
+      source: "keyboard",
+      bytes: new Uint8Array([2]),
+    });
+    await settle();
+    const pendingCommand = unknown.peer.commands.at(-1).command;
+    scheduler.advance(5_001);
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      kind: "input",
+      outcome: { ok: false, value: { unknownBytes: 1, notSentBytes: 0 } },
+    });
+    unknown.peer.result(pendingCommand, {
+      epoch: 1,
+      inputSeq: pendingCommand.inputSeq,
+      status: "written",
+      writtenBytes: 1,
+    });
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(unknown.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test("observer throw, rejection, unsubscribe and dispose do not suppress an owned final notice", async () => {
+    const scheduler = clock();
+    const { controller, peer } = await harness({ scheduler });
+    await grant(controller, peer);
+    const seen = [];
+    controller.onInputOutcome(() => {
+      throw new Error("observer");
+    });
+    controller.onInputOutcome(() => Promise.reject(new Error("async observer")));
+    let self;
+    self = controller.onInputOutcome(() => self.dispose());
+    controller.onInputOutcome((notice) => {
+      seen.push({ notice, retained: controller.snapshot().retainedInputBytes });
+    });
+    const pending = controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
+    await settle();
+    controller.dispose();
+    scheduler.advance(5_001);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].retained).toBe(0);
+    expect(seen[0].notice.outcome).toEqual(result);
+  });
+
+  test("observer can dispose during the final notice after byte debt is released", async () => {
+    const { controller, peer } = await harness({
+      onCommand: ({ command, payload }, activePeer) => {
+        if (command.type === "input")
+          activePeer.result(command, {
+            epoch: command.epoch,
+            inputSeq: command.inputSeq,
+            status: "written",
+            writtenBytes: payload.byteLength,
+          });
+      },
+    });
+    await grant(controller, peer);
+    const seen = [];
+    controller.onInputOutcome(() => controller.dispose());
+    controller.onInputOutcome((notice) => seen.push({ notice, snapshot: controller.snapshot() }));
+    const result = await controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
+    expect(result.ok).toBe(true);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].notice.outcome).toEqual(result);
+    expect(seen[0].snapshot).toMatchObject({
+      phase: "disposed",
+      retainedInputBytes: 0,
+      pendingInputIntents: 0,
+    });
   });
 });
