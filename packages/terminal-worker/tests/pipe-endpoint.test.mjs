@@ -4,6 +4,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError } from "@cove/protocol/errors";
 import {
   PIPE_VERSION,
+  MAX_FRAME_BYTES,
   createPipeDecoder,
   encodePipeFrame,
   validatePipeFrame,
@@ -53,8 +54,10 @@ function encode(metadata, payload = new Uint8Array()) {
   return Buffer.from(frame.value);
 }
 
-function coalescedAtCap(cap) {
+function coalescedAtCap(cap, prefixFrameBytes) {
   const pieces = [];
+  const frameLengths = [];
+  const payloadLengths = [];
   let remaining = cap;
   for (let index = 0; remaining > 0; index++) {
     const command = {
@@ -68,13 +71,21 @@ function coalescedAtCap(cap) {
     };
     const base = encode(command).length;
     const max = base + 65_536;
-    const length = remaining <= max ? remaining : Math.min(max, remaining - base - 1);
+    const length =
+      prefixFrameBytes && index < 4
+        ? prefixFrameBytes
+        : remaining <= max
+          ? remaining
+          : Math.min(max, remaining - base - 1);
     if (length <= base) throw new Error("cannot construct exact boundary fixture");
-    const piece = encode(command, Buffer.alloc(length - base, 0x61));
+    const payloadLength = length - base;
+    const piece = encode(command, Buffer.alloc(payloadLength, 0x61));
     pieces.push(piece);
+    frameLengths.push(piece.length);
+    payloadLengths.push(payloadLength);
     remaining -= piece.length;
   }
-  return { bytes: Buffer.concat(pieces), count: pieces.length };
+  return { bytes: Buffer.concat(pieces), count: pieces.length, frameLengths, payloadLengths };
 }
 
 function createHarness(config = {}) {
@@ -280,6 +291,101 @@ test("exact pipe ingress cap crosses decoder slices while cap plus one is reject
   expect(invalid.calls).toHaveLength(0);
 });
 
+test("exact-cap ingress releases an unproduced header before every decoder yield", async () => {
+  const cap = M0_LIMITS.pipeQueuedBytes;
+  const fixture = coalescedAtCap(cap, 65_532);
+  expect(fixture.bytes.length).toBe(cap);
+  expect(fixture.frameLengths.slice(0, 4).reduce((sum, length) => sum + length, 0)).toBe(262_128);
+  const responders = [];
+  const h = createHarness({
+    execute: (command) => new Promise((resolve) => responders.push({ command, resolve })),
+  });
+  await ready(h);
+  h.input.write(fixture.bytes);
+  const samples = [h.pipe.snapshot()];
+  for (let attempt = 0; attempt < 100 && h.calls.length < fixture.count; attempt++) {
+    await tick();
+    samples.push(h.pipe.snapshot());
+  }
+  expect(samples[0].ingressBytes).toBe(cap);
+  expect(samples.filter((sample) => sample.ingressBytes > 0).length).toBeGreaterThan(1);
+  expect(samples.every((sample) => sample.ingressBytes <= cap)).toBe(true);
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(
+    fixture.payloadLengths.map((_, index) => `boundary-${index}`),
+  );
+  expect(h.calls.map(({ payload }) => payload.byteLength)).toEqual(fixture.payloadLengths);
+  expect(h.pipe.snapshot().ingressBytes).toBe(0);
+  for (const { command, resolve } of responders)
+    resolve({
+      type: "error",
+      worker,
+      run,
+      requestId: command.requestId,
+      commandType: command.type,
+      error: domainError("CAPABILITY_UNAVAILABLE"),
+    });
+  await tick();
+  expect(
+    h
+      .frames()
+      .slice(1)
+      .map((reply) => reply.requestId),
+  ).toEqual(fixture.payloadLengths.map((_, index) => `boundary-${index}`));
+  await h.pipe.shutdown("test-complete");
+});
+
+test("previous-chunk partial completes before a smaller-cap slice yield", async () => {
+  const cap = 300_000;
+  const fixture = coalescedAtCap(cap, 65_532);
+  const h = createHarness({
+    execute: (command) =>
+      Promise.resolve({
+        type: "error",
+        worker,
+        run,
+        requestId: command.requestId,
+        commandType: command.type,
+        error: domainError("CAPABILITY_UNAVAILABLE"),
+      }),
+  });
+  await ready(h, { ...hello, effectiveBudgets: { ...M0_LIMITS, pipeQueuedBytes: cap } });
+  h.input.write(Buffer.from(fixture.bytes.subarray(0, 7)));
+  expect(h.pipe.snapshot().ingressBytes).toBe(16);
+  h.input.write(Buffer.from(fixture.bytes.subarray(7)));
+  expect(h.pipe.snapshot().ingressBytes).toBeLessThanOrEqual(cap);
+  for (let attempt = 0; attempt < 20 && h.calls.length < fixture.count; attempt++) await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(
+    fixture.payloadLengths.map((_, index) => `boundary-${index}`),
+  );
+  expect(h.frames()).toHaveLength(fixture.count + 1);
+  expect(h.pipe.snapshot().state).toBe("ready");
+  await h.pipe.shutdown("test-complete");
+});
+
+test("EOF with a decoder-owned partial remains truncated after yield repair", async () => {
+  const h = createHarness();
+  await ready(h);
+  const command = encode({ type: "preview-refresh", worker, run, requestId: "partial-eof" });
+  h.input.write(command.subarray(0, 16));
+  expect(h.pipe.snapshot().ingressBytes).toBe(MAX_FRAME_BYTES);
+  h.input.end();
+  expect((await h.pipe.closed).reason).toBe("stdin-truncated-frame");
+  expect(h.calls).toHaveLength(0);
+});
+
+test("readable close during a decoder yield freezes only admitted request IDs", async () => {
+  const fixture = coalescedAtCap(M0_LIMITS.pipeQueuedBytes, 65_532);
+  const h = createHarness({ execute: () => new Promise(() => {}) });
+  await ready(h);
+  h.input.write(fixture.bytes);
+  const admittedIds = h.calls.map(({ command }) => command.requestId);
+  expect(admittedIds).toHaveLength(4);
+  h.input.destroy();
+  const closed = await h.pipe.closed;
+  expect(closed.reason).toBe("stdin-close");
+  expect(closed.uncertainRequestIds).toEqual(admittedIds);
+});
+
 test("pre-hello default and decoder partial count toward the ingress cap", async () => {
   const before = createHarness();
   before.input.write(Buffer.alloc(M0_LIMITS.pipeQueuedBytes + 1));
@@ -292,7 +398,7 @@ test("pre-hello default and decoder partial count toward the ingress cap", async
   const command = encode({ type: "preview-refresh", worker, run, requestId: "partial" });
   partial.input.write(command.subarray(0, 7));
   await tick();
-  expect(partial.pipe.snapshot().ingressBytes).toBe(7);
+  expect(partial.pipe.snapshot().ingressBytes).toBe(16);
   partial.input.write(Buffer.alloc(budgets.pipeQueuedBytes - 6));
   expect((await partial.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(partial.calls).toHaveLength(0);

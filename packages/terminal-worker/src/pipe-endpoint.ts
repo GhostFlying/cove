@@ -4,6 +4,7 @@ import { domainError } from "@cove/protocol/errors";
 import { sameWorkerRef } from "@cove/protocol/identity";
 import {
   HEADER_BYTES,
+  MAX_FRAME_BYTES,
   MAX_METADATA_BYTES,
   PIPE_VERSION,
   createPipeDecoder,
@@ -82,7 +83,7 @@ class WorkerPipeCore {
   readonly #readable: Readable;
   readonly #writable: Writable;
   readonly #options: WorkerPipeOptions;
-  readonly #decoder = createPipeDecoder();
+  #decoder = createPipeDecoder();
   readonly #outbound: OutboundFrame[] = [];
   readonly #pending = new Map<string, RequestRecord>();
   readonly #unsettledFrames = new Set<OutboundFrame>();
@@ -136,7 +137,7 @@ class WorkerPipeCore {
       outstandingRequests: this.#pending.size,
       responseItems: this.#unsettledFrames.size,
       // The backing buffer stays live until the complete chunk is released.
-      ingressBytes: (this.#activeChunk?.buffer.byteLength ?? 0) + this.#decoder.retainedBytes,
+      ingressBytes: (this.#activeChunk?.buffer.byteLength ?? 0) + this.#decoderStorageBound(),
       peakDecodeSliceBytes: this.#peakDecodeSliceBytes,
       queuedBytes: this.#queuedBytes,
       transportBytes: this.#transportBytes(),
@@ -190,6 +191,13 @@ class WorkerPipeCore {
       this.#blockedFrameBytes,
       this.#transportFrameBytes,
     );
+  }
+
+  #decoderStorageBound(): number {
+    const filled = this.#decoder.retainedBytes;
+    if (filled === 0) return 0;
+    // A complete header can allocate the full validated frame before its body arrives.
+    return filled < HEADER_BYTES ? HEADER_BYTES : MAX_FRAME_BYTES;
   }
 
   #accountedBytes(): number {
@@ -291,6 +299,16 @@ class WorkerPipeCore {
           break;
         }
         if (read.status === "budget") {
+          const partial = this.#decoder.retainedBytes;
+          if (partial !== 0) {
+            if (read.frames.length === 0 || partial > read.consumedBytes) {
+              void this.shutdown("decoder-partial-provenance");
+              break;
+            }
+            // Only the unproduced tail is rewound; completed frames already entered execution.
+            this.#activeOffset -= partial;
+            this.#decoder = createPipeDecoder();
+          }
           setImmediate(() => this.#processChunk());
           break;
         }
