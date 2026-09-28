@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   chmodSync,
   copyFileSync,
@@ -16,11 +17,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   childPipe,
+  admitWorkerStartup,
+  hello,
   parseWorkerProcessRow,
+  preserveWorkerHarness,
   psIdentity,
   repo,
   sameOwnedWorker,
   signalVerifiedWorkerExec,
+  startWorkerPipe,
   stopVerified,
   until,
   verifyWorkerIdentity,
@@ -62,6 +67,28 @@ const preserve = (directory, names) => {
   mkdirSync(target, { recursive: true });
   for (const name of names)
     if (existsSync(join(directory, name))) copyFileSync(join(directory, name), join(target, name));
+};
+
+const startupHarness = (first, sequence) => {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => {
+    throw Error("unexpected subject signal");
+  };
+  const sends = [];
+  let samples = 0;
+  const harness = {
+    child,
+    bin,
+    errors: [],
+    firstObservation: first,
+    initialObservation: first,
+    observe: () => sequence[Math.min(samples++, sequence.length - 1)],
+    send: (frame) => sends.push(frame),
+  };
+  return { harness, sends, sampleCount: () => samples };
 };
 
 test("structured worker identity accepts one owned shim-to-compiled exec and rejects ambiguity", () => {
@@ -187,6 +214,164 @@ test("real SIGTERM branch signals once only for a fresh matching compiled birth"
   expect(signals).toEqual(["SIGTERM"]);
 });
 
+test("bounded admission waits through transient shell and shim before caller hello", async () => {
+  const transient = {
+    kind: "unverifiable",
+    pid,
+    started,
+    commandLine: "(sh)",
+    reason: "pre-exec-shell",
+    raw: `${pid} ${started} (sh)`,
+  };
+  const shim = parse(`/bin/sh ${bin}`);
+  const exec = parse(`node ${linuxEntry}`);
+  const { harness, sends } = startupHarness(transient, [shim, exec, exec]);
+  const pending = startWorkerPipe(harness, hello, { deadlineMs: 1000 });
+  expect(sends).toEqual([]);
+  await pending;
+  expect(harness.provisionalBirth).toEqual({ pid, started });
+  expect(harness.firstObservation).toEqual(transient);
+  expect(harness.admittedObservation).toEqual(exec);
+  expect(harness.startupSamples.map((sample) => sample.commandLine)).toEqual([
+    "(sh)",
+    shim.commandLine,
+    exec.commandLine,
+  ]);
+  expect(sends).toEqual([hello]);
+});
+
+test("direct expected compiled entry admits before caller hello", async () => {
+  const exec = parse(`node ${linuxEntry}`);
+  const { harness, sends } = startupHarness(exec, [exec]);
+  await startWorkerPipe(harness, hello);
+  expect(harness.startupSamples).toEqual([exec]);
+  expect(sends).toEqual([hello]);
+});
+
+test("pending startup reaches fixed deadline without hello or signal", async () => {
+  const transient = {
+    kind: "unverifiable",
+    pid,
+    started,
+    commandLine: "(sh)",
+    reason: "pre-exec-shell",
+  };
+  const { harness, sends } = startupHarness(transient, [{ kind: "absent", pid }]);
+  await expect(startWorkerPipe(harness, hello, { deadlineMs: 80 })).rejects.toThrow(
+    "worker startup admission deadline",
+  );
+  expect(harness.startupState).toBe("failed");
+  expect(sends).toEqual([]);
+});
+
+test("changed birth and wrong full entry cannot transition into acceptance", async () => {
+  const transient = {
+    kind: "unverifiable",
+    pid,
+    started,
+    commandLine: "(sh)",
+    reason: "pre-exec-shell",
+  };
+  const changed = { ...parse(`/bin/sh ${bin}`), started: "Mon Sep 28 18:16:49 2026" };
+  const one = startupHarness(transient, [changed]);
+  await expect(admitWorkerStartup(one.harness, { deadlineMs: 1000 })).rejects.toThrow(
+    "worker birth changed",
+  );
+  expect(one.sends).toEqual([]);
+  const wrong = {
+    kind: "unverifiable",
+    pid,
+    started,
+    commandLine: "node /wrong/main.js",
+    reason: "unrelated-argv",
+  };
+  const two = startupHarness(parse(`/bin/sh ${bin}`), [wrong, parse(`node ${linuxEntry}`)]);
+  await expect(startWorkerPipe(two.harness, hello, { deadlineMs: 1000 })).rejects.toThrow(
+    "worker startup identity rejected",
+  );
+  expect(two.sampleCount()).toBe(1);
+  expect(two.sends).toEqual([]);
+});
+
+test("observed child exit terminates pending admission before hello", async () => {
+  const shim = parse(`/bin/sh ${bin}`);
+  const one = startupHarness(shim, []);
+  one.harness.observe = () => {
+    one.harness.child.exitCode = 1;
+    one.harness.child.emit("exit", 1, null);
+    return { kind: "absent", pid };
+  };
+  await expect(startWorkerPipe(one.harness, hello, { deadlineMs: 1000 })).rejects.toThrow(
+    "worker exited or errored",
+  );
+  expect(one.sends).toEqual([]);
+});
+
+test("a real shell wrapper reaches its exact Node entry before any hello", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-wrapper-entry-"));
+  const nonce = `wrapper-${process.pid}-${Date.now()}`;
+  const wrapper = join(directory, "installed-wrapper");
+  const entry = join(directory, "controlled-entry.mjs");
+  writeFileSync(
+    entry,
+    'process.stdin.resume();\nprocess.stdin.once("end", () => process.exit(0));\n',
+  );
+  writeFileSync(wrapper, `#!/bin/sh\nread gate\nexec "${process.execPath}" "${entry}"\n`);
+  chmodSync(wrapper, 0o700);
+  let harness;
+  let primary;
+  const cleanupErrors = [];
+  try {
+    harness = childPipe(wrapper, nonce, { expectedEntry: entry, evidencePath: directory });
+    const admission = admitWorkerStartup(harness);
+    void admission.catch(() => {});
+    await until(
+      () => {
+        if (harness.startupState === "failed") throw Error(harness.startupFailure.message);
+        return harness.startupSamples?.some((sample) => sample.form === "installed-shim");
+      },
+      3000,
+      "controlled wrapper shim observation",
+    );
+    harness.child.stdin.write("go\n");
+    expect(await admission).toMatchObject({ kind: "owned", form: "compiled-entry" });
+    expect(harness.firstObservation).toBeDefined();
+    expect(harness.provisionalBirth).toMatchObject({ pid: harness.child.pid });
+    expect(harness.frames).toEqual([]);
+  } catch (error) {
+    primary = error;
+  } finally {
+    try {
+      if (harness) preserveWorkerHarness(harness, directory, "before-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) await stopVerified(harness);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) preserveWorkerHarness(harness, directory, "after-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      preserve(directory, ["acquired.json", "before-cleanup.json", "after-cleanup.json"]);
+      rmSync(directory, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length)
+    throw new AggregateError(
+      [...(primary ? [primary] : []), ...cleanupErrors],
+      "wrapper cleanup failed",
+    );
+  if (primary) throw primary;
+  expect(await until(() => !psIdentity(harness.child.pid), 3000, "wrapper child exit")).toBe(true);
+});
+
 test("owned child survives validation throw as a retained handle and exits on EOF", async () => {
   const directory = mkdtempSync(join(tmpdir(), "cove-qual-identity-"));
   const fakeBin = controlledBin(directory);
@@ -237,7 +422,10 @@ test("launcher pre-handoff identity failure preserves receipt and cleans its own
     expect(exit).toEqual({ code: 1, signal: null });
     const failure = JSON.parse(readFileSync(join(directory, "launcher-failure.json"), "utf8"));
     expect(failure).toMatchObject({ nonce, workerPid: expect.any(Number), cleanupErrors: [] });
-    expect(failure.error.message).toContain("worker identity uncertain");
+    expect(failure.error.message).toContain("worker startup identity rejected");
+    expect(failure.ptyStart).toBe(null);
+    expect(existsSync(join(directory, "launch.json"))).toBe(false);
+    expect(existsSync(join(directory, "start.json"))).toBe(false);
     expect(
       JSON.parse(readFileSync(join(directory, "launcher-after-cleanup.json"), "utf8")).exitCode,
     ).toBe(0);
