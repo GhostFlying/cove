@@ -19,6 +19,7 @@ import {
   PROFILE,
   validateAppearance,
   type Appearance,
+  type Geometry,
 } from "@cove/protocol/profile";
 import { canonicalOperationIntent, RPC_METHODS, type RpcMethod } from "@cove/protocol/rpc";
 import type { TerminalView } from "@cove/protocol/view";
@@ -173,6 +174,11 @@ export type TerminalOutcome<T = void> =
 
 export type TerminalOpenOutcome = TerminalOutcome<TerminalController>;
 
+export interface TerminalControlReceipt {
+  readonly epoch: number;
+  readonly atSeq: number;
+}
+
 export interface TerminalSnapshot {
   readonly phase:
     "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
@@ -181,6 +187,8 @@ export interface TerminalSnapshot {
   readonly queuedBytes: number;
   readonly activeParseBytes: number;
   readonly subscription?: SubscriptionRef;
+  readonly inputReady: boolean;
+  readonly controlEpoch?: number;
 }
 
 export interface TerminalController {
@@ -190,6 +198,11 @@ export interface TerminalController {
   ): Promise<TerminalOutcome<TerminalReady>>;
   detach(): Promise<TerminalOutcome>;
   replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>>;
+  setInputTarget(foreground: boolean, focused: boolean): TerminalOutcome;
+  requestFocus(geometry?: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>>;
+  blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>>;
+  requestResize(geometry: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>>;
+  updateAppearance(appearance: Appearance): Promise<TerminalOutcome<TerminalControlReceipt>>;
   setVisibility(visible: boolean): void;
   snapshot(): TerminalSnapshot;
   onState(listener: (snapshot: TerminalSnapshot) => void): Disposable;
