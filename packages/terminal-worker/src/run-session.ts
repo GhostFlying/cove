@@ -262,6 +262,8 @@ class RunSessionCore {
   readonly #parseHighBytes: number;
   readonly #parseHardBytes: number;
   readonly #itemCap: number;
+  readonly #itemHigh: number;
+  readonly #itemLow: number;
 
   constructor(options: RunSessionOptions) {
     this.#run = options.run;
@@ -274,6 +276,8 @@ class RunSessionCore {
     this.#parseHighBytes = options.effectiveBudgets?.parseHighBytes ?? M0_LIMITS.parseHighBytes;
     this.#parseHardBytes = options.effectiveBudgets?.parseHardBytes ?? M0_LIMITS.parseHardBytes;
     this.#itemCap = M0_LIMITS.pendingWorkerCommands;
+    this.#itemHigh = Math.floor((this.#itemCap * 3) / 4);
+    this.#itemLow = Math.floor(this.#itemCap / 4);
     this.#model = createTerminalModel({
       run: options.run,
       geometry: options.geometry,
@@ -311,7 +315,7 @@ class RunSessionCore {
       this.#requestStop();
       return;
     }
-    if (this.#queuedBytes >= this.#parseHighBytes) this.#pause();
+    this.#pauseIfHigh();
     this.#schedule();
   }
 
@@ -366,7 +370,7 @@ class RunSessionCore {
       return;
     }
     this.#peakQueuedBytes = Math.max(this.#peakQueuedBytes, this.#queuedBytes);
-    if (this.#queuedBytes >= this.#parseHighBytes) this.#pause();
+    this.#pauseIfHigh();
     this.#schedule();
   }
 
@@ -474,6 +478,7 @@ class RunSessionCore {
       return Promise.resolve(failure("Run service queue full"));
     return new Promise((resolve) => {
       this.#pending.push({ kind: "barrier", resolve });
+      this.#pauseIfHigh();
       this.#schedule();
     });
   }
@@ -491,6 +496,7 @@ class RunSessionCore {
       else {
         this.#deferIngress = true;
         this.#pending.push({ kind: "operation", operation, resolve: resolveStop });
+        this.#pauseIfHigh();
         this.#schedule();
       }
       return promise;
@@ -516,6 +522,7 @@ class RunSessionCore {
     return new Promise((resolve) => {
       this.#deferIngress = true;
       this.#pending.push({ kind: "operation", operation, resolve });
+      this.#pauseIfHigh();
       this.#schedule();
     });
   }
@@ -700,17 +707,28 @@ class RunSessionCore {
     );
   }
 
+  #pauseIfHigh(): void {
+    if (
+      this.#queuedBytes < this.#parseHighBytes &&
+      this.#pending.length + Number(this.#running) < this.#itemHigh
+    )
+      return;
+    this.#pause();
+  }
+
   #pause(): void {
-    if (!this.#native || this.#paused) return;
+    if (!this.#native || this.#paused || this.#faulted || this.#disposed || this.#exited) return;
     const native = this.#native;
+    // Native flow-control callbacks can synchronously reenter output admission.
+    this.#paused = true;
     try {
       native.pause();
+      if (this.#faulted || this.#disposed || this.#exited || native !== this.#native)
+        this.#paused = false;
     } catch {
+      this.#paused = false;
       this.onFault({ kind: "io", reason: "pause-threw" });
-      return;
     }
-    if (!this.#faulted && !this.#disposed && !this.#exited && native === this.#native)
-      this.#paused = true;
   }
 
   #schedule(): void {
@@ -800,11 +818,13 @@ class RunSessionCore {
         !this.#faulted &&
         !this.#disposed &&
         !this.#exited &&
-        this.#queuedBytes <= this.#parseLowBytes
+        this.#queuedBytes <= this.#parseLowBytes &&
+        this.#pending.length <= this.#itemLow
       ) {
         try {
+          // Reentrant output may pause again before resume returns.
+          this.#paused = false;
           native.resume();
-          if (!this.#faulted && !this.#disposed && native === this.#native) this.#paused = false;
         } catch {
           this.#fault("Native resume failed");
         }
