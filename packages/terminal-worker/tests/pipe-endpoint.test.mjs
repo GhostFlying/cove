@@ -1163,6 +1163,12 @@ test("write callback EPIPE keeps the later Writable error owned through close", 
   expect(events).toEqual(["write-callback", "error", "close"]);
   expect(output.closed).toBe(true);
   expect(h.pipe.snapshot().state).toBe("closing");
+  expect(h.pipe.snapshot()).toMatchObject({
+    responseItems: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    blocked: false,
+  });
   expect(shutdowns).toEqual(["stdout-write-failed"]);
   expect(h.pipe.shutdown("late-close")).toBe(h.pipe.closed);
   disposal.resolve();
@@ -1175,6 +1181,14 @@ test("write callback EPIPE keeps the later Writable error owned through close", 
   });
   expect(writes).toHaveLength(2);
   expect(output.listenerCount("error")).toBe(0);
+  expect(h.pipe.snapshot()).toMatchObject({
+    responseItems: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    queuedBytes: 0,
+    outstandingRequests: 0,
+    blocked: false,
+  });
 });
 
 test("a late Writable error remains guarded after shutdown receipt until terminal close", async () => {
@@ -1203,4 +1217,146 @@ test("a late Writable error remains guarded after shutdown receipt until termina
   await tick();
   expect(output.closed).toBe(true);
   expect(output.listenerCount("error")).toBe(0);
+});
+
+test("logical shutdown retains handed-off bytes until physical Writable close", async () => {
+  const callbacks = [];
+  const writes = [];
+  const output = new Writable({
+    highWaterMark: 1,
+    write(chunk, _encoding, callback) {
+      writes.push(Buffer.from(chunk));
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  h.input.write(encode({ type: "preview-refresh", worker, run, requestId: "held" }));
+  await tick();
+  const before = h.pipe.snapshot();
+  expect(before).toMatchObject({ responseItems: 1, blocked: true });
+  expect(before.transportBytes).toBeGreaterThan(0);
+  expect(before.ordinaryAccountedBytes).toBeGreaterThan(0);
+  const closed = await h.pipe.shutdown("test-close");
+  expect(closed).toMatchObject({ reason: "test-close", uncertainRequestIds: ["held"] });
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "closed",
+    responseItems: 1,
+    transportBytes: before.transportBytes,
+    ordinaryAccountedBytes: before.ordinaryAccountedBytes,
+    blocked: true,
+  });
+  output.destroy();
+  await tick();
+  expect(output.closed).toBe(true);
+  expect(h.pipe.snapshot()).toMatchObject({
+    responseItems: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    queuedBytes: 0,
+    outstandingRequests: 0,
+    blocked: false,
+    peakAccountedBytes: before.peakAccountedBytes,
+  });
+  expect(await h.pipe.shutdown("later-close")).toBe(closed);
+  expect(writes).toHaveLength(2);
+});
+
+test("late success and error callbacks after terminal retirement do not restore debt", async () => {
+  for (const error of [false, true]) {
+    let heldCallback;
+    let writes = 0;
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        writes++;
+        if (writes === 1) callback();
+        else heldCallback = callback;
+      },
+    });
+    const h = createHarness({ output });
+    h.input.write(encode(hello));
+    await tick();
+    h.input.write(encode({ type: "preview-refresh", worker, run, requestId: "late" }));
+    await tick();
+    expect(h.pipe.snapshot().responseItems).toBe(1);
+    output.emit("close");
+    const closed = await h.pipe.closed;
+    expect(closed).toMatchObject({ reason: "stdout-close", uncertainRequestIds: ["late"] });
+    expect(h.pipe.snapshot()).toMatchObject({ responseItems: 0, transportBytes: 0 });
+    heldCallback(error ? Object.assign(new Error("late EPIPE"), { code: "EPIPE" }) : undefined);
+    await tick();
+    output.destroy();
+    await tick();
+    expect(h.pipe.snapshot()).toMatchObject({
+      responseItems: 0,
+      transportBytes: 0,
+      ordinaryAccountedBytes: 0,
+      queuedBytes: 0,
+      outstandingRequests: 0,
+      blocked: false,
+    });
+    expect(await h.pipe.shutdown("repeated-close")).toBe(closed);
+    expect(writes).toBe(2);
+  }
+});
+
+test("terminal close retires a handed-off duplicate response token once", async () => {
+  const callbacks = [];
+  const output = new Writable({
+    highWaterMark: 1024 * 1024,
+    write(_chunk, _encoding, callback) {
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  const original = { type: "stop", worker, run, requestId: "duplicate", operationId: "first" };
+  h.input.write(encode(original));
+  await tick();
+  h.input.write(encode({ ...original, operationId: "second" }));
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({ responseItems: 2, outstandingRequests: 1 });
+  output.emit("close");
+  const closed = await h.pipe.closed;
+  expect(closed).toMatchObject({ reason: "stdout-close", uncertainRequestIds: ["duplicate"] });
+  expect(h.pipe.snapshot()).toMatchObject({
+    responseItems: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    outstandingRequests: 0,
+  });
+  callbacks.shift()();
+  output.destroy();
+  await tick();
+  expect(h.pipe.snapshot().responseItems).toBe(0);
+  expect(await h.pipe.shutdown("again")).toBe(closed);
+});
+
+test("synchronous close during write(false) cannot restore blocked transport", async () => {
+  let writes = 0;
+  const output = new Writable({
+    highWaterMark: 1,
+    write() {
+      writes++;
+      this.emit("close");
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  const closed = await h.pipe.closed;
+  expect(closed.reason).toBe("stdout-close");
+  expect(h.pipe.snapshot()).toMatchObject({
+    responseItems: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    blocked: false,
+  });
+  output.destroy();
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({ transportBytes: 0, blocked: false });
+  expect(writes).toBe(1);
 });

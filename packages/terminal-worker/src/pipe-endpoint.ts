@@ -65,7 +65,7 @@ export interface WorkerPipe {
 }
 
 interface OutboundFrame {
-  readonly bytes: Uint8Array;
+  bytes: Uint8Array;
   request?: RequestRecord;
   readonly control: boolean;
   readonly extra: boolean;
@@ -79,12 +79,26 @@ interface RequestRecord {
   readonly frames: Set<OutboundFrame>;
 }
 
-function guardTerminalErrors(stream: Readable | Writable): void {
-  if (stream.closed) return;
+function guardTerminalErrors(stream: Readable | Writable, pendingCallbacks = 0): () => void {
+  if (stream.closed && pendingCallbacks === 0) return () => {};
   // The stream alone owns late callback errors until close; no execution graph is retained.
   const ignoreTerminalError = (): void => {};
+  let closed = stream.closed;
+  let remaining = pendingCallbacks;
+  const release = (): void => {
+    if (closed && remaining === 0) stream.off("error", ignoreTerminalError);
+  };
   stream.on("error", ignoreTerminalError);
-  stream.once("close", () => stream.off("error", ignoreTerminalError));
+  if (!closed)
+    stream.once("close", () => {
+      closed = true;
+      release();
+    });
+  return () => {
+    if (remaining > 0) remaining--;
+    // Node may emit the write error after invoking its write callback.
+    if (closed && remaining === 0) setImmediate(release);
+  };
 }
 
 class WorkerPipeCore {
@@ -108,6 +122,9 @@ class WorkerPipeCore {
   #peakAccountedBytes = 0;
   #blocked = false;
   #blockedFrameBytes = 0;
+  #writableClosed = false;
+  #writeCallbacksPending = 0;
+  #writeGuardCallbackSettled: (() => void) | undefined;
   #activeChunk: Uint8Array | undefined;
   #activeOffset = 0;
   #peakDecodeSliceBytes = 0;
@@ -162,7 +179,10 @@ class WorkerPipeCore {
     this.#state = "closing";
     const uncertainRequestIds = [...this.#pending.keys()];
     guardTerminalErrors(this.#readable);
-    guardTerminalErrors(this.#writable);
+    this.#writeGuardCallbackSettled = guardTerminalErrors(
+      this.#writable,
+      this.#writeCallbacksPending,
+    );
     this.#readable.pause();
     this.#readable.off("data", this.#onData);
     this.#readable.off("end", this.#onEnd);
@@ -170,7 +190,6 @@ class WorkerPipeCore {
     this.#readable.off("close", this.#onReadClose);
     this.#writable.off("drain", this.#onDrain);
     this.#writable.off("error", this.#onWriteError);
-    this.#writable.off("close", this.#onWriteClose);
     this.#activeChunk = undefined;
     this.#outbound.length = 0;
     this.#deferredControl.length = 0;
@@ -181,8 +200,16 @@ class WorkerPipeCore {
         frame.state = "settled";
         this.#unsettledFrames.delete(frame);
         if (frame.extra) this.#extraResponseItems--;
+        frame.bytes = emptyPayload;
       }
     }
+    if (this.#writable.closed) this.#retireTransport();
+    else if (
+      this.#transportFrameBytes === 0 &&
+      this.#blockedFrameBytes === 0 &&
+      this.#writable.writableLength === 0
+    )
+      this.#writable.off("close", this.#onWriteClose);
     this.#pending.clear();
     this.#reservedReplyBytes = 0;
     void (async () => {
@@ -208,6 +235,7 @@ class WorkerPipeCore {
   }
 
   #transportBytes(): number {
+    if (this.#writableClosed) return 0;
     return Math.max(
       this.#writable.writableLength,
       this.#blockedFrameBytes,
@@ -243,7 +271,12 @@ class WorkerPipeCore {
       if (record.role === "ordinary" && record.phase === "executing") bytes += MAX_REPLY_BYTES;
     for (const frame of this.#unsettledFrames) if (!frame.control) bytes += frame.bytes.byteLength;
     // Unknown third-party writable buffering cannot borrow the control reserve.
-    return bytes + Math.max(0, this.#writable.writableLength - this.#transportFrameBytes);
+    return (
+      bytes +
+      (this.#writableClosed
+        ? 0
+        : Math.max(0, this.#writable.writableLength - this.#transportFrameBytes))
+    );
   }
 
   #role(command: PipeCommand): "ordinary" | "status" | "stop" {
@@ -590,12 +623,19 @@ class WorkerPipeCore {
     if (this.#blocked || this.#state === "closing" || this.#state === "closed") return;
     while (this.#outbound.length) {
       const frame = this.#outbound.shift()!;
-      this.#queuedBytes -= frame.bytes.byteLength;
+      const frameBytes = frame.bytes.byteLength;
+      this.#queuedBytes -= frameBytes;
       frame.state = "transport";
-      this.#transportFrameBytes += frame.bytes.byteLength;
+      this.#transportFrameBytes += frameBytes;
       let accepted: boolean;
+      let callbackReturned = false;
+      this.#writeCallbacksPending++;
       try {
         accepted = this.#writable.write(Buffer.from(frame.bytes), (error) => {
+          if (callbackReturned) return;
+          callbackReturned = true;
+          this.#writeCallbacksPending--;
+          this.#writeGuardCallbackSettled?.();
           if (error) {
             void this.shutdown("stdout-write-failed");
           } else {
@@ -603,13 +643,19 @@ class WorkerPipeCore {
           }
         });
       } catch {
+        if (!callbackReturned) {
+          callbackReturned = true;
+          this.#writeCallbacksPending--;
+          this.#writeGuardCallbackSettled?.();
+        }
         void this.shutdown("stdout-write-failed");
         return;
       }
+      if (this.#writableClosed || this.#state !== "ready") return;
       if (!accepted) {
         // write(false) has already handed off this frame. Never enqueue it again.
         this.#blocked = true;
-        this.#blockedFrameBytes = frame.bytes.byteLength;
+        this.#blockedFrameBytes = frameBytes;
       }
       this.#recordPeak();
       if (this.#accountedBytes() > this.#hello!.effectiveBudgets.pipeQueuedBytes) {
@@ -628,6 +674,8 @@ class WorkerPipeCore {
     frame.request?.frames.delete(frame);
     if (frame.extra) this.#extraResponseItems--;
     const record = frame.request;
+    delete frame.request;
+    frame.bytes = emptyPayload;
     if (
       record &&
       record.phase === "response" &&
@@ -636,6 +684,25 @@ class WorkerPipeCore {
     )
       this.#pending.delete(record.command.requestId);
     this.#tryStartDeferred();
+  }
+
+  #retireTransport(): void {
+    if (this.#writableClosed) return;
+    // Physical close ends ownership; it never acknowledges an uncertain response.
+    this.#writableClosed = true;
+    for (const frame of this.#unsettledFrames) {
+      frame.request?.frames.delete(frame);
+      delete frame.request;
+      frame.bytes = emptyPayload;
+      frame.state = "settled";
+    }
+    this.#unsettledFrames.clear();
+    this.#outbound.length = 0;
+    this.#queuedBytes = 0;
+    this.#transportFrameBytes = 0;
+    this.#blockedFrameBytes = 0;
+    this.#blocked = false;
+    this.#extraResponseItems = 0;
   }
 
   #onDrain = (): void => {
@@ -665,6 +732,7 @@ class WorkerPipeCore {
   };
 
   #onWriteClose = (): void => {
+    this.#retireTransport();
     void this.shutdown("stdout-close");
   };
 }
