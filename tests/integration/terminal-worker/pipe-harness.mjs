@@ -158,6 +158,10 @@ export function parseWorkerProcessRow(
 }
 
 export function observeWorkerProcess(pid, bin, options = {}) {
+  const requestedTimeout = options.timeoutMs ?? 2000;
+  if (!Number.isFinite(requestedTimeout) || requestedTimeout < 1)
+    throw RangeError(`invalid worker observation timeout: ${requestedTimeout}`);
+  const timeout = Math.min(2000, Math.floor(requestedTimeout));
   try {
     const raw = execFileSync(
       "/bin/ps",
@@ -165,7 +169,7 @@ export function observeWorkerProcess(pid, bin, options = {}) {
       {
         encoding: "utf8",
         env: { ...process.env, LC_ALL: "C" },
-        timeout: Math.max(1, Math.min(options.timeoutMs ?? 2000, 2000)),
+        timeout,
       },
     ).trim();
     return parseWorkerProcessRow(raw, pid, bin, options);
@@ -259,7 +263,8 @@ export async function admitWorkerStartup(harness, { deadlineMs = 8000 } = {}) {
       await startupTick(harness.child, Math.min(50, remaining));
       const beforeSample = deadline - performance.now();
       if (beforeSample <= 0) throw Error("worker startup admission deadline");
-      const sampleBudget = Math.max(1, Math.min(2000, beforeSample));
+      const sampleBudget = Math.min(2000, Math.floor(beforeSample));
+      if (sampleBudget < 1) throw Error("worker startup admission deadline");
       observation = sampleWorker(harness.observe, harness.child.pid, harness.bin, sampleBudget);
     }
     throw Error("worker startup observation budget exhausted");
