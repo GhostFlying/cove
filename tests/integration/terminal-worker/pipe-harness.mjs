@@ -101,6 +101,16 @@ const sameOwnedWorker = (initial, current) => {
   );
 };
 
+export function workerExecIdentity(harness) {
+  const current = psIdentity(harness.child.pid);
+  if (
+    !sameOwnedWorker(harness.identity, current) ||
+    !current.includes("/packages/terminal-worker/dist/src/main.js")
+  )
+    throw Error(`worker exec identity uncertain: initial=${harness.identity}, current=${current}`);
+  return current;
+}
+
 export function installedBin() {
   const temp = mkdtempSync(join(tmpdir(), "cove-qual-bin-"));
   writeFileSync(
@@ -129,6 +139,7 @@ export function installedBin() {
   }
   return {
     bin: join(temp, "node_modules/.bin/cove-terminal-worker"),
+    consumerRoot: temp,
     cleanup: () => rmSync(temp, { recursive: true, force: true }),
   };
 }
