@@ -277,15 +277,77 @@ export async function admitWorkerStartup(harness, { deadlineMs = 8000 } = {}) {
 }
 
 export async function startWorkerPipe(harness, helloFrame = hello, options) {
+  if (harness.helloWrite?.attempted) throw Error("worker hello already attempted");
   await admitWorkerStartup(harness, options);
+  let complete;
+  let reject;
+  let settled = false;
+  const completion = new Promise((resolve, fail) => {
+    complete = resolve;
+    reject = fail;
+  });
+  void completion.catch(() => {});
+  const attempt = (harness.helloWrite = {
+    status: "pending",
+    attempted: false,
+    returned: null,
+    failure: null,
+  });
+  const fail = (error, phase) => {
+    if (settled) return;
+    settled = true;
+    attempt.status = "failed";
+    attempt.failure = {
+      name: error.name,
+      code: error.code ?? null,
+      message: error.message,
+      phase,
+    };
+    reject(error);
+  };
+  const succeed = () => {
+    if (settled) return;
+    settled = true;
+    attempt.status = "completed";
+    complete();
+  };
+  const childExited = () =>
+    fail(Error("worker exited before hello write completion"), "child-exit");
+  const stdinClosed = () =>
+    fail(Error("worker stdin closed before hello write completion"), "stdin-close");
+  harness.pendingHelloWrite = { fail };
+  harness.child.once("exit", childExited);
+  (harness.input ?? harness.child.stdin).once("close", stdinClosed);
+  const waitMs = Math.min(8000, Math.max(1, options?.helloWriteMs ?? 8000));
+  const timer = setTimeout(
+    () =>
+      fail(
+        Object.assign(Error("worker hello write completion deadline"), { code: "ETIMEDOUT" }),
+        "completion-timeout",
+      ),
+    waitMs,
+  );
   try {
     workerExecIdentity(harness);
-    harness.send(helloFrame);
+    attempt.attempted = true;
+    attempt.returned = harness.send(helloFrame, undefined, (error) => {
+      if (error) fail(error, "write-callback");
+      else succeed();
+    });
+    await completion;
   } catch (error) {
+    fail(error, attempt.attempted ? "write-call" : "pre-hello-proof");
     harness.startupState = "failed";
-    harness.startupFailure = { name: error.name, message: error.message };
-    harness.startupFailureObservation = harness.lastObservation ?? null;
+    harness.startupFailure = { ...attempt.failure };
+    harness.startupFailureObservation = attempt.attempted
+      ? null
+      : (harness.lastObservation ?? null);
     throw error;
+  } finally {
+    clearTimeout(timer);
+    harness.child.off("exit", childExited);
+    (harness.input ?? harness.child.stdin).off("close", stdinClosed);
+    harness.pendingHelloWrite = null;
   }
 }
 
@@ -389,7 +451,7 @@ export async function stopPtyIfOwned(start, nonce) {
 export function childPipe(
   bin,
   nonce,
-  { observe = observeWorkerProcess, evidencePath, expectedEntry = workerEntry } = {},
+  { observe = observeWorkerProcess, evidencePath, expectedEntry = workerEntry, input } = {},
 ) {
   const expectedAnchors = workerIdentityAnchors(bin, realpathSync, expectedEntry);
   const boundObserve =
@@ -402,13 +464,36 @@ export function childPipe(
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, COVE_QUALIFICATION_NONCE: nonce },
   });
+  const stdin = input ?? child.stdin;
   const decoder = createPipeDecoder();
   const frames = [];
   const stderr = [];
   const rawSizes = [];
   const errors = [];
+  const stdinErrors = [];
   let harness;
-  child.on("error", (error) => errors.push({ name: error.name, message: error.message }));
+  child.on("error", (error) => {
+    errors.push({
+      name: error.name,
+      code: error.code ?? null,
+      message: error.message,
+      source: "child",
+    });
+    harness?.pendingHelloWrite?.fail(error, "child-error");
+  });
+  stdin.on("error", (error) => {
+    const pendingHello =
+      harness?.helloWrite?.status !== "completed" ? harness?.pendingHelloWrite : null;
+    const row = {
+      name: error.name,
+      code: error.code ?? null,
+      message: error.message,
+      phase: pendingHello ? "hello-write" : "command-or-cleanup",
+    };
+    stdinErrors.push(row);
+    errors.push({ ...row, source: "stdin" });
+    pendingHello?.fail(error, "stdin-error");
+  });
   child.stdout.on("data", (chunk) => {
     rawSizes.push(chunk.length);
     let offset = 0;
@@ -443,7 +528,8 @@ export function childPipe(
       resolve({ code, signal });
     }),
   );
-  const send = (metadata, payload) => child.stdin.write(encode(metadata, payload));
+  const send = (metadata, payload, onComplete) =>
+    stdin.write(encode(metadata, payload), onComplete);
   const wait = (predicate, label) =>
     until(
       () => {
@@ -458,6 +544,7 @@ export function childPipe(
     : { kind: "unverifiable", reason: "spawn-without-pid" };
   harness = {
     child,
+    input: stdin,
     bin,
     nonce,
     observe: boundObserve,
@@ -471,6 +558,7 @@ export function childPipe(
     rawSizes,
     stderr,
     errors,
+    stdinErrors,
     exit,
     send,
     wait,
@@ -499,6 +587,8 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
         startupState: harness.startupState ?? null,
         startupFailure: harness.startupFailure ?? null,
         startupFailureObservation: harness.startupFailureObservation ?? null,
+        helloWrite: harness.helloWrite ?? null,
+        stdinErrors: harness.stdinErrors ?? [],
         cleanupProofs: harness.cleanupProofs ?? [],
         cleanupSignals: harness.cleanupSignals ?? [],
         cleanupFailure: harness.cleanupFailure ?? null,

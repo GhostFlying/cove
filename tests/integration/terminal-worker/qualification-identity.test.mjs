@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Writable } from "node:stream";
 import {
   childPipe,
   admitWorkerStartup,
@@ -75,6 +76,7 @@ const startupHarness = (first, sequence) => {
   child.pid = pid;
   child.exitCode = null;
   child.signalCode = null;
+  child.stdin = new EventEmitter();
   child.kill = () => {
     throw Error("unexpected subject signal");
   };
@@ -88,7 +90,10 @@ const startupHarness = (first, sequence) => {
     firstObservation: first,
     initialObservation: first,
     observe: () => sequence[Math.min(samples++, sequence.length - 1)],
-    send: (frame) => sends.push(frame),
+    send: (frame, _payload, onComplete) => {
+      sends.push(frame);
+      onComplete?.();
+    },
   };
   return { harness, sends, sampleCount: () => samples };
 };
@@ -285,6 +290,195 @@ test("failed hello write is terminal and does not retry", async () => {
   expect(harness.startupState).toBe("failed");
   expect(harness.startupFailure.message).toBe("controlled hello write failure");
 });
+
+test.each([
+  ["async callback error", "error"],
+  ["false-return completion", "success"],
+  ["missing completion", "timeout"],
+  ["premature close", "close"],
+])(
+  "owned Writable hello %s uses shared childPipe send and error wiring",
+  async (_label, mode) => {
+    const directory = mkdtempSync(join(tmpdir(), "cove-qual-hello-writable-"));
+    const entry = controlledBin(directory);
+    const nonce = `hello-write-${mode}-${process.pid}-${Date.now()}`;
+    const sent = [];
+    let lateComplete;
+    const input = new Writable({
+      highWaterMark: 1,
+      write(chunk, _encoding, callback) {
+        sent.push(Buffer.from(chunk));
+        if (mode === "error")
+          setImmediate(() =>
+            callback(Object.assign(Error("controlled broken pipe"), { code: "EPIPE" })),
+          );
+        else if (mode === "success") setImmediate(() => callback());
+        else if (mode === "close") setImmediate(() => input.destroy());
+        else lateComplete = callback;
+      },
+    });
+    let harness;
+    let primary;
+    const cleanupErrors = [];
+    try {
+      harness = childPipe(entry, nonce, { expectedEntry: entry, evidencePath: directory, input });
+      try {
+        await startWorkerPipe(harness, hello, { helloWriteMs: 80 });
+      } catch (error) {
+        primary = error;
+      }
+      expect(sent).toHaveLength(1);
+      expect(harness.helloWrite.attempted).toBe(true);
+      expect(harness.helloWrite.returned).toBe(false);
+      expect(harness.startupState).toBe(mode === "success" ? "admitted" : "failed");
+      expect(harness.helloWrite.status).toBe(mode === "success" ? "completed" : "failed");
+      expect(primary?.code ?? null).toBe(
+        mode === "error" ? "EPIPE" : mode === "timeout" ? "ETIMEDOUT" : null,
+      );
+      expect(harness.startupFailure?.phase ?? null).toBe(
+        mode === "error"
+          ? "write-callback"
+          : mode === "timeout"
+            ? "completion-timeout"
+            : mode === "close"
+              ? "stdin-close"
+              : null,
+      );
+      if (lateComplete) {
+        lateComplete();
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(harness.helloWrite.status).toBe(mode === "success" ? "completed" : "failed");
+      let laterWaitError;
+      if (mode === "success" || mode === "timeout") {
+        input.emit("error", Object.assign(Error("later command failure"), { code: "EPIPE" }));
+        if (mode === "success")
+          try {
+            await harness.wait(() => false, "later stdin error");
+          } catch (error) {
+            laterWaitError = error;
+          }
+      }
+      expect(laterWaitError?.message?.includes("worker child error") === true).toBe(
+        mode === "success",
+      );
+      expect(harness.startupState).toBe(mode === "success" ? "admitted" : "failed");
+      preserveWorkerHarness(harness, directory, "after-write", primary);
+      const saved = JSON.parse(readFileSync(join(directory, "after-write.json"), "utf8"));
+      expect(saved.helloWrite.status).toBe(harness.helloWrite.status);
+      expect(saved.startupFailure?.phase ?? null).toBe(harness.startupFailure?.phase ?? null);
+      expect(saved.stdinErrors.length > 0).toBe(mode !== "close");
+      expect(saved.stdinErrors.at(-1)?.phase ?? null).toBe(
+        mode === "error" ? "hello-write" : mode === "close" ? null : "command-or-cleanup",
+      );
+    } finally {
+      try {
+        if (harness) preserveWorkerHarness(harness, directory, "before-cleanup", primary);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        if (harness) await stopVerified(harness);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        if (harness) preserveWorkerHarness(harness, directory, "after-cleanup", primary);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        preserve(directory, [
+          "acquired.json",
+          "after-write.json",
+          "before-cleanup.json",
+          "after-cleanup.json",
+        ]);
+        rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      input.destroy();
+    }
+    if (cleanupErrors.length)
+      throw new AggregateError(
+        [...(primary ? [primary] : []), ...cleanupErrors],
+        "hello cleanup failed",
+      );
+    expect(
+      await until(() => !psIdentity(harness.child.pid), 3000, "controlled hello child exit"),
+    ).toBe(true);
+  },
+  10000,
+);
+
+test("actual owned child pipe rejects one hello after local stdin closure", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "cove-qual-closed-hello-pipe-"));
+  const entry = join(directory, "controlled-entry");
+  writeFileSync(entry, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`);
+  chmodSync(entry, 0o700);
+  let harness;
+  let primary;
+  const cleanupErrors = [];
+  try {
+    harness = childPipe(entry, `closed-hello-${process.pid}-${Date.now()}`, {
+      expectedEntry: entry,
+      evidencePath: directory,
+    });
+    await admitWorkerStartup(harness);
+    harness.child.stdin.destroy();
+    try {
+      await startWorkerPipe(harness, hello, { helloWriteMs: 500 });
+    } catch (error) {
+      primary = error;
+    }
+    expect(primary?.code).toBe("ERR_STREAM_DESTROYED");
+    expect(harness.helloWrite).toMatchObject({ attempted: true, status: "failed" });
+    expect(harness.startupFailure).toMatchObject({
+      code: "ERR_STREAM_DESTROYED",
+      phase: "write-callback",
+    });
+    preserveWorkerHarness(harness, directory, "after-write", primary);
+    const saved = JSON.parse(readFileSync(join(directory, "after-write.json"), "utf8"));
+    expect(saved.startupFailure.code).toBe("ERR_STREAM_DESTROYED");
+    expect(saved.helloWrite.attempted).toBe(true);
+  } finally {
+    try {
+      if (harness) preserveWorkerHarness(harness, directory, "before-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) await stopVerified(harness);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) preserveWorkerHarness(harness, directory, "after-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      preserve(directory, [
+        "acquired.json",
+        "after-write.json",
+        "before-cleanup.json",
+        "after-cleanup.json",
+      ]);
+      rmSync(directory, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  }
+  if (cleanupErrors.length)
+    throw new AggregateError(
+      [...(primary ? [primary] : []), ...cleanupErrors],
+      "closed pipe cleanup failed",
+    );
+  expect(await until(() => !psIdentity(harness.child.pid), 3000, "closed pipe child exit")).toBe(
+    true,
+  );
+}, 10000);
 
 test("cleanup authorizes only a fresh compiled entry at the captured birth", async () => {
   const compiledEntry = parse(`node ${linuxEntry}`);
