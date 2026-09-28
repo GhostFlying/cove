@@ -356,6 +356,21 @@ export const requiredSuites = [
     minimumTests: 26,
   },
   {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/public-delivery.test.mjs",
+    minimumTests: 1,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/pipe-main-real.test.mjs",
+    minimumTests: 6,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/worker-fairness-real.test.mjs",
+    minimumTests: 1,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
@@ -690,6 +705,10 @@ export function readVitestOwnedTestFiles(checkoutRoot = root) {
     testFilesIn(
       join(checkoutRoot, "packages/terminal-worker/tests"),
       "packages/terminal-worker/tests",
+    ),
+    testFilesIn(
+      join(checkoutRoot, "tests/integration/terminal-worker"),
+      "tests/integration/terminal-worker",
     ),
     testFilesIn(join(checkoutRoot, "packages/terminal-web/probes"), "packages/terminal-web/probes"),
     testFilesIn(join(checkoutRoot, "packages/terminal-web/tests"), "packages/terminal-web/tests"),
