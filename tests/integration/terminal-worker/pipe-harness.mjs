@@ -494,6 +494,9 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
         startupState: harness.startupState ?? null,
         startupFailure: harness.startupFailure ?? null,
         startupFailureObservation: harness.startupFailureObservation ?? null,
+        cleanupProofs: harness.cleanupProofs ?? [],
+        cleanupSignals: harness.cleanupSignals ?? [],
+        cleanupFailure: harness.cleanupFailure ?? null,
         startupDeadlineMs: harness.startupDeadlineMs ?? null,
         spawnAt: harness.spawnAt ?? null,
         startupSamples: harness.startupSamples ?? [],
@@ -517,9 +520,59 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
 export async function stopVerified(harness) {
   const { child } = harness;
   if (harness.exitObserved || child.exitCode !== null || child.signalCode !== null) return;
-  const current = sampleWorker(harness.observe, child.pid, harness.bin);
-  if (sameOwnedWorker(harness.initialObservation, current)) {
+  const proof = (signal) => {
+    const current = sampleWorker(harness.observe, child.pid, harness.bin);
+    harness.lastObservation = current;
+    const birth =
+      harness.provisionalBirth ??
+      harness.admittedObservation ??
+      (harness.firstObservation?.kind === "owned" ? harness.firstObservation : null);
+    const anchorsAgree = [
+      harness.provisionalBirth,
+      harness.admittedObservation,
+      harness.firstObservation?.kind === "owned" ? harness.firstObservation : null,
+    ]
+      .filter(Boolean)
+      .every((anchor) => anchor.pid === birth?.pid && anchor.started === birth?.started);
+    const authorized =
+      birth !== null &&
+      anchorsAgree &&
+      sameOwnedWorker({ ...birth, kind: "owned" }, current) &&
+      current.form === "compiled-entry" &&
+      (!harness.expectedAnchors || current.canonical === harness.expectedAnchors.compiled);
+    (harness.cleanupProofs ??= []).push({ signal, observation: current, authorized });
+    return authorized;
+  };
+  const eof = async () => {
+    let descriptorError;
+    try {
+      if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+    } catch (error) {
+      descriptorError = error;
+    }
+    try {
+      await until(
+        () => harness.exitObserved || child.exitCode !== null || child.signalCode !== null,
+        2000,
+        "worker EOF exit",
+      );
+    } catch (error) {
+      const failure = Error(
+        `cleanup identity uncertain: observation=${JSON.stringify(harness.lastObservation)}`,
+        { cause: error },
+      );
+      if (descriptorError) failure.descriptorError = descriptorError;
+      throw failure;
+    }
+    if (descriptorError) throw descriptorError;
+  };
+  try {
+    if (!proof("SIGTERM")) {
+      await eof();
+      return;
+    }
     child.kill("SIGTERM");
+    (harness.cleanupSignals ??= []).push("SIGTERM");
     try {
       await until(
         () => child.exitCode !== null || child.signalCode !== null,
@@ -527,31 +580,20 @@ export async function stopVerified(harness) {
         "worker exit after SIGTERM",
       );
     } catch {
-      if (
-        sameOwnedWorker(
-          harness.initialObservation,
-          sampleWorker(harness.observe, child.pid, harness.bin),
-        )
-      )
-        child.kill("SIGKILL");
+      if (!proof("SIGKILL")) {
+        await eof();
+        return;
+      }
+      child.kill("SIGKILL");
+      (harness.cleanupSignals ??= []).push("SIGKILL");
       await until(
         () => child.exitCode !== null || child.signalCode !== null,
         5000,
         "worker exit after SIGKILL",
       );
     }
-  } else {
-    if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
-    try {
-      await until(
-        () => harness.exitObserved || child.exitCode !== null || child.signalCode !== null,
-        2000,
-        "worker EOF exit",
-      );
-    } catch {
-      throw Error(
-        `cleanup identity uncertain: initial=${JSON.stringify(harness.initialObservation)}, current=${JSON.stringify(current)}`,
-      );
-    }
+  } catch (error) {
+    harness.cleanupFailure = { name: error.name, message: error.message };
+    throw error;
   }
 }

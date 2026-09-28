@@ -285,6 +285,85 @@ test("failed hello write is terminal and does not retry", async () => {
   expect(harness.startupFailure.message).toBe("controlled hello write failure");
 });
 
+test("cleanup authorizes only a fresh compiled entry at the captured birth", async () => {
+  const compiledEntry = parse(`node ${linuxEntry}`);
+  const shim = parse(`/bin/sh ${bin}`);
+  const changed = { ...compiledEntry, started: "Mon Sep 28 18:16:49 2026" };
+  const wrong = parse("node /tmp/other/main.js");
+  for (const current of [shim, changed, wrong]) {
+    const { harness } = startupHarness(shim, [current]);
+    harness.provisionalBirth = { pid, started };
+    const signals = [];
+    let eof = 0;
+    harness.child.kill = (signal) => signals.push(signal);
+    harness.child.stdin = {
+      destroyed: false,
+      writableEnded: false,
+      end: () => {
+        eof++;
+        harness.child.exitCode = 0;
+      },
+    };
+    await stopVerified(harness);
+    expect(signals).toEqual([]);
+    expect(eof).toBe(1);
+    expect(harness.cleanupProofs).toMatchObject([{ signal: "SIGTERM", authorized: false }]);
+  }
+  const { harness } = startupHarness(shim, [compiledEntry]);
+  harness.provisionalBirth = { pid, started };
+  const signals = [];
+  harness.child.kill = (signal) => {
+    signals.push(signal);
+    harness.child.signalCode = signal;
+  };
+  await stopVerified(harness);
+  expect(signals).toEqual(["SIGTERM"]);
+  expect(harness.cleanupProofs).toMatchObject([{ signal: "SIGTERM", authorized: true }]);
+});
+
+test.each([
+  ["shim", parse(`/bin/sh ${bin}`), ["SIGTERM"]],
+  ["changed birth", { ...parse(`node ${linuxEntry}`), started: "changed" }, ["SIGTERM"]],
+  ["wrong entry", parse("node /tmp/other/main.js"), ["SIGTERM"]],
+  ["compiled", parse(`node ${linuxEntry}`), ["SIGTERM", "SIGKILL"]],
+])(
+  "cleanup escalation resamples %s before SIGKILL",
+  async (_label, second, expectedSignals) => {
+    const exec = parse(`node ${linuxEntry}`);
+    const { harness } = startupHarness(exec, [exec, second]);
+    harness.provisionalBirth = { pid, started };
+    harness.admittedObservation = exec;
+    const signals = [];
+    let eof = 0;
+    harness.child.kill = (signal) => {
+      signals.push(signal);
+      if (signal === "SIGKILL") harness.child.signalCode = signal;
+    };
+    harness.child.stdin = {
+      destroyed: false,
+      writableEnded: false,
+      end: () => {
+        eof++;
+        harness.child.exitCode = 0;
+      },
+    };
+    await stopVerified(harness);
+    expect(signals).toEqual(expectedSignals);
+    expect(
+      harness.cleanupProofs.map(({ signal, observation, authorized }) => ({
+        signal,
+        observation,
+        authorized,
+      })),
+    ).toMatchObject([
+      { signal: "SIGTERM", observation: exec, authorized: true },
+      { signal: "SIGKILL", observation: second, authorized: expectedSignals.length === 2 },
+    ]);
+    expect(eof).toBe(expectedSignals.length === 2 ? 0 : 1);
+  },
+  15000,
+);
+
 test("pending startup reaches fixed deadline without hello or signal", async () => {
   const transient = {
     kind: "unverifiable",
@@ -408,6 +487,119 @@ test("a real shell wrapper reaches its exact Node entry before any hello", async
   if (primary) throw primary;
   expect(await until(() => !psIdentity(harness.child.pid), 3000, "wrapper child exit")).toBe(true);
 });
+
+test.each([
+  ["EOF exit", false],
+  ["unresolved EOF", true],
+])(
+  "pending real shim cleanup preserves timeout and %s",
+  async (_label, ignoreEof) => {
+    const directory = mkdtempSync(join(tmpdir(), "cove-qual-pending-shim-"));
+    const wrapper = join(directory, "installed-wrapper");
+    const entry = join(directory, "controlled-entry.mjs");
+    writeFileSync(entry, "setInterval(() => {}, 1000);\n");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nif ! read gate; then ${ignoreEof ? `exec "${process.execPath}" "${entry}"` : "exit 0"}; fi\n`,
+    );
+    chmodSync(wrapper, 0o700);
+    let harness;
+    let primary;
+    let cleanup;
+    let outer;
+    let outerError;
+    const subjectSignals = [];
+    try {
+      harness = childPipe(wrapper, `pending-${process.pid}-${Date.now()}`, {
+        expectedEntry: entry,
+        evidencePath: directory,
+      });
+      harness.child.kill = (signal) => {
+        subjectSignals.push(signal);
+        throw Error("subject must not signal a pending shim");
+      };
+      try {
+        await startWorkerPipe(harness, hello, { deadlineMs: 250 });
+      } catch (error) {
+        primary = error;
+      }
+      expect(primary?.message).toContain("worker startup admission deadline");
+      expect(harness.startupState).toBe("failed");
+      preserveWorkerHarness(harness, directory, "before-cleanup", primary);
+      try {
+        await stopVerified(harness);
+      } catch (error) {
+        cleanup = error;
+      }
+      preserveWorkerHarness(harness, directory, "after-cleanup", primary);
+      expect(subjectSignals).toEqual([]);
+      expect(harness.child.stdin.writableEnded).toBe(true);
+      expect(harness.cleanupProofs).toMatchObject([
+        { signal: "SIGTERM", observation: { form: "installed-shim" }, authorized: false },
+      ]);
+      expect(cleanup?.message?.includes("cleanup identity uncertain") === true).toBe(ignoreEof);
+      expect(harness.cleanupFailure?.message?.includes("cleanup identity uncertain") === true).toBe(
+        ignoreEof,
+      );
+      expect(Boolean(harness.exitObserved || harness.child.exitCode !== null)).toBe(!ignoreEof);
+      const saved = JSON.parse(readFileSync(join(directory, "after-cleanup.json"), "utf8"));
+      expect(saved.startupFailure.message).toContain("worker startup admission deadline");
+      expect(saved.cleanupSignals).toEqual([]);
+      expect(saved.cleanupFailure?.message?.includes("cleanup identity uncertain") === true).toBe(
+        ignoreEof,
+      );
+    } finally {
+      try {
+        if (harness && !harness.exitObserved && harness.child.exitCode === null) {
+          const fresh = harness.observe(harness.child.pid, wrapper);
+          const birth = harness.provisionalBirth;
+          const verified =
+            birth &&
+            sameOwnedWorker({ kind: "owned", ...birth }, fresh) &&
+            fresh.form === "compiled-entry" &&
+            fresh.canonical === realpathSync(entry);
+          outer = { pid: harness.child.pid, birth, fresh, verified, signal: null };
+          if (verified) {
+            process.kill(harness.child.pid, "SIGTERM");
+            outer.signal = "SIGTERM";
+            await until(() => harness.exitObserved, 3000, "outer owned child exit");
+          } else outerError = Error("outer cleanup identity uncertain");
+        }
+      } catch (error) {
+        outerError = error;
+      }
+      if (harness) {
+        writeFileSync(
+          join(directory, "outer-cleanup.json"),
+          JSON.stringify(outer ?? null, null, 2) + "\n",
+        );
+        preserveWorkerHarness(harness, directory, "final", primary);
+        preserve(directory, [
+          "acquired.json",
+          "before-cleanup.json",
+          "after-cleanup.json",
+          "outer-cleanup.json",
+          "final.json",
+        ]);
+      }
+      const closed =
+        !harness ||
+        harness.exitObserved ||
+        harness.child.exitCode !== null ||
+        harness.child.signalCode !== null;
+      if (!closed) outerError ??= Error("outer cleanup exit uncertain");
+      if (closed) rmSync(directory, { recursive: true, force: true });
+    }
+    if (outerError)
+      throw new AggregateError(
+        [primary, cleanup, outerError].filter(Boolean),
+        "outer cleanup failed",
+      );
+    expect(outer?.verified === true).toBe(ignoreEof);
+    expect(outer?.signal === "SIGTERM").toBe(ignoreEof);
+  },
+  10000,
+);
 
 test("owned child survives validation throw as a retained handle and exits on EOF", async () => {
   const directory = mkdtempSync(join(tmpdir(), "cove-qual-identity-"));
