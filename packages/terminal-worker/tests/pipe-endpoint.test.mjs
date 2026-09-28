@@ -571,6 +571,69 @@ test("EOF classifies pending work as uncertain and shuts down once", async () =>
   expect(shutdowns).toEqual(["stdin-eof"]);
 });
 
+test("readable close without EOF settles once and preserves held request uncertainty", async () => {
+  const shutdowns = [];
+  let reentrant;
+  const h = createHarness({
+    execute: () => new Promise(() => {}),
+    onShutdown: (reason) => {
+      shutdowns.push(reason);
+      reentrant = h.pipe.shutdown("reentrant-close");
+    },
+  });
+  await ready(h);
+  h.input.write(encode({ type: "stop", worker, run, requestId: "held", operationId: "op" }));
+  await tick();
+  h.input.destroy();
+  const closed = await h.pipe.closed;
+  expect(closed.reason).toBe("stdin-close");
+  expect(closed.uncertainRequestIds).toEqual(["held"]);
+  expect(shutdowns).toEqual(["stdin-close"]);
+  expect(reentrant).toBe(h.pipe.closed);
+  expect(await h.pipe.shutdown("later-close")).toBe(closed);
+});
+
+test("readable close keeps a physical reply token uncertain after execution completes", async () => {
+  const callbacks = [];
+  const output = new Writable({
+    highWaterMark: 1024 * 1024,
+    write(_chunk, _encoding, callback) {
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  h.input.write(encode({ type: "stop", worker, run, requestId: "reply", operationId: "op" }));
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({ pendingCommands: 0, responseItems: 1 });
+  h.input.destroy();
+  const closed = await h.pipe.closed;
+  expect(closed).toMatchObject({ reason: "stdin-close", uncertainRequestIds: ["reply"] });
+  callbacks.shift()();
+  await tick();
+  expect(await h.pipe.closed).toBe(closed);
+});
+
+test("readable error then close and EOF then close keep their first shutdown cause", async () => {
+  const failureReasons = [];
+  const failure = createHarness({ onShutdown: (reason) => failureReasons.push(reason) });
+  await ready(failure);
+  failure.input.destroy(new Error("read failure"));
+  expect((await failure.pipe.closed).reason).toBe("stdin-error");
+  await tick();
+  expect(failureReasons).toEqual(["stdin-error"]);
+
+  const eofReasons = [];
+  const eof = createHarness({ onShutdown: (reason) => eofReasons.push(reason) });
+  await ready(eof);
+  eof.input.end();
+  expect((await eof.pipe.closed).reason).toBe("stdin-eof");
+  await tick();
+  expect(eofReasons).toEqual(["stdin-eof"]);
+});
+
 test("EPIPE retains uncertainty for a response still buffered by stdout", async () => {
   const callbacks = [];
   const output = new Writable({
