@@ -5,11 +5,15 @@ import { domainError } from "@cove/protocol/errors";
 import {
   PIPE_VERSION,
   MAX_FRAME_BYTES,
+  composeSpawnPayload,
   createPipeDecoder,
   encodePipeFrame,
   validatePipeFrame,
   validatePipeResultForCommand,
 } from "@cove/protocol/pipe";
+import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
+import { createWorkerExecution } from "@cove/terminal-worker/execution";
+import { runWorkerPipe as runPublicWorkerPipe } from "@cove/terminal-worker/pipe";
 import { runWorkerPipe } from "../dist/src/pipe-endpoint.js";
 
 const worker = {
@@ -134,9 +138,9 @@ function createHarness(config = {}) {
       return [];
     },
   };
-  const pipe = runWorkerPipe(input, output, {
+  const pipe = (config.runPipe ?? runWorkerPipe)(input, output, {
     buildVersion: "child",
-    createExecution: () => execution,
+    createExecution: config.createExecution ?? (() => execution),
   });
   const frames = () => {
     const bytes = Buffer.concat(chunks);
@@ -157,6 +161,348 @@ function createHarness(config = {}) {
   };
   return { input, output, pipe, calls, chunks, frames };
 }
+
+function createSeamNativeFactory() {
+  const observed = { spawns: [], writes: [], resizes: [], stops: 0 };
+  const cleanup = {
+    scope: "initial-process-group",
+    verified: false,
+    graceful: { kind: "not-attempted", reason: "already-exited" },
+    force: { kind: "not-attempted", reason: "already-exited" },
+  };
+  const factory = {
+    retainedBytesAccounting: "participating",
+    snapshot: () => ({ owners: observed.spawns.length - observed.stops }),
+    spawn(spec, observer) {
+      observed.spawns.push(spec);
+      const pty = {
+        pid: 100,
+        writerCompletion: Promise.resolve({ kind: "closed" }),
+        submit(bytes, onSettled) {
+          const lease = spec.reserveRetainedBytes?.("native-input", bytes.length * 2 + 128);
+          if (spec.reserveRetainedBytes && !lease)
+            return { kind: "rejected", reason: "worker-byte-limit", writtenBytes: 0 };
+          const copy = Buffer.from(bytes);
+          observed.writes.push(copy);
+          const ticket = observed.writes.length;
+          try {
+            onSettled({
+              kind: "written",
+              ticket,
+              status: "written",
+              originalBytes: copy.length,
+              writtenBytes: copy.length,
+              remainingBytes: 0,
+            });
+          } finally {
+            lease?.release();
+          }
+          return { kind: "accepted", ticket, byteLength: copy.length };
+        },
+        automaticOutputSink() {},
+        resize(cols, rows) {
+          observed.resizes.push([cols, rows]);
+        },
+        pause() {},
+        resume() {},
+        retireInput() {},
+        async stop() {
+          observed.stops++;
+          observer.onExit({ exitCode: 0 });
+          return { kind: "exited", exit: { exitCode: 0 }, cleanup };
+        },
+        snapshot() {
+          return {
+            pid: 100,
+            exited: false,
+            writer: "closed",
+            input: {
+              allocatedBytes: 0,
+              tasks: 0,
+              peakAllocatedBytes: 0,
+              peakTasks: 0,
+              maxBytes: 65_536,
+              maxTasks: 256,
+            },
+            earlyOutputBytes: 0,
+            paused: false,
+          };
+        },
+      };
+      return { kind: "created", pty };
+    },
+  };
+  return { factory, observed };
+}
+
+function createRealExecutionHarness() {
+  const native = createSeamNativeFactory();
+  const harness = createHarness({
+    runPipe: runPublicWorkerPipe,
+    createExecution: (options) => createWorkerExecution({ ...options, factory: native.factory }),
+  });
+  return { ...harness, native: native.observed };
+}
+
+async function sendAndRead(harness, command, payload) {
+  const before = harness.frames().length;
+  harness.input.write(encode(command, payload));
+  for (let attempt = 0; attempt < 20 && harness.frames().length === before; attempt++) await tick();
+  expect(harness.frames()).toHaveLength(before + 1);
+  return harness.frames().at(-1);
+}
+
+function seamSpawn(requestId = "seam-spawn") {
+  const composed = composeSpawnPayload(
+    { executable: "/bin/sh", argv: ["-c", "exit 0"], cwd: "/" },
+    (value) => encoder.encode(value),
+  );
+  if (!composed) throw new Error("canonical spawn fixture failed");
+  return {
+    command: {
+      type: "spawn",
+      worker,
+      run,
+      requestId,
+      operationId: "seam-spawn-op",
+      geometry: { cols: 80, rows: 24 },
+      profile: PROFILE,
+      appearance: DEFAULT_APPEARANCE,
+      effectiveBudgets: M0_LIMITS,
+      spawnPayloadBytes: composed.bytes.length,
+    },
+    payload: composed.bytes,
+  };
+}
+
+test("public pipe normalizes validated empty commands for real worker execution", async () => {
+  const h = createRealExecutionHarness();
+  const holder = {
+    connection: subscription.connection,
+    subscriptionId: subscription.subscriptionId,
+    viewId: subscription.viewId,
+  };
+  try {
+    await ready(h);
+    const spawn = seamSpawn();
+    expect(await sendAndRead(h, spawn.command, spawn.payload)).toMatchObject({
+      type: "result",
+      requestId: spawn.command.requestId,
+      commandType: "spawn",
+      outcome: "accepted",
+    });
+    expect(h.native.spawns).toHaveLength(1);
+    expect(h.native.spawns[0]).toMatchObject({
+      file: "/bin/sh",
+      args: ["-c", "exit 0"],
+      cwd: "/",
+    });
+
+    const control = {
+      type: "set-control",
+      worker,
+      run,
+      requestId: "seam-control",
+      expectedEpoch: 0,
+      nextEpoch: 1,
+      holder,
+      geometry: { cols: 80, rows: 24 },
+    };
+    expect(await sendAndRead(h, control)).toMatchObject({
+      type: "result",
+      requestId: control.requestId,
+      commandType: "set-control",
+      outcome: "accepted",
+    });
+    const query = { type: "status", worker, run, requestId: "seam-status" };
+    expect(await sendAndRead(h, query)).toMatchObject({
+      type: "result",
+      requestId: query.requestId,
+      commandType: "status",
+      outcome: "accepted",
+      runStatus: { run, controlEpoch: 1, controlHolder: holder },
+    });
+
+    const bytes = Uint8Array.of(0x00, 0x80, 0xff, 0x41);
+    const input = {
+      type: "input",
+      worker,
+      run,
+      requestId: "seam-input",
+      subscription,
+      epoch: 1,
+      inputSeq: 1,
+    };
+    expect(await sendAndRead(h, input, bytes)).toMatchObject({
+      type: "result",
+      requestId: input.requestId,
+      commandType: "input",
+      outcome: "accepted",
+      inputSeq: 1,
+      writtenBytes: bytes.length,
+    });
+    expect(h.native.writes).toEqual([Buffer.from(bytes)]);
+
+    const resize = {
+      type: "resize",
+      worker,
+      run,
+      requestId: "seam-resize",
+      subscription,
+      epoch: 1,
+      geometry: { cols: 81, rows: 24 },
+    };
+    expect(await sendAndRead(h, resize)).toMatchObject({
+      type: "result",
+      commandType: "resize",
+      outcome: "accepted",
+    });
+    expect(h.native.resizes).toContainEqual([81, 24]);
+    const appearance = {
+      type: "appearance",
+      worker,
+      run,
+      requestId: "seam-appearance",
+      subscription,
+      epoch: 1,
+      appearance: DEFAULT_APPEARANCE,
+    };
+    expect(await sendAndRead(h, appearance)).toMatchObject({
+      type: "result",
+      commandType: "appearance",
+      outcome: "accepted",
+    });
+
+    const unavailable = [
+      { type: "subscribe", subscription, atSeq: 0 },
+      { type: "recover", subscription },
+      { type: "unsubscribe", subscription },
+      { type: "applied-ack", subscription, appliedSeq: 0 },
+      { type: "baseline-progress", subscription, baselineId: "baseline", lastParsedOrdinal: 0 },
+      { type: "preview-refresh" },
+    ];
+    for (const [index, fields] of unavailable.entries()) {
+      const command = { ...fields, worker, run, requestId: `seam-w2-${index}` };
+      expect(await sendAndRead(h, command)).toMatchObject({
+        type: "error",
+        requestId: command.requestId,
+        commandType: command.type,
+        error: { kind: "CAPABILITY_UNAVAILABLE" },
+      });
+    }
+
+    const stop = { type: "stop", worker, run, requestId: "seam-stop", operationId: "stop-op" };
+    expect(await sendAndRead(h, stop)).toMatchObject({
+      type: "result",
+      requestId: stop.requestId,
+      commandType: "stop",
+      outcome: "accepted",
+    });
+    expect(h.native.stops).toBe(1);
+  } finally {
+    await h.pipe.shutdown("test-complete");
+  }
+});
+
+test.each([
+  [
+    "status with bytes",
+    () => ({
+      command: { type: "status", worker, run, requestId: "bad-status" },
+      payload: Uint8Array.of(1),
+    }),
+  ],
+  [
+    "set-control with bytes",
+    () => ({
+      command: {
+        type: "set-control",
+        worker,
+        run,
+        requestId: "bad-control",
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: null,
+        geometry: { cols: 80, rows: 24 },
+      },
+      payload: Uint8Array.of(1),
+    }),
+  ],
+  ["empty spawn", () => ({ command: seamSpawn().command, payload: new Uint8Array() })],
+  [
+    "short spawn",
+    () => {
+      const spawn = seamSpawn();
+      return {
+        command: spawn.command,
+        payload: spawn.payload.subarray(0, spawn.payload.length - 1),
+      };
+    },
+  ],
+  [
+    "empty input",
+    () => ({
+      command: {
+        type: "input",
+        worker,
+        run,
+        requestId: "bad-input",
+        subscription,
+        epoch: 1,
+        inputSeq: 1,
+      },
+      payload: new Uint8Array(),
+    }),
+  ],
+])("public pipe rejects %s before real execution", async (_name, fixture) => {
+  const h = createRealExecutionHarness();
+  try {
+    await ready(h);
+    const { command, payload } = fixture();
+    h.input.write(encode(command, payload));
+    expect((await h.pipe.closed).reason).toBe("invalid-frame-INVALID_METADATA");
+    expect(h.native.spawns).toHaveLength(0);
+    expect(h.frames()).toHaveLength(1);
+  } finally {
+    await h.pipe.shutdown("test-complete");
+  }
+});
+
+test("real execution still rejects missing spawn and empty input directly", async () => {
+  const native = createSeamNativeFactory();
+  const execution = createWorkerExecution({
+    worker,
+    effectiveBudgets: M0_LIMITS,
+    factory: native.factory,
+  });
+  try {
+    const spawn = seamSpawn();
+    expect(await execution.execute(spawn.command)).toMatchObject({
+      type: "error",
+      error: { kind: "INPUT_REJECTED" },
+    });
+    expect(
+      await execution.execute(
+        {
+          type: "input",
+          worker,
+          run,
+          requestId: "direct-empty-input",
+          subscription,
+          epoch: 1,
+          inputSeq: 1,
+        },
+        new Uint8Array(),
+      ),
+    ).toMatchObject({
+      type: "error",
+      error: { kind: "INPUT_REJECTED" },
+    });
+    expect(native.observed.spawns).toHaveLength(0);
+  } finally {
+    await execution.shutdown("test-complete");
+  }
+});
 
 async function ready(harness, greeting = hello) {
   harness.input.write(encode(greeting));
