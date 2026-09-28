@@ -134,6 +134,8 @@ export class RoutedTerminalController implements TerminalController {
   private progressInFlight = false;
   private pendingProgress: number | undefined;
   private autoRecoveryUsed = false;
+  private retiring = false;
+  private disposalComplete = false;
   private readonly listeners = new Set<(snapshot: TerminalSnapshot) => void>();
 
   constructor(
@@ -145,11 +147,12 @@ export class RoutedTerminalController implements TerminalController {
   ) {}
 
   attach(): Promise<TerminalOutcome<TerminalReady>> {
+    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
+    if (this.retiring) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (this.operation)
       return this.operation.kind === "attach"
         ? this.operation.promise
         : Promise.resolve(errorOutcome(localError("invalid-state")));
-    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
     if (this.ref) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (this.host.lane.retiredCount >= 256)
       return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
@@ -181,11 +184,12 @@ export class RoutedTerminalController implements TerminalController {
       reason !== "expired"
     )
       return Promise.resolve(errorOutcome(localError("invalid-request")));
+    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
+    if (this.retiring) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (this.operation)
       return this.operation.kind === "recover"
         ? this.operation.promise
         : Promise.resolve(errorOutcome(localError("invalid-state")));
-    if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
     const ref = this.ref;
     const binding = this.host.binding();
     if (!ref || !binding || this.phase !== "ready")
@@ -254,6 +258,7 @@ export class RoutedTerminalController implements TerminalController {
 
   async detach(): Promise<TerminalOutcome> {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
+    if (this.retiring) return { ok: true, value: undefined };
     const ref = this.ref;
     const unknownAttach = this.mayHaveUnidentifiedAttach();
     if (unknownAttach) {
@@ -263,7 +268,7 @@ export class RoutedTerminalController implements TerminalController {
       return { ok: true, value: undefined };
     }
     this.retire(localError("invalid-state"));
-    if (!ref || !this.host.binding()) return { ok: true, value: undefined };
+    if (!ref || !this.currentConnection(ref)) return { ok: true, value: undefined };
     const requestId = this.host.lane.nextRequestId(this.host.generation());
     if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     const result = await this.host.lane.send(
@@ -276,7 +281,10 @@ export class RoutedTerminalController implements TerminalController {
 
   async replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>> {
     if (this.phase === "disposed") return errorOutcome(localError("disposed"));
+    if (this.retiring) return errorOutcome(localError("invalid-state"));
     void this.detach();
+    if (this.snapshot().phase === "disposed") return errorOutcome(localError("disposed"));
+    if (this.retiring) return errorOutcome(localError("invalid-state"));
     this.releaseListener();
     try {
       this.view.dispose();
@@ -289,7 +297,7 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   setVisibility(visible: boolean): void {
-    if (this.phase === "disposed") return;
+    if (this.phase === "disposed" || this.retiring) return;
     try {
       this.view.setVisibility(visible);
     } catch {
@@ -324,29 +332,29 @@ export class RoutedTerminalController implements TerminalController {
 
   dispose(): void {
     if (this.phase === "disposed") return;
+    if (this.retiring) {
+      // The active retirement owns cleanup; this terminal request cannot be undone.
+      this.phase = "disposed";
+      return;
+    }
     const unknownAttach = this.mayHaveUnidentifiedAttach();
     if (unknownAttach) this.host.retireConnection(this, localError("disposed"));
     if (this.snapshot().phase === "disposed") return;
     const ref = this.ref;
-    this.retire(localError("disposed"));
     this.phase = "disposed";
-    this.releaseListener();
-    try {
-      this.view.dispose();
-    } catch {
-      /* All local ownership still retires. */
-    }
-    this.publish();
-    this.listeners.clear();
-    this.host.remove(this);
+    this.retire(localError("disposed"));
     if (ref) this.releaseRemote(ref);
   }
 
   connectionLost(error: ClientError | DomainError = localError("transport")): void {
     if (this.phase === "disposed") return;
-    this.retire(error, false);
     this.phase = "unavailable";
-    this.publish();
+    if (this.retiring) {
+      this.publish();
+      return;
+    }
+    this.retire(error, false);
+    if (this.phase === "unavailable") this.publish();
   }
 
   receive(event: ExternalTerminalEvent, bytes: Uint8Array): void {
@@ -690,7 +698,7 @@ export class RoutedTerminalController implements TerminalController {
         ok: true,
         value: { subscription: identityCopy(this.ref!), atSeq: this.appliedSeq },
       });
-      this.publish();
+      if (this.token === operation.token && this.phase === "ready") this.publish();
     });
   }
 
@@ -791,7 +799,7 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   private fail(error: ClientError | DomainError, token = this.token): void {
-    if (token !== this.token || this.phase === "disposed") return;
+    if (token !== this.token || this.phase === "disposed" || this.retiring) return;
     const ref = this.ref;
     const unknownAttach = this.mayHaveUnidentifiedAttach();
     if (unknownAttach) {
@@ -799,9 +807,9 @@ export class RoutedTerminalController implements TerminalController {
       this.host.retireConnection(this, error);
       if (this.token !== before || this.snapshot().phase === "disposed") return;
     }
-    this.retire(error);
     this.phase = "unavailable";
-    this.publish();
+    this.retire(error);
+    if (this.phase === "unavailable") this.publish();
     if (ref) this.releaseRemote(ref);
   }
 
@@ -835,18 +843,17 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   private retire(error: ClientError | DomainError, rememberRef = true): void {
+    if (this.retiring) return;
+    this.retiring = true;
+    const operation = this.operation;
+    const ref = this.ref;
+    const listener = this.listener;
+    // Withdraw all public ownership before a disposer or lane callback may reenter.
+    this.operation = undefined;
+    this.ref = undefined;
+    this.listener = undefined;
     this.token = nextCounter(this.token) ?? -1;
     this.drainToken = this.token;
-    this.clearQueued();
-    // Keep activeBytes charged until an old parser actually settles.
-    this.releaseListener();
-    const ref = this.ref;
-    let remembered = true;
-    if (ref) {
-      this.host.lane.cancelUnsentControl(ref);
-      if (rememberRef) remembered = this.host.lane.retire(ref);
-      this.ref = undefined;
-    }
     this.baseline = undefined;
     this.retainedModel = false;
     this.retainedGeometry = undefined;
@@ -854,16 +861,44 @@ export class RoutedTerminalController implements TerminalController {
     this.pendingAck = undefined;
     this.progressInFlight = false;
     this.pendingProgress = undefined;
-    if (this.operation) this.settle(this.operation, errorOutcome(error));
-    if (!remembered) this.host.retireConnection();
+    try {
+      this.clearQueued();
+      // Active parse debt remains charged until the original call settles.
+      if (operation) this.settle(operation, errorOutcome(error));
+      safeDispose(listener);
+      if (ref) {
+        this.host.lane.cancelUnsentControl(ref);
+        if (rememberRef && !this.host.lane.retire(ref) && this.currentConnection(ref))
+          this.host.retireConnection();
+      }
+    } finally {
+      this.retiring = false;
+      if (this.phase === "disposed") this.finalizeDisposal();
+    }
   }
 
   private settle(operation: Operation, result: TerminalOutcome<TerminalReady>): void {
     if (operation.settled) return;
     operation.settled = true;
-    safeDispose(operation.timer);
+    const timer = operation.timer;
+    delete operation.timer;
     if (this.operation === operation) this.operation = undefined;
     operation.resolve(result);
+    safeDispose(timer);
+  }
+
+  private finalizeDisposal(): void {
+    if (this.disposalComplete) return;
+    this.disposalComplete = true;
+    this.releaseListener();
+    try {
+      this.view.dispose();
+    } catch {
+      /* All local ownership still retires. */
+    }
+    this.publish();
+    this.listeners.clear();
+    this.host.remove(this);
   }
 
   private clearQueued(): void {

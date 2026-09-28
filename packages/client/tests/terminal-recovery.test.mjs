@@ -71,6 +71,32 @@ function clock() {
   };
 }
 
+function operationDisposalClock() {
+  let armed;
+  let disposalCalls = 0;
+  return {
+    nowMs: () => 0,
+    setTimer() {
+      if (!armed) return { dispose() {} };
+      const callback = armed;
+      armed = undefined;
+      return {
+        dispose() {
+          disposalCalls++;
+          callback();
+        },
+      };
+    },
+    yieldTurn: async () => {},
+    arm(callback) {
+      armed = callback;
+    },
+    get disposalCalls() {
+      return disposalCalls;
+    },
+  };
+}
+
 function view({ chunkGate, eventGate } = {}) {
   const facts = [];
   const listeners = new Set();
@@ -337,6 +363,218 @@ function settleControl(command, peer) {
 }
 
 describe("public terminal subscription and recovery", () => {
+  test("definite local attach refusal preserves a healthy route when timer disposal disposes its controller", async () => {
+    const scheduler = operationDisposalClock();
+    const rejectedView = view();
+    const codec = {
+      encode: (value) => {
+        if (value.includes('"type":"attach"') && value.includes('"viewId":"reject"'))
+          throw new Error("local encoder refusal");
+        return encoder.encode(value);
+      },
+      decodeFatal: (bytes) => decoder.decode(bytes),
+    };
+    const { client, peer } = await harness(
+      (command, peer) => {
+        if (command.type === "attach") reply(command, peer, subscription(command.viewId));
+        else settleControl(command, peer);
+      },
+      scheduler,
+      {},
+      codec,
+    );
+    const healthy = client.openTerminal({
+      run,
+      viewId: "healthy",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const healthyAttach = healthy.attach();
+    baseline(peer, subscription("healthy"));
+    expect((await healthyAttach).ok).toBe(true);
+    const rejected = client.openTerminal({
+      run,
+      viewId: "reject",
+      view: rejectedView.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const phases = [];
+    rejected.onState((snapshot) => phases.push(snapshot.phase));
+    scheduler.arm(() => rejected.dispose());
+    expect(await rejected.attach()).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-request" },
+    });
+    expect(scheduler.disposalCalls).toBe(1);
+    expect(rejected.snapshot().phase).toBe("disposed");
+    expect(phases.at(-1)).toBe("disposed");
+    expect(rejectedView.facts.filter(([kind]) => kind === "dispose")).toHaveLength(1);
+    expect(
+      peer.commands.filter((command) => command.type === "attach" && command.viewId === "reject"),
+    ).toHaveLength(0);
+    expect(await rejected.attach()).toMatchObject({ ok: false, error: { reason: "disposed" } });
+    expect(await rejected.recover("expired")).toMatchObject({
+      ok: false,
+      error: { reason: "disposed" },
+    });
+    expect(await rejected.replaceView(view().terminalView)).toMatchObject({
+      ok: false,
+      error: { reason: "disposed" },
+    });
+    expect(client.snapshot().status).toBe("connected");
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("healthy"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(healthy.snapshot().appliedSeq).toBe(4);
+    expect(
+      peer.commands.some((command) => command.type === "applied-ack" && command.appliedSeq === 4),
+    ).toBe(true);
+    healthy.dispose();
+    client.dispose();
+  });
+
+  test("accepted or unknown attach loss keeps timer-disposer disposal terminal after reconnect", async () => {
+    for (const disposition of ["accepted", "unknown"]) {
+      const scheduler = operationDisposalClock();
+      const rendered = view();
+      let mode = disposition;
+      const { client, peer } = await harness((command, peer) => {
+        if (command.type === "attach") {
+          if (mode === "accepted")
+            peer.emit(4, {
+              type: "error",
+              requestId: command.requestId,
+              run,
+              commandType: "attach",
+              error: domainError("BUSY", "accepted"),
+            });
+          else if (mode === "unknown") return "unknown";
+          else reply(command, peer, subscription(command.viewId));
+        } else settleControl(command, peer);
+      }, scheduler);
+      const old = client.openTerminal({
+        run,
+        viewId: "old",
+        view: rendered.terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      const phases = [];
+      old.onState((snapshot) => phases.push(snapshot.phase));
+      scheduler.arm(() => old.dispose());
+      expect((await old.attach()).ok).toBe(false);
+      expect(client.snapshot().status).toBe("unverifiable");
+      expect(old.snapshot().phase).toBe("disposed");
+      expect(phases.at(-1)).toBe("disposed");
+      expect(scheduler.disposalCalls).toBe(1);
+      expect(rendered.facts.filter(([kind]) => kind === "dispose")).toHaveLength(1);
+      mode = "success";
+      expect((await client.reconnect()).ok).toBe(true);
+      const before = peer.commands.length;
+      expect(await old.attach()).toMatchObject({ ok: false, error: { reason: "disposed" } });
+      expect(peer.commands).toHaveLength(before);
+      const fresh = client.openTerminal({
+        run,
+        viewId: "fresh",
+        view: view().terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      const freshAttach = fresh.attach();
+      baseline(peer, subscription("fresh"));
+      expect((await freshAttach).ok).toBe(true);
+      fresh.dispose();
+      client.dispose();
+    }
+  });
+
+  test("known accepted ref survives timer-disposer detach classification during local result failure", async () => {
+    const scheduler = operationDisposalClock();
+    const rejectRefs = [
+      subscription("reject", "subscription-reject-first"),
+      subscription("reject", "subscription-reject-second"),
+    ];
+    let rejectAttachCount = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        if (command.viewId === "reject") {
+          const index = rejectAttachCount++;
+          reply(command, peer, rejectRefs[index], "baseline", index === 0 ? 3 : 2);
+        } else reply(command, peer, subscription(command.viewId));
+      } else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    }, scheduler);
+    const healthy = client.openTerminal({
+      run,
+      viewId: "healthy",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const healthyAttach = healthy.attach();
+    baseline(peer, subscription("healthy"));
+    expect((await healthyAttach).ok).toBe(true);
+    const rejected = client.openTerminal({
+      run,
+      viewId: "reject",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const firstAttach = rejected.attach();
+    baseline(peer, rejectRefs[0]);
+    expect((await firstAttach).ok).toBe(true);
+    expect((await rejected.detach()).ok).toBe(true);
+    let nestedDetach;
+    scheduler.arm(() => {
+      nestedDetach = rejected.detach();
+    });
+    expect(await rejected.attach()).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-response" },
+    });
+    expect((await nestedDetach).ok).toBe(true);
+    expect(scheduler.disposalCalls).toBe(1);
+    expect(client.snapshot().status).toBe("connected");
+    expect(
+      peer.commands.filter(
+        (command) =>
+          command.type === "detach" &&
+          command.subscription.subscriptionId === rejectRefs[1].subscriptionId,
+      ),
+    ).toHaveLength(1);
+    expect(
+      peer.commands.filter((command) => command.type === "attach" && command.viewId === "reject"),
+    ).toHaveLength(2);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("healthy"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(healthy.snapshot().appliedSeq).toBe(4);
+    expect(
+      peer.commands.some((command) => command.type === "applied-ack" && command.appliedSeq === 4),
+    ).toBe(true);
+    rejected.dispose();
+    healthy.dispose();
+    client.dispose();
+  });
+
   test("fatal failure during listener registration cannot initialize a renderer", async () => {
     const rendered = view();
     let disposed = 0;
