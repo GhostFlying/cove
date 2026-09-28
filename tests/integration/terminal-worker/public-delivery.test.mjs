@@ -1,10 +1,16 @@
 import { expect, test } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { childPipe, hello, stopVerified } from "./pipe-harness.mjs";
+import {
+  childPipe,
+  hello,
+  preserveWorkerHarness,
+  stopVerified,
+  verifyWorkerIdentity,
+} from "./pipe-harness.mjs";
 
 const repo = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const packageDir = join(repo, "packages/terminal-worker");
@@ -12,7 +18,12 @@ const tsc = join(repo, "node_modules/typescript/bin/tsc");
 
 test("installed public package exposes declarations, ESM and compiled bin with v2 readiness", async () => {
   const temp = await mkdtemp(join(tmpdir(), "cove-qual-consumer-"));
+  const evidenceRoot = process.env.COVE_QUALIFICATION_EVIDENCE_DIR;
+  const evidencePath = evidenceRoot ? join(evidenceRoot, `delivery-${process.pid}`) : undefined;
+  if (evidencePath) await mkdir(evidencePath, { recursive: true });
   let harness;
+  let primary;
+  const cleanupErrors = [];
   try {
     await writeFile(
       join(temp, "package.json"),
@@ -73,7 +84,8 @@ test("installed public package exposes declarations, ESM and compiled bin with v
     await writeFile(moduleFile, 'export { runWorkerPipe } from "@cove/terminal-worker/pipe";\n');
     const module = await import(new URL(`file://${moduleFile}`));
     expect(typeof module.runWorkerPipe).toBe("function");
-    harness = childPipe(bin, `delivery-${process.pid}`);
+    harness = childPipe(bin, `delivery-${process.pid}`, { evidencePath });
+    verifyWorkerIdentity(harness);
     harness.send(hello);
     const ready = await harness.wait((metadata) => metadata.type === "ready", "public ready");
     expect(ready.metadata).toMatchObject({
@@ -85,8 +97,30 @@ test("installed public package exposes declarations, ESM and compiled bin with v
     harness.child.stdin.end();
     expect(await harness.exit).toEqual({ code: 0, signal: null });
     expect(harness.frames.map((frame) => frame.metadata.type)).toEqual(["ready"]);
+  } catch (error) {
+    primary = error;
   } finally {
-    if (harness) await stopVerified(harness);
+    try {
+      if (harness) preserveWorkerHarness(harness, evidencePath, "before-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) await stopVerified(harness);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      if (harness) preserveWorkerHarness(harness, evidencePath, "after-cleanup", primary);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     await rm(temp, { recursive: true, force: true });
   }
+  if (cleanupErrors.length)
+    throw new AggregateError(
+      [...(primary ? [primary] : []), ...cleanupErrors],
+      "public delivery and/or owned cleanup failed",
+    );
+  if (primary) throw primary;
 });
