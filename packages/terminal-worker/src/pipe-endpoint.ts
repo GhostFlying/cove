@@ -66,7 +66,7 @@ export interface WorkerPipe {
 
 interface OutboundFrame {
   readonly bytes: Uint8Array;
-  readonly request?: RequestRecord;
+  request?: RequestRecord;
   readonly control: boolean;
   readonly extra: boolean;
   state: "queued" | "transport" | "settled";
@@ -77,6 +77,14 @@ interface RequestRecord {
   readonly role: "ordinary" | "status" | "stop" | "rejection";
   phase: "deferred" | "executing" | "response";
   readonly frames: Set<OutboundFrame>;
+}
+
+function guardTerminalErrors(stream: Readable | Writable): void {
+  if (stream.closed) return;
+  // The stream alone owns late callback errors until close; no execution graph is retained.
+  const ignoreTerminalError = (): void => {};
+  stream.on("error", ignoreTerminalError);
+  stream.once("close", () => stream.off("error", ignoreTerminalError));
 }
 
 class WorkerPipeCore {
@@ -153,6 +161,8 @@ class WorkerPipeCore {
     this.#shutdownPromise = this.#closedPromise;
     this.#state = "closing";
     const uncertainRequestIds = [...this.#pending.keys()];
+    guardTerminalErrors(this.#readable);
+    guardTerminalErrors(this.#writable);
     this.#readable.pause();
     this.#readable.off("data", this.#onData);
     this.#readable.off("end", this.#onEnd);
@@ -163,7 +173,18 @@ class WorkerPipeCore {
     this.#writable.off("close", this.#onWriteClose);
     this.#activeChunk = undefined;
     this.#outbound.length = 0;
+    this.#deferredControl.length = 0;
     this.#queuedBytes = 0;
+    for (const frame of this.#unsettledFrames) {
+      delete frame.request;
+      if (frame.state === "queued") {
+        frame.state = "settled";
+        this.#unsettledFrames.delete(frame);
+        if (frame.extra) this.#extraResponseItems--;
+      }
+    }
+    this.#pending.clear();
+    this.#reservedReplyBytes = 0;
     void (async () => {
       let disposalReceipts: WorkerPipeClose["disposalReceipts"] = [];
       let disposalUnverifiable = false;
@@ -173,6 +194,7 @@ class WorkerPipeCore {
         // An unverified dispose cannot turn an in-flight command into a known failure.
         disposalUnverifiable = true;
       }
+      this.#execution = undefined;
       try {
         if (!this.#writable.destroyed && !this.#writable.writableEnded) this.#writable.end();
       } catch {
