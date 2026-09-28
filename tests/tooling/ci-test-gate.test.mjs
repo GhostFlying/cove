@@ -1007,6 +1007,7 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     ["run-session", 32],
     ["worker-execution", 30],
     ["run-session-real", 1],
+    ["pipe-endpoint", 23],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
