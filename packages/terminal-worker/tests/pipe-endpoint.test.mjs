@@ -262,6 +262,67 @@ test("duplicate outstanding ID rejects second command without releasing first", 
   await h.pipe.shutdown("test-complete");
 });
 
+test("request ID stays outstanding until its response write callback settles", async () => {
+  const callbacks = [];
+  const writes = [];
+  const output = new Writable({
+    highWaterMark: 1024 * 1024,
+    write(chunk, _encoding, callback) {
+      writes.push(Buffer.from(chunk));
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  const first = { type: "stop", worker, run, requestId: "q", operationId: "first" };
+  const duplicate = { ...first, operationId: "second" };
+  h.input.write(encode(first));
+  await tick();
+  expect(writes).toHaveLength(2);
+  expect(h.pipe.snapshot()).toMatchObject({ pendingCommands: 0, outstandingRequests: 1 });
+  h.input.write(encode(duplicate));
+  await tick();
+  expect(h.calls).toHaveLength(1);
+  expect(h.pipe.snapshot().responseItems).toBe(2);
+  callbacks.shift()();
+  await tick();
+  expect(writes).toHaveLength(3);
+  expect(h.pipe.snapshot().outstandingRequests).toBe(1);
+  callbacks.shift()();
+  await tick();
+  expect(h.pipe.snapshot().outstandingRequests).toBe(0);
+  await h.pipe.shutdown("test-complete");
+});
+
+test("queued original and duplicate tokens preserve one uncertain ID on close", async () => {
+  const callbacks = [];
+  const output = new Writable({
+    highWaterMark: 1,
+    write(_chunk, _encoding, callback) {
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({ output });
+  h.input.write(encode(hello));
+  callbacks.shift()();
+  await tick();
+  const blocker = { type: "stop", worker, run, requestId: "blocker", operationId: "blocker" };
+  const original = { ...blocker, requestId: "q", operationId: "first" };
+  h.input.write(Buffer.concat([encode(blocker), encode(original)]));
+  await tick();
+  h.input.write(encode({ ...original, operationId: "second" }));
+  await tick();
+  expect(h.calls).toHaveLength(2);
+  expect(h.pipe.snapshot().outstandingRequests).toBe(2);
+  const closed = await h.pipe.shutdown("test-close");
+  expect(closed.uncertainRequestIds).toEqual(["blocker", "q"]);
+  callbacks.splice(0).forEach((callback) => callback());
+  await tick();
+  expect(closed.uncertainRequestIds).toEqual(["blocker", "q"]);
+});
+
 test("an invalid execution result fences delivery and retains request uncertainty", async () => {
   const h = createHarness({
     execute: (command) =>
