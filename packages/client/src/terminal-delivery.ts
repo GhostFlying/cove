@@ -98,11 +98,23 @@ export class TerminalLane {
     onHandoff?: () => void,
     onSettled?: (outcome: CommandOutcome) => void,
   ): Promise<CommandOutcome> {
+    const rejectBeforeSend = (reason: LocalErrorReason): Promise<CommandOutcome> => {
+      const outcome: CommandOutcome = {
+        ok: false,
+        error: localError(reason),
+        uncertain: false,
+      };
+      try {
+        onSettled?.(outcome);
+      } catch {
+        this.owner.invalid();
+      }
+      return Promise.resolve(outcome);
+    };
     const binding = this.owner.binding();
-    if (!binding || !this.owner.socket())
-      return Promise.resolve({ ok: false, error: localError("invalid-state"), uncertain: false });
+    if (!binding || !this.owner.socket()) return rejectBeforeSend("invalid-state");
     if (this.pending.has(command.requestId) || this.pending.size >= M0_LIMITS.pendingWorkerCommands)
-      return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
+      return rejectBeforeSend("capacity");
     let bytes: Uint8Array;
     try {
       const encoded = encodeTerminalFrame(
@@ -113,13 +125,12 @@ export class TerminalLane {
       if (!encoded.ok) throw new Error("invalid command");
       bytes = encoded.value;
     } catch {
-      return Promise.resolve({ ok: false, error: localError("invalid-request"), uncertain: false });
+      return rejectBeforeSend("invalid-request");
     }
     const cap =
       binding.effectiveBudgets.outboundConnectionBytes +
       binding.effectiveBudgets.reservedControlBytes;
-    if (this.retainedOutboundBytes + bytes.byteLength > cap)
-      return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
+    if (this.retainedOutboundBytes + bytes.byteLength > cap) return rejectBeforeSend("capacity");
 
     let resolve!: (value: CommandOutcome) => void;
     const promise = new Promise<CommandOutcome>((settle) => {
