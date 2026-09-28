@@ -15,3 +15,11 @@ No coherent full, browser, hosted CI, devbox or shared suite registration is in 
 ## Source gate at initial corrected candidate
 
 Formal source review at H `f4df4eb25adaed9fdd32390bd92adfc0ad067e49` is **CHANGES_REQUESTED**: callback-error shutdown retains one 423-byte transport frame after actual Writable close. The independent compiled fake diagnostic reproduces public snapshot `closed` with `responseItems=1`, `transportBytes=423`, `ordinaryAccountedBytes=423`; its strict retirement assertion fails. Therefore every real/native and physical OS-pipe row remains unexecuted at this source. Prepared fixtures below are not evidence of passing real behavior. The source correction and renewed formal approval must precede retakes.
+
+## r2 source and tester allocation
+
+At corrected source H `8ae8fc513401e978443bada0d14adc9ea5d219ba` / T `54ae4dcafd48d984cd786308248d69f099bee310`, formal independent source rereview is APPROVED. The unchanged strict 423-byte finite assertion passes; held-open and late-callback controls pass after the fixture waits for actual `close` event rather than the Writable `closed` property alone. The first timing failure remains raw evidence.
+
+Affected real canonical and installed-bin EPIPE cases pass with nonce/PID emission receipt and handled `stdout-write-failed`/complete disposal diagnostic. A 768 KiB two-PTY pressure run crosses the former 256 small-callback boundary, observes three native pause/resume cycles at 192/64 items, exact child-emission/public-parsed digest, peer progress and closure-proven cleanup. No broader throughput or 100-PTY claim follows.
+
+The distinct OS-pipe stall/drain row remains **open**. Attempts with 200 requests did not fill the real pipe; 320 unpaced requests closed the endpoint after reservation pressure; 320 in two 160-request waves did positively observe an actual held-open reader and `blocked=true` with retained transport. Its probe was admitted into a queued response while transport dequeue stayed stopped. The fixture mistakenly asserted no request admission and stopped before releasing the reader, so drain/FIFO was not verified. All three failure receipts remain off-tree; the corrected transport-dequeue assertion is prepared but unexecuted, and this branch is not a passing qualification.

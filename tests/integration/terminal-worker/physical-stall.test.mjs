@@ -19,6 +19,7 @@ import {
 } from "./pipe-harness.mjs";
 
 test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", async () => {
+  const requestCount = 320;
   const delivery = installedBin();
   const publicFile = join(delivery.consumerRoot, "physical-stall-public.mjs");
   writeFileSync(publicFile, 'export { runWorkerPipe } from "@cove/terminal-worker/pipe";\n');
@@ -57,9 +58,15 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
       shutdown: async () => [],
     }),
   });
+  let observedClose;
+  void pipe.closed.then((value) => {
+    observedClose = value;
+  });
   let initialIdentity;
   let held;
+  let firstWave;
   let blocked;
+  let stoppedDequeue;
   let drained;
   let childReceipt;
   let primary;
@@ -76,8 +83,11 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
           initialIdentity,
           currentIdentity: psIdentity(reader.pid),
           held,
+          firstWave,
           blocked,
+          stoppedDequeue,
           drained,
+          observedClose,
           childReceipt: childReceipt && { total: childReceipt.total, pid: childReceipt.pid },
           requests: pending.map((item) => item.requestId),
           pipe: pipe.snapshot(),
@@ -97,21 +107,51 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
     expect(held).toMatchObject({ nonce, pid: reader.pid, state: "held-open-unread" });
     expect(initialIdentity).toContain(nonce);
     ingress.write(encode(hello));
-    for (let index = 0; index < 200; index++) {
+    for (let index = 0; index < requestCount / 2; index++) {
       const request = command("preview-refresh", target);
       pending.push(request);
       ingress.write(encode(request));
     }
+    firstWave = await until(
+      () => {
+        const snap = pipe.snapshot();
+        return snap.blocked || snap.state !== "ready" || snap.outstandingRequests <= 32
+          ? snap
+          : null;
+      },
+      8000,
+      "first OS-pipe wave settles below reservation pressure",
+    );
+    expect(firstWave.state).toBe("ready");
+    preserve("first-wave");
+    if (!firstWave.blocked)
+      for (let index = requestCount / 2; index < requestCount; index++) {
+        const request = command("preview-refresh", target);
+        pending.push(request);
+        ingress.write(encode(request));
+      }
     blocked = await until(
       () => {
         const snap = pipe.snapshot();
-        return snap.blocked && snap.transportBytes > 0 && snap.responseItems > 0 ? snap : null;
+        return snap.blocked || snap.state !== "ready" ? snap : null;
       },
       8000,
       "physical writer blocked with retained responses",
     );
+    expect(blocked.state).toBe("ready");
+    expect(blocked.transportBytes).toBeGreaterThan(0);
+    expect(blocked.responseItems).toBeGreaterThan(0);
     expect(blocked.peakAccountedBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
     preserve("blocked-before-drain");
+    const deferred = command("preview-refresh", target);
+    pending.push(deferred);
+    ingress.write(encode(deferred));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stoppedDequeue = pipe.snapshot();
+    expect(stoppedDequeue.blocked).toBe(true);
+    expect(stoppedDequeue.transportBytes).toBe(blocked.transportBytes);
+    expect(stoppedDequeue.queuedBytes).toBeGreaterThan(blocked.queuedBytes);
+    preserve("stopped-dequeue");
     reader.send("drain");
     drained = await until(
       () => {
@@ -144,7 +184,7 @@ test("a held-open OS stdout pipe blocks dequeue and later drains FIFO replies", 
     expect(replies.slice(1).map((item) => item.requestId)).toEqual(
       pending.map((item) => item.requestId),
     );
-    expect(new Set(replies.slice(1).map((item) => item.requestId)).size).toBe(200);
+    expect(new Set(replies.slice(1).map((item) => item.requestId)).size).toBe(pending.length);
     preserve("after-drain");
   } catch (error) {
     primary = error;
