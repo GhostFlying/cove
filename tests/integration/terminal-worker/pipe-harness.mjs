@@ -92,9 +92,9 @@ const workerEntry = join(repo, "packages/terminal-worker/dist/src/main.js");
 const startPattern =
   /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/;
 
-export function workerIdentityAnchors(bin, resolveEntry = realpathSync) {
+export function workerIdentityAnchors(bin, resolveEntry = realpathSync, entry = workerEntry) {
   try {
-    return { installed: resolveEntry(bin), compiled: resolveEntry(workerEntry) };
+    return { installed: resolveEntry(bin), compiled: resolveEntry(entry) };
   } catch (error) {
     return { error: `${error.code ?? error.name ?? "unknown"}: ${error.message}` };
   }
@@ -162,7 +162,11 @@ export function observeWorkerProcess(pid, bin, options = {}) {
     const raw = execFileSync(
       "/bin/ps",
       ["-p", String(pid), "-o", "pid=", "-o", "lstart=", "-o", "command="],
-      { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 2000 },
+      {
+        encoding: "utf8",
+        env: { ...process.env, LC_ALL: "C" },
+        timeout: Math.max(1, Math.min(options.timeoutMs ?? 2000, 2000)),
+      },
     ).trim();
     return parseWorkerProcessRow(raw, pid, bin, options);
   } catch (error) {
@@ -185,9 +189,9 @@ export function sameOwnedWorker(initial, current) {
   );
 }
 
-const sampleWorker = (observe, pid, bin) => {
+const sampleWorker = (observe, pid, bin, timeoutMs) => {
   try {
-    return observe(pid, bin);
+    return observe(pid, bin, timeoutMs);
   } catch (error) {
     return {
       kind: "unverifiable",
@@ -196,6 +200,81 @@ const sampleWorker = (observe, pid, bin) => {
     };
   }
 };
+
+const startupTick = (child, ms) =>
+  new Promise((resolve) => {
+    let timer;
+    const done = () => {
+      clearTimeout(timer);
+      child.off("exit", done);
+      child.off("error", done);
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    child.once("exit", done);
+    child.once("error", done);
+  });
+
+export async function admitWorkerStartup(harness, { deadlineMs = 8000 } = {}) {
+  const deadline = (harness.spawnAt ?? performance.now()) + Math.min(deadlineMs, 8000);
+  harness.startupSamples = [];
+  harness.startupState = "pending";
+  harness.startupDeadlineMs = Math.min(deadlineMs, 8000);
+  let observation = harness.firstObservation;
+  let birth;
+  try {
+    if (harness.collectorError) throw Error("worker acquisition receipt failed");
+    for (let sample = 0; sample < 128; sample++) {
+      if (performance.now() > deadline) throw Error("worker startup admission deadline");
+      if (
+        harness.errors.length ||
+        harness.exitObserved ||
+        harness.child.exitCode !== null ||
+        harness.child.signalCode !== null
+      )
+        throw Error("worker exited or errored during startup admission");
+      harness.startupSamples.push(observation);
+      if (Number.isInteger(observation?.pid) && typeof observation.started === "string") {
+        if (!birth) birth = { pid: observation.pid, started: observation.started };
+        else if (birth.pid !== observation.pid || birth.started !== observation.started)
+          throw Error("worker birth changed during startup admission");
+        harness.provisionalBirth = birth;
+      }
+      if (observation?.kind === "owned" && observation.form === "compiled-entry") {
+        if (!birth) throw Error("worker compiled entry has no birth identity");
+        harness.initialObservation = observation;
+        harness.admittedObservation = observation;
+        harness.identity = observation.raw;
+        harness.startupState = "admitted";
+        return observation;
+      }
+      const pending =
+        (observation?.kind === "owned" && observation.form === "installed-shim") ||
+        observation?.reason === "pre-exec-shell" ||
+        observation?.kind === "absent" ||
+        observation?.reason?.startsWith("ps-error:");
+      if (!pending) throw Error(`worker startup identity rejected: ${JSON.stringify(observation)}`);
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw Error("worker startup admission deadline");
+      await startupTick(harness.child, Math.min(50, remaining));
+      const beforeSample = deadline - performance.now();
+      if (beforeSample <= 0) throw Error("worker startup admission deadline");
+      const sampleBudget = Math.max(1, Math.min(2000, beforeSample));
+      observation = sampleWorker(harness.observe, harness.child.pid, harness.bin, sampleBudget);
+    }
+    throw Error("worker startup observation budget exhausted");
+  } catch (error) {
+    harness.startupState = "failed";
+    harness.startupFailure = { name: error.name, message: error.message };
+    throw error;
+  }
+}
+
+export async function startWorkerPipe(harness, helloFrame = hello, options) {
+  await admitWorkerStartup(harness, options);
+  verifyWorkerIdentity(harness);
+  harness.send(helloFrame);
+}
 
 export function verifyWorkerIdentity(harness) {
   const current = sampleWorker(harness.observe, harness.child.pid, harness.bin);
@@ -288,12 +367,18 @@ export async function stopPtyIfOwned(start, nonce) {
   }
 }
 
-export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidencePath } = {}) {
-  const expectedAnchors = workerIdentityAnchors(bin);
+export function childPipe(
+  bin,
+  nonce,
+  { observe = observeWorkerProcess, evidencePath, expectedEntry = workerEntry } = {},
+) {
+  const expectedAnchors = workerIdentityAnchors(bin, realpathSync, expectedEntry);
   const boundObserve =
     observe === observeWorkerProcess
-      ? (pid, path) => observeWorkerProcess(pid, path, { anchors: expectedAnchors })
+      ? (pid, path, timeoutMs) =>
+          observeWorkerProcess(pid, path, { anchors: expectedAnchors, timeoutMs })
       : observe;
+  const spawnAt = performance.now();
   const child = spawn(bin, [], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, COVE_QUALIFICATION_NONCE: nonce },
@@ -303,6 +388,7 @@ export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidence
   const stderr = [];
   const rawSizes = [];
   const errors = [];
+  let harness;
   child.on("error", (error) => errors.push({ name: error.name, message: error.message }));
   child.stdout.on("data", (chunk) => {
     rawSizes.push(chunk.length);
@@ -333,7 +419,10 @@ export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidence
   });
   child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
   const exit = new Promise((resolve) =>
-    child.once("exit", (code, signal) => resolve({ code, signal })),
+    child.once("exit", (code, signal) => {
+      if (harness) harness.exitObserved = true;
+      resolve({ code, signal });
+    }),
   );
   const send = (metadata, payload) => child.stdin.write(encode(metadata, payload));
   const wait = (predicate, label) =>
@@ -348,12 +437,14 @@ export function childPipe(bin, nonce, { observe = observeWorkerProcess, evidence
   const initialObservation = child.pid
     ? sampleWorker(boundObserve, child.pid, bin)
     : { kind: "unverifiable", reason: "spawn-without-pid" };
-  const harness = {
+  harness = {
     child,
     bin,
     nonce,
     observe: boundObserve,
     expectedAnchors,
+    spawnAt,
+    firstObservation: initialObservation,
     initialObservation,
     lastObservation: initialObservation,
     identity: initialObservation.raw ?? null,
@@ -383,12 +474,21 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
         nonce: harness.nonce,
         pid: child.pid ?? null,
         initialObservation: harness.initialObservation,
+        firstObservation: harness.firstObservation,
+        provisionalBirth: harness.provisionalBirth ?? null,
+        admittedObservation: harness.admittedObservation ?? null,
+        startupState: harness.startupState ?? null,
+        startupFailure: harness.startupFailure ?? null,
+        startupDeadlineMs: harness.startupDeadlineMs ?? null,
+        spawnAt: harness.spawnAt ?? null,
+        startupSamples: harness.startupSamples ?? [],
         expectedAnchors: harness.expectedAnchors,
         currentObservation: child.pid
           ? sampleWorker(harness.observe, child.pid, harness.bin)
           : null,
         exitCode: child.exitCode,
         signalCode: child.signalCode,
+        exitObserved: harness.exitObserved ?? false,
         stderrHex: Buffer.concat(harness.stderr).toString("hex"),
         errors: harness.errors,
         failure: error && { name: error.name, message: error.message },
@@ -401,7 +501,7 @@ export function preserveWorkerHarness(harness, evidencePath, stage, error) {
 
 export async function stopVerified(harness) {
   const { child } = harness;
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (harness.exitObserved || child.exitCode !== null || child.signalCode !== null) return;
   const current = sampleWorker(harness.observe, child.pid, harness.bin);
   if (sameOwnedWorker(harness.initialObservation, current)) {
     child.kill("SIGTERM");
@@ -425,11 +525,11 @@ export async function stopVerified(harness) {
         "worker exit after SIGKILL",
       );
     }
-  } else if (current.kind !== "absent") {
-    child.stdin.end();
+  } else {
+    if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
     try {
       await until(
-        () => child.exitCode !== null || child.signalCode !== null,
+        () => harness.exitObserved || child.exitCode !== null || child.signalCode !== null,
         2000,
         "worker EOF exit",
       );

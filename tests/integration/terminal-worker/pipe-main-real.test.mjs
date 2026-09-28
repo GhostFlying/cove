@@ -25,11 +25,11 @@ import {
   run,
   signalVerifiedWorkerExec,
   spawnCommand,
+  startWorkerPipe,
   stopPtyIfOwned,
   stopVerified,
   subscription,
   until,
-  verifyWorkerIdentity,
   workerExecIdentity,
 } from "./pipe-harness.mjs";
 
@@ -66,6 +66,12 @@ async function withWorker(label, body) {
           workerPid: h?.child.pid ?? null,
           workerInitialIdentity: h?.identity ?? null,
           workerInitialObservation: h?.initialObservation ?? null,
+          workerFirstObservation: h?.firstObservation ?? null,
+          workerProvisionalBirth: h?.provisionalBirth ?? null,
+          workerStartupState: h?.startupState ?? null,
+          workerStartupFailure: h?.startupFailure ?? null,
+          workerStartupSamples: h?.startupSamples ?? [],
+          workerExpectedAnchors: h?.expectedAnchors ?? null,
           workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
           workerExecIdentity: execIdentity ?? null,
           workerSignalObservation: h?.signalObservation ?? null,
@@ -91,8 +97,7 @@ async function withWorker(label, body) {
   };
   try {
     h = childPipe(delivery.bin, nonce, { evidencePath });
-    verifyWorkerIdentity(h);
-    h.send(hello);
+    await startWorkerPipe(h, hello);
     expect((await h.wait((m) => m.type === "ready", "ready")).metadata.pipeVersion).toBe(2);
     execIdentity = workerExecIdentity(h);
     preserve("ready");
@@ -131,7 +136,11 @@ async function withWorker(label, body) {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    rmSync(temp, { recursive: true, force: true });
+    try {
+      rmSync(temp, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   if (cleanupErrors.length)
     throw new AggregateError(
@@ -425,7 +434,11 @@ test("compiled public main disposes an owned PTY after its parent process disapp
     } catch (error) {
       cleanupErrors.push(error);
     }
-    rmSync(temp, { recursive: true, force: true });
+    try {
+      rmSync(temp, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   if (cleanupErrors.length)
     throw new AggregateError(

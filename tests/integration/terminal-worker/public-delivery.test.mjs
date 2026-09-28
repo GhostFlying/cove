@@ -8,8 +8,8 @@ import {
   childPipe,
   hello,
   preserveWorkerHarness,
+  startWorkerPipe,
   stopVerified,
-  verifyWorkerIdentity,
 } from "./pipe-harness.mjs";
 
 const repo = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -85,8 +85,7 @@ test("installed public package exposes declarations, ESM and compiled bin with v
     const module = await import(new URL(`file://${moduleFile}`));
     expect(typeof module.runWorkerPipe).toBe("function");
     harness = childPipe(bin, `delivery-${process.pid}`, { evidencePath });
-    verifyWorkerIdentity(harness);
-    harness.send(hello);
+    await startWorkerPipe(harness, hello);
     const ready = await harness.wait((metadata) => metadata.type === "ready", "public ready");
     expect(ready.metadata).toMatchObject({
       type: "ready",
@@ -115,7 +114,11 @@ test("installed public package exposes declarations, ESM and compiled bin with v
     } catch (error) {
       cleanupErrors.push(error);
     }
-    await rm(temp, { recursive: true, force: true });
+    try {
+      await rm(temp, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
   }
   if (cleanupErrors.length)
     throw new AggregateError(

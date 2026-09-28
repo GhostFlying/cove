@@ -10,9 +10,9 @@ import {
   repo,
   run,
   spawnCommand,
+  startWorkerPipe,
   stopPtyIfOwned,
   stopVerified,
-  verifyWorkerIdentity,
   workerExecIdentity,
 } from "../pipe-harness.mjs";
 
@@ -27,8 +27,7 @@ try {
       ? { observe: (pid) => ({ kind: "unverifiable", pid, reason: "injected-before-handoff" }) }
       : {}),
   });
-  verifyWorkerIdentity(h);
-  h.send(hello);
+  await startWorkerPipe(h, hello);
   await h.wait((metadata) => metadata.type === "ready", "orphan ready");
   const execIdentity = workerExecIdentity(h);
   const target = run("orphan");
@@ -92,6 +91,11 @@ try {
         workerPid: h?.child.pid ?? null,
         workerInitialIdentity: h?.identity ?? null,
         workerInitialObservation: h?.initialObservation ?? null,
+        workerFirstObservation: h?.firstObservation ?? null,
+        workerProvisionalBirth: h?.provisionalBirth ?? null,
+        workerStartupState: h?.startupState ?? null,
+        workerStartupFailure: h?.startupFailure ?? null,
+        workerStartupSamples: h?.startupSamples ?? [],
         workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
         workerExitCode: h?.child.exitCode ?? null,
         workerSignalCode: h?.child.signalCode ?? null,
