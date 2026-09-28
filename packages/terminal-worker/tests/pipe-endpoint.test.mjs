@@ -34,6 +34,18 @@ const hello = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+const status = {
+  run,
+  status: "live",
+  geometry: { cols: 80, rows: 24 },
+  controlEpoch: 0,
+  controlHolder: null,
+  receivedSeq: null,
+  parsedSeq: null,
+  recovery: "unavailable",
+  exitCode: null,
+  signal: null,
+};
 
 function encode(metadata, payload = new Uint8Array()) {
   const frame = encodePipeFrame(1, encoder.encode(JSON.stringify(metadata)), payload);
@@ -111,8 +123,8 @@ function createHarness(config = {}) {
   return { input, output, pipe, calls, chunks, frames };
 }
 
-async function ready(harness) {
-  harness.input.write(encode(hello));
+async function ready(harness, greeting = hello) {
+  harness.input.write(encode(greeting));
   await tick();
   expect(harness.frames()[0]).toMatchObject({
     type: "ready",
@@ -129,8 +141,8 @@ test("split hello and coalesced commands preserve correlated revision-2 frames",
   expect(h.frames()).toEqual([]);
   h.input.write(bytes.subarray(7));
   await tick();
-  const one = { type: "stop", worker, run, requestId: "q1", operationId: "op1" };
-  const two = { type: "stop", worker, run, requestId: "q2", operationId: "op2" };
+  const one = { type: "preview-refresh", worker, run, requestId: "q1" };
+  const two = { type: "preview-refresh", worker, run, requestId: "q2" };
   h.input.write(Buffer.concat([encode(one), encode(two)]));
   await tick();
   expect(h.calls.map(({ command }) => command.requestId)).toEqual(["q1", "q2"]);
@@ -198,11 +210,10 @@ test("coalesced input beyond one decoder slice reaches every command within the 
   const h = createHarness();
   await ready(h);
   const commands = Array.from({ length: 48 }, (_, index) => ({
-    type: "stop",
+    type: "preview-refresh",
     worker,
     run,
     requestId: `request-${index}`,
-    operationId: `operation-${index}`,
   }));
   h.input.write(Buffer.concat(commands.map((command) => encode(command))));
   for (let attempt = 0; attempt < 10 && h.calls.length < commands.length; attempt++) await tick();
@@ -231,6 +242,105 @@ test("all W2-only commands are explicitly unavailable through the pipe", async (
     expect(reply.error.kind).toBe("CAPABILITY_UNAVAILABLE");
     expect(validatePipeResultForCommand(commands[index], reply)).toBe(true);
   });
+  await h.pipe.shutdown("test-complete");
+});
+
+test("reserved status and stop execute while the one ordinary slot is held", async () => {
+  let settleOrdinary;
+  const pending = new Promise((resolve) => {
+    settleOrdinary = resolve;
+  });
+  const h = createHarness({
+    execute: (command) =>
+      command.type === "preview-refresh"
+        ? pending
+        : Promise.resolve({
+            type: "result",
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+            outcome: "accepted",
+            ...(command.type === "status"
+              ? { runStatus: status }
+              : { operationId: command.operationId }),
+          }),
+  });
+  await ready(h, { ...hello, effectiveBudgets: { ...M0_LIMITS, pendingWorkerCommands: 1 } });
+  const ordinary = { type: "preview-refresh", worker, run, requestId: "ordinary" };
+  const controlStatus = { type: "status", worker, run, requestId: "status" };
+  const controlStop = { type: "stop", worker, run, requestId: "stop", operationId: "op" };
+  const overflow = { ...ordinary, requestId: "overflow" };
+  h.input.write(
+    Buffer.concat(
+      [ordinary, controlStatus, controlStop, overflow].map((command) => encode(command)),
+    ),
+  );
+  await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["ordinary", "status", "stop"]);
+  const replies = h.frames().slice(1);
+  expect(replies).toHaveLength(3);
+  expect(replies.find((reply) => reply.requestId === "overflow")?.error.kind).toBe("BUSY");
+  expect(replies.find((reply) => reply.requestId === "status")?.runStatus).toEqual(status);
+  expect(replies.find((reply) => reply.requestId === "stop")?.outcome).toBe("accepted");
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", pendingCommands: 1 });
+  settleOrdinary({
+    type: "error",
+    worker,
+    run,
+    requestId: "ordinary",
+    commandType: "preview-refresh",
+    error: domainError("CAPABILITY_UNAVAILABLE"),
+  });
+  await tick();
+  expect(h.frames()).toHaveLength(5);
+  await h.pipe.shutdown("test-complete");
+});
+
+test("ordinary response reservations stop before spending the control reserve", async () => {
+  const budgets = {
+    ...M0_LIMITS,
+    pipeQueuedBytes: 69_648,
+    reservedControlBytes: 8_192,
+    pendingWorkerCommands: 32,
+  };
+  const h = createHarness({
+    execute: (command) =>
+      command.type === "preview-refresh"
+        ? new Promise(() => {})
+        : Promise.resolve({
+            type: "result",
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+            outcome: "accepted",
+            ...(command.type === "status"
+              ? { runStatus: status }
+              : { operationId: command.operationId }),
+          }),
+  });
+  await ready(h, { ...hello, effectiveBudgets: budgets });
+  const ordinary = Array.from({ length: 14 }, (_, index) => ({
+    type: "preview-refresh",
+    worker,
+    run,
+    requestId: `ordinary-${index}`,
+  }));
+  const controlStatus = { type: "status", worker, run, requestId: "status" };
+  const controlStop = { type: "stop", worker, run, requestId: "stop", operationId: "op" };
+  h.input.write(
+    Buffer.concat([...ordinary, controlStatus, controlStop].map((command) => encode(command))),
+  );
+  await tick();
+  expect(h.calls.filter(({ command }) => command.type === "preview-refresh")).toHaveLength(13);
+  expect(h.calls.map(({ command }) => command.type).slice(-2)).toEqual(["status", "stop"]);
+  expect(h.frames().find((reply) => reply.requestId === "ordinary-13")?.error.kind).toBe("BUSY");
+  expect(h.pipe.snapshot().ordinaryAccountedBytes).toBeLessThanOrEqual(
+    budgets.pipeQueuedBytes - budgets.reservedControlBytes,
+  );
+  expect(h.pipe.snapshot().peakAccountedBytes).toBeLessThanOrEqual(budgets.pipeQueuedBytes);
+  expect(h.pipe.snapshot().state).toBe("ready");
   await h.pipe.shutdown("test-complete");
 });
 
@@ -308,11 +418,11 @@ test("queued original and duplicate tokens preserve one uncertain ID on close", 
   h.input.write(encode(hello));
   callbacks.shift()();
   await tick();
-  const blocker = { type: "stop", worker, run, requestId: "blocker", operationId: "blocker" };
-  const original = { ...blocker, requestId: "q", operationId: "first" };
+  const blocker = { type: "preview-refresh", worker, run, requestId: "blocker" };
+  const original = { ...blocker, requestId: "q", knownVersion: 1 };
   h.input.write(Buffer.concat([encode(blocker), encode(original)]));
   await tick();
-  h.input.write(encode({ ...original, operationId: "second" }));
+  h.input.write(encode({ ...original, knownVersion: 2 }));
   await tick();
   expect(h.calls).toHaveLength(2);
   expect(h.pipe.snapshot().outstandingRequests).toBe(2);

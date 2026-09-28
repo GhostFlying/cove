@@ -51,6 +51,7 @@ export interface WorkerPipeSnapshot {
   readonly ingressBytes: number;
   readonly queuedBytes: number;
   readonly transportBytes: number;
+  readonly ordinaryAccountedBytes: number;
   readonly peakAccountedBytes: number;
   readonly blocked: boolean;
 }
@@ -64,13 +65,15 @@ export interface WorkerPipe {
 interface OutboundFrame {
   readonly bytes: Uint8Array;
   readonly request?: RequestRecord;
+  readonly control: boolean;
   readonly extra: boolean;
   state: "queued" | "transport" | "settled";
 }
 
 interface RequestRecord {
   readonly command: PipeCommand;
-  phase: "executing" | "response";
+  readonly role: "ordinary" | "status" | "stop" | "rejection";
+  phase: "deferred" | "executing" | "response";
   readonly frames: Set<OutboundFrame>;
 }
 
@@ -82,6 +85,7 @@ class WorkerPipeCore {
   readonly #outbound: OutboundFrame[] = [];
   readonly #pending = new Map<string, RequestRecord>();
   readonly #unsettledFrames = new Set<OutboundFrame>();
+  readonly #deferredControl: RequestRecord[] = [];
   readonly #closedPromise: Promise<WorkerPipeClose>;
   #resolveClosed!: (value: WorkerPipeClose) => void;
   #state: WorkerPipeSnapshot["state"] = "awaiting-hello";
@@ -132,6 +136,7 @@ class WorkerPipeCore {
         (this.#activeChunk?.byteLength ?? 0) - this.#activeOffset + this.#decoder.retainedBytes,
       queuedBytes: this.#queuedBytes,
       transportBytes: this.#transportBytes(),
+      ordinaryAccountedBytes: this.#ordinaryAccountedBytes(),
       peakAccountedBytes: this.#peakAccountedBytes,
       blocked: this.#blocked,
     };
@@ -193,10 +198,33 @@ class WorkerPipeCore {
     );
   }
 
-  #mayAdmitCommand(): boolean {
+  #ordinaryAccountedBytes(): number {
+    let bytes = 0;
+    for (const record of this.#pending.values())
+      if (record.role === "ordinary" && record.phase === "executing") bytes += MAX_REPLY_BYTES;
+    for (const frame of this.#unsettledFrames) if (!frame.control) bytes += frame.bytes.byteLength;
+    // Unknown third-party writable buffering cannot borrow the control reserve.
+    return bytes + Math.max(0, this.#writable.writableLength - this.#transportFrameBytes);
+  }
+
+  #role(command: PipeCommand): "ordinary" | "status" | "stop" {
+    return command.type === "status" || command.type === "stop" ? command.type : "ordinary";
+  }
+
+  #slotAvailable(role: "ordinary" | "status" | "stop"): boolean {
+    let count = 0;
+    for (const record of this.#pending.values()) if (record.role === role) count++;
+    return role === "ordinary"
+      ? count < this.#hello!.effectiveBudgets.pendingWorkerCommands
+      : count === 0;
+  }
+
+  #replyCapacity(role: "ordinary" | "status" | "stop"): boolean {
+    if (this.#accountedBytes() + MAX_REPLY_BYTES > this.#hello!.effectiveBudgets.pipeQueuedBytes)
+      return false;
     return (
-      this.#pending.size < this.#hello!.effectiveBudgets.pendingWorkerCommands &&
-      this.#accountedBytes() + MAX_REPLY_BYTES <= this.#ordinaryLimit()
+      role !== "ordinary" ||
+      this.#ordinaryAccountedBytes() + 2 * MAX_REPLY_BYTES <= this.#ordinaryLimit()
     );
   }
 
@@ -236,8 +264,6 @@ class WorkerPipeCore {
           if (!this.#blocked) this.#readable.resume();
           break;
         }
-        // A completed command may already be held by the decoder; reserve reply room before more input.
-        if (this.#hello && !this.#mayAdmitCommand()) break;
         const read = this.#decoder.read(remaining);
         this.#activeOffset += read.consumedBytes;
         for (const frame of read.frames) {
@@ -322,10 +348,6 @@ class WorkerPipeCore {
       return false;
     }
     const command = metadata as PipeCommand;
-    if (!this.#mayAdmitCommand()) {
-      void this.shutdown("command-capacity-exceeded");
-      return false;
-    }
     const outstanding = this.#pending.get(command.requestId);
     if (outstanding) {
       if (this.#extraResponseItems !== 0) {
@@ -340,19 +362,84 @@ class WorkerPipeCore {
         commandType: command.type,
         error: domainError("OPERATION_ID_CONFLICT"),
       };
-      if (!this.#enqueue(duplicate, 4, false, outstanding, true))
+      if (
+        !this.#enqueue(
+          duplicate,
+          4,
+          outstanding.role === "status" || outstanding.role === "stop",
+          outstanding,
+          true,
+        )
+      )
         void this.shutdown("duplicate-response-capacity");
       return true;
     }
-    const record: RequestRecord = { command, phase: "executing", frames: new Set() };
+    const role = this.#role(command);
+    if (!this.#slotAvailable(role)) return this.#rejectBusy(command);
+    const record: RequestRecord = { command, role, phase: "deferred", frames: new Set() };
     this.#pending.set(command.requestId, record);
+    if (!this.#replyCapacity(role)) {
+      if (role === "ordinary") {
+        this.#pending.delete(command.requestId);
+        return this.#rejectBusy(command);
+      }
+      this.#deferredControl.push(record);
+      return true;
+    }
+    this.#startExecution(record, frame.payload);
+    return true;
+  }
+
+  #rejectBusy(command: PipeCommand): boolean {
+    if (this.#extraResponseItems !== 0) {
+      void this.shutdown("rejection-slot-exhausted");
+      return false;
+    }
+    const record: RequestRecord = {
+      command,
+      role: "rejection",
+      phase: "response",
+      frames: new Set(),
+    };
+    this.#pending.set(command.requestId, record);
+    const busy: PipeError = {
+      type: "error",
+      worker: command.worker,
+      run: command.run,
+      requestId: command.requestId,
+      commandType: command.type,
+      error: domainError("BUSY"),
+    };
+    if (
+      !this.#enqueue(busy, 4, command.type === "status" || command.type === "stop", record, true)
+    ) {
+      void this.shutdown("rejection-byte-capacity");
+      return false;
+    }
+    return true;
+  }
+
+  #startExecution(record: RequestRecord, payload?: Uint8Array): void {
+    record.phase = "executing";
     this.#reservedReplyBytes += MAX_REPLY_BYTES;
     this.#recordPeak();
-    void this.#execution!.execute(command, frame.payload).then(
+    void this.#execution!.execute(record.command, payload).then(
       (response) => this.#completeCommand(record, response),
-      () => this.#completeCommand(record, this.#unknownError(command)),
+      () => this.#completeCommand(record, this.#unknownError(record.command)),
     );
-    return true;
+  }
+
+  #tryStartDeferred(): void {
+    if (this.#state !== "ready") return;
+    for (let index = 0; index < this.#deferredControl.length;) {
+      const record = this.#deferredControl[index]!;
+      if (!this.#replyCapacity(record.role === "status" ? "status" : "stop")) {
+        index++;
+        continue;
+      }
+      this.#deferredControl.splice(index, 1);
+      this.#startExecution(record);
+    }
   }
 
   #unknownError(command: PipeCommand): PipeError {
@@ -380,7 +467,14 @@ class WorkerPipeCore {
       void this.shutdown("invalid-execution-correlation");
       return;
     }
-    if (!this.#enqueue(response, response.type === "result" ? 2 : 4, false, record)) {
+    if (
+      !this.#enqueue(
+        response,
+        response.type === "result" ? 2 : 4,
+        record.role === "status" || record.role === "stop",
+        record,
+      )
+    ) {
       void this.shutdown("response-send-failed");
       return;
     }
@@ -401,11 +495,16 @@ class WorkerPipeCore {
     const encoded = encodePipeFrame(kind, metadataBytes, emptyPayload);
     if (!encoded.ok || !this.#hello) return false;
     const total = this.#accountedBytes() + encoded.value.byteLength;
-    const cap = control ? this.#hello.effectiveBudgets.pipeQueuedBytes : this.#ordinaryLimit();
-    if (total > cap) return false;
+    if (total > this.#hello.effectiveBudgets.pipeQueuedBytes) return false;
+    if (
+      !control &&
+      this.#ordinaryAccountedBytes() + encoded.value.byteLength > this.#ordinaryLimit()
+    )
+      return false;
     const frame: OutboundFrame = {
       bytes: encoded.value,
       ...(request && { request }),
+      control,
       extra,
       state: "queued",
     };
@@ -468,6 +567,7 @@ class WorkerPipeCore {
       this.#pending.get(record.command.requestId) === record
     )
       this.#pending.delete(record.command.requestId);
+    this.#tryStartDeferred();
   }
 
   #onDrain = (): void => {
