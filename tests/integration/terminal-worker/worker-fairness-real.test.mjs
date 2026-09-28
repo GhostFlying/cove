@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,9 +29,11 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   const publicFile = join(delivery.consumerRoot, "qualification-public.mjs");
   writeFileSync(
     publicFile,
-    'export { runWorkerPipe } from "@cove/terminal-worker/pipe";\nexport { createWorkerExecution } from "@cove/terminal-worker/execution";\n',
+    'export { runWorkerPipe } from "@cove/terminal-worker/pipe";\nexport { createWorkerExecution } from "@cove/terminal-worker/execution";\nexport { createNativePtyFactory } from "@cove/terminal-worker/native-adapter";\n',
   );
-  const { runWorkerPipe, createWorkerExecution } = await import(pathToFileURL(publicFile).href);
+  const { runWorkerPipe, createWorkerExecution, createNativePtyFactory } = await import(
+    pathToFileURL(publicFile).href
+  );
   const temp = mkdtempSync(join(tmpdir(), "cove-qual-fairness-"));
   const bulkDir = join(temp, "bulk");
   const interactiveDir = join(temp, "interactive");
@@ -47,6 +50,48 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   const messages = [];
   const facts = [];
   const faults = [];
+  const flow = [];
+  const callbacks = [];
+  const bulkDigest = createHash("sha256");
+  const interactiveRaw = [];
+  const native = createNativePtyFactory({
+    maxOwners: budgets.maxRuns,
+    aggregateInputBytes: budgets.workerBytes,
+    aggregateInputTasks: budgets.pendingWorkerCommands,
+    perPtyInputBytes: Math.min(budgets.inputQueueBytes, 65_536, budgets.workerBytes),
+    perPtyInputTasks: budgets.pendingWorkerCommands,
+    earlyOutputBytes: budgets.parseHardBytes,
+  });
+  const factory = {
+    retainedBytesAccounting: "participating",
+    snapshot: () => native.snapshot(),
+    spawn(spec, observer) {
+      const label = spec.args.includes(bulkNonce) ? "bulk" : "interactive";
+      const created = native.spawn(spec, {
+        ...observer,
+        onData(bytes) {
+          observer.onData(bytes);
+          callbacks.push({ label, bytes: bytes.length });
+        },
+      });
+      if (created.kind !== "created") return created;
+      const pty = new Proxy(created.pty, {
+        get(target, key) {
+          if (key === "pause" || key === "resume")
+            return () => {
+              const before = execution
+                ?.snapshot()
+                .sessions.find((item) => item.run.runId === label);
+              target[key]();
+              flow.push({ label, kind: key, snapshot: before?.snapshot ?? null });
+            };
+          const value = target[key];
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      return { kind: "created", pty };
+    },
+  };
   let execution;
   let bulkStart;
   let interactiveStart;
@@ -84,15 +129,20 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   const pipe = runWorkerPipe(ingress, egress, {
     buildVersion: "fairness-qualification",
     onFault: (fault) => faults.push(fault),
-    onFact: ({ event, bytes }) =>
+    onFact: ({ event, bytes }) => {
+      if (event.type === "output" && bytes) {
+        if (event.run.runId === "bulk") bulkDigest.update(bytes);
+        else interactiveRaw.push(Buffer.from(bytes));
+      }
       facts.push({
         runId: event.run.runId,
         type: event.type,
         seq: event.seq,
         bytes: bytes?.length ?? 0,
-      }),
+      });
+    },
     createExecution(options) {
-      execution = createWorkerExecution(options);
+      execution = createWorkerExecution({ ...options, factory });
       return execution;
     },
   });
@@ -112,7 +162,7 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       ["bulk", bulkDir],
       ["interactive", interactiveDir],
     ])
-      for (const name of ["start.json", "stall.json", "finish.json"]) {
+      for (const name of ["start.json", "stall.json", "finish.json", "initial-emission.json"]) {
         const source = join(dir, name);
         if (existsSync(source)) copyFileSync(source, join(evidencePath, `${label}-${name}`));
       }
@@ -131,6 +181,9 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
           messages,
           facts,
           faults,
+          flow,
+          callbacks,
+          interactiveRawHex: Buffer.concat(interactiveRaw).toString("hex"),
           metrics,
           pipe: pipe.snapshot(),
           execution: execution?.snapshot(),
@@ -168,7 +221,7 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     expect(bulkStart.nonce).toBe(bulkNonce);
     expect(bulkIdentity).toContain(bulkNonce);
     const stall = await receipt(join(bulkDir, "stall.json"), "bulk stall");
-    expect(stall.emitted).toBe(64 * 1024);
+    expect(stall.scheduled).toBe(64 * 1024);
     const duringStall = {
       pipe: pipe.snapshot(),
       execution: execution.snapshot(),
@@ -202,6 +255,14 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       "accepted",
     );
     interactiveStart = await receipt(join(interactiveDir, "start.json"));
+    const initialEmission = await receipt(join(interactiveDir, "initial-emission.json"));
+    expect(initialEmission).toMatchObject({
+      nonce: interactiveNonce,
+      pid: interactiveStart.pid,
+      ok: true,
+      length: 7,
+      hex: "410080ffe282ac",
+    });
     interactiveIdentity = psIdentity(interactiveStart.pid);
     expect(interactiveStart.nonce).toBe(interactiveNonce);
     expect(interactiveIdentity).toContain(interactiveNonce);
@@ -229,17 +290,34 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     preserve("interactive-before-bulk-finish");
 
     const bulkFinish = await receipt(join(bulkDir, "finish.json"), "bulk finish");
-    expect(bulkFinish.emitted).toBe(192 * 1024);
+    expect(bulkFinish).toMatchObject({
+      nonce: bulkNonce,
+      pid: bulkStart.pid,
+      scheduled: 768 * 1024,
+      emitted: 768 * 1024,
+      callbackError: null,
+    });
     await until(
       () =>
         facts
           .filter((fact) => fact.runId === "bulk" && fact.type === "output")
           .reduce((sum, fact) => sum + fact.bytes, 0) >=
-        192 * 1024,
+        768 * 1024,
       8000,
       "bulk parsed output",
     );
     const bulkOutput = facts.filter((fact) => fact.runId === "bulk" && fact.type === "output");
+    expect(bulkOutput.reduce((sum, fact) => sum + fact.bytes, 0)).toBe(768 * 1024);
+    expect(bulkDigest.digest("hex")).toBe(bulkFinish.sha256);
+    expect(Buffer.concat(interactiveRaw).subarray(0, 7).toString("hex")).toBe("410080ffe282ac");
+    expect(callbacks.filter((item) => item.label === "bulk").length).toBeGreaterThan(256);
+    expect(flow.some((item) => item.label === "bulk" && item.kind === "pause")).toBe(true);
+    expect(flow.some((item) => item.label === "bulk" && item.kind === "resume")).toBe(true);
+    expect(
+      flow
+        .filter((item) => item.label === "bulk" && item.kind === "pause")
+        .every((item) => item.snapshot && item.snapshot.queuedItems < 256),
+    ).toBe(true);
     for (const id of ["bulk", "interactive"]) {
       const ordered = facts.filter((fact) => fact.runId === id).map((fact) => fact.seq);
       expect(ordered).toEqual([...new Set(ordered)].sort((a, b) => a - b));

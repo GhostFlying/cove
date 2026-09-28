@@ -44,7 +44,7 @@ async function withWorker(label, body) {
   const cleanupErrors = [];
   const preserve = (stage) => {
     if (!evidencePath) return;
-    for (const name of ["start.json", "finish.json"]) {
+    for (const name of ["start.json", "finish.json", "initial-emission.json"]) {
       const source = join(temp, name);
       if (existsSync(source)) copyFileSync(source, join(evidencePath, name));
     }
@@ -147,6 +147,14 @@ test("compiled public main correlates real PTY bytes, query reply, control, inpu
     });
     const start = await startPty();
     expect(start.windowSize).toBe("24 80");
+    const initialEmission = await receipt(join(temp, "initial-emission.json"));
+    expect(initialEmission).toMatchObject({
+      nonce,
+      pid: start.pid,
+      ok: true,
+      length: 7,
+      hex: "410080ffe282ac",
+    });
 
     const control = command("set-control", target, {
       expectedEpoch: 0,
@@ -291,6 +299,18 @@ test("compiled public main disposes an owned PTY when its stdout reader closes",
       ),
     ]);
     expect(exited.code).toBe(1);
+    const stderr = await until(
+      () => {
+        const value = Buffer.concat(h.stderr).toString("utf8");
+        return value.includes("worker-shutdown reason=") ? value : null;
+      },
+      8000,
+      "bounded stdout-close shutdown diagnostic",
+    );
+    expect(stderr).toMatch(
+      /^worker-shutdown reason=stdout-(?:write-failed|error|close) disposal-complete=1 disposal-uncertain=0\n$/,
+    );
+    expect(stderr).not.toMatch(/Unhandled 'error' event|Error: write EPIPE|uncaughtException/);
     expect(await until(() => !psIdentity(start.pid), 8000, "PTY disposal on stdout close")).toBe(
       true,
     );

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 
 const [mode, nonce, receiptDir] = process.argv.slice(2);
@@ -21,7 +22,24 @@ writeFileSync(
 process.on("SIGHUP", () => process.exit(0));
 
 if (mode === "interactive") {
-  process.stdout.write(Buffer.from([0x41, 0x00, 0x80, 0xff, 0xe2, 0x82, 0xac]));
+  const initial = Buffer.from([0x41, 0x00, 0x80, 0xff, 0xe2, 0x82, 0xac]);
+  process.stdout.write(initial, (error) => {
+    writeFileSync(
+      `${receiptDir}/initial-emission.json`,
+      JSON.stringify({
+        nonce,
+        pid: process.pid,
+        ok: !error,
+        ...(error
+          ? { errorCode: error.code ?? "unknown" }
+          : {
+              length: initial.length,
+              hex: initial.toString("hex"),
+              sha256: createHash("sha256").update(initial).digest("hex"),
+            }),
+      }),
+    );
+  });
   process.stdout.write(Buffer.from(`READY:${nonce}\n\u001b[5n`));
   const parts = [];
   process.stdin.on("data", (chunk) => {
@@ -54,27 +72,50 @@ if (mode === "interactive") {
     process.exit(23);
   });
 } else if (mode === "bulk") {
+  const total = 768 * 1024;
+  const digest = createHash("sha256");
+  let scheduled = 0;
   let emitted = 0;
+  let callbackError = null;
   let stalled = false;
   const timer = setInterval(() => {
-    if (emitted >= 192 * 1024 || stalled) return;
-    process.stdout.write(Buffer.alloc(8192, 0x42));
-    emitted += 8192;
-    if (emitted === 64 * 1024) {
+    if (scheduled >= total || stalled) return;
+    const bytes = Buffer.alloc(8192, 0x42);
+    scheduled += bytes.length;
+    process.stdout.write(bytes, (error) => {
+      if (error) {
+        callbackError = error.code ?? "unknown";
+        writeFileSync(
+          `${receiptDir}/emission-failure.json`,
+          JSON.stringify({ nonce, pid: process.pid, scheduled, emitted, callbackError }),
+        );
+        return;
+      }
+      digest.update(bytes);
+      emitted += bytes.length;
+      if (emitted === total)
+        writeFileSync(
+          `${receiptDir}/finish.json`,
+          JSON.stringify({
+            nonce,
+            pid: process.pid,
+            scheduled,
+            emitted,
+            callbackError,
+            sha256: digest.digest("hex"),
+          }),
+        );
+    });
+    if (scheduled === 64 * 1024) {
       stalled = true;
       writeFileSync(
         `${receiptDir}/stall.json`,
-        JSON.stringify({ nonce, pid: process.pid, emitted }),
+        JSON.stringify({ nonce, pid: process.pid, scheduled }),
       );
       setTimeout(() => {
         stalled = false;
       }, 1500);
     }
-    if (emitted === 192 * 1024)
-      writeFileSync(
-        `${receiptDir}/finish.json`,
-        JSON.stringify({ nonce, pid: process.pid, emitted }),
-      );
   }, 2);
   timer.unref();
   setInterval(() => {}, 1000);
