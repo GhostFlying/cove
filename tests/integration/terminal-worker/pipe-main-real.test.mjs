@@ -15,6 +15,7 @@ import { DEFAULT_APPEARANCE } from "../../../packages/protocol/dist/profile.js";
 import {
   childPipe,
   command,
+  composeWorkerReceipt,
   fixture,
   geometry,
   hello,
@@ -51,6 +52,7 @@ async function withWorker(label, body) {
   let execIdentity;
   let primary;
   let result;
+  let preservationFailed = false;
   const cleanupErrors = [];
   const preserve = (stage) => {
     if (!evidencePath) return;
@@ -61,35 +63,29 @@ async function withWorker(label, body) {
     writeFileSync(
       join(evidencePath, `${stage}.json`),
       JSON.stringify(
-        {
-          nonce,
-          workerPid: h?.child.pid ?? null,
-          workerInitialIdentity: h?.identity ?? null,
-          workerInitialObservation: h?.initialObservation ?? null,
-          workerFirstObservation: h?.firstObservation ?? null,
-          workerProvisionalBirth: h?.provisionalBirth ?? null,
-          workerStartupState: h?.startupState ?? null,
-          workerStartupFailure: h?.startupFailure ?? null,
-          workerStartupSamples: h?.startupSamples ?? [],
-          workerExpectedAnchors: h?.expectedAnchors ?? null,
-          workerCurrentObservation: h?.child.pid ? h.observe(h.child.pid, h.bin) : null,
-          workerExecIdentity: execIdentity ?? null,
-          workerSignalObservation: h?.signalObservation ?? null,
-          workerCurrentIdentity: h?.child.pid ? psIdentity(h.child.pid) : null,
-          workerExitCode: h?.child.exitCode ?? null,
-          workerSignalCode: h?.child.signalCode ?? null,
-          ptyStart: start ?? null,
-          ptyStartIdentity: startIdentity ?? null,
-          ptyCurrentIdentity: start ? psIdentity(start.pid) : null,
-          returnedFrames: (h?.frames ?? []).map(({ metadata, payload, kind }) => ({
-            metadata,
-            payloadHex: payload.toString("hex"),
-            kind,
-          })),
-          stdoutChunkSizes: h?.rawSizes ?? [],
-          stderrHex: Buffer.concat(h?.stderr ?? []).toString("hex"),
-          failure: primary && { name: primary.name, message: primary.message },
-        },
+        composeWorkerReceipt(
+          h,
+          {
+            nonce,
+            workerPid: h?.child.pid ?? null,
+            workerInitialIdentity: h?.identity ?? null,
+            workerExecIdentity: execIdentity ?? null,
+            workerSignalObservation: h?.signalObservation ?? null,
+            workerCurrentIdentity: h?.child.pid ? psIdentity(h.child.pid) : null,
+            ptyStart: start ?? null,
+            ptyStartIdentity: startIdentity ?? null,
+            ptyCurrentIdentity: start ? psIdentity(start.pid) : null,
+            returnedFrames: (h?.frames ?? []).map(({ metadata, payload, kind }) => ({
+              metadata,
+              payloadHex: payload.toString("hex"),
+              kind,
+            })),
+            stdoutChunkSizes: h?.rawSizes ?? [],
+            stderrHex: Buffer.concat(h?.stderr ?? []).toString("hex"),
+            failure: primary && { name: primary.name, message: primary.message },
+          },
+          primary,
+        ),
         null,
         2,
       ) + "\n",
@@ -100,7 +96,12 @@ async function withWorker(label, body) {
     await startWorkerPipe(h, hello);
     expect((await h.wait((m) => m.type === "ready", "ready")).metadata.pipeVersion).toBe(2);
     execIdentity = workerExecIdentity(h);
-    preserve("ready");
+    try {
+      preserve("ready");
+    } catch (error) {
+      preservationFailed = true;
+      throw error;
+    }
     result = await body({
       h,
       temp,
@@ -119,6 +120,7 @@ async function withWorker(label, body) {
     try {
       preserve("before-cleanup");
     } catch (error) {
+      preservationFailed = true;
       cleanupErrors.push(error);
     }
     try {
@@ -134,10 +136,13 @@ async function withWorker(label, body) {
     try {
       preserve("after-cleanup");
     } catch (error) {
+      preservationFailed = true;
       cleanupErrors.push(error);
     }
     try {
-      rmSync(temp, { recursive: true, force: true });
+      if (preservationFailed)
+        cleanupErrors.push(Error(`qualification evidence retained at ${temp}`));
+      else rmSync(temp, { recursive: true, force: true });
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -355,6 +360,7 @@ test("compiled public main disposes an owned PTY after its parent process disapp
   launcher.stdout.resume();
   let launch;
   let primary;
+  let preservationFailed = false;
   const cleanupErrors = [];
   const preserve = (stage) => {
     if (!evidencePath) return;
@@ -369,6 +375,9 @@ test("compiled public main disposes an owned PTY after its parent process disapp
       const source = join(temp, name);
       if (existsSync(source)) copyFileSync(source, join(evidencePath, name));
     }
+    const launcherFailure = existsSync(join(temp, "launcher-failure.json"))
+      ? JSON.parse(readFileSync(join(temp, "launcher-failure.json"), "utf8"))
+      : null;
     writeFileSync(
       join(evidencePath, `${stage}.json`),
       JSON.stringify(
@@ -377,9 +386,19 @@ test("compiled public main disposes an owned PTY after its parent process disapp
           launcherPid: launcher.pid,
           launcherExitCode: launcher.exitCode,
           launcherStderrHex: Buffer.concat(launcherStderr).toString("hex"),
-          launcherFailure: existsSync(join(temp, "launcher-failure.json"))
-            ? JSON.parse(readFileSync(join(temp, "launcher-failure.json"), "utf8"))
-            : null,
+          launcherFailure,
+          workerHarnessReceiptRefs:
+            launcherFailure?.workerHarnessReceiptRefs ??
+            (launch?.workerHarness
+              ? {
+                  handoff: {
+                    file: "launch.json",
+                    stage: "handoff",
+                    nonce,
+                    workerPid: launch.workerPid,
+                  },
+                }
+              : null),
           workerPid: launch?.workerPid ?? null,
           workerCurrentIdentity: launch ? psIdentity(launch.workerPid) : null,
           ptyPid: launch?.ptyStart.pid ?? null,
@@ -413,7 +432,12 @@ test("compiled public main disposes an owned PTY after its parent process disapp
     expect(launch.ptyStart.nonce).toBe(nonce);
     expect(launch.workerExecIdentity).toContain("/packages/terminal-worker/dist/src/main.js");
     expect(launch.ptyIdentity).toContain(nonce);
-    preserve("parent-exited");
+    try {
+      preserve("parent-exited");
+    } catch (error) {
+      preservationFailed = true;
+      throw error;
+    }
     expect(await until(() => !psIdentity(launch.workerPid), 8000, "orphan worker exit")).toBe(true);
     expect(await until(() => !psIdentity(launch.ptyStart.pid), 8000, "orphan PTY exit")).toBe(true);
   } catch (error) {
@@ -422,6 +446,7 @@ test("compiled public main disposes an owned PTY after its parent process disapp
     try {
       preserve("before-cleanup");
     } catch (error) {
+      preservationFailed = true;
       cleanupErrors.push(error);
     }
     try {
@@ -432,10 +457,12 @@ test("compiled public main disposes an owned PTY after its parent process disapp
     try {
       preserve("after-cleanup");
     } catch (error) {
+      preservationFailed = true;
       cleanupErrors.push(error);
     }
     try {
-      rmSync(temp, { recursive: true, force: true });
+      if (preservationFailed) cleanupErrors.push(Error(`orphan evidence retained at ${temp}`));
+      else rmSync(temp, { recursive: true, force: true });
     } catch (error) {
       cleanupErrors.push(error);
     }
