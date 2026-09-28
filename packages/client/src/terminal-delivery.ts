@@ -391,12 +391,17 @@ export class TerminalLane {
     this.focusSequences.clear();
     this.inputSequences.clear();
     this.lastSentRoute = undefined;
-    for (const pending of [...this.pending.values()])
+    for (const pending of [...this.pending.values()]) {
+      const uncertain = pending.attempting || pending.handedOff;
       this.finish(pending, {
         ok: false,
-        error: localError(reason),
-        uncertain: pending.attempting || pending.handedOff,
+        error:
+          uncertain && pending.command.type === "input"
+            ? domainError("RESULT_UNKNOWN", "unknown", "input")
+            : localError(reason),
+        uncertain,
       });
+    }
     this.outbound.length = 0;
   }
 

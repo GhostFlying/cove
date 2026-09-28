@@ -103,15 +103,19 @@ async function settle() {
 function clock() {
   let now = 0;
   let expireNextSet = false;
+  let timerSets = 0;
+  let synchronousExpirations = 0;
   const timers = new Set();
   return {
     nowMs: () => now,
     setTimer(delay, callback) {
+      timerSets++;
       const timer = { deadline: now + delay, callback };
       timers.add(timer);
       if (expireNextSet) {
         expireNextSet = false;
         timers.delete(timer);
+        synchronousExpirations++;
         callback();
       }
       return { dispose: () => timers.delete(timer) };
@@ -125,6 +129,12 @@ function clock() {
     expireNextSet() {
       expireNextSet = true;
     },
+    get timerSets() {
+      return timerSets;
+    },
+    get synchronousExpirations() {
+      return synchronousExpirations;
+    },
   };
 }
 
@@ -137,6 +147,9 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply, autoOpen =
     commands,
     get currentRef() {
       return currentRef;
+    },
+    close() {
+      callbacks.onClose();
     },
     emit(kind, metadata, payload) {
       callbacks.onBinary(frame(kind, metadata, payload));
@@ -863,6 +876,192 @@ describe("client control authority", () => {
     });
     expect(result.error).toEqual(remote);
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test("synchronous socket close during input send keeps inspect-run uncertainty", async () => {
+    const scheduler = clock();
+    const { controller, peer } = await harness({
+      scheduler,
+      onCommand: ({ command }, activePeer) => {
+        if (command.type === "input") {
+          activePeer.close();
+          return "not-sent"; // A later disposition cannot undo an already attempted send.
+        }
+      },
+    });
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) =>
+      notices.push({ notice, snapshot: controller.snapshot() }),
+    );
+    const outcome = await controller.sendInput({
+      source: "keyboard",
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      value: { inputId: 1, writtenBytes: 0, unknownBytes: 3, notSentBytes: 0 },
+    });
+    expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    expect("operationId" in outcome.error).toBe(false);
+    expect(notices).toHaveLength(1);
+    expect(notices[0].notice).toEqual({ kind: "input", outcome });
+    expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+    scheduler.advance(5_001);
+    peer.close();
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(controller.snapshot()).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
+  });
+
+  test("asynchronous close after input handoff settles once without replay", async () => {
+    const scheduler = clock();
+    const { controller, peer } = await harness({ scheduler });
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) =>
+      notices.push({ notice, snapshot: controller.snapshot() }),
+    );
+    const pending = controller.sendInput({ source: "paste", bytes: new Uint8Array([4, 5]) });
+    await settle();
+    const sent = peer.commands.filter(({ command }) => command.type === "input");
+    expect(sent).toHaveLength(1);
+    peer.close();
+    const outcome = await pending;
+    expect(outcome).toMatchObject({
+      ok: false,
+      value: { inputId: 1, writtenBytes: 0, unknownBytes: 2, notSentBytes: 0 },
+    });
+    expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0].notice).toEqual({ kind: "input", outcome });
+    expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
+    peer.result(sent[0].command, {
+      epoch: 1,
+      inputSeq: sent[0].command.inputSeq,
+      status: "written",
+      writtenBytes: 2,
+    });
+    scheduler.advance(5_001);
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test("client disposal after input handoff retains the last public uncertainty notice", async () => {
+    const { client, controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) =>
+      notices.push({ notice, snapshot: controller.snapshot() }),
+    );
+    const pending = controller.sendInput({ source: "mouse", bytes: new Uint8Array([7]) });
+    await settle();
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+    client.dispose();
+    const outcome = await pending;
+    expect(outcome).toMatchObject({
+      ok: false,
+      value: { inputId: 1, writtenBytes: 0, unknownBytes: 1, notSentBytes: 0 },
+    });
+    expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    expect(notices).toHaveLength(1);
+    expect(notices[0].notice).toEqual({ kind: "input", outcome });
+    expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
+    expect(mounted.disposed).toBe(1);
+    client.dispose();
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+  });
+
+  test("queued and timer-expired pre-send input remains definitely unsent on close", async () => {
+    const { controller, peer } = await harness();
+    await grant(controller, peer);
+    const notices = [];
+    controller.onInputOutcome((notice) => notices.push(notice));
+    const first = controller.sendInput({ source: "keyboard", bytes: new Uint8Array([1]) });
+    const second = controller.sendInput({ source: "keyboard", bytes: new Uint8Array([2, 3]) });
+    await settle();
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
+    peer.close();
+    const [uncertain, unsent] = await Promise.all([first, second]);
+    expect(uncertain.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    expect(uncertain.value).toMatchObject({ unknownBytes: 1, notSentBytes: 0 });
+    expect(unsent.error).toEqual({ category: "local", reason: "invalid-state" });
+    expect(unsent.value).toMatchObject({ writtenBytes: 0, unknownBytes: 0, notSentBytes: 2 });
+    expect(notices).toEqual([
+      { kind: "input", outcome: uncertain },
+      { kind: "input", outcome: unsent },
+    ]);
+    expect(controller.snapshot()).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
+
+    const scheduler = clock();
+    const beforeSend = await harness({ scheduler });
+    await grant(beforeSend.controller, beforeSend.peer);
+    const priorTimerSets = scheduler.timerSets;
+    scheduler.expireNextSet();
+    const timed = await beforeSend.controller.sendInput({
+      source: "keyboard",
+      bytes: new Uint8Array([9]),
+    });
+    expect(timed.error).toEqual({ category: "local", reason: "timeout" });
+    expect(timed.value).toMatchObject({ writtenBytes: 0, unknownBytes: 0, notSentBytes: 1 });
+    expect(scheduler.timerSets).toBe(priorTimerSets + 1);
+    expect(scheduler.synchronousExpirations).toBe(1);
+    expect(beforeSend.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
+      0,
+    );
+    beforeSend.peer.close();
+    expect(beforeSend.controller.snapshot()).toMatchObject({
+      retainedInputBytes: 0,
+      pendingInputIntents: 0,
+    });
+  });
+
+  test("noninput close stays local and completed input is not rewritten", async () => {
+    const { controller, peer } = await harness();
+    await grant(controller, peer);
+    const resize = controller.requestResize({ cols: 90, rows: 30 });
+    await settle();
+    expect(peer.commands.at(-1).command.type).toBe("resize");
+    peer.close();
+    const closed = await resize;
+    expect(closed.error).toEqual({ category: "local", reason: "transport" });
+    expect("subject" in closed.error).toBe(false);
+
+    const writtenCase = await harness();
+    await grant(writtenCase.controller, writtenCase.peer);
+    const notices = [];
+    writtenCase.controller.onInputOutcome((notice) => notices.push(notice));
+    const pending = writtenCase.controller.sendInput({
+      source: "keyboard",
+      bytes: new Uint8Array([6, 7]),
+    });
+    await settle();
+    const sent = writtenCase.peer.commands.at(-1).command;
+    writtenCase.peer.result(sent, {
+      epoch: 1,
+      inputSeq: sent.inputSeq,
+      status: "written",
+      writtenBytes: 2,
+    });
+    const written = await pending;
+    expect(written).toMatchObject({
+      ok: true,
+      value: { writtenBytes: 2, unknownBytes: 0, notSentBytes: 0 },
+    });
+    writtenCase.peer.close();
+    await settle();
+    expect(notices).toEqual([{ kind: "input", outcome: written }]);
+    expect(
+      writtenCase.peer.commands.filter(({ command }) => command.type === "input"),
+    ).toHaveLength(1);
+    expect(writtenCase.controller.snapshot()).toMatchObject({
+      retainedInputBytes: 0,
+      pendingInputIntents: 0,
+    });
   });
 
   test("observer disposal during input admission prevents any input handoff", async () => {
