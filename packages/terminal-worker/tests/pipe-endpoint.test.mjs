@@ -53,6 +53,30 @@ function encode(metadata, payload = new Uint8Array()) {
   return Buffer.from(frame.value);
 }
 
+function coalescedAtCap(cap) {
+  const pieces = [];
+  let remaining = cap;
+  for (let index = 0; remaining > 0; index++) {
+    const command = {
+      type: "input",
+      worker,
+      run,
+      subscription,
+      requestId: `boundary-${index}`,
+      epoch: 1,
+      inputSeq: index + 1,
+    };
+    const base = encode(command).length;
+    const max = base + 65_536;
+    const length = remaining <= max ? remaining : Math.min(max, remaining - base - 1);
+    if (length <= base) throw new Error("cannot construct exact boundary fixture");
+    const piece = encode(command, Buffer.alloc(length - base, 0x61));
+    pieces.push(piece);
+    remaining -= piece.length;
+  }
+  return { bytes: Buffer.concat(pieces), count: pieces.length };
+}
+
 function createHarness(config = {}) {
   const input = new PassThrough();
   const chunks = [];
@@ -221,6 +245,63 @@ test("coalesced input beyond one decoder slice reaches every command within the 
   expect(h.frames()).toHaveLength(commands.length + 1);
   expect(h.pipe.snapshot().peakAccountedBytes).toBeLessThanOrEqual(M0_LIMITS.pipeQueuedBytes);
   await h.pipe.shutdown("test-complete");
+});
+
+test("exact pipe ingress cap crosses decoder slices while cap plus one is rejected before retention", async () => {
+  const fixture = coalescedAtCap(M0_LIMITS.pipeQueuedBytes);
+  expect(fixture.bytes.length).toBe(M0_LIMITS.pipeQueuedBytes);
+  expect(fixture.count).toBeGreaterThan(32);
+  const valid = createHarness({
+    execute: (command) =>
+      Promise.resolve({
+        type: "error",
+        worker,
+        run,
+        requestId: command.requestId,
+        commandType: command.type,
+        error: domainError("CAPABILITY_UNAVAILABLE"),
+      }),
+  });
+  await ready(valid);
+  valid.input.write(fixture.bytes);
+  for (let attempt = 0; attempt < 100 && valid.calls.length < fixture.count; attempt++)
+    await tick();
+  expect(valid.calls, JSON.stringify(valid.pipe.snapshot())).toHaveLength(fixture.count);
+  expect(valid.pipe.snapshot().state).toBe("ready");
+  expect(valid.pipe.snapshot().peakDecodeSliceBytes).toBeLessThanOrEqual(256 * 1024);
+  expect(valid.frames()).toHaveLength(fixture.count + 1);
+  await valid.pipe.shutdown("test-complete");
+
+  const invalid = createHarness();
+  await ready(invalid);
+  invalid.input.write(Buffer.concat([fixture.bytes, Buffer.of(0)]));
+  expect((await invalid.pipe.closed).reason).toBe("ingress-capacity-exceeded");
+  expect(invalid.pipe.snapshot().ingressBytes).toBe(0);
+  expect(invalid.calls).toHaveLength(0);
+});
+
+test("pre-hello default and decoder partial count toward the ingress cap", async () => {
+  const before = createHarness();
+  before.input.write(Buffer.alloc(M0_LIMITS.pipeQueuedBytes + 1));
+  expect((await before.pipe.closed).reason).toBe("ingress-capacity-exceeded");
+  expect(before.pipe.snapshot().ingressBytes).toBe(0);
+
+  const budgets = { ...M0_LIMITS, pipeQueuedBytes: 69_648 };
+  const partial = createHarness();
+  await ready(partial, { ...hello, effectiveBudgets: budgets });
+  const command = encode({ type: "preview-refresh", worker, run, requestId: "partial" });
+  partial.input.write(command.subarray(0, 7));
+  await tick();
+  expect(partial.pipe.snapshot().ingressBytes).toBe(7);
+  partial.input.write(Buffer.alloc(budgets.pipeQueuedBytes - 6));
+  expect((await partial.pipe.closed).reason).toBe("ingress-capacity-exceeded");
+  expect(partial.calls).toHaveLength(0);
+
+  const retainedBacking = createHarness();
+  await ready(retainedBacking, { ...hello, effectiveBudgets: budgets });
+  retainedBacking.input.write(Buffer.alloc(budgets.pipeQueuedBytes + 1).subarray(0, 7));
+  expect((await retainedBacking.pipe.closed).reason).toBe("ingress-capacity-exceeded");
+  expect(retainedBacking.pipe.snapshot().ingressBytes).toBe(0);
 });
 
 test("all W2-only commands are explicitly unavailable through the pipe", async () => {
