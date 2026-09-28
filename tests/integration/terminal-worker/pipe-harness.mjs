@@ -188,6 +188,13 @@ export function workerExecIdentity(harness) {
   return current.raw;
 }
 
+export function signalVerifiedWorkerExec(harness, signal) {
+  workerExecIdentity(harness);
+  harness.signalObservation = harness.lastObservation;
+  harness.child.kill(signal);
+  return harness.signalObservation;
+}
+
 export function installedBin() {
   const temp = mkdtempSync(join(tmpdir(), "cove-qual-bin-"));
   writeFileSync(

@@ -18,6 +18,7 @@ import {
   psIdentity,
   repo,
   sameOwnedWorker,
+  signalVerifiedWorkerExec,
   stopVerified,
   until,
   verifyWorkerIdentity,
@@ -74,6 +75,26 @@ test("structured worker identity accepts one owned shim-to-compiled exec and rej
   expect(parseWorkerProcessRow(`${pid} ${started} node ${compiled}\nextra`, pid, bin).kind).toBe(
     "unverifiable",
   );
+});
+
+test("real SIGTERM branch signals once only for a fresh matching compiled birth", () => {
+  const initial = parse(`/bin/sh ${bin}`);
+  const matching = parse(
+    `node ${dirname(bin)}/../../../../home/runner/work/cove/cove/packages/terminal-worker/dist/src/main.js`,
+  );
+  const signals = [];
+  let fresh = matching;
+  const harness = {
+    child: { pid, kill: (signal) => signals.push(signal) },
+    bin,
+    initialObservation: initial,
+    observe: () => fresh,
+  };
+  expect(signalVerifiedWorkerExec(harness, "SIGTERM")).toEqual(matching);
+  expect(signals).toEqual(["SIGTERM"]);
+  fresh = { ...matching, started: "Mon Sep 28 18:16:49 2026" };
+  expect(() => signalVerifiedWorkerExec(harness, "SIGTERM")).toThrow("worker identity uncertain");
+  expect(signals).toEqual(["SIGTERM"]);
 });
 
 test("owned child survives validation throw as a retained handle and exits on EOF", async () => {
