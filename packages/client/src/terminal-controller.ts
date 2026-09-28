@@ -2,6 +2,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import {
   nextCounter,
+  SubscriptionRefSchema,
   sameConnectionRef,
   sameRunRef,
   sameSubscriptionRef,
@@ -74,6 +75,15 @@ function safeDispose(disposable: Disposable | undefined): void {
   } catch {
     /* Local retirement continues. */
   }
+}
+
+function identityCopy(ref: SubscriptionRef): SubscriptionRef {
+  return Object.freeze({
+    run: Object.freeze({ ...ref.run }),
+    connection: Object.freeze({ ...ref.connection }),
+    subscriptionId: ref.subscriptionId,
+    viewId: ref.viewId,
+  });
 }
 
 export class RoutedTerminalController implements TerminalController {
@@ -254,7 +264,7 @@ export class RoutedTerminalController implements TerminalController {
       viewGeneration: this.viewGeneration,
       queuedBytes: this.queuedBytes,
       activeParseBytes: this.activeBytes,
-      ...(this.ref ? { subscription: this.ref } : {}),
+      ...(this.ref ? { subscription: identityCopy(this.ref) } : {}),
     });
   }
 
@@ -418,16 +428,17 @@ export class RoutedTerminalController implements TerminalController {
       }
       if (result.type !== "attach-result" && result.type !== "recover-result") return;
       if (command.type === "attach") {
+        const parsedRef = SubscriptionRefSchema.safeParse(result.subscription);
+        const canonicalRef = parsedRef.success ? identityCopy(parsedRef.data) : undefined;
         if (
-          !sameRunRef(result.subscription.run, this.run) ||
-          !this.host.lane.register(result.subscription, (event, bytes) =>
-            this.receive(event, bytes),
-          )
+          !canonicalRef ||
+          !sameRunRef(canonicalRef.run, this.run) ||
+          !this.host.lane.register(canonicalRef, (event, bytes) => this.receive(event, bytes))
         ) {
           this.fail(localError("invalid-response"), operation.token);
           return;
         }
-        this.ref = result.subscription;
+        this.ref = canonicalRef;
       }
       operation.mode = result.mode;
       operation.atSeq = result.atSeq;
@@ -518,7 +529,11 @@ export class RoutedTerminalController implements TerminalController {
         viewGeneration: generation,
       });
       if (item.token !== this.token) return;
-      await this.view.beginBaseline(descriptor);
+      await this.view.beginBaseline({
+        ...descriptor,
+        run: Object.freeze({ ...descriptor.run }),
+        subscription: identityCopy(descriptor.subscription),
+      });
       return;
     }
     if (event.type === "baseline-chunk") {
@@ -592,7 +607,7 @@ export class RoutedTerminalController implements TerminalController {
       this.autoRecoveryUsed = false;
       this.settle(operation, {
         ok: true,
-        value: { subscription: this.ref!, atSeq: this.appliedSeq },
+        value: { subscription: identityCopy(this.ref!), atSeq: this.appliedSeq },
       });
       this.publish();
     });
