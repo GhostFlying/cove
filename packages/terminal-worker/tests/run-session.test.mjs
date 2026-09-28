@@ -359,6 +359,98 @@ test("high-water pause and low-water resume account copied pending bytes", async
   }
 });
 
+test("item pressure pauses below byte high and resumes after item drain without losing facts", async () => {
+  const total = 600;
+  const emitted = [];
+  const parsed = [];
+  const resumeOccupancy = [];
+  let owned;
+  let next = 0;
+  const produce = () => {
+    while (next < total && !owned.state.flowPaused) {
+      const bytes = Buffer.alloc(1024);
+      bytes.writeUInt32LE(next++);
+      emitted.push(bytes);
+      owned.observer.onData(bytes);
+    }
+  };
+  owned = start("item-watermarks", {
+    onFact(fact) {
+      if (fact.bytes) parsed.push(Buffer.from(fact.bytes));
+    },
+    onResume() {
+      resumeOccupancy.push(owned.session.snapshot().queuedItems);
+      produce(); // Native producer may synchronously reenter resume.
+    },
+  });
+  try {
+    produce();
+    expect(owned.session.snapshot()).toMatchObject({
+      queuedItems: 192,
+      queuedBytes: 192 * 1024,
+      paused: true,
+      faulted: false,
+    });
+    await vi.waitFor(() => expect(parsed).toHaveLength(total), { timeout: 10_000, interval: 10 });
+    expect(Buffer.concat(parsed)).toEqual(Buffer.concat(emitted));
+    expect(owned.session.snapshot()).toMatchObject({
+      receivedSeq: total,
+      parsedSeq: total,
+      queuedItems: 0,
+      paused: false,
+      faulted: false,
+    });
+    expect(owned.state.paused).toBeGreaterThan(1);
+    expect(resumeOccupancy.length).toBeGreaterThan(1);
+    expect(resumeOccupancy.every((items) => items <= 64)).toBe(true);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("the item cap remains explicit when native emits after pause", async () => {
+  const owned = start("item-hard-cap");
+  try {
+    for (let index = 0; index < 256; index++) owned.observer.onData(Buffer.alloc(1024));
+    expect(owned.state.paused).toBe(1);
+    expect(owned.session.snapshot()).toMatchObject({ queuedItems: 256, faulted: false });
+    owned.observer.onData(Buffer.alloc(1024));
+    expect(owned.session.snapshot().faulted).toBe(true);
+    expect(owned.faults).toHaveLength(1);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("early item pressure pauses the native owner on attachment", async () => {
+  const owned = start("early-item-watermarks", {
+    onSpawn(observer) {
+      for (let index = 0; index < 192; index++) observer.onData(Buffer.alloc(1024));
+    },
+  });
+  try {
+    expect(owned.session.snapshot()).toMatchObject({ queuedItems: 192, paused: true });
+    expect(owned.state.paused).toBe(1);
+    expect(await owned.session.barrier()).toMatchObject({ ok: true });
+    expect(owned.state.resumed).toBe(1);
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
+test("an ordered service admission counts toward native item pressure", async () => {
+  const owned = start("service-item-watermark");
+  try {
+    for (let index = 0; index < 191; index++) owned.observer.onData(Buffer.alloc(1024));
+    expect(owned.session.snapshot()).toMatchObject({ queuedItems: 191, paused: false });
+    const barrier = owned.session.barrier();
+    expect(owned.session.snapshot()).toMatchObject({ queuedItems: 192, paused: true });
+    expect(await barrier).toMatchObject({ ok: true });
+  } finally {
+    await owned.session.dispose();
+  }
+});
+
 test("a synchronous native pause fault retires once without recursive pause", async () => {
   const owned = start("pause-fault", {
     onPause(observer) {
