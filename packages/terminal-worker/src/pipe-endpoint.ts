@@ -118,6 +118,7 @@ class WorkerPipeCore {
     readable.on("data", this.#onData);
     readable.once("end", this.#onEnd);
     readable.once("error", this.#onReadError);
+    readable.once("close", this.#onReadClose);
     writable.on("drain", this.#onDrain);
     writable.once("error", this.#onWriteError);
     writable.once("close", this.#onWriteClose);
@@ -147,19 +148,22 @@ class WorkerPipeCore {
 
   shutdown(reason: string): Promise<WorkerPipeClose> {
     if (this.#shutdownPromise) return this.#shutdownPromise;
+    // Latch before stream teardown or execution disposal can reenter shutdown.
+    this.#shutdownPromise = this.#closedPromise;
     this.#state = "closing";
+    const uncertainRequestIds = [...this.#pending.keys()];
     this.#readable.pause();
     this.#readable.off("data", this.#onData);
     this.#readable.off("end", this.#onEnd);
     this.#readable.off("error", this.#onReadError);
+    this.#readable.off("close", this.#onReadClose);
     this.#writable.off("drain", this.#onDrain);
     this.#writable.off("error", this.#onWriteError);
     this.#writable.off("close", this.#onWriteClose);
     this.#activeChunk = undefined;
     this.#outbound.length = 0;
     this.#queuedBytes = 0;
-    const uncertainRequestIds = [...this.#pending.keys()];
-    this.#shutdownPromise = (async () => {
+    void (async () => {
       let disposalReceipts: WorkerPipeClose["disposalReceipts"] = [];
       let disposalUnverifiable = false;
       try {
@@ -167,13 +171,15 @@ class WorkerPipeCore {
       } catch {
         // An unverified dispose cannot turn an in-flight command into a known failure.
         disposalUnverifiable = true;
-      } finally {
-        if (!this.#writable.destroyed && !this.#writable.writableEnded) this.#writable.end();
-        this.#state = "closed";
       }
+      try {
+        if (!this.#writable.destroyed && !this.#writable.writableEnded) this.#writable.end();
+      } catch {
+        disposalUnverifiable = true;
+      }
+      this.#state = "closed";
       const closed = { reason, uncertainRequestIds, disposalReceipts, disposalUnverifiable };
       this.#resolveClosed(closed);
-      return closed;
     })();
     return this.#shutdownPromise;
   }
@@ -605,6 +611,10 @@ class WorkerPipeCore {
 
   #onReadError = (): void => {
     void this.shutdown("stdin-error");
+  };
+
+  #onReadClose = (): void => {
+    void this.shutdown("stdin-close");
   };
 
   #onWriteError = (): void => {
