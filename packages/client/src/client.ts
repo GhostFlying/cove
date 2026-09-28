@@ -7,9 +7,21 @@ import {
 } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError, type DomainError } from "@cove/protocol/errors";
-import { nextCounter, OpaqueIdSchema } from "@cove/protocol/identity";
-import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
+import {
+  nextCounter,
+  OpaqueIdSchema,
+  RunRefSchema,
+  type RunRef,
+  type SubscriptionRef,
+} from "@cove/protocol/identity";
+import {
+  BASELINE_ENCODING,
+  PROFILE,
+  validateAppearance,
+  type Appearance,
+} from "@cove/protocol/profile";
 import { canonicalOperationIntent, RPC_METHODS, type RpcMethod } from "@cove/protocol/rpc";
+import type { TerminalView } from "@cove/protocol/view";
 import {
   agreeBootstraps,
   checkBootstrap,
@@ -41,6 +53,8 @@ import type {
   TransferDisposition,
   Utf8Codec,
 } from "./transport-ports.js";
+import { TerminalLane } from "./terminal-delivery.js";
+import { RoutedTerminalController } from "./terminal-controller.js";
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
 const MAX_CONNECTION_TIMEOUT_MS = 5_000;
@@ -141,11 +155,53 @@ export interface ClientOptions {
   readonly rpcTimeoutMs?: number;
 }
 
+export interface TerminalOpenOptions {
+  readonly run: RunRef;
+  readonly viewId: string;
+  readonly view: TerminalView;
+  readonly initialAppearance: Appearance;
+}
+
+export interface TerminalReady {
+  readonly subscription: SubscriptionRef;
+  readonly atSeq: number;
+}
+
+export type TerminalOutcome<T = void> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: ClientError | DomainError };
+
+export type TerminalOpenOutcome = TerminalOutcome<TerminalController>;
+
+export interface TerminalSnapshot {
+  readonly phase:
+    "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
+  readonly appliedSeq: number;
+  readonly viewGeneration: number;
+  readonly queuedBytes: number;
+  readonly activeParseBytes: number;
+  readonly subscription?: SubscriptionRef;
+}
+
+export interface TerminalController {
+  attach(): Promise<TerminalOutcome<TerminalReady>>;
+  recover(
+    reason: "gap" | "released-view" | "resize-context" | "expired",
+  ): Promise<TerminalOutcome<TerminalReady>>;
+  detach(): Promise<TerminalOutcome>;
+  replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>>;
+  setVisibility(visible: boolean): void;
+  snapshot(): TerminalSnapshot;
+  onState(listener: (snapshot: TerminalSnapshot) => void): Disposable;
+  dispose(): void;
+}
+
 export interface Client {
   connect(): Promise<ConnectOutcome>;
   reconnect(): Promise<ConnectOutcome>;
   call<M extends RpcMethod>(method: M, params: ParamsFor<M>): Promise<CallOutcome<ResultFor<M>>>;
   getOperation(operationId: string): Promise<CallOutcome<ResultFor<"operation.get">>>;
+  openTerminal(options: TerminalOpenOptions): TerminalOpenOutcome;
   snapshot(): ClientSnapshot;
   onState(listener: (snapshot: ClientSnapshot) => void): Disposable;
   dispose(): void;
@@ -313,6 +369,8 @@ class CoveClient implements Client {
   private requestSequence = 0;
   private peakPendingRpcCount = 0;
   private suppressRpcState = false;
+  private readonly terminalLane: TerminalLane;
+  private readonly controllers = new Set<RoutedTerminalController>();
 
   constructor(private readonly options: ClientOptions) {
     this.offer = copyOffer(options);
@@ -322,6 +380,18 @@ class CoveClient implements Client {
       validOffer(this.offer) &&
       validDeadline(this.connectionTimeoutMs, MAX_CONNECTION_TIMEOUT_MS) &&
       validDeadline(this.rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
+    this.terminalLane = new TerminalLane(
+      {
+        binding: () => this.connection,
+        socket: () => this.connectedAttempt?.terminalConnection,
+        invalid: () => {
+          if (this.connectedAttempt) this.onTerminalBusinessMessage(this.connectedAttempt);
+        },
+      },
+      options.codec,
+      options.scheduler,
+      options.createOpaqueId,
+    );
   }
 
   connect(): Promise<ConnectOutcome> {
@@ -432,6 +502,57 @@ class CoveClient implements Client {
     });
   }
 
+  openTerminal(options: TerminalOpenOptions): TerminalOpenOutcome {
+    if (this.status === "disposed") return { ok: false, error: localError("disposed") };
+    const binding = this.connection;
+    if (this.status !== "connected" || !binding)
+      return { ok: false, error: localError("invalid-state") };
+    if (!options || typeof options !== "object")
+      return { ok: false, error: localError("invalid-request") };
+    if (
+      !RunRefSchema.safeParse(options.run).success ||
+      options.run.serverId !== binding.serverId ||
+      options.run.relayInstanceId !== binding.relayInstanceId ||
+      !OpaqueIdSchema.safeParse(options.viewId).success ||
+      !options.view ||
+      typeof options.view.initialize !== "function" ||
+      typeof options.view.beginBaseline !== "function" ||
+      typeof options.view.writeBaselineChunk !== "function" ||
+      typeof options.view.finishBaseline !== "function" ||
+      typeof options.view.applyEvent !== "function" ||
+      typeof options.view.measureGrid !== "function" ||
+      typeof options.view.setVisibility !== "function" ||
+      typeof options.view.onFailure !== "function" ||
+      typeof options.view.dispose !== "function"
+    )
+      return { ok: false, error: localError("invalid-request") };
+    const appearance = validateAppearance(options.initialAppearance);
+    if (!appearance) return { ok: false, error: localError("invalid-request") };
+    if (this.controllers.size >= binding.effectiveBudgets.subscriptionsPerConnection)
+      return { ok: false, error: localError("capacity") };
+    const controller = new RoutedTerminalController(
+      {
+        lane: this.terminalLane,
+        scheduler: this.options.scheduler,
+        binding: () => this.connection,
+        generation: () => this.generation,
+        retireConnection: () => {
+          if (this.connectedAttempt)
+            this.loseConnectedAttempt(this.connectedAttempt, localError("transport"));
+        },
+        remove: (item) => {
+          this.controllers.delete(item);
+        },
+      },
+      options.run,
+      options.viewId,
+      options.view,
+      appearance,
+    );
+    this.controllers.add(controller);
+    return { ok: true, value: controller };
+  }
+
   snapshot(): ClientSnapshot {
     return Object.freeze({
       status: this.status,
@@ -460,6 +581,7 @@ class CoveClient implements Client {
   dispose(): void {
     if (this.status === "disposed") return;
     this.fenceConnection("disposed");
+    for (const controller of [...this.controllers]) controller.dispose();
     this.status = "disposed";
     this.lastError = undefined;
     this.emitState();
@@ -571,7 +693,7 @@ class CoveClient implements Client {
           if (disposition !== "handed-off") this.failConnect(attempt, localError("transport"));
         },
         onText: (message) => this.onTerminalText(attempt, message),
-        onBinary: () => this.onTerminalBusinessMessage(attempt),
+        onBinary: (message) => this.onTerminalBinary(attempt, message),
         onClose: () => this.onTerminalClose(attempt),
       });
       attempt.terminalCancellation = cancellation;
@@ -686,6 +808,15 @@ class CoveClient implements Client {
     this.failConnect(attempt, this.negotiationError("invalid-bootstrap", "connection"));
   }
 
+  private onTerminalBinary(attempt: ConnectAttempt, message: Uint8Array): void {
+    if (!this.currentAttempt(attempt)) return;
+    if (!attempt.committed || !this.connection) {
+      this.onTerminalBusinessMessage(attempt);
+      return;
+    }
+    this.terminalLane.receive(message, this.connection.connection);
+  }
+
   private onTerminalClose(attempt: ConnectAttempt): void {
     if (!this.currentAttempt(attempt)) return;
     if (attempt.committed) {
@@ -744,6 +875,8 @@ class CoveClient implements Client {
 
   private loseConnectedAttempt(attempt: ConnectAttempt, error: ClientError): void {
     if (!this.currentAttempt(attempt) || !attempt.committed) return;
+    for (const controller of [...this.controllers]) controller.connectionLost();
+    this.terminalLane.close("transport");
     attempt.fenced = true;
     this.connectedAttempt = undefined;
     this.connection = undefined;
@@ -758,6 +891,8 @@ class CoveClient implements Client {
   }
 
   private fenceConnection(reason: LocalErrorReason): void {
+    for (const controller of [...this.controllers]) controller.connectionLost();
+    this.terminalLane.close(reason);
     const nextGeneration = nextCounter(this.generation);
     if (nextGeneration !== null) this.generation = nextGeneration;
     const attempt = this.attempt;
