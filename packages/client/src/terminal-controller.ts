@@ -59,7 +59,7 @@ export interface ControllerHost {
   readonly scheduler: Scheduler;
   binding(): NegotiatedConnection | undefined;
   generation(): number;
-  retireConnection(): void;
+  retireConnection(origin?: RoutedTerminalController, error?: ClientError | DomainError): void;
   remove(controller: RoutedTerminalController): void;
 }
 
@@ -256,8 +256,13 @@ export class RoutedTerminalController implements TerminalController {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     const ref = this.ref;
     const unknownAttach = this.mayHaveUnidentifiedAttach();
+    if (unknownAttach) {
+      const token = this.token;
+      this.host.retireConnection(this, localError("invalid-state"));
+      if (this.token === token) this.retire(localError("invalid-state"));
+      return { ok: true, value: undefined };
+    }
     this.retire(localError("invalid-state"));
-    if (unknownAttach) this.host.retireConnection();
     if (!ref || !this.host.binding()) return { ok: true, value: undefined };
     const requestId = this.host.lane.nextRequestId(this.host.generation());
     if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
@@ -319,8 +324,10 @@ export class RoutedTerminalController implements TerminalController {
 
   dispose(): void {
     if (this.phase === "disposed") return;
-    const ref = this.ref;
     const unknownAttach = this.mayHaveUnidentifiedAttach();
+    if (unknownAttach) this.host.retireConnection(this, localError("disposed"));
+    if (this.snapshot().phase === "disposed") return;
+    const ref = this.ref;
     this.retire(localError("disposed"));
     this.phase = "disposed";
     safeDispose(this.listener);
@@ -333,13 +340,12 @@ export class RoutedTerminalController implements TerminalController {
     this.publish();
     this.listeners.clear();
     this.host.remove(this);
-    if (unknownAttach) this.host.retireConnection();
-    else if (ref) this.releaseRemote(ref);
+    if (ref) this.releaseRemote(ref);
   }
 
-  connectionLost(): void {
+  connectionLost(error: ClientError | DomainError = localError("transport")): void {
     if (this.phase === "disposed") return;
-    this.retire(localError("transport"), false);
+    this.retire(error, false);
     this.phase = "unavailable";
     this.publish();
   }
@@ -777,11 +783,15 @@ export class RoutedTerminalController implements TerminalController {
     if (token !== this.token || this.phase === "disposed") return;
     const ref = this.ref;
     const unknownAttach = this.mayHaveUnidentifiedAttach();
+    if (unknownAttach) {
+      const before = this.token;
+      this.host.retireConnection(this, error);
+      if (this.token !== before || this.snapshot().phase === "disposed") return;
+    }
     this.retire(error);
     this.phase = "unavailable";
     this.publish();
-    if (unknownAttach) this.host.retireConnection();
-    else if (ref) this.releaseRemote(ref);
+    if (ref) this.releaseRemote(ref);
   }
 
   private releaseRemote(ref: SubscriptionRef): void {
