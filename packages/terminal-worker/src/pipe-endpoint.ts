@@ -46,6 +46,8 @@ export interface WorkerPipeClose {
 export interface WorkerPipeSnapshot {
   readonly state: "awaiting-hello" | "ready" | "closing" | "closed";
   readonly pendingCommands: number;
+  readonly outstandingRequests: number;
+  readonly responseItems: number;
   readonly ingressBytes: number;
   readonly queuedBytes: number;
   readonly transportBytes: number;
@@ -61,7 +63,15 @@ export interface WorkerPipe {
 
 interface OutboundFrame {
   readonly bytes: Uint8Array;
-  readonly requestId?: string;
+  readonly request?: RequestRecord;
+  readonly extra: boolean;
+  state: "queued" | "transport" | "settled";
+}
+
+interface RequestRecord {
+  readonly command: PipeCommand;
+  phase: "executing" | "response";
+  readonly frames: Set<OutboundFrame>;
 }
 
 class WorkerPipeCore {
@@ -70,16 +80,17 @@ class WorkerPipeCore {
   readonly #options: WorkerPipeOptions;
   readonly #decoder = createPipeDecoder();
   readonly #outbound: OutboundFrame[] = [];
-  readonly #pending = new Set<string>();
-  readonly #awaitingSend = new Set<string>();
-  readonly #transportPending = new Set<string>();
+  readonly #pending = new Map<string, RequestRecord>();
+  readonly #unsettledFrames = new Set<OutboundFrame>();
   readonly #closedPromise: Promise<WorkerPipeClose>;
   #resolveClosed!: (value: WorkerPipeClose) => void;
   #state: WorkerPipeSnapshot["state"] = "awaiting-hello";
   #hello: Hello | undefined;
   #execution: WorkerExecution | undefined;
   #queuedBytes = 0;
+  #transportFrameBytes = 0;
   #reservedReplyBytes = 0;
+  #extraResponseItems = 0;
   #peakAccountedBytes = 0;
   #blocked = false;
   #blockedFrameBytes = 0;
@@ -113,7 +124,10 @@ class WorkerPipeCore {
   snapshot(): WorkerPipeSnapshot {
     return {
       state: this.#state,
-      pendingCommands: this.#pending.size,
+      pendingCommands: [...this.#pending.values()].filter((record) => record.phase === "executing")
+        .length,
+      outstandingRequests: this.#pending.size,
+      responseItems: this.#unsettledFrames.size,
       ingressBytes:
         (this.#activeChunk?.byteLength ?? 0) - this.#activeOffset + this.#decoder.retainedBytes,
       queuedBytes: this.#queuedBytes,
@@ -136,9 +150,7 @@ class WorkerPipeCore {
     this.#activeChunk = undefined;
     this.#outbound.length = 0;
     this.#queuedBytes = 0;
-    const uncertainRequestIds = [
-      ...new Set([...this.#pending, ...this.#awaitingSend, ...this.#transportPending]),
-    ];
+    const uncertainRequestIds = [...this.#pending.keys()];
     this.#shutdownPromise = (async () => {
       let disposalReceipts: WorkerPipeClose["disposalReceipts"] = [];
       let disposalUnverifiable = false;
@@ -159,7 +171,11 @@ class WorkerPipeCore {
   }
 
   #transportBytes(): number {
-    return Math.max(this.#writable.writableLength, this.#blockedFrameBytes);
+    return Math.max(
+      this.#writable.writableLength,
+      this.#blockedFrameBytes,
+      this.#transportFrameBytes,
+    );
   }
 
   #accountedBytes(): number {
@@ -310,7 +326,12 @@ class WorkerPipeCore {
       void this.shutdown("command-capacity-exceeded");
       return false;
     }
-    if (this.#pending.has(command.requestId)) {
+    const outstanding = this.#pending.get(command.requestId);
+    if (outstanding) {
+      if (this.#extraResponseItems !== 0) {
+        void this.shutdown("duplicate-response-capacity");
+        return false;
+      }
       const duplicate: PipeError = {
         type: "error",
         worker: command.worker,
@@ -319,16 +340,17 @@ class WorkerPipeCore {
         commandType: command.type,
         error: domainError("OPERATION_ID_CONFLICT"),
       };
-      if (!this.#enqueue(duplicate, 4, false, command.requestId))
+      if (!this.#enqueue(duplicate, 4, false, outstanding, true))
         void this.shutdown("duplicate-response-capacity");
       return true;
     }
-    this.#pending.add(command.requestId);
+    const record: RequestRecord = { command, phase: "executing", frames: new Set() };
+    this.#pending.set(command.requestId, record);
     this.#reservedReplyBytes += MAX_REPLY_BYTES;
     this.#recordPeak();
     void this.#execution!.execute(command, frame.payload).then(
-      (response) => this.#completeCommand(command, response),
-      () => this.#completeCommand(command, this.#unknownError(command)),
+      (response) => this.#completeCommand(record, response),
+      () => this.#completeCommand(record, this.#unknownError(command)),
     );
     return true;
   }
@@ -348,17 +370,17 @@ class WorkerPipeCore {
     };
   }
 
-  #completeCommand(command: PipeCommand, response: PipeResult | PipeError): void {
-    if (!this.#pending.has(command.requestId)) return;
-    this.#pending.delete(command.requestId);
+  #completeCommand(record: RequestRecord, response: PipeResult | PipeError): void {
+    const command = record.command;
+    if (this.#pending.get(command.requestId) !== record || record.phase !== "executing") return;
+    record.phase = "response";
     this.#reservedReplyBytes -= MAX_REPLY_BYTES;
     if (this.#state !== "ready") return;
-    this.#awaitingSend.add(command.requestId);
     if (!validatePipeResultForCommand(command, response)) {
       void this.shutdown("invalid-execution-correlation");
       return;
     }
-    if (!this.#enqueue(response, response.type === "result" ? 2 : 4, false, command.requestId)) {
+    if (!this.#enqueue(response, response.type === "result" ? 2 : 4, false, record)) {
       void this.shutdown("response-send-failed");
       return;
     }
@@ -370,7 +392,8 @@ class WorkerPipeCore {
     metadata: Ready | PipeResult | PipeError,
     kind: 2 | 4,
     control: boolean,
-    requestId?: string,
+    request?: RequestRecord,
+    extra = false,
   ): boolean {
     const metadataBytes = textEncoder.encode(JSON.stringify(metadata));
     if (!validatePipeFrame({ kind, metadata: metadataBytes, payload: emptyPayload }, metadata).ok)
@@ -380,8 +403,16 @@ class WorkerPipeCore {
     const total = this.#accountedBytes() + encoded.value.byteLength;
     const cap = control ? this.#hello.effectiveBudgets.pipeQueuedBytes : this.#ordinaryLimit();
     if (total > cap) return false;
-    this.#outbound.push({ bytes: encoded.value, ...(requestId && { requestId }) });
-    if (requestId) this.#awaitingSend.add(requestId);
+    const frame: OutboundFrame = {
+      bytes: encoded.value,
+      ...(request && { request }),
+      extra,
+      state: "queued",
+    };
+    this.#outbound.push(frame);
+    this.#unsettledFrames.add(frame);
+    request?.frames.add(frame);
+    if (extra) this.#extraResponseItems++;
     this.#queuedBytes += encoded.value.byteLength;
     this.#recordPeak();
     this.#flush();
@@ -393,14 +424,16 @@ class WorkerPipeCore {
     while (this.#outbound.length) {
       const frame = this.#outbound.shift()!;
       this.#queuedBytes -= frame.bytes.byteLength;
-      if (frame.requestId) {
-        this.#awaitingSend.delete(frame.requestId);
-        this.#transportPending.add(frame.requestId);
-      }
+      frame.state = "transport";
+      this.#transportFrameBytes += frame.bytes.byteLength;
       let accepted: boolean;
       try {
         accepted = this.#writable.write(Buffer.from(frame.bytes), (error) => {
-          if (!error && frame.requestId) this.#transportPending.delete(frame.requestId);
+          if (error) {
+            void this.shutdown("stdout-write-failed");
+          } else {
+            this.#settleFrame(frame);
+          }
         });
       } catch {
         void this.shutdown("stdout-write-failed");
@@ -420,10 +453,26 @@ class WorkerPipeCore {
     }
   }
 
+  #settleFrame(frame: OutboundFrame): void {
+    if (frame.state === "settled") return;
+    if (frame.state === "transport") this.#transportFrameBytes -= frame.bytes.byteLength;
+    frame.state = "settled";
+    this.#unsettledFrames.delete(frame);
+    frame.request?.frames.delete(frame);
+    if (frame.extra) this.#extraResponseItems--;
+    const record = frame.request;
+    if (
+      record &&
+      record.phase === "response" &&
+      record.frames.size === 0 &&
+      this.#pending.get(record.command.requestId) === record
+    )
+      this.#pending.delete(record.command.requestId);
+  }
+
   #onDrain = (): void => {
     this.#blocked = false;
     this.#blockedFrameBytes = 0;
-    this.#transportPending.clear();
     if (this.#hello && !this.#activeChunk) this.#allowCommands = true;
     this.#flush();
     this.#processChunk();
