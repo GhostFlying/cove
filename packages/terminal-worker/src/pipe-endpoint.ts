@@ -49,6 +49,7 @@ export interface WorkerPipeSnapshot {
   readonly outstandingRequests: number;
   readonly responseItems: number;
   readonly ingressBytes: number;
+  readonly peakDecodeSliceBytes: number;
   readonly queuedBytes: number;
   readonly transportBytes: number;
   readonly ordinaryAccountedBytes: number;
@@ -100,6 +101,7 @@ class WorkerPipeCore {
   #blockedFrameBytes = 0;
   #activeChunk: Uint8Array | undefined;
   #activeOffset = 0;
+  #peakDecodeSliceBytes = 0;
   #processing = false;
   #allowCommands = false;
   #shutdownPromise: Promise<WorkerPipeClose> | undefined;
@@ -132,8 +134,9 @@ class WorkerPipeCore {
         .length,
       outstandingRequests: this.#pending.size,
       responseItems: this.#unsettledFrames.size,
-      ingressBytes:
-        (this.#activeChunk?.byteLength ?? 0) - this.#activeOffset + this.#decoder.retainedBytes,
+      // The backing buffer stays live until the complete chunk is released.
+      ingressBytes: (this.#activeChunk?.buffer.byteLength ?? 0) + this.#decoder.retainedBytes,
+      peakDecodeSliceBytes: this.#peakDecodeSliceBytes,
       queuedBytes: this.#queuedBytes,
       transportBytes: this.#transportBytes(),
       ordinaryAccountedBytes: this.#ordinaryAccountedBytes(),
@@ -240,8 +243,8 @@ class WorkerPipeCore {
       return;
     }
     if (
-      chunk.byteLength + this.#decoder.retainedBytes >
-      (this.#hello?.effectiveBudgets.workerBytes ?? M0_LIMITS.workerBytes)
+      chunk.buffer.byteLength + this.#decoder.retainedBytes >
+      (this.#hello?.effectiveBudgets.pipeQueuedBytes ?? M0_LIMITS.pipeQueuedBytes)
     ) {
       void this.shutdown("ingress-capacity-exceeded");
       return;
@@ -266,6 +269,14 @@ class WorkerPipeCore {
         }
         const read = this.#decoder.read(remaining);
         this.#activeOffset += read.consumedBytes;
+        // Decoder-owned frame copies are consumed in this synchronous slice, not queued at the endpoint.
+        this.#peakDecodeSliceBytes = Math.max(
+          this.#peakDecodeSliceBytes,
+          read.frames.reduce(
+            (bytes, frame) => bytes + frame.metadata.byteLength + frame.payload.byteLength,
+            0,
+          ),
+        );
         for (const frame of read.frames) {
           if (!this.#handleFrame(frame)) break;
         }
@@ -312,6 +323,14 @@ class WorkerPipeCore {
       };
       if (!validatePipeReadiness(metadata, ready)) {
         void this.shutdown("hello-mismatch");
+        return false;
+      }
+      if (
+        this.#activeChunk &&
+        this.#activeChunk.buffer.byteLength + this.#decoder.retainedBytes >
+          metadata.effectiveBudgets.pipeQueuedBytes
+      ) {
+        void this.shutdown("ingress-capacity-exceeded");
         return false;
       }
       try {
