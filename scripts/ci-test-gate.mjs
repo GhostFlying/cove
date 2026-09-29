@@ -407,6 +407,21 @@ export const requiredSuites = [
     minimumTests: 1,
   },
   {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs",
+    minimumTests: 1,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/worker-query-observation.test.mjs",
+    minimumTests: 2,
+  },
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/worker-timing.test.mjs",
+    minimumTests: 7,
+  },
+  {
     project: "terminal-web-probes",
     file: "packages/terminal-web/probes/environment.test.mjs",
     minimumTests: 5,
@@ -439,6 +454,15 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "terminal-worker",
+    file: "tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs",
+    template: "public native factory accounts for ${mode} and reuses its slot",
+    names: [
+      "public native factory accounts for missing-executable and reuses its slot",
+      "public native factory accounts for missing-cwd and reuses its slot",
+    ],
+  },
   {
     project: "terminal-worker",
     file: "tests/integration/terminal-worker/qualification-identity.test.mjs",
@@ -524,10 +548,14 @@ export function verifyDiscovery(discovered, sourceFiles, suites = requiredSuites
     throw new Error("Required suite inventory is empty or contains duplicates");
   }
   const found = new Map();
+  const identities = new Set();
   for (const test of discovered) {
     const file = repositoryPath(test.file);
     const key = `${test.projectName}:${file}`;
     if (!expected.has(key)) throw new Error(`Unregistered Vitest suite: ${key}`);
+    const identity = `${key}\0${test.name}`;
+    if (identities.has(identity)) throw new Error(`Duplicate discovered identity: ${key}`);
+    identities.add(identity);
     found.set(key, (found.get(key) ?? 0) + 1);
   }
   for (const [key, suite] of expected) {
