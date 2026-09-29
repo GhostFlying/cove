@@ -134,6 +134,8 @@ test("client public-contract suites reject missing and short discovery", async (
     ["compiled-client", 4],
     ["terminal-recovery", 40],
     ["terminal-control-input", 33],
+    ["terminal-budgets-preview", 29],
+    ["terminal-lifecycle", 4],
   ]) {
     const file = `packages/client/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
@@ -1125,7 +1127,7 @@ test("W1 evidence suites reject missing, short, duplicate and unknown identities
   }
 });
 
-test("finite worker templates require every exact expanded runtime identity", () => {
+test("finite registered templates require every exact expanded runtime identity", () => {
   const groups = Map.groupBy(finiteRuntimeExpansions, ({ project, file }) => `${project}:${file}`);
   for (const expansions of groups.values()) {
     const { project, file } = expansions[0];
@@ -1136,6 +1138,15 @@ test("finite worker templates require every exact expanded runtime identity", ()
       name: expansion.template,
     }));
     const names = expansions.flatMap((expansion) => expansion.names);
+    const assertion = (name) => {
+      const parts = name.split(" > ");
+      return {
+        ancestorTitles: parts.slice(0, -1),
+        title: parts.at(-1),
+        fullName: parts.join(" "),
+        status: "passed",
+      };
+    };
     const execution = {
       success: true,
       numTotalTests: names.length,
@@ -1147,7 +1158,7 @@ test("finite worker templates require every exact expanded runtime identity", ()
         {
           name: resolve(root, file),
           status: "passed",
-          assertionResults: names.map((fullName) => ({ fullName, status: "passed" })),
+          assertionResults: names.map(assertion),
         },
       ],
     };
@@ -1165,22 +1176,28 @@ test("finite worker templates require every exact expanded runtime identity", ()
       /Parameterized runtime identities differ/,
     );
     const extra = structuredClone(execution);
-    extra.testResults[0].assertionResults.push({
-      fullName: "unregistered extra parameter",
-      status: "passed",
-    });
+    extra.testResults[0].assertionResults.push(assertion("unregistered extra parameter"));
     expect(() => verifyInventory(discovered, extra, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
     const duplicate = structuredClone(execution);
-    duplicate.testResults[0].assertionResults.at(-1).fullName = names[0];
+    duplicate.testResults[0].assertionResults[
+      duplicate.testResults[0].assertionResults.length - 1
+    ] = assertion(names[0]);
     expect(() => verifyInventory(discovered, duplicate, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
     );
     const renamed = structuredClone(execution);
-    renamed.testResults[0].assertionResults.at(-1).fullName = "unregistered parameter";
+    renamed.testResults[0].assertionResults[renamed.testResults[0].assertionResults.length - 1] =
+      assertion("unregistered parameter");
     expect(() => verifyInventory(discovered, renamed, [file], [suite])).toThrow(
       /Parameterized runtime identities differ/,
+    );
+    const renamedTemplate = discovered.map((test, index) =>
+      index === 0 ? { ...test, name: "renamed template" } : test,
+    );
+    expect(() => verifyInventory(renamedTemplate, execution, [file], [suite])).toThrow(
+      /Missing parameterized declaration/,
     );
   }
 });

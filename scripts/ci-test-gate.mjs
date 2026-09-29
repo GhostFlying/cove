@@ -186,6 +186,12 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 export const requiredSuites = [
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
+  {
+    project: "client",
+    file: "packages/client/tests/terminal-budgets-preview.test.mjs",
+    minimumTests: 29,
+  },
+  { project: "client", file: "packages/client/tests/terminal-lifecycle.test.mjs", minimumTests: 4 },
   { project: "client", file: "packages/client/tests/terminal-recovery.test.mjs", minimumTests: 40 },
   {
     project: "client",
@@ -455,6 +461,17 @@ export const requiredSuites = [
 
 export const finiteRuntimeExpansions = [
   {
+    project: "client",
+    file: "packages/client/tests/terminal-budgets-preview.test.mjs",
+    template:
+      "client preview transaction > joins one opaque transfer in %s order without a live controller",
+    names: [
+      "client preview transaction > joins one opaque transfer in result-first order without a live controller",
+      "client preview transaction > joins one opaque transfer in events-first order without a live controller",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
     project: "terminal-worker",
     file: "tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs",
     template: "public native factory accounts for ${mode} and reuses its slot",
@@ -617,7 +634,19 @@ export function verifyInventory(discovered, report, sourceFiles, suites = requir
           identities.add(name);
         }
       }
-      const actual = resultSuites.get(file)?.assertionResults.map((test) => test.fullName) ?? [];
+      const structured = expansions.some((expansion) => expansion.reporterIdentity === "ancestry");
+      const actual =
+        resultSuites.get(file)?.assertionResults.map((test) => {
+          if (!structured) return test.fullName;
+          const parts = [...(test.ancestorTitles ?? []), test.title];
+          if (
+            !Array.isArray(test.ancestorTitles) ||
+            !parts.every((part) => typeof part === "string" && part.length > 0) ||
+            test.fullName !== parts.join(" ")
+          )
+            return null;
+          return parts.join(" > ");
+        }) ?? [];
       if (
         new Set(actual).size !== actual.length ||
         actual.some((name) => !identities.has(name)) ||
