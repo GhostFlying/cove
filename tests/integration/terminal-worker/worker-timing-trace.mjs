@@ -83,7 +83,10 @@ export function summarizeTimingTrace(trace) {
       if (
         pair.boundary === "pipe-block-to-drain" &&
         (pair.start.detail?.blockedSnapshot?.blocked !== true ||
-          pair.end.detail?.after?.blocked !== false)
+          !pair.end.detail?.after ||
+          (pair.end.detail.after.blocked === true
+            ? !pair.end.detail.reblockedBy || pair.end.detail.reblockedBy === pair.sampleId
+            : pair.end.detail.after.blocked !== false || pair.end.detail.reblockedBy !== null))
       )
         throw Error("pipe blocked epoch join invalid");
       if (
