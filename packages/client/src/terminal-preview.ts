@@ -29,6 +29,7 @@ type PreviewEvent = Extract<
   ExternalTerminalEvent,
   { type: "preview-start" | "preview-chunk" | "preview-end" }
 >;
+export type PreviewRoute = "active" | "obsolete" | "unrouteable";
 
 interface Transfer {
   readonly previewId: string;
@@ -67,15 +68,12 @@ function runKey(run: RunRef): string {
   return JSON.stringify([run.serverId, run.relayInstanceId, run.runId]);
 }
 
-function previewKey(key: string, previewId: string): string {
-  return JSON.stringify([key, previewId]);
-}
-
 // Preview events have no requestId: an unseen old transfer requires a run fence after uncertainty.
 export class TerminalPreview {
   private readonly pending = new Map<string, PendingPreview>();
-  private readonly retired = new Set<string>();
+  private readonly retired = new Map<string, Set<string>>();
   private readonly quarantined = new Set<string>();
+  private retiredCount = 0;
   private retainedBytes = 0;
 
   constructor(
@@ -113,7 +111,7 @@ export class TerminalPreview {
       this.pending.has(key) ||
       this.pending.size >= binding.effectiveBudgets.maxRuns ||
       this.pending.size >= M0_LIMITS.pendingWorkerCommands ||
-      this.pending.size + this.retired.size >= RETIRED_PREVIEW_LIMIT
+      this.pending.size + this.retiredCount + this.quarantined.size >= RETIRED_PREVIEW_LIMIT
     )
       return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
 
@@ -174,12 +172,17 @@ export class TerminalPreview {
     return promise;
   }
 
-  receive(event: PreviewEvent, bytes: Uint8Array): void {
+  receive(event: PreviewEvent, bytes: Uint8Array): PreviewRoute {
     const key = runKey(event.run);
-    const identity = previewKey(key, event.previewId);
-    if (this.retired.has(identity) || this.quarantined.has(key)) return;
+    if (this.retired.get(key)?.has(event.previewId) || this.quarantined.has(key)) return "obsolete";
     const pending = this.pending.get(key);
-    if (!pending || pending.settled || pending.generation !== this.generation()) return;
+    if (!pending || pending.settled || pending.generation !== this.generation())
+      return "unrouteable";
+    this.process(pending, event, bytes);
+    return "active";
+  }
+
+  private process(pending: PendingPreview, event: PreviewEvent, bytes: Uint8Array): void {
     const transfer = pending.transfer;
     if (event.type === "preview-start") {
       if (transfer || event.vtBytes > this.binding()!.effectiveBudgets.previewBytesPerRun) {
@@ -240,6 +243,7 @@ export class TerminalPreview {
         uncertain: pending.startedSend,
       });
     this.retired.clear();
+    this.retiredCount = 0;
     this.quarantined.clear();
   }
 
@@ -296,8 +300,25 @@ export class TerminalPreview {
     if (pending.settled) return;
     pending.settled = true;
     this.pending.delete(pending.key);
-    if (pending.transfer) this.retired.add(previewKey(pending.key, pending.transfer.previewId));
-    if (!outcome.ok && (outcome.uncertain || pending.transfer)) this.quarantined.add(pending.key);
+    if (!outcome.ok && (outcome.uncertain || pending.transfer)) {
+      // A run quarantine subsumes every older completed preview ID for that run.
+      const oldIds = this.retired.get(pending.key);
+      if (oldIds) {
+        this.retiredCount -= oldIds.size;
+        this.retired.delete(pending.key);
+      }
+      this.quarantined.add(pending.key);
+    } else if (pending.transfer) {
+      let ids = this.retired.get(pending.key);
+      if (!ids) {
+        ids = new Set<string>();
+        this.retired.set(pending.key, ids);
+      }
+      if (!ids.has(pending.transfer.previewId)) {
+        ids.add(pending.transfer.previewId);
+        this.retiredCount++;
+      }
+    }
     if (pending.reservedBytes) {
       this.retainedBytes -= pending.reservedBytes;
       this.lane.releaseIngress(pending.reservedBytes);

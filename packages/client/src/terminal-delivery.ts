@@ -69,7 +69,7 @@ export interface TerminalLaneOwner {
       { type: "preview-start" | "preview-chunk" | "preview-end" }
     >,
     bytes: Uint8Array,
-  ): void;
+  ): "active" | "obsolete" | "unrouteable";
 }
 
 // The lane owns correlation and the only ordered terminal send path; controllers own parsing.
@@ -81,6 +81,7 @@ export class TerminalLane {
   >();
   private readonly retiredRefs = new Set<string>();
   private readonly outbound: PendingCommand[] = [];
+  private readonly heldPreviewReservations = new Set<string>();
   private flushing = false;
   private retainedOutboundBytes = 0;
   private retainedIngressBytes = 0;
@@ -149,13 +150,18 @@ export class TerminalLane {
     };
     const binding = this.owner.binding();
     if (!binding || !this.owner.socket()) return rejectBeforeSend("invalid-state");
-    if (this.pending.has(command.requestId) || this.pending.size >= M0_LIMITS.pendingWorkerCommands)
+    if (
+      this.pending.has(command.requestId) ||
+      this.heldPreviewReservations.has(command.requestId) ||
+      this.pending.size + this.heldPreviewReservations.size >= M0_LIMITS.pendingWorkerCommands
+    )
       return rejectBeforeSend("capacity");
     if (
       (command.type === "input" || command.type === "preview") &&
-      [...this.pending.values()].filter(
-        (pending) => pending.command.type === "input" || pending.command.type === "preview",
-      ).length >=
+      this.heldPreviewReservations.size +
+        [...this.pending.values()].filter(
+          (pending) => pending.command.type === "input" || pending.command.type === "preview",
+        ).length >=
         M0_LIMITS.pendingWorkerCommands - 32
     )
       return rejectBeforeSend("capacity");
@@ -284,6 +290,7 @@ export class TerminalLane {
   }
 
   cancelPreview(requestId: string): void {
+    this.heldPreviewReservations.delete(requestId);
     const pending = this.pending.get(requestId);
     if (!pending || pending.command.type !== "preview") return;
     this.finish(pending, {
@@ -362,8 +369,9 @@ export class TerminalLane {
         const event = value as ExternalTerminalEvent;
         const ref = externalEventSubscription(event);
         if (!ref) {
+          let route: "active" | "obsolete" | "unrouteable";
           try {
-            this.owner.preview(
+            route = this.owner.preview(
               event as Extract<
                 ExternalTerminalEvent,
                 { type: "preview-start" | "preview-chunk" | "preview-end" }
@@ -372,7 +380,9 @@ export class TerminalLane {
             );
           } catch {
             this.owner.invalid();
+            return;
           }
+          if (route === "unrouteable") this.owner.invalid();
           return;
         }
         try {
@@ -434,11 +444,12 @@ export class TerminalLane {
         uncertain,
       });
     }
+    this.heldPreviewReservations.clear();
     this.outbound.length = 0;
   }
 
   get pendingCount(): number {
-    return this.pending.size;
+    return this.pending.size + this.heldPreviewReservations.size;
   }
 
   get retiredCount(): number {
@@ -528,6 +539,14 @@ export class TerminalLane {
   private finish(pending: PendingCommand, outcome: CommandOutcome): void {
     if (pending.settled) return;
     pending.settled = true;
+    // The result can retire its frame while the preview still owns an ordinary slot.
+    if (
+      pending.command.type === "preview" &&
+      outcome.ok &&
+      outcome.result.type === "preview-result" &&
+      outcome.result.status === "transfer"
+    )
+      this.heldPreviewReservations.add(pending.command.requestId);
     this.pending.delete(pending.command.requestId);
     this.retainedOutboundBytes -= pending.bytes.byteLength;
     try {
