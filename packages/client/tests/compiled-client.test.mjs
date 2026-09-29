@@ -52,15 +52,30 @@ function compile(directory) {
   });
 }
 
-test("isolated ES-only consumer imports the built public entry and its typed six-call surface", async () => {
+test("isolated ES-only consumer imports typed RPC and preview outcomes from public entries", async () => {
   const directory = await isolatedConsumer(`
-import { createClient, type Client, type ClientOptions, type ParamsFor, type ResultFor } from '@cove/client';
+import { createClient, type Client, type ClientOptions, type ParamsFor, type PreviewOutcome, type ResultFor } from '@cove/client';
+import type { RunRef } from '@cove/protocol/identity';
 declare const options: ClientOptions;
+declare const run: RunRef;
 const client: Client = createClient(options);
 const params: ParamsFor<'terminal.list'> = { limit: 1 };
 const result: Promise<{ ok: boolean }> = client.call('terminal.list', params);
+const preview: Promise<PreviewOutcome> = client.getPreview(run, 1);
+async function readPreview(): Promise<number> {
+  const outcome: PreviewOutcome = await preview;
+  if (!outcome.ok) {
+    const uncertain: boolean = outcome.uncertain;
+    return uncertain ? 1 : 0;
+  }
+  if (outcome.status === 'unchanged') return outcome.version;
+  const bytes: Uint8Array = outcome.bytes;
+  const atSeq: number = outcome.atSeq;
+  const generatedAtMs: number = outcome.generatedAtMs;
+  return bytes.byteLength + atSeq + generatedAtMs;
+}
 declare const typed: ResultFor<'terminal.list'>;
-void typed; void result;
+void typed; void result; void readPreview;
 `);
   const result = compile(directory);
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
