@@ -150,12 +150,77 @@ function fakeFactory(config = {}) {
   };
 }
 
-async function start(config = {}, budgets = M0_LIMITS, onFact) {
+function deliverySink(deliveries) {
+  return {
+    enqueue(event, payload) {
+      deliveries.push({ event, payload: Buffer.from(payload) });
+      return 16 + encode(JSON.stringify(event)).byteLength + payload.byteLength;
+    },
+    cancelUnsent() {},
+  };
+}
+
+async function install(execution, deliveries, ref, workerRef = worker) {
+  const subscribe = command(
+    "subscribe",
+    { worker: workerRef, subscription: ref, atSeq: 0 },
+    ref.run,
+  );
+  const marker = await execution.execute(subscribe);
+  expect(marker).toMatchObject({ type: "result", outcome: "accepted", recoveryMode: "baseline" });
+  execution.markerEnqueued(subscribe, marker);
+  for (let turn = 0; turn < 10; turn++) {
+    if (
+      deliveries.some(
+        (item) =>
+          item.event.terminal.type === "baseline-end" &&
+          item.event.subscription.subscriptionId === ref.subscriptionId &&
+          item.event.run.runId === ref.run.runId,
+      )
+    )
+      break;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const own = deliveries.filter(
+    (item) =>
+      item.event.subscription?.subscriptionId === ref.subscriptionId &&
+      item.event.run.runId === ref.run.runId,
+  );
+  const chunks = own.filter((item) => item.event.terminal.type === "baseline-chunk");
+  const baselineId = own.find((item) => item.event.terminal.type === "baseline-start")?.event
+    .terminal.descriptor.baselineId;
+  expect(own.at(-1)?.event.terminal.type).toBe("baseline-end");
+  for (let index = 0; index < chunks.length; index++) {
+    const progress = command(
+      "baseline-progress",
+      {
+        worker: workerRef,
+        subscription: ref,
+        baselineId,
+        lastParsedOrdinal: index,
+      },
+      ref.run,
+    );
+    expect((await execution.execute(progress)).outcome).toBe("accepted");
+    execution.responseSettled(progress.requestId);
+  }
+  const ack = command(
+    "applied-ack",
+    { worker: workerRef, subscription: ref, appliedSeq: marker.atSeq },
+    ref.run,
+  );
+  expect((await execution.execute(ack)).outcome).toBe("accepted");
+  execution.responseSettled(ack.requestId);
+}
+
+async function start(config = {}, budgets = M0_LIMITS, onFact, installDefault = true) {
   const factory = fakeFactory(config);
+  const deliveries = [];
   const execution = createWorkerExecution({
     worker,
     effectiveBudgets: budgets,
     factory,
+    delivery: deliverySink(deliveries),
     ...(onFact && { onFact }),
   });
   const spawn = spawnCommand(run(), budgets);
@@ -165,7 +230,16 @@ async function start(config = {}, budgets = M0_LIMITS, onFact) {
     outcome: "accepted",
     atSeq: 0,
   });
-  return { execution, factory, item: [...factory.owned.values()][0] };
+  if (installDefault)
+    for (const id of budgets.workerBytes >= 9 * 1024 * 1024 ? ["sub", "a", "b", "other"] : ["sub"])
+      await install(execution, deliveries, subscription(id));
+  return {
+    execution,
+    factory,
+    item: [...factory.owned.values()][0],
+    install: (ref) => install(execution, deliveries, ref),
+    deliveries,
+  };
 }
 
 test.each([
@@ -185,7 +259,8 @@ test.each([
     expect(facts.reduce((sum, fact) => sum + fact.bytes.length, 0)).toBe(
       lengths.reduce((sum, length) => sum + length, 0),
     );
-    expect(execution.snapshot().retainedBreakdown.workerBytes).toBe(baseline);
+    const retained = execution.snapshot();
+    expect(retained.retainedBreakdown.workerBytes - retained.replay[0].bytes).toBe(baseline);
   } finally {
     await execution.shutdown("test");
   }
@@ -239,7 +314,13 @@ test("registered execution entry preserves the first-slice facade and rejects W2
   expect(Object.keys(direct)).toEqual(["kind", "session"]);
   expect(Object.keys(direct.session)).toEqual(["barrier", "snapshot", "dispose"]);
   await direct.session.dispose();
-  const { execution } = await start();
+  const execution = createWorkerExecution({
+    worker,
+    effectiveBudgets: M0_LIMITS,
+    factory: fakeFactory(),
+  });
+  const spawn = spawnCommand();
+  expect((await execution.execute(spawn.command, spawn.payload)).outcome).toBe("accepted");
   try {
     expect(
       await execution.execute(command("subscribe", { subscription: subscription(), atSeq: 0 })),
@@ -602,11 +683,18 @@ test("compiled near-MAX epoch rejects new grants but accepts same-epoch release"
     { controlEpoch: Number.MAX_SAFE_INTEGER },
     async (createNearLimitWorker) => {
       const factory = fakeFactory();
-      const execution = createNearLimitWorker({ worker, effectiveBudgets: M0_LIMITS, factory });
+      const deliveries = [];
+      const execution = createNearLimitWorker({
+        worker,
+        effectiveBudgets: M0_LIMITS,
+        factory,
+        delivery: deliverySink(deliveries),
+      });
       try {
         const spawn = spawnCommand();
         const spawned = await execution.execute(spawn.command, spawn.payload);
         expectCorrelated(spawn.command, spawned, "result");
+        await install(execution, deliveries, subscription());
         const grant = command("set-control", {
           expectedEpoch: Number.MAX_SAFE_INTEGER,
           nextEpoch: Number.MAX_SAFE_INTEGER,
@@ -646,7 +734,13 @@ test("compiled near-MAX output rejects multi-fact grant before native resize", a
     { receivedSeq: Number.MAX_SAFE_INTEGER - 1 },
     async (createNearLimitWorker) => {
       const factory = fakeFactory();
-      const execution = createNearLimitWorker({ worker, effectiveBudgets: M0_LIMITS, factory });
+      const deliveries = [];
+      const execution = createNearLimitWorker({
+        worker,
+        effectiveBudgets: M0_LIMITS,
+        factory,
+        delivery: deliverySink(deliveries),
+      });
       try {
         const spawn = spawnCommand();
         expectCorrelated(
@@ -654,6 +748,7 @@ test("compiled near-MAX output rejects multi-fact grant before native resize", a
           await execution.execute(spawn.command, spawn.payload),
           "result",
         );
+        await install(execution, deliveries, subscription());
         const item = [...factory.owned.values()][0];
         const grant = command("set-control", {
           expectedEpoch: 0,
@@ -927,6 +1022,7 @@ test("minimum control carve-out covers max IDs and concurrent status/stop overla
   const longWorker = { serverId: id, relayInstanceId: id, workerId: id, workerIncarnationId: id };
   const longRun = { serverId: id, relayInstanceId: id, runId: id };
   const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1, reservedControlBytes: 4112 };
+  const deliveries = [];
   let settle;
   const factory = fakeFactory({
     submit(_item, bytes, onSettled, ticket) {
@@ -959,6 +1055,7 @@ test("minimum control carve-out covers max IDs and concurrent status/stop overla
     worker: longWorker,
     effectiveBudgets: budgets,
     factory,
+    delivery: deliverySink(deliveries),
   });
   const makeCommand = (type, fields, requestId) => ({
     ...command(type, fields, longRun),
@@ -969,6 +1066,7 @@ test("minimum control carve-out covers max IDs and concurrent status/stop overla
     const spawn = spawnCommand(longRun, budgets);
     const spawnRequest = { ...spawn.command, worker: longWorker, operationId: id };
     expectCorrelated(spawnRequest, await execution.execute(spawnRequest, spawn.payload), "result");
+    await install(execution, deliveries, subscription("sub", longRun), longWorker);
     const grant = makeCommand(
       "set-control",
       {
@@ -1046,7 +1144,7 @@ test("retained input identity count rejects a second full subscription", async (
 
 test("worker byte cap rejects model allocation before native spawn and retains run identity", async () => {
   const budgets = { ...M0_LIMITS, workerBytes: 92 * 1024 };
-  const { execution, factory } = await start({}, budgets);
+  const { execution, factory } = await start({}, budgets, undefined, false);
   try {
     const firstBytes = execution.snapshot().accountedBytes;
     const second = spawnCommand(run("next"), budgets);
@@ -1070,6 +1168,7 @@ test("two T2 tails and held N2 input share one worker pre-admission cap", async 
     execution,
     factory,
     item: first,
+    install: installRun,
   } = await start(
     {
       submit(item, bytes, onSettled, ticket) {
@@ -1106,10 +1205,11 @@ test("two T2 tails and held N2 input share one worker pre-admission cap", async 
       outcome: "accepted",
     });
     const second = [...factory.owned.values()][1];
-    first.observer.onData(Buffer.from("A"));
-    second.observer.onData(Buffer.from("B"));
+    first.observer.onData(Buffer.alloc(5_000, 0x41));
+    second.observer.onData(Buffer.alloc(5_000, 0x42));
     await execution.execute(command("status"));
     await execution.execute(command("status", {}, secondRun));
+    await installRun(subscription("sub", secondRun));
     const snapshots = execution.snapshot().sessions.map(({ snapshot }) => snapshot);
     expect(snapshots.map((snapshot) => snapshot.settledState.resources.tailAllocatedBytes)).toEqual(
       [65_536, 65_536],
@@ -1137,20 +1237,20 @@ test("two T2 tails and held N2 input share one worker pre-admission cap", async 
     );
     await new Promise((resolve) => setImmediate(resolve));
     expect(typeof releaseFirst).toBe("function");
-    expect(
-      await execution.execute(
-        command(
-          "input",
-          {
-            subscription: subscription("sub", secondRun),
-            epoch: 1,
-            inputSeq: 1,
-          },
-          secondRun,
-        ),
-        Buffer.alloc(20_000),
+    expect(budgets.workerBytes - execution.snapshot().accountedBytes).toBeLessThan(20_000);
+    const secondResult = await execution.execute(
+      command(
+        "input",
+        {
+          subscription: subscription("sub", secondRun),
+          epoch: 1,
+          inputSeq: 1,
+        },
+        secondRun,
       ),
-    ).toMatchObject({ type: "error", error: { kind: "BUSY" } });
+      Buffer.alloc(20_000),
+    );
+    expect(secondResult).toMatchObject({ type: "error", error: { kind: "BUSY" } });
     expect(second.writes).toHaveLength(0);
     expect(execution.snapshot().accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
     releaseFirst();

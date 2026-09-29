@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { model, output, resize, utf8, string } from "./driver.mjs";
+import { createScreenPreview } from "../dist/src/terminal-preview.js";
 
 test("V01 preview includes current normal viewport and excludes retained history", async () => {
   const engine = model();
@@ -95,4 +96,135 @@ test("V06 preview is detached and pure; disposal closes later capture", async ()
   expect(replies).toEqual([]);
   engine.dispose();
   expect((await engine.capturePreview()).status).toBe("disposed");
+});
+
+test("V07 scratch denial precedes preview construction and leaves existing model leases intact", async () => {
+  let current = 0;
+  let denyPreview = false;
+  const requests = [];
+  const engine = model({
+    reserveRetainedBytes(bytes) {
+      requests.push(bytes);
+      if (denyPreview && bytes === M0_LIMITS.previewBytesPerRun + 512 * 12 * 4 + 256)
+        return undefined;
+      current += bytes;
+      let released = false;
+      return {
+        release() {
+          if (released) return;
+          released = true;
+          current -= bytes;
+        },
+      };
+    },
+  });
+  try {
+    const existing = current;
+    denyPreview = true;
+    expect((await engine.capturePreview()).status).toBe("unavailable");
+    expect(current).toBe(existing);
+    denyPreview = false;
+    expect((await engine.capturePreview()).status).toBe("ready");
+    expect(current).toBe(existing);
+    expect(requests).toContain(M0_LIMITS.previewBytesPerRun + 512 * 12 * 4 + 256);
+  } finally {
+    engine.dispose();
+  }
+  expect(current).toBe(0);
+});
+
+test("V08 streaming preview rejects an oversized existing cell before row staging", () => {
+  const cell = {
+    getWidth: () => 1,
+    getChars: () => `A${"\u0301".repeat(40_000)}`,
+    getFgColorMode: () => 0,
+    getBgColorMode: () => 0,
+    isBold: () => false,
+    isDim: () => false,
+    isItalic: () => false,
+    isUnderline: () => false,
+    isBlink: () => false,
+    isInverse: () => false,
+    isInvisible: () => false,
+    isStrikethrough: () => false,
+    isOverline: () => false,
+  };
+  const terminal = {
+    cols: 1,
+    rows: 1,
+    buffer: {
+      active: {
+        baseY: 0,
+        cursorX: 0,
+        cursorY: 0,
+        getLine: () => ({ getCell: () => cell }),
+      },
+    },
+  };
+  expect(() => createScreenPreview(terminal, 65_536)).toThrow("preview exceeds byte cap");
+});
+
+test("V09 detached baseline reservation precedes copies and denial or throw preserves authority", async () => {
+  const engine = model();
+  try {
+    await engine.apply(output(1), utf8("LIVE"));
+    const original = await engine.captureBaseline();
+    expect(original.status).toBe("ready");
+    const size = original.baseline.vt.byteLength + original.baseline.tail.byteLength + 4096;
+    const calls = [];
+    expect(
+      (
+        await engine.captureBaseline((bytes) => {
+          calls.push(bytes);
+          return false;
+        })
+      ).status,
+    ).toBe("unavailable");
+    expect(
+      (
+        await engine.captureBaseline((bytes) => {
+          calls.push(bytes);
+          throw new Error("reservation failed");
+        })
+      ).status,
+    ).toBe("unavailable");
+    expect(calls).toEqual([size, size]);
+    expect((await engine.captureBaseline()).baseline).toEqual(original.baseline);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("V10 exact baseline lease remains caller-owned while reentrant work waits behind capture", async () => {
+  const engine = model();
+  try {
+    let charged = 0;
+    let later;
+    const first = await engine.captureBaseline((bytes) => {
+      charged = bytes;
+      later = engine.captureBaseline();
+      return true;
+    });
+    expect(first.status).toBe("ready");
+    expect(charged).toBe(first.baseline.vt.byteLength + first.baseline.tail.byteLength + 4096);
+    expect((await later).baseline).toEqual(first.baseline);
+    expect(charged).toBeGreaterThan(0);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("V11 callback disposal stops detached baseline copies after reservation", async () => {
+  const engine = model();
+  let called = 0;
+  const result = await engine.captureBaseline((bytes) => {
+    expect(bytes).toBeGreaterThan(4096);
+    called++;
+    engine.dispose();
+    return true;
+  });
+  expect(called).toBe(1);
+  expect(result).toMatchObject({ status: "disposed" });
+  expect(result).not.toHaveProperty("baseline.vt");
+  expect((await engine.captureBaseline()).status).toBe("disposed");
 });

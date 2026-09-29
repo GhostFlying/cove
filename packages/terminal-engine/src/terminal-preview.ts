@@ -9,21 +9,19 @@ export function createScreenPreview(terminal: Terminal, maxBytes: number): Uint8
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65_536)
     throw new Error("Invalid preview byte cap");
   const buffer = terminal.buffer.active;
-  const chunks: Uint8Array[] = [];
+  const output = new Uint8Array(maxBytes);
   let total = 0;
   const append = (vt: string): void => {
     if (!vt) return;
-    const chunk = encoder.encode(vt);
-    if (chunk.length > maxBytes - total) throw new Error("Current-screen preview exceeds byte cap");
-    chunks.push(chunk);
-    total += chunk.length;
+    const written = encoder.encodeInto(vt, output.subarray(total));
+    if (written.read !== vt.length) throw new Error("Current-screen preview exceeds byte cap");
+    total += written.written;
   };
   append("\u001b[0m\u001b[H");
   for (let y = 0; y < terminal.rows; y++) {
     if (y) append("\r\n");
     const line = buffer.getLine(buffer.baseY + y);
     if (!line) throw new Error("Current-screen row is absent");
-    let row = "";
     let prior: AttributeState | null = null;
     for (let x = 0; x < terminal.cols; x++) {
       const cell = line.getCell(x);
@@ -31,21 +29,14 @@ export function createScreenPreview(terminal: Terminal, maxBytes: number): Uint8
       if (cell.getWidth() === 0) continue;
       const next = cellAttr(cell);
       if (!prior || !sameAttr(prior, next)) {
-        row += sgr(next);
+        append(sgr(next));
         prior = next;
       }
-      row += cell.getChars() || " ";
+      append(cell.getChars() || " ");
     }
-    append(row);
   }
   const privateState = readPrivateRecoveryState(terminal);
   append(absolutePosition(Math.min(buffer.cursorX, terminal.cols - 1), buffer.cursorY));
   if (privateState.cursorHidden) append("\u001b[?25l");
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result;
+  return output.slice(0, total);
 }

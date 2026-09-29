@@ -2,6 +2,8 @@ import {
   createTerminalModel,
   type EngineResult,
   type EngineState,
+  type EngineBaselineResult,
+  type EnginePreviewResult,
   type TerminalModel,
   type RetainedBytesLease,
   type RetainedBytesReservation,
@@ -43,6 +45,12 @@ type Pending =
       readonly retireIngress: () => void;
     }
   | { readonly kind: "barrier"; readonly resolve: (result: EngineResult<EngineState>) => void }
+  | {
+      readonly kind: "baseline";
+      readonly reserveDetached?: (bytes: number) => boolean;
+      readonly resolve: (result: EngineBaselineResult) => void;
+    }
+  | { readonly kind: "preview"; readonly resolve: (result: EnginePreviewResult) => void }
   | {
       readonly kind: "operation";
       readonly operation: RunSessionOperation;
@@ -95,6 +103,8 @@ export type RunSessionOperationResult =
 
 export interface WorkerRunSessionCapability {
   execute(operation: RunSessionOperation): Promise<RunSessionOperationResult>;
+  captureBaseline(reserveDetached?: (bytes: number) => boolean): Promise<EngineBaselineResult>;
+  capturePreview(): Promise<EnginePreviewResult>;
 }
 
 export interface RunSessionOptions {
@@ -104,9 +114,11 @@ export interface RunSessionOptions {
   readonly spawn: Omit<NativeSpawnSpec, "cols" | "rows">;
   readonly factory: NativePtyFactory;
   readonly onFact?: (fact: Fact) => void;
+  readonly onRetainedFact?: (fact: Fact) => void;
   readonly onFault?: (fault: RunSessionFault) => void;
   readonly reserveIngressBytes?: RetainedBytesReservation;
   readonly reserveInputIdentity?: (subscription: SubscriptionRef) => boolean;
+  readonly isSubscriptionInstalled?: (subscription: SubscriptionRef) => boolean;
   readonly reserveRetainedBytes?: RetainedBytesReservation;
   readonly availableRetainedBytes?: () => number;
   readonly reserveNativeRetainedBytes?: NativeSpawnSpec["reserveRetainedBytes"];
@@ -258,6 +270,8 @@ class RunSessionCore {
   #lastState!: EngineState;
   readonly #reserveIngressBytes: RetainedBytesReservation;
   readonly #reserveInputIdentity: (subscription: SubscriptionRef) => boolean;
+  readonly #isSubscriptionInstalled: (subscription: SubscriptionRef) => boolean;
+  readonly #onRetainedFact: RunSessionOptions["onRetainedFact"];
   readonly #parseLowBytes: number;
   readonly #parseHighBytes: number;
   readonly #parseHardBytes: number;
@@ -269,9 +283,11 @@ class RunSessionCore {
     this.#run = options.run;
     this.#geometry = Object.freeze({ ...options.geometry });
     this.#onFact = options.onFact;
+    this.#onRetainedFact = options.onRetainedFact;
     this.#onFault = options.onFault;
     this.#reserveIngressBytes = options.reserveIngressBytes ?? (() => UNACCOUNTED_INGRESS_LEASE);
     this.#reserveInputIdentity = options.reserveInputIdentity ?? (() => true);
+    this.#isSubscriptionInstalled = options.isSubscriptionInstalled ?? (() => true);
     this.#parseLowBytes = options.effectiveBudgets?.parseLowBytes ?? M0_LIMITS.parseLowBytes;
     this.#parseHighBytes = options.effectiveBudgets?.parseHighBytes ?? M0_LIMITS.parseHighBytes;
     this.#parseHardBytes = options.effectiveBudgets?.parseHardBytes ?? M0_LIMITS.parseHardBytes;
@@ -478,6 +494,38 @@ class RunSessionCore {
       return Promise.resolve(failure("Run service queue full"));
     return new Promise((resolve) => {
       this.#pending.push({ kind: "barrier", resolve });
+      this.#pauseIfHigh();
+      this.#schedule();
+    });
+  }
+
+  captureBaseline(reserveDetached?: (bytes: number) => boolean): Promise<EngineBaselineResult> {
+    if (this.#disposed)
+      return Promise.resolve({ status: "disposed", reason: "Run session disposed" });
+    if (this.#faulted) return Promise.resolve({ status: "faulted", reason: "Run session faulted" });
+    if (this.#pending.length + Number(this.#running) >= this.#itemCap)
+      return Promise.resolve({ status: "unavailable", reason: "Run service queue full" });
+    return new Promise((resolve) => {
+      this.#deferIngress = true;
+      this.#pending.push({
+        kind: "baseline",
+        ...(reserveDetached && { reserveDetached }),
+        resolve,
+      });
+      this.#pauseIfHigh();
+      this.#schedule();
+    });
+  }
+
+  capturePreview(): Promise<EnginePreviewResult> {
+    if (this.#disposed)
+      return Promise.resolve({ status: "disposed", reason: "Run session disposed" });
+    if (this.#faulted) return Promise.resolve({ status: "faulted", reason: "Run session faulted" });
+    if (this.#pending.length + Number(this.#running) >= this.#itemCap)
+      return Promise.resolve({ status: "unavailable", reason: "Run service queue full" });
+    return new Promise((resolve) => {
+      this.#deferIngress = true;
+      this.#pending.push({ kind: "preview", resolve });
       this.#pauseIfHigh();
       this.#schedule();
     });
@@ -758,7 +806,13 @@ class RunSessionCore {
     const releaseIngress = (): void => {
       if (ingressRetired) return;
       ingressRetired = true;
-      if (item.kind === "barrier" || item.kind === "operation") return;
+      if (
+        item.kind === "barrier" ||
+        item.kind === "operation" ||
+        item.kind === "baseline" ||
+        item.kind === "preview"
+      )
+        return;
       this.#queuedBytes = Math.max(0, this.#queuedBytes - payloadBytes);
       item.retireIngress();
     };
@@ -767,6 +821,10 @@ class RunSessionCore {
       if (item.kind === "barrier") {
         const result = await this.#model!.barrier();
         item.resolve(this.#disposed ? failure("Run session disposed") : result);
+      } else if (item.kind === "baseline") {
+        item.resolve(await this.#model!.captureBaseline(item.reserveDetached));
+      } else if (item.kind === "preview") {
+        item.resolve(await this.#model!.capturePreview());
       } else if (item.kind === "operation") {
         item.resolve(await this.#runOperation(item.operation));
       } else if (item.kind === "unpublished") {
@@ -799,6 +857,10 @@ class RunSessionCore {
       }
     } catch {
       if (item.kind === "barrier") item.resolve(failure("Ordered terminal barrier failed"));
+      if (item.kind === "baseline")
+        item.resolve({ status: "faulted", reason: "Ordered baseline capture failed" });
+      if (item.kind === "preview")
+        item.resolve({ status: "faulted", reason: "Ordered preview capture failed" });
       if (item.kind === "operation")
         item.resolve({ kind: "unknown", reason: "ordered-operation-failed" });
       this.#fault("Ordered terminal parse failed");
@@ -808,6 +870,8 @@ class RunSessionCore {
       this.#deferIngress = this.#pending.some(
         (pending) =>
           pending.kind === "operation" ||
+          pending.kind === "baseline" ||
+          pending.kind === "preview" ||
           pending.kind === "deferred-output" ||
           pending.kind === "deferred-exit",
       );
@@ -844,6 +908,11 @@ class RunSessionCore {
       this.#lastState = result.value;
       this.#geometry = Object.freeze({ ...result.value.geometry });
       if (fact.event.type === "exit") this.#exitApplied = true;
+      try {
+        this.#onRetainedFact?.(fact);
+      } catch {
+        // Replay is an optional bounded optimization; the authoritative parser remains live.
+      }
       if (!this.#consumerFenced) {
         try {
           const returned = this.#onFact?.(fact) as unknown;
@@ -878,6 +947,15 @@ class RunSessionCore {
       if (operation.expectedEpoch !== this.#controlEpoch)
         return { kind: "rejected", reason: "stale-control" };
       if (operation.holder) {
+        if (
+          !this.#isSubscriptionInstalled({
+            run: this.#run,
+            connection: operation.holder.connection,
+            viewId: operation.holder.viewId,
+            subscriptionId: operation.holder.subscriptionId,
+          })
+        )
+          return { kind: "rejected", reason: "subscription-not-installed" };
         if (this.#controlEpoch === Number.MAX_SAFE_INTEGER) {
           this.#epochCounterExhausted = true;
           return { kind: "rejected", reason: "counter-exhausted" };
@@ -887,6 +965,8 @@ class RunSessionCore {
       } else if (this.#controlEpoch === 0 || operation.nextEpoch !== this.#controlEpoch) {
         return { kind: "rejected", reason: "stale-control" };
       }
+    } else if (!this.#isSubscriptionInstalled(operation.subscription)) {
+      return { kind: "rejected", reason: "subscription-not-installed" };
     } else if (!this.#matchesAuthority(operation.subscription, operation.epoch)) {
       return { kind: "rejected", reason: "stale-control" };
     }
@@ -1076,6 +1156,8 @@ class RunSessionCore {
   #releasePending(reason: string): void {
     for (const item of this.#pending.splice(0)) {
       if (item.kind === "barrier") item.resolve(failure(reason));
+      if (item.kind === "baseline") item.resolve({ status: "disposed", reason });
+      if (item.kind === "preview") item.resolve({ status: "disposed", reason });
       if (item.kind === "operation") {
         if (item.operation.type === "stop")
           void this.dispose().then((receipt) => item.resolve({ kind: "stopped", receipt }));
@@ -1174,6 +1256,9 @@ function startRunSession(options: RunSessionOptions):
   );
   const capability: WorkerRunSessionCapability = Object.freeze({
     execute: (operation: RunSessionOperation) => core.execute(operation),
+    captureBaseline: (reserveDetached?: (bytes: number) => boolean) =>
+      core.captureBaseline(reserveDetached),
+    capturePreview: () => core.capturePreview(),
   });
   return { kind: "created", session, capability };
 }

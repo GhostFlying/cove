@@ -346,7 +346,7 @@ export class TerminalModel {
     return this.#state();
   }
 
-  captureBaseline(): Promise<EngineBaselineResult> {
+  captureBaseline(reserveDetached?: (bytes: number) => boolean): Promise<EngineBaselineResult> {
     const blocked = this.#captureBlock();
     if (blocked) return Promise.resolve(blocked);
     const admitted = this.#enqueue<EngineBaselineResult>(
@@ -365,6 +365,20 @@ export class TerminalModel {
         const copyBytes = checkpoint.vt.length + this.#tail.retainedBytes;
         if (this.#accountedBytes(copyBytes) > this.#budgets.workerBytes)
           return { status: "unavailable", reason: "Detached baseline exceeds engine resource cap" };
+        if (reserveDetached) {
+          let reserved = false;
+          try {
+            reserved = reserveDetached(copyBytes + 4096);
+          } catch {
+            return { status: "unavailable", reason: "Detached baseline reservation failed" };
+          }
+          if (!reserved)
+            return {
+              status: "unavailable",
+              reason: "Detached baseline exceeds worker retention capacity",
+            };
+          if (this.#disposed) return { status: "disposed", reason: "Terminal model disposed" };
+        }
         return {
           status: "ready",
           baseline: {
@@ -400,6 +414,14 @@ export class TerminalModel {
       async () => {
         if (this.#disposed) return { status: "disposed", reason: "Terminal model disposed" };
         if (this.#fault) return { status: "faulted", reason: this.#fault };
+        const scratchBytes =
+          this.#budgets.previewBytesPerRun + 512 * this.#terminal.cols * this.#terminal.rows + 256;
+        const scratchLease = this.#reserveRetainedBytes?.(scratchBytes);
+        if (this.#reserveRetainedBytes && !scratchLease)
+          return {
+            status: "unavailable",
+            reason: "Preview scratch exceeds worker retention capacity",
+          };
         try {
           const vt = createScreenPreview(this.#terminal, this.#budgets.previewBytesPerRun);
           return {
@@ -415,6 +437,8 @@ export class TerminalModel {
             status: "unavailable",
             reason: error instanceof Error ? error.message : "Preview construction failed",
           };
+        } finally {
+          scratchLease?.release();
         }
       },
       { status: "disposed", reason: "Terminal model disposed" },

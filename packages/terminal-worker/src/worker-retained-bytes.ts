@@ -2,6 +2,7 @@ export type RetainedCategory = "worker" | "engine" | "native-input" | "native-ou
 
 export interface RetainedLease {
   release(): void;
+  shrinkTo(bytes: number): void;
 }
 
 // The control carve-out is inside workerBytes and is never consumed by ordinary work.
@@ -33,12 +34,20 @@ export class WorkerRetainedBytes {
     this.#used += bytes;
     this.#peak = Math.max(this.#peak, this.#used);
     let released = false;
+    let charged = bytes;
     return {
       release: () => {
         if (released) return;
         released = true;
-        this.#current[category] -= bytes;
-        this.#used -= bytes;
+        this.#current[category] -= charged;
+        this.#used -= charged;
+      },
+      shrinkTo: (next) => {
+        if (released || !Number.isSafeInteger(next) || next < 1 || next > charged)
+          throw new RangeError("Invalid retained-byte lease reduction");
+        this.#current[category] -= charged - next;
+        this.#used -= charged - next;
+        charged = next;
       },
     };
   }
