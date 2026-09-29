@@ -17,6 +17,7 @@ type Failure =
 export type PreviewOutcome = { readonly result: PipeResult } | { readonly failure: Failure };
 const empty = new Uint8Array();
 const MAX_METADATA_BYTES = 4096;
+type PreviewReservationOwner = "preview-transfer";
 
 interface PendingPreview {
   readonly runId: string;
@@ -33,7 +34,7 @@ interface PendingPreview {
 export class PreviewService {
   readonly #worker: WorkerRef;
   readonly #budgets: EffectiveBudgets;
-  readonly #reserve: (bytes: number) => RetainedLease | undefined;
+  readonly #reserve: (bytes: number, owner: PreviewReservationOwner) => RetainedLease | undefined;
   readonly #delivery: RecoveryDelivery;
   readonly #capture: <T>(runId: string, operation: () => Promise<T>) => Promise<T | undefined>;
   readonly #clock: RecoveryClock;
@@ -47,7 +48,7 @@ export class PreviewService {
   constructor(
     worker: WorkerRef,
     budgets: EffectiveBudgets,
-    reserve: (bytes: number) => RetainedLease | undefined,
+    reserve: (bytes: number, owner: PreviewReservationOwner) => RetainedLease | undefined,
     delivery: RecoveryDelivery,
     capture: <T>(runId: string, operation: () => Promise<T>) => Promise<T | undefined>,
     clock: RecoveryClock = recoveryClock,
@@ -69,7 +70,10 @@ export class PreviewService {
     if (this.#active.has(run.runId) || this.#active.size >= this.#budgets.previewRefreshes)
       return { failure: "BUSY" };
     if (this.#counter === Number.MAX_SAFE_INTEGER) return { failure: "COUNTER_EXHAUSTED" };
-    const lease = this.#reserve(this.#budgets.previewBytesPerRun + 3 * MAX_METADATA_BYTES);
+    const lease = this.#reserve(
+      this.#budgets.previewBytesPerRun + 3 * MAX_METADATA_BYTES,
+      "preview-transfer",
+    );
     if (!lease) return { failure: "BUSY" };
     this.#active.add(run.runId);
     let retained = false;

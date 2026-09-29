@@ -35,6 +35,14 @@ const ROUTE_RECORD_BYTES = 128 + 2 * 4096;
 const SENT_RECORD_BYTES = 256;
 const TRANSFER_FRAME_BYTES = 512;
 const POST_N_REFERENCE_BYTES = 128;
+type RecoveryReservationOwner =
+  | "recovery-connection"
+  | "recovery-route"
+  | "recovery-baseline"
+  | "recovery-transfer-frames"
+  | "recovery-post-n-pin"
+  | "recovery-post-n-copy"
+  | "recovery-sent-ledger";
 const empty = new Uint8Array();
 const encoder = new TextEncoder();
 
@@ -116,7 +124,7 @@ function retainedFrameCharge(event: PipeEvent): number {
 export class RecoverySubscriptions {
   readonly #worker: WorkerRef;
   readonly #budgets: EffectiveBudgets;
-  readonly #reserve: (bytes: number) => RetainedLease | undefined;
+  readonly #reserve: (bytes: number, owner: RecoveryReservationOwner) => RetainedLease | undefined;
   readonly #delivery: RecoveryDelivery;
   readonly #clock: RecoveryClock;
   readonly #routes = new Map<string, Route>();
@@ -133,7 +141,7 @@ export class RecoverySubscriptions {
   constructor(
     worker: WorkerRef,
     budgets: EffectiveBudgets,
-    reserve: (bytes: number) => RetainedLease | undefined,
+    reserve: (bytes: number, owner: RecoveryReservationOwner) => RetainedLease | undefined,
     delivery: RecoveryDelivery,
     clock: RecoveryClock = recoveryClock,
   ) {
@@ -185,9 +193,11 @@ export class RecoverySubscriptions {
         (!entry && this.#connections.size >= this.#budgets.authenticatedSockets)
       )
         return { failure: "BUSY" };
-      const connectionLease = entry ? undefined : this.#reserve(ROUTE_RECORD_BYTES);
+      const connectionLease = entry
+        ? undefined
+        : this.#reserve(ROUTE_RECORD_BYTES, "recovery-connection");
       if (!entry && !connectionLease) return { failure: "BUSY" };
-      const lease = this.#reserve(ROUTE_RECORD_BYTES);
+      const lease = this.#reserve(ROUTE_RECORD_BYTES, "recovery-route");
       if (!lease) {
         connectionLease?.release();
         return { failure: "BUSY" };
@@ -249,7 +259,7 @@ export class RecoverySubscriptions {
         source.captureBaseline((bytes) => {
           if (route.token !== token || route.state !== "preparing" || route.baselineLease)
             return false;
-          const lease = this.#reserve(bytes);
+          const lease = this.#reserve(bytes, "recovery-baseline");
           if (!lease) return false;
           if (route.token !== token || route.state !== "preparing") {
             lease.release();
@@ -353,6 +363,7 @@ export class RecoverySubscriptions {
       retainedFrameCharge(start) +
         chunkCount * retainedFrameCharge(lastChunk) +
         retainedFrameCharge(end),
+      "recovery-transfer-frames",
     );
     if (!frameLease) {
       this.#fail(route, "RESYNC_REQUIRED");
@@ -504,7 +515,10 @@ export class RecoverySubscriptions {
         continue;
       }
       const pin = replay?.pin(fact.event.seq);
-      const lease = this.#reserve(pin ? POST_N_REFERENCE_BYTES : charge);
+      const lease = this.#reserve(
+        pin ? POST_N_REFERENCE_BYTES : charge,
+        pin ? "recovery-post-n-pin" : "recovery-post-n-copy",
+      );
       if (!lease) {
         pin?.release();
         this.#fail(route, "RESYNC_REQUIRED");
@@ -572,7 +586,9 @@ export class RecoverySubscriptions {
           deferredByTurn = true;
           break;
         }
-        const ledgerLease = next.ledger ? this.#reserve(SENT_RECORD_BYTES) : undefined;
+        const ledgerLease = next.ledger
+          ? this.#reserve(SENT_RECORD_BYTES, "recovery-sent-ledger")
+          : undefined;
         if (next.ledger && !ledgerLease) {
           this.#fail(route, "RESYNC_REQUIRED");
           break;
