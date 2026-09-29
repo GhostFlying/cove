@@ -1,6 +1,6 @@
 # M0 W1 — ordered real-PTY worker execution (#16)
 
-Status: executable planning proposal for coordinator integration and independent review; no implementation or test result is claimed. W1 implementation starts only after this plan is integrated and the coordinator explicitly transfers the required package/root registration ownership. P3 remains held for its separate external-routing decision.
+Status: the following is the original W1 execution plan. W1a and W1b have separately bounded acceptance; full W1 is still pending the [A/B/C evidence integration](m0-worker-evidence-main-integration.md), independent composition, normal dual-OS and actual-main review. P3c is separately accepted at main `76dbc017215a517f5c0bf199c821f57873e472be`. Earlier entry and ownership language below is retained as historical planning context; it does not describe current checkout ownership or unlock W2.
 
 ## Authority, exact inputs and DAG
 
