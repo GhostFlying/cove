@@ -26,18 +26,24 @@ import {
 } from "./pipe-harness.mjs";
 import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
 import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
+import {
+  FIFO_REQUESTS_PER_CYCLE,
+  MAX_TIMING_OUTPUT_BYTES,
+  MAX_TIMING_TRACE_POINTS,
+  TIMING_CYCLES,
+  TIMING_EXCHANGES,
+} from "./worker-timing-bounds.mjs";
 
 const childEntry = new URL("./fixtures/timing-exchange-child.mjs", import.meta.url).pathname;
 const fifoEntry = new URL("./fixtures/fifo-reader.mjs", import.meta.url).pathname;
-const cycles = 4;
-const exchanges = 8;
+const cycles = TIMING_CYCLES;
+const exchanges = TIMING_EXCHANGES;
 const clock = `hrtime-bigint-process-${process.pid}`;
 const os = process.platform;
 const trace = [];
-const maxTracePoints = 512;
 
 function pointAt(tick, boundary, phase, runId, sampleId, detail = {}, outcome) {
-  if (trace.length >= maxTracePoints) throw Error("bounded timing trace exhausted");
+  if (trace.length >= MAX_TIMING_TRACE_POINTS) throw Error("bounded timing trace exhausted");
   const value = {
     boundary,
     phase,
@@ -123,6 +129,39 @@ test("pure timing joins preserve uncertainty and nearest-rank finite quantiles",
   expect(() => summarizeTimingTrace([sample("start", "a", "10"), sample("end", "a", "9")])).toThrow(
     "negative",
   );
+});
+
+test("the declared trace bound admits one native callback per emitted byte", () => {
+  expect(MAX_TIMING_OUTPUT_BYTES).toBe(1376);
+  const maximallySplit = [];
+  for (let index = 0; index < MAX_TIMING_OUTPUT_BYTES; index++) {
+    const sampleId = `fragment:${index}`;
+    const base = {
+      boundary: "native-delivery-to-fact",
+      runId: "max-fragmentation",
+      sampleId,
+      os: "test-os",
+      pid: 1,
+      clock: "one-process",
+    };
+    maximallySplit.push({
+      ...base,
+      phase: "start",
+      tick: String(index * 2),
+      detail: { begin: index, end: index + 1, bytes: 1, digest: "0".repeat(64) },
+    });
+    maximallySplit.push({
+      ...base,
+      phase: "end",
+      tick: String(index * 2 + 1),
+      detail: { intervalEnd: index + 1, parsedBytes: index + 1, finalFactSeq: index + 1 },
+    });
+  }
+  const summary = summarizeTimingTrace(maximallySplit);
+  expect(summary).toMatchObject([
+    { count: MAX_TIMING_OUTPUT_BYTES, p50Ns: "1", p95Ns: "1", p99Ns: "1", maxNs: "1" },
+  ]);
+  expect(MAX_TIMING_TRACE_POINTS).toBeGreaterThan(maximallySplit.length);
 });
 
 test("controlled asynchronous settlement and unresolved cleanup remain distinct outcomes", async () => {
@@ -490,21 +529,10 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
           native.snapshot().owners === 0;
         if (closed) {
           const later = observerExitTick > writerCloseTick ? observerExitTick : writerCloseTick;
-          trace.push({
-            boundary: "stop-to-owner-release",
-            phase: "end",
-            runId: target.runId,
-            sampleId,
-            os,
-            pid: process.pid,
-            clock,
-            unit: "nanoseconds",
-            tick: later.toString(),
-            detail: {
-              observerExitTick: observerExitTick.toString(),
-              writerCloseTick: writerCloseTick.toString(),
-              receipt: shutdown[0],
-            },
+          pointAt(later, "stop-to-owner-release", "end", target.runId, sampleId, {
+            observerExitTick: observerExitTick.toString(),
+            writerCloseTick: writerCloseTick.toString(),
+            receipt: shutdown[0],
           });
         } else {
           point(
@@ -716,7 +744,7 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               "FIFO ready",
             );
             tracker.arm();
-            const requests = Array.from({ length: 320 }, () =>
+            const requests = Array.from({ length: FIFO_REQUESTS_PER_CYCLE }, () =>
               command("preview-refresh", run(runId)),
             );
             for (let offset = 0; offset < requests.length; offset += 32) {

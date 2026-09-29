@@ -1,10 +1,11 @@
+import { MAX_TIMING_TRACE_POINTS } from "./worker-timing-bounds.mjs";
+
 const BOUNDARIES = new Set([
   "native-delivery-to-fact",
   "native-submit-to-settlement",
   "pipe-block-to-drain",
   "stop-to-owner-release",
 ]);
-const MAX_EVENTS = 512;
 
 export function nearestRank(values, proportion) {
   if (!values.length) return null;
@@ -13,7 +14,7 @@ export function nearestRank(values, proportion) {
 }
 
 export function summarizeTimingTrace(trace) {
-  if (!Array.isArray(trace) || trace.length > MAX_EVENTS)
+  if (!Array.isArray(trace) || trace.length > MAX_TIMING_TRACE_POINTS)
     throw Error("timing trace count exceeds bound");
   const pairs = new Map();
   const groups = new Map();
