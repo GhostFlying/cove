@@ -55,8 +55,11 @@ import type {
   Utf8Codec,
 } from "./transport-ports.js";
 import { TerminalLane } from "./terminal-delivery.js";
+import { TerminalPreview, type PreviewOutcome } from "./terminal-preview.js";
 import { RoutedTerminalController } from "./terminal-controller.js";
 import { completeTerminalView } from "./terminal-view-contract.js";
+
+export type { PreviewOutcome } from "./terminal-preview.js";
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 5_000;
 const MAX_CONNECTION_TIMEOUT_MS = 5_000;
@@ -244,6 +247,7 @@ export interface Client {
   reconnect(): Promise<ConnectOutcome>;
   call<M extends RpcMethod>(method: M, params: ParamsFor<M>): Promise<CallOutcome<ResultFor<M>>>;
   getOperation(operationId: string): Promise<CallOutcome<ResultFor<"operation.get">>>;
+  getPreview(run: RunRef, knownVersion?: number): Promise<PreviewOutcome>;
   openTerminal(options: TerminalOpenOptions): TerminalOpenOutcome;
   snapshot(): ClientSnapshot;
   onState(listener: (snapshot: ClientSnapshot) => void): Disposable;
@@ -414,6 +418,7 @@ class CoveClient implements Client {
   private suppressRpcState = false;
   private retiringConnection = false;
   private readonly terminalLane: TerminalLane;
+  private readonly terminalPreview: TerminalPreview;
   private readonly controllers = new Set<RoutedTerminalController>();
 
   constructor(private readonly options: ClientOptions) {
@@ -431,10 +436,18 @@ class CoveClient implements Client {
         invalid: () => {
           if (this.connectedAttempt) this.onTerminalBusinessMessage(this.connectedAttempt);
         },
+        preview: (event, bytes) => this.terminalPreview.receive(event, bytes),
       },
       options.codec,
       options.scheduler,
       options.createOpaqueId,
+    );
+    this.terminalPreview = new TerminalPreview(
+      this.terminalLane,
+      options.scheduler,
+      () => this.connection,
+      () => this.generation,
+      () => this.status === "connected" && !this.retiringConnection,
     );
   }
 
@@ -476,6 +489,12 @@ class CoveClient implements Client {
         error: localError(statusAfterPublish === "disposed" ? "disposed" : "invalid-state"),
       });
     return this.beginConnect();
+  }
+
+  getPreview(run: RunRef, knownVersion?: number): Promise<PreviewOutcome> {
+    if (this.status === "disposed")
+      return Promise.resolve({ ok: false, error: localError("disposed"), uncertain: false });
+    return this.terminalPreview.get(run, knownVersion);
   }
 
   call<M extends RpcMethod>(method: M, params: ParamsFor<M>): Promise<CallOutcome<ResultFor<M>>> {
@@ -951,6 +970,7 @@ class CoveClient implements Client {
     this.status = error.category === "local" ? "unverifiable" : "incompatible";
     this.lastError = error;
     try {
+      this.terminalPreview.close("transport");
       for (const controller of controllers)
         controller.connectionLost(controller === origin ? originError : undefined);
       this.terminalLane.close("transport");
@@ -983,6 +1003,7 @@ class CoveClient implements Client {
     this.connection = undefined;
     this.status = reason === "disposed" ? "disposed" : "idle";
     try {
+      this.terminalPreview.close(reason);
       for (const controller of controllers) controller.connectionLost();
       this.terminalLane.close(reason);
       if (attempt && !attempt.finished) {

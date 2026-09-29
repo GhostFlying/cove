@@ -1,0 +1,479 @@
+import { TextDecoder, TextEncoder } from "node:util";
+import { describe, expect, test } from "vitest";
+import { createClient } from "@cove/client";
+import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
+import { M0_LIMITS } from "@cove/protocol/budgets";
+import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
+import {
+  createTerminalDecoder,
+  encodeTerminalFrame,
+  MAX_METADATA_BYTES,
+} from "@cove/protocol/terminal";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
+const identity = { serverId: "server-1", relayInstanceId: "instance-1" };
+const run = { ...identity, runId: "run-1" };
+const geometry = { cols: 80, rows: 24 };
+
+function bootstrap(terminal, budgets = {}, capabilities = M0_CAPABILITIES) {
+  return {
+    type: "cove-bootstrap-result",
+    bootstrapVersion: 1,
+    ...identity,
+    protocolVersion: PROTOCOL_VERSION,
+    buildVersion: "server-build",
+    capabilities: [...capabilities],
+    profile: PROFILE,
+    encoding: BASELINE_ENCODING,
+    effectiveBudgets: { ...M0_LIMITS, ...budgets },
+    ...(terminal ? { connection: { connectionId: "connection-1", generation: 1 } } : {}),
+  };
+}
+
+function frame(kind, metadata, payload = new Uint8Array()) {
+  const encoded = encodeTerminalFrame(kind, encoder.encode(JSON.stringify(metadata)), payload);
+  if (!encoded.ok) throw new Error("invalid fixture frame");
+  return encoded.value;
+}
+
+function command(bytes) {
+  const parser = createTerminalDecoder();
+  const read = parser.read(bytes);
+  expect(read.frames).toHaveLength(1);
+  expect(parser.finish().ok).toBe(true);
+  return JSON.parse(decoder.decode(read.frames[0].metadata));
+}
+
+function clock() {
+  let now = 0;
+  const timers = new Set();
+  return {
+    nowMs: () => now,
+    setTimer(delay, callback) {
+      const timer = { at: now + delay, callback };
+      timers.add(timer);
+      return { dispose: () => timers.delete(timer) };
+    },
+    yieldTurn: async () => {},
+    advance(ms) {
+      now += ms;
+      for (const timer of [...timers])
+        if (timer.at <= now && timers.delete(timer)) timer.callback();
+    },
+    get active() {
+      return timers.size;
+    },
+  };
+}
+
+async function harness({
+  budgets = {},
+  capabilities = M0_CAPABILITIES,
+  onSend,
+  scheduler = clock(),
+} = {}) {
+  const commands = [];
+  const attempts = [];
+  let nextId = 0;
+  const client = createClient({
+    expectedServerId: identity.serverId,
+    expectedRelayInstanceId: identity.relayInstanceId,
+    buildVersion: "client-build",
+    credentials: () => ({ authorization: "Bearer fixture", terminalSecret: "a".repeat(43) }),
+    codec: {
+      encode: (text) => encoder.encode(text),
+      decodeFatal: (bytes) => decoder.decode(bytes),
+    },
+    createOpaqueId: () => `request-${++nextId}`,
+    scheduler,
+    http: {
+      post(_request, callbacks) {
+        queueMicrotask(() =>
+          callbacks.onResponse({
+            status: 200,
+            headers: {},
+            body: encoder.encode(JSON.stringify(bootstrap(false, budgets, capabilities))),
+          }),
+        );
+        return { cancel: () => "not-sent" };
+      },
+    },
+    terminal: {
+      open(callbacks) {
+        const attempt = {
+          callbacks,
+          commands: [],
+          emit(kind, metadata, payload) {
+            callbacks.onBinary(frame(kind, metadata, payload));
+          },
+          result(sent, status, version) {
+            this.emit(2, {
+              type: "preview-result",
+              requestId: sent.requestId,
+              run: sent.run,
+              status,
+              version,
+            });
+          },
+          transfer(previewId, version, bytes, targetRun = run) {
+            this.emit(3, {
+              type: "preview-start",
+              run: targetRun,
+              previewId,
+              version,
+              atSeq: 7,
+              geometry,
+              generatedAtMs: 123,
+              vtBytes: bytes.byteLength,
+              chunkCount: 1,
+            });
+            this.emit(
+              3,
+              { type: "preview-chunk", run: targetRun, previewId, version, ordinal: 0 },
+              bytes,
+            );
+            this.emit(3, {
+              type: "preview-end",
+              run: targetRun,
+              previewId,
+              version,
+              atSeq: 7,
+              totalBytes: bytes.byteLength,
+            });
+          },
+        };
+        attempts.push(attempt);
+        callbacks.onOpen({
+          send(message) {
+            if (typeof message === "string") {
+              callbacks.onText(
+                encoder.encode(JSON.stringify(bootstrap(true, budgets, capabilities))),
+              );
+              return "handed-off";
+            }
+            const sent = command(message);
+            commands.push(sent);
+            attempt.commands.push(sent);
+            return onSend?.(sent, attempt, client) ?? "handed-off";
+          },
+          close() {},
+          dispose() {},
+        });
+        return { cancel: () => "not-sent" };
+      },
+    },
+  });
+  expect((await client.connect()).ok).toBe(true);
+  return {
+    client,
+    commands,
+    attempts,
+    scheduler,
+    get peer() {
+      return attempts.at(-1);
+    },
+  };
+}
+
+describe("client preview transaction", () => {
+  test.each(["result-first", "events-first"])(
+    "joins one opaque transfer in %s order without a live controller",
+    async (order) => {
+      const h = await harness();
+      const promise = h.client.getPreview(run);
+      const sent = h.commands.at(-1);
+      const backing = new Uint8Array(1024 * 1024);
+      backing.set([0xff, 0x00, 0x1b, 0x5b], 100);
+      const bytes = backing.subarray(100, 104);
+      if (order === "result-first") h.peer.result(sent, "transfer", 8);
+      h.peer.transfer("preview-1", 8, bytes);
+      if (order === "events-first") h.peer.result(sent, "transfer", 8);
+      const outcome = await promise;
+      backing.fill(0);
+      expect(outcome).toMatchObject({
+        ok: true,
+        status: "transfer",
+        version: 8,
+        atSeq: 7,
+        geometry,
+        generatedAtMs: 123,
+      });
+      expect([...outcome.bytes]).toEqual([0xff, 0x00, 0x1b, 0x5b]);
+      expect(h.commands).toHaveLength(1);
+      expect(h.scheduler.active).toBe(0);
+      h.client.dispose();
+    },
+  );
+
+  test("accepts unchanged only for the matching supplied version", async () => {
+    const h = await harness();
+    const promise = h.client.getPreview(run, 5);
+    h.peer.result(h.commands.at(-1), "unchanged", 5);
+    expect(await promise).toEqual({ ok: true, status: "unchanged", version: 5 });
+    const invalid = h.client.getPreview(run);
+    h.peer.result(h.commands.at(-1), "unchanged", 5);
+    expect(await invalid).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
+  });
+
+  test("validates run and version before send and bounds same-run admission", async () => {
+    const h = await harness();
+    expect(await h.client.getPreview({ ...run, serverId: "other" })).toMatchObject({ ok: false });
+    expect(await h.client.getPreview(run, Number.MAX_SAFE_INTEGER + 1)).toMatchObject({
+      ok: false,
+    });
+    const first = h.client.getPreview(run);
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "capacity" },
+    });
+    expect(h.commands).toHaveLength(1);
+    h.peer.result(h.commands[0], "transfer", 2);
+    h.peer.transfer("preview-2", 2, new Uint8Array([42]));
+    expect((await first).ok).toBe(true);
+    h.client.dispose();
+
+    const noPreview = await harness({
+      capabilities: M0_CAPABILITIES.filter((value) => value !== "terminal-preview-v1"),
+    });
+    expect(await noPreview.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    expect(noPreview.commands).toHaveLength(0);
+    noPreview.client.dispose();
+  });
+
+  test("distinct run requests join by full run and mismatched versions quarantine only one run", async () => {
+    const h = await harness();
+    const other = { ...run, runId: "run-2" };
+    const first = h.client.getPreview(run);
+    const second = h.client.getPreview(other);
+    const [firstCommand, secondCommand] = h.commands;
+    h.peer.transfer("first", 2, new Uint8Array([1]));
+    h.peer.result(firstCommand, "transfer", 3);
+    expect(await first).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    h.peer.transfer("second", 4, new Uint8Array([2]), other);
+    h.peer.result(secondCommand, "transfer", 4);
+    expect(await second).toMatchObject({ ok: true, status: "transfer", version: 4 });
+    expect(h.client.snapshot().status).toBe("connected");
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    h.client.dispose();
+  });
+
+  test("rejects chunk before start and duplicate chunk without retiring the live connection", async () => {
+    const h = await harness();
+    const first = h.client.getPreview(run);
+    h.peer.emit(
+      3,
+      { type: "preview-chunk", run, previewId: "orphan", version: 1, ordinal: 0 },
+      new Uint8Array([1]),
+    );
+    expect(await first).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
+    expect(h.scheduler.active).toBe(0);
+    h.client.dispose();
+
+    const another = await harness();
+    const second = another.client.getPreview(run);
+    another.peer.emit(3, {
+      type: "preview-start",
+      run,
+      previewId: "duplicate",
+      version: 1,
+      atSeq: 0,
+      geometry,
+      generatedAtMs: 1,
+      vtBytes: 1,
+      chunkCount: 1,
+    });
+    const chunk = { type: "preview-chunk", run, previewId: "duplicate", version: 1, ordinal: 0 };
+    another.peer.emit(3, chunk, new Uint8Array([1]));
+    another.peer.emit(3, chunk, new Uint8Array([1]));
+    expect(await second).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(another.client.snapshot().status).toBe("connected");
+    another.client.dispose();
+  });
+
+  test("keeps an unseen timed-out transfer quarantined until explicit reconnect", async () => {
+    const h = await harness();
+    const first = h.client.getPreview(run);
+    h.scheduler.advance(5_000);
+    expect(await first).toMatchObject({ ok: false, error: { reason: "timeout" } });
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    expect(h.commands).toHaveLength(1);
+    const old = h.peer;
+    expect((await h.client.reconnect()).ok).toBe(true);
+    const next = h.client.getPreview(run);
+    old.transfer("late-old", 3, new Uint8Array([1]));
+    expect(h.commands).toHaveLength(2);
+    h.peer.transfer("fresh", 4, new Uint8Array([2]));
+    h.peer.result(h.commands.at(-1), "transfer", 4);
+    expect(await next).toMatchObject({ ok: true, status: "transfer", version: 4 });
+    h.client.dispose();
+  });
+
+  test("retirement ledger refuses its 257th transfer identity without eviction", async () => {
+    const h = await harness();
+    for (let index = 0; index < 256; index++) {
+      const pending = h.client.getPreview(run);
+      h.peer.transfer(`preview-${index}`, index + 1, new Uint8Array([index]));
+      h.peer.result(h.commands.at(-1), "transfer", index + 1);
+      expect((await pending).ok).toBe(true);
+    }
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "capacity" },
+    });
+    expect(h.commands).toHaveLength(256);
+    expect(h.scheduler.active).toBe(0);
+    h.client.dispose();
+  });
+
+  test("accepts the exact 64KiB payload and rejects an effective cap excess", async () => {
+    const h = await harness();
+    const bytes = new Uint8Array(M0_LIMITS.previewBytesPerRun).fill(65);
+    const first = h.client.getPreview(run);
+    h.peer.transfer("maximum", 1, bytes);
+    h.peer.result(h.commands.at(-1), "transfer", 1);
+    expect((await first).bytes.byteLength).toBe(M0_LIMITS.previewBytesPerRun);
+    h.client.dispose();
+
+    const lower = await harness({ budgets: { previewBytesPerRun: 1 } });
+    const second = lower.client.getPreview(run);
+    lower.peer.transfer("over-lower-cap", 1, new Uint8Array([1, 2]));
+    expect(await second).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(lower.client.snapshot().status).toBe("connected");
+    lower.client.dispose();
+  });
+
+  test("controlled live ingress debt and current decoder reservation block preview retention", async () => {
+    const h = await harness();
+    const start = {
+      type: "preview-start",
+      run,
+      previewId: "aggregate",
+      version: 1,
+      atSeq: 0,
+      geometry,
+      generatedAtMs: 1,
+      vtBytes: M0_LIMITS.previewBytesPerRun,
+      chunkCount: 1,
+    };
+    const frameLease = frame(3, start).byteLength * 3 + MAX_METADATA_BYTES * 3;
+    const cap = M0_LIMITS.outboundConnectionBytes + M0_LIMITS.reservedControlBytes;
+    const simulatedBlockedParse = cap - frameLease - M0_LIMITS.previewBytesPerRun + 1;
+    // The existing lane lease is the same counter used by blocked live parsers.
+    expect(h.client.terminalLane.reserveIngress(simulatedBlockedParse)).toBe(true);
+    const pending = h.client.getPreview(run);
+    h.peer.emit(3, start);
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "capacity" } });
+    h.client.terminalLane.releaseIngress(simulatedBlockedParse);
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
+  });
+
+  test("settles inline delivery and clears ownership on close and late frames", async () => {
+    const h = await harness({
+      onSend(sent, peer) {
+        peer.transfer("inline", 2, new Uint8Array([5]));
+        peer.result(sent, "transfer", 2);
+      },
+    });
+    expect(await h.client.getPreview(run)).toMatchObject({ ok: true, status: "transfer" });
+    h.peer.transfer("inline", 2, new Uint8Array([5]));
+    expect(h.scheduler.active).toBe(0);
+    h.client.dispose();
+    expect(h.scheduler.active).toBe(0);
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "disposed" },
+    });
+  });
+
+  test("definitely unsent refusal frees admission; connection loss settles one pending transfer", async () => {
+    let refuse = true;
+    const h = await harness({ onSend: () => (refuse ? "not-sent" : "handed-off") });
+    expect(await h.client.getPreview(run)).toMatchObject({ ok: false, uncertain: false });
+    refuse = false;
+    const pending = h.client.getPreview(run);
+    h.peer.emit(3, {
+      type: "preview-start",
+      run,
+      previewId: "pending-close",
+      version: 1,
+      atSeq: 0,
+      geometry,
+      generatedAtMs: 1,
+      vtBytes: 1,
+      chunkCount: 1,
+    });
+    h.peer.callbacks.onClose();
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "transport" } });
+    expect(h.scheduler.active).toBe(0);
+    expect(h.client.snapshot().status).toBe("unverifiable");
+    h.client.dispose();
+  });
+
+  test("unknown send is quarantined while synchronous timer expiry never sends", async () => {
+    const unknown = await harness({
+      onSend() {
+        throw new Error("adapter lost the send disposition");
+      },
+    });
+    expect(await unknown.client.getPreview(run)).toMatchObject({ ok: false, uncertain: true });
+    expect(await unknown.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    unknown.client.dispose();
+
+    const scheduler = clock();
+    const unsent = await harness({ scheduler });
+    scheduler.setTimer = (_delay, callback) => {
+      callback();
+      return { dispose() {} };
+    };
+    expect(await unsent.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "timeout" },
+      uncertain: false,
+    });
+    expect(unsent.commands).toHaveLength(0);
+    unsent.client.dispose();
+  });
+
+  test("timer disposal reentry cannot restore a settled preview or client", async () => {
+    const scheduler = clock();
+    const h = await harness({ scheduler });
+    const original = scheduler.setTimer;
+    let reentered = false;
+    scheduler.setTimer = (delay, callback) => {
+      const handle = original(delay, callback);
+      return {
+        dispose() {
+          handle.dispose();
+          if (!reentered) {
+            reentered = true;
+            h.client.dispose();
+          }
+        },
+      };
+    };
+    const pending = h.client.getPreview(run);
+    h.peer.transfer("reentry", 1, new Uint8Array([1]));
+    h.peer.result(h.commands.at(-1), "transfer", 1);
+    expect(await pending).toMatchObject({ ok: true, status: "transfer" });
+    expect(reentered).toBe(true);
+    expect(h.client.snapshot().status).toBe("disposed");
+    expect(scheduler.active).toBe(0);
+  });
+});
