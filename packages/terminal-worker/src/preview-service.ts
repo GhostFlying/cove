@@ -3,6 +3,7 @@ import type { EffectiveBudgets } from "@cove/protocol/budgets";
 import type { RunRef, WorkerRef } from "@cove/protocol/identity";
 import type { PipeCommand, PipeEvent, PipeResult } from "@cove/protocol/pipe";
 import type { RecoveryDelivery } from "./recovery-subscription.js";
+import { recoveryClock, type RecoveryClock } from "./recovery-clock.js";
 import type { RetainedLease } from "./worker-retained-bytes.js";
 
 type PreviewCommand = Extract<PipeCommand, { type: "preview-refresh" }>;
@@ -35,6 +36,7 @@ export class PreviewService {
   readonly #reserve: (bytes: number) => RetainedLease | undefined;
   readonly #delivery: RecoveryDelivery;
   readonly #capture: <T>(runId: string, operation: () => Promise<T>) => Promise<T | undefined>;
+  readonly #clock: RecoveryClock;
   readonly #active = new Set<string>();
   readonly #pending = new Map<string, PendingPreview>();
   #counter = 0;
@@ -48,12 +50,14 @@ export class PreviewService {
     reserve: (bytes: number) => RetainedLease | undefined,
     delivery: RecoveryDelivery,
     capture: <T>(runId: string, operation: () => Promise<T>) => Promise<T | undefined>,
+    clock: RecoveryClock = recoveryClock,
   ) {
     this.#worker = worker;
     this.#budgets = budgets;
     this.#reserve = reserve;
     this.#delivery = delivery;
     this.#capture = capture;
+    this.#clock = clock;
   }
 
   async refresh(
@@ -84,7 +88,10 @@ export class PreviewService {
         });
       const expired = Symbol("preview-capture-deadline");
       const deadline = new Promise<typeof expired>((resolve) => {
-        wakeDeadline = setTimeout(() => resolve(expired), this.#budgets.recoveryDeadlineMs);
+        wakeDeadline = this.#clock.setTimeout(
+          () => resolve(expired),
+          this.#budgets.recoveryDeadlineMs,
+        );
       });
       let result: EnginePreviewResult | undefined | typeof expired;
       try {
@@ -148,7 +155,7 @@ export class PreviewService {
           ],
           lease,
           resolve,
-          deadlineAt: performance.now() + this.#budgets.recoveryDeadlineMs,
+          deadlineAt: this.#clock.now() + this.#budgets.recoveryDeadlineMs,
           version: atSeq,
           next: 0,
         };
@@ -158,7 +165,7 @@ export class PreviewService {
         this.capacity();
       });
     } finally {
-      if (wakeDeadline) clearTimeout(wakeDeadline);
+      if (wakeDeadline) this.#clock.clearTimeout(wakeDeadline);
       if (!retained) {
         lease.release();
         this.#active.delete(run.runId);
@@ -194,7 +201,7 @@ export class PreviewService {
 
   shutdown(): void {
     this.#closed = true;
-    if (this.#timer) clearTimeout(this.#timer);
+    if (this.#timer) this.#clock.clearTimeout(this.#timer);
     for (const pending of [...this.#pending.values()])
       this.#finish(pending, { failure: "RESULT_UNKNOWN" });
   }
@@ -222,17 +229,17 @@ export class PreviewService {
   }
 
   #armTimer(): void {
-    if (this.#timer) clearTimeout(this.#timer);
+    if (this.#timer) this.#clock.clearTimeout(this.#timer);
     const next = Math.min(...[...this.#pending.values()].map((pending) => pending.deadlineAt));
     if (!Number.isFinite(next)) return;
-    this.#timer = setTimeout(
+    this.#timer = this.#clock.setTimeout(
       () => {
-        const now = performance.now();
+        const now = this.#clock.now();
         for (const pending of [...this.#pending.values()])
           if (now >= pending.deadlineAt) this.#finish(pending, { failure: "RECOVERY_EXPIRED" });
         this.#armTimer();
       },
-      Math.max(0, Math.ceil(next - performance.now())),
+      Math.max(0, Math.ceil(next - this.#clock.now())),
     );
   }
 }

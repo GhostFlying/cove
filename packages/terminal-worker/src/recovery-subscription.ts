@@ -8,6 +8,7 @@ import {
 } from "@cove/protocol/identity";
 import type { PipeCommand, PipeEvent, PipeResult } from "@cove/protocol/pipe";
 import { validateBaselineDescriptor } from "@cove/protocol/terminal";
+import { recoveryClock, type RecoveryClock } from "./recovery-clock.js";
 import {
   retainedFactCharge,
   type ReplaySlice,
@@ -117,6 +118,7 @@ export class RecoverySubscriptions {
   readonly #budgets: EffectiveBudgets;
   readonly #reserve: (bytes: number) => RetainedLease | undefined;
   readonly #delivery: RecoveryDelivery;
+  readonly #clock: RecoveryClock;
   readonly #routes = new Map<string, Route>();
   readonly #connections = new Map<string, { count: number; lease: RetainedLease }>();
   readonly #captureWaiters: { runId: string; resolve: () => void }[] = [];
@@ -133,11 +135,13 @@ export class RecoverySubscriptions {
     budgets: EffectiveBudgets,
     reserve: (bytes: number) => RetainedLease | undefined,
     delivery: RecoveryDelivery,
+    clock: RecoveryClock = recoveryClock,
   ) {
     this.#worker = worker;
     this.#budgets = budgets;
     this.#reserve = reserve;
     this.#delivery = delivery;
+    this.#clock = clock;
   }
 
   get routeCount(): number {
@@ -216,7 +220,7 @@ export class RecoverySubscriptions {
     route.token = ++this.#nextToken;
     const token = route.token;
     route.markerRequestId = command.requestId;
-    route.deadlineAt = performance.now() + this.#budgets.recoveryDeadlineMs;
+    route.deadlineAt = this.#clock.now() + this.#budgets.recoveryDeadlineMs;
     route.appliedSeq =
       command.type === "subscribe" ? command.atSeq : (command.appliedSeq ?? route.appliedSeq);
     route.sentSeq = route.appliedSeq;
@@ -256,9 +260,9 @@ export class RecoverySubscriptions {
         }),
       );
       const deadline = new Promise<undefined>((resolve) => {
-        wakeDeadline = setTimeout(
+        wakeDeadline = this.#clock.setTimeout(
           () => resolve(undefined),
-          Math.max(0, Math.ceil(route.deadlineAt! - performance.now())),
+          Math.max(0, Math.ceil(route.deadlineAt! - this.#clock.now())),
         );
       });
       captured = await Promise.race([work, deadline]);
@@ -266,7 +270,7 @@ export class RecoverySubscriptions {
       this.#fail(route, "RESYNC_REQUIRED");
       return { failure: "RECOVERY_UNAVAILABLE" };
     } finally {
-      if (wakeDeadline) clearTimeout(wakeDeadline);
+      if (wakeDeadline) this.#clock.clearTimeout(wakeDeadline);
     }
     if (!captured) {
       this.#fail(route, "RECOVERY_EXPIRED");
@@ -546,7 +550,7 @@ export class RecoverySubscriptions {
 
   shutdown(): void {
     this.#closed = true;
-    if (this.#timer) clearTimeout(this.#timer);
+    if (this.#timer) this.#clock.clearTimeout(this.#timer);
     for (const route of [...this.#routes.values()]) this.#remove(route);
     for (const waiter of this.#captureWaiters.splice(0)) waiter.resolve();
   }
@@ -750,18 +754,18 @@ export class RecoverySubscriptions {
   }
 
   #armTimer(): void {
-    if (this.#timer) clearTimeout(this.#timer);
+    if (this.#timer) this.#clock.clearTimeout(this.#timer);
     const next = Math.min(...[...this.#routes.values()].flatMap((route) => route.deadlineAt ?? []));
     if (!Number.isFinite(next)) return;
-    this.#timer = setTimeout(
+    this.#timer = this.#clock.setTimeout(
       () => {
-        const now = performance.now();
+        const now = this.#clock.now();
         for (const route of this.#routes.values())
           if (route.deadlineAt !== undefined && now >= route.deadlineAt)
             this.#fail(route, "RECOVERY_EXPIRED");
         this.#armTimer();
       },
-      Math.max(0, Math.ceil(next - performance.now())),
+      Math.max(0, Math.ceil(next - this.#clock.now())),
     );
   }
 }
