@@ -229,7 +229,7 @@ function baseline(peer, ref, currentGeometry = grid) {
     encoding: BASELINE_ENCODING,
     checkpointSeq: 2,
     atSeq: 3,
-    captureGeometry: grid,
+    captureGeometry: currentGeometry,
     currentGeometry,
     coverage: {
       normal: {
@@ -287,7 +287,11 @@ function autoCommands(sent, peer) {
   if (sent.type === "attach")
     peer.result(sent, { subscription: subscription(), mode: "baseline", atSeq: 3 });
   if (sent.type === "recover")
-    peer.result(sent, { subscription: sent.subscription, mode: "replay", atSeq: 3 });
+    peer.result(sent, {
+      subscription: sent.subscription,
+      mode: sent.resume ? "replay" : "baseline",
+      atSeq: sent.resume?.appliedSeq ?? 3,
+    });
   if (sent.type === "applied-ack") peer.result(sent, { appliedSeq: sent.appliedSeq });
   if (sent.type === "baseline-progress")
     peer.result(sent, { baselineId: sent.baselineId, lastParsedOrdinal: sent.lastParsedOrdinal });
@@ -453,6 +457,261 @@ describe("public terminal state completion", () => {
     await settle();
     expect(controller.snapshot().execution.status).toBe("exited");
     expect(controller.snapshot().appliedSeq).toBe(5);
+    h.client.dispose();
+  });
+
+  test("baseline geometry appears only after finish and remains detached from view mutation", async () => {
+    const finish = deferred();
+    const view = fixtureView({ finish });
+    let mutationRejected = false;
+    view.beginBaseline = async (descriptor) => {
+      try {
+        descriptor.currentGeometry.cols = 999;
+      } catch {
+        mutationRejected = true;
+      }
+    };
+    const h = await harness({ onCommand: autoCommands, view });
+    const opened = h.client.openTerminal({
+      run,
+      viewId: "view-1",
+      view,
+      initialAppearance: DEFAULT_APPEARANCE,
+    });
+    expect(opened.ok).toBe(true);
+    const controller = opened.value;
+    const attached = controller.attach();
+    baseline(h.peer, subscription(), { cols: 92, rows: 28 });
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toBeNull();
+    expect(controller.snapshot().appliedAuthority).toBeNull();
+    finish.resolve();
+    expect(await attached).toMatchObject({ ok: true });
+    expect(mutationRejected).toBe(true);
+    expect(controller.snapshot().appliedGeometry).toEqual({
+      geometry: { cols: 92, rows: 28 },
+      atSeq: 3,
+    });
+    expect(controller.snapshot().appliedAuthority).toBeNull();
+    h.client.dispose();
+  });
+
+  test("control and resize publish only applied facts; received foreign control revokes input first", async () => {
+    const foreign = deferred();
+    const resize = deferred();
+    const view = fixtureView();
+    const originalApply = view.applyEvent;
+    view.applyEvent = async (event, bytes) => {
+      if (event.type === "control" && event.seq === 4) {
+        try {
+          event.geometry.cols = 999;
+        } catch {
+          /* A frozen renderer input is also safe. */
+        }
+      }
+      if (event.seq === 5) await foreign.promise;
+      if (event.seq === 6) await resize.promise;
+      await originalApply(event, bytes);
+    };
+    const h = await harness({ onCommand: autoCommands, view });
+    const { controller, ref } = await ready(h);
+    controller.setInputTarget(true, true);
+    expect((await controller.requestFocus(grid)).ok).toBe(true);
+    const holder = { connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId };
+    const controlGrid = { cols: 90, rows: 28 };
+    h.peer.emit(3, {
+      type: "run-event",
+      subscription: ref,
+      event: { type: "control", run, seq: 4, epoch: 1, holder, geometry: controlGrid },
+    });
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toEqual({ geometry: controlGrid, atSeq: 4 });
+    expect(controller.snapshot().appliedAuthority).toEqual({ epoch: 1, holder, atSeq: 4 });
+    expect(Object.isFrozen(controller.snapshot().appliedAuthority.holder.connection)).toBe(true);
+    expect(
+      Reflect.set(controller.snapshot().appliedAuthority.holder.connection, "generation", 99),
+    ).toBe(false);
+    expect(controller.snapshot().appliedAuthority.holder.connection.generation).toBe(1);
+    expect(controller.snapshot().inputReady).toBe(true);
+    h.peer.emit(3, {
+      type: "run-event",
+      subscription: ref,
+      event: { type: "control", run, seq: 5, epoch: 2, holder: null, geometry: controlGrid },
+    });
+    await settle();
+    expect(controller.snapshot().inputReady).toBe(false);
+    expect(controller.snapshot().appliedAuthority).toEqual({ epoch: 1, holder, atSeq: 4 });
+    foreign.resolve();
+    await settle();
+    expect(controller.snapshot().appliedAuthority).toEqual({ epoch: 2, holder: null, atSeq: 5 });
+    const resizeGrid = { cols: 100, rows: 30 };
+    h.peer.emit(3, {
+      type: "run-event",
+      subscription: ref,
+      event: { type: "resize", run, seq: 6, geometry: resizeGrid, requiresBaseline: false },
+    });
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toEqual({ geometry: controlGrid, atSeq: 5 });
+    resize.resolve();
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toEqual({ geometry: resizeGrid, atSeq: 6 });
+    expect(controller.snapshot().appliedAuthority).toEqual({ epoch: 2, holder: null, atSeq: 5 });
+    h.peer.emit(
+      3,
+      { type: "run-event", subscription: ref, event: { type: "output", run, seq: 7 } },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(controller.snapshot().appliedSeq).toBe(7);
+    expect(controller.snapshot().appliedGeometry.atSeq).toBe(6);
+    for (const object of [
+      controller.snapshot().run,
+      controller.snapshot().appliedGeometry.geometry,
+      controller.snapshot().appliedAuthority,
+      controller.snapshot().execution,
+    ])
+      expect(Object.isFrozen(object)).toBe(true);
+    h.client.dispose();
+  });
+
+  test("same-view empty replay restores only retained applied geometry, never prior authority", async () => {
+    const view = fixtureView();
+    let heldRecover;
+    const h = await harness({
+      onCommand(sent, peer) {
+        if (sent.type === "recover") heldRecover = sent;
+        else autoCommands(sent, peer);
+      },
+      view,
+    });
+    const { controller, ref } = await ready(h);
+    const controlGrid = { cols: 94, rows: 29 };
+    h.peer.emit(3, {
+      type: "run-event",
+      subscription: ref,
+      event: { type: "control", run, seq: 4, epoch: 1, holder: null, geometry: controlGrid },
+    });
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toEqual({ geometry: controlGrid, atSeq: 4 });
+    view.measureGrid = () => controlGrid;
+    const recovery = controller.recover("released-view");
+    expect(controller.snapshot().appliedGeometry).toBeNull();
+    expect(controller.snapshot().appliedAuthority).toBeNull();
+    expect(heldRecover).toMatchObject({ resume: { geometry: controlGrid, appliedSeq: 4 } });
+    h.peer.result(heldRecover, { mode: "replay", atSeq: 4 });
+    expect((await recovery).ok).toBe(true);
+    expect(controller.snapshot().appliedGeometry).toEqual({ geometry: controlGrid, atSeq: 4 });
+    expect(controller.snapshot().appliedAuthority).toBeNull();
+    h.client.dispose();
+    expect(controller.snapshot().appliedGeometry).toBeNull();
+  });
+
+  test("nested disposal suppresses stale outer state delivery to later listeners", async () => {
+    const h = await harness();
+    const controller = h.client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: h.view,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const later = [];
+    controller.onState((snapshot) => {
+      if (snapshot.execution.status === "live") controller.dispose();
+    });
+    controller.onState((snapshot) => later.push([snapshot.phase, snapshot.execution.status]));
+    const query = h.client.call("terminal.get", { run });
+    await settle();
+    h.respond(0, "live");
+    expect((await query).ok).toBe(true);
+    expect(later).toEqual([["disposed", "unverifiable"]]);
+    h.client.dispose();
+  });
+
+  test("ordered exit and ordinary output remain distinct after the same connection loss", async () => {
+    for (const type of ["exit", "output"]) {
+      const h = await harness({ onCommand: autoCommands });
+      const { controller, ref } = await ready(h);
+      h.peer.emit(
+        3,
+        {
+          type: "run-event",
+          subscription: ref,
+          event:
+            type === "exit"
+              ? { type, run, seq: 4, exitCode: null, signal: "SIGTERM" }
+              : { type, run, seq: 4 },
+        },
+        type === "output" ? new Uint8Array([65]) : undefined,
+      );
+      await settle();
+      expect(controller.snapshot().appliedSeq).toBe(4);
+      h.peer.close();
+      const state = controller.snapshot();
+      expect(state.phase).toBe("unavailable");
+      expect(state.run).toEqual(run);
+      expect(state.execution.status).toBe(type === "exit" ? "exited" : "unverifiable");
+      expect(state.execution).toMatchObject(
+        type === "exit"
+          ? { source: "run-event", seq: 4, exitCode: null, signal: "SIGTERM" }
+          : { status: "unverifiable", source: "none" },
+      );
+      h.client.dispose();
+    }
+  });
+
+  test("transport failure downgrades only live evidence and never erases a proved exit", async () => {
+    const h = await harness();
+    const controller = h.client.openTerminal({
+      run,
+      viewId: "view-1",
+      view: h.view,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    const live = h.client.call("terminal.get", { run });
+    await settle();
+    h.respond(0, "live");
+    await live;
+    const failure = h.client.call("terminal.get", { run });
+    await settle();
+    h.requests[1].callbacks.onFailure({ disposition: "unknown", reason: "transport" });
+    expect((await failure).ok).toBe(false);
+    expect(controller.snapshot().execution).toEqual({
+      status: "unverifiable",
+      source: "terminal-get",
+    });
+    const exited = h.client.call("terminal.get", { run });
+    await settle();
+    h.respond(2, "exited");
+    await exited;
+    const laterFailure = h.client.call("terminal.get", { run });
+    await settle();
+    h.requests[3].callbacks.onFailure({ disposition: "unknown", reason: "transport" });
+    await laterFailure;
+    expect(controller.snapshot().execution).toMatchObject({
+      status: "exited",
+      source: "terminal-get",
+    });
+    h.client.dispose();
+  });
+
+  test("requires-baseline resize clears projection without publishing its unapplied grid", async () => {
+    const h = await harness({ onCommand: autoCommands });
+    const { controller, ref } = await ready(h);
+    h.peer.emit(3, {
+      type: "run-event",
+      subscription: ref,
+      event: {
+        type: "resize",
+        run,
+        seq: 4,
+        geometry: { cols: 120, rows: 40 },
+        requiresBaseline: true,
+      },
+    });
+    await settle();
+    expect(controller.snapshot().appliedGeometry).toBeNull();
+    expect(controller.snapshot().appliedAuthority).toBeNull();
+    expect(controller.snapshot().appliedSeq).toBe(3);
     h.client.dispose();
   });
 });
