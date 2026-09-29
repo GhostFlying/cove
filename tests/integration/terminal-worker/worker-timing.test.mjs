@@ -823,6 +823,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
       let readerReceipt;
       let expectedRequestIds = [];
       let decodedResponses = [];
+      let ingressedRequests = 0;
+      let heldEpoch;
       let readerIdentity;
       let released = false;
       const tracker = createDrainEpochTracker({
@@ -864,6 +866,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               readerReceipt,
               expectedRequestIds,
               decodedResponses,
+              ingressedRequests,
+              heldEpochId: heldEpoch?.sampleId,
               epochs,
               trace: trace.filter((item) => item.runId === runId),
               ownerError: ownerError && { message: ownerError.message },
@@ -919,23 +923,50 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
             expectedRequestIds = requests.map((item) => item.requestId);
             expect(new Set(expectedRequestIds).size).toBe(FIFO_REQUESTS_PER_CYCLE);
             for (let offset = 0; offset < requests.length; offset += 32) {
-              ingress.write(
-                Buffer.concat(requests.slice(offset, offset + 32).map((item) => encode(item))),
+              const batch = requests.slice(offset, offset + 32);
+              ingress.write(Buffer.concat(batch.map((item) => encode(item))));
+              ingressedRequests += batch.length;
+              const next = await until(
+                () => {
+                  const snapshot = pipe.snapshot();
+                  const epoch = tracker.current;
+                  if (
+                    snapshot.state === "ready" &&
+                    snapshot.blocked &&
+                    snapshot.transportBytes > 0 &&
+                    epoch
+                  ) {
+                    blocked = snapshot;
+                    heldEpoch = epoch;
+                    // Release in the same observation so the selected epoch cannot retire first.
+                    released = true;
+                    owner.child.send("drain");
+                    return "reader-released";
+                  }
+                  if (!snapshot.blocked && snapshot.outstandingRequests <= 32) return "next-batch";
+                  return false;
+                },
+                8000,
+                "held FIFO block or bounded batch",
               );
+              if (next === "reader-released") break;
+            }
+            expect(heldEpoch).toBeDefined();
+            expect(blocked).toMatchObject({ state: "ready", blocked: true });
+            expect(blocked.transportBytes).toBeGreaterThan(0);
+            await until(() => heldEpoch.after && heldEpoch, 8000, "actual FIFO drain event");
+            expect(heldEpoch.readerHeldAtDrain).toBe(false);
+            for (let offset = ingressedRequests; offset < requests.length; offset += 32) {
               await until(
                 () => pipe.snapshot().outstandingRequests <= 32,
                 8000,
-                "bounded FIFO batch",
+                "draining FIFO batch budget",
               );
+              const batch = requests.slice(offset, offset + 32);
+              ingress.write(Buffer.concat(batch.map((item) => encode(item))));
+              ingressedRequests += batch.length;
             }
-            blocked = pipe.snapshot();
-            expect(tracker.current).toBeDefined();
-            expect(blocked).toMatchObject({ state: "ready", blocked: true });
-            expect(blocked.transportBytes).toBeGreaterThan(0);
-            const heldEpoch = tracker.current;
-            released = true;
-            owner.child.send("drain");
-            await until(() => heldEpoch.after && heldEpoch, 8000, "actual FIFO drain event");
+            expect(ingressedRequests).toBe(FIFO_REQUESTS_PER_CYCLE);
             await until(
               () => {
                 const snap = pipe.snapshot();
@@ -976,6 +1007,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               readerReceipt,
               expectedRequestIds,
               decodedResponses,
+              ingressedRequests,
+              heldEpochId: heldEpoch.sampleId,
               epochs,
             };
           },
@@ -995,6 +1028,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               readerReceipt,
               expectedRequestIds,
               decodedResponses,
+              ingressedRequests,
+              heldEpochId: heldEpoch?.sampleId,
               epochs,
               trace: trace.filter((item) => item.runId === runId),
               primary: cycleError && { name: cycleError.name, message: cycleError.message },
