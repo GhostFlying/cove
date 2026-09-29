@@ -1,0 +1,27 @@
+# M0 W1 evidence-gap integration (#16)
+
+Status: candidate composition only. Full W1 remains pending independent composition review, normal macOS/Ubuntu qualification artifacts, protected integration, actual-main review and root acceptance. W2 remains gated.
+
+## Authority and source
+
+The accepted starting main is P3c `76dbc017215a517f5c0bf199c821f57873e472be` (tree `7d37dce441c3f4c7502b290058fe2ae1b04e6de0`). Root's bounded P3c acceptance is recorded off-tree at `/Users/luchengxuan/WORKSPACE/cove-evidence/p3c-main-integration/accepted-handoff.md` (SHA-256 `4f11307c5680d72c25bcdaa4b8a387e2140b05119c2f6b5961185e7dac247036`). The ten W1 fixture commits from source `c31a3de149b7b8d3ff942a60557af741fe59df1a` (tree `2f5c38e350dc55ecf6133b3ce29ab47d4a40dd50`) are replayed linearly in the existing view checkout; original refs remain. The frozen [gap closure plan](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/gap-closure-plan.md) binds the A/B/C scope.
+
+Independent source review APPROVED SHA-256 `ca1829c791a9cdec8ebfcfb71f597f8e155b05ef579111a97a26e0e7b4239067`. Finite r4 QA PASS report SHA-256 `63434702715d708ce929b9e0d5676a477984a65ae38bbff388583b0ec6148620` and manifest SHA-256 `668e5edc109def031dc60390dea1f9b7bda32ae8c08bd0ac7c85a449ccb994cc`; independent validation review APPROVED report SHA-256 `932d724fdf521900acbe391c7720f56261f65cd4d6b8418ecf36ab43a796eb69`, manifest SHA-256 `e28a1d35e4b6dfce8df5c534d8a3f62ad2f8e32e86fdb65dc0b11193a5053d87`. These authorize composition, not full W1 acceptance.
+
+## Coverage ledger and registration
+
+| Gap | Source suite | Declared / expected runtime | Bounded observation |
+| --- | --- | ---: | --- |
+| A: invalid executable and cwd through the public native factory | `tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs` | 1 / 2 | Exact `missing-executable` and `missing-cwd` finite expansions, typed failure or created-adapter lifecycle, slot reuse after cleanup. |
+| B: query authority at 0/1/2 passive recipients and real reply-shaped user input | `tests/integration/terminal-worker/worker-query-observation.test.mjs` | 2 / 2 | Same automatic bytes across passive observation cardinalities; distinct automatic and authorized user-byte origins. |
+| C: four worker timing boundaries | `tests/integration/terminal-worker/worker-timing.test.mjs` | 7 / 7 | Host-monotonic public-boundary raw ticks, nearest-rank p50/p95/p99/max, finite positive and negative trace controls. |
+
+The integration glob already owns all three files. `scripts/ci-test-gate.mjs` registers exact suite floors 1/2/7 and the two A runtime names; its discovery scanner rejects missing, short, duplicate and unknown identities. The ordinary check gate already sets `COVE_QUALIFICATION_EVIDENCE_DIR` to `.cache/ci/worker-qualification`, binding source/tree/run/attempt and pinned environment. `.github/workflows/check.yml` already uploads `.cache/ci/` even on failure, so no separate diagnostic workflow or CI change is needed.
+
+The r3 affected run passed eight cases only at its original r3 head. The r4 selected retake passed three selected cases with four filtered same-file controls; it did **not** newly execute all eleven. Historic r3 9 PASS/2 FAIL and the discovery overwrite accident remain evidence. Four r4 macOS finite timing populations held 32/32/1280/4 complete samples. These are public-boundary finite observations, not kernel pipe-full latency, a performance SLA or a 100-PTY guarantee. The original W1 pressure/FIFO failures, unknown xterm parsing diagnostics, and scoped cleanup limits remain attributed to their own runs.
+
+Current-tip static discovery and the exact source-to-candidate projection belong to the off-tree candidate manifest. Current-tip dynamic discovery requires the compiled public package artifacts; this view checkout's preexisting build output is incomplete. No build, native fixture or full test was run to conceal that limit. An independent reviewer must assess this projection before an ordinary changed-candidate dual-OS run can execute the exact runtime identities and A/B/C effects on both hosts.
+
+## Required remaining gates
+
+Independent composition and evidence review must bind every source commit, fixture blob, test identity, registration guard and accepted-main production projection. Root then decides whether a normal PR dual-OS run may consume its one allocation. Both OS artifacts must contain raw A/B/C receipts and four distributions with exact identity and resource closure. Protected rebase-only mapping, normal actual-main dual-OS artifacts and independent final review precede root's full-W1 decision. Issue #16 remains open; W2, P2, actual agent journeys, devbox capacity, M0 exit and M1 are not unlocked by this candidate.
