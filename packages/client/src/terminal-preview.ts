@@ -2,7 +2,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import type { DomainError } from "@cove/protocol/errors";
 import { RunRefSchema, SequenceSchema, type RunRef } from "@cove/protocol/identity";
 import type { Geometry } from "@cove/protocol/profile";
-import type { ExternalTerminalEvent, TerminalResult } from "@cove/protocol/terminal";
+import type { ExternalTerminalEvent, TerminalError, TerminalResult } from "@cove/protocol/terminal";
 import type { ClientError, LocalErrorReason } from "./client.js";
 import type { NegotiatedConnection } from "./connection-session.js";
 import { TerminalLane, type CommandOutcome } from "./terminal-delivery.js";
@@ -54,6 +54,7 @@ interface PendingPreview {
   transfer?: Transfer;
   reservedBytes: number;
   startedSend: boolean;
+  replyObserved: boolean;
   settled: boolean;
 }
 
@@ -71,9 +72,10 @@ function runKey(run: RunRef): string {
 // Preview events have no requestId: an unseen old transfer requires a run fence after uncertainty.
 export class TerminalPreview {
   private readonly pending = new Map<string, PendingPreview>();
+  private readonly provisional = new Map<string, symbol>();
   private readonly retired = new Map<string, Set<string>>();
-  private readonly quarantined = new Set<string>();
-  private retiredCount = 0;
+  private readonly retiredRequests = new Map<string, string>();
+  private readonly quarantined = new Map<string, string>();
   private retainedBytes = 0;
 
   constructor(
@@ -109,15 +111,31 @@ export class TerminalPreview {
       return Promise.resolve({ ok: false, error: localError("invalid-state"), uncertain: false });
     if (
       this.pending.has(key) ||
-      this.pending.size >= binding.effectiveBudgets.maxRuns ||
-      this.pending.size >= M0_LIMITS.pendingWorkerCommands ||
-      this.pending.size + this.retiredCount + this.quarantined.size >= RETIRED_PREVIEW_LIMIT
+      this.provisional.has(key) ||
+      this.pending.size + this.provisional.size >= binding.effectiveBudgets.maxRuns ||
+      this.pending.size + this.provisional.size >= M0_LIMITS.pendingWorkerCommands ||
+      this.pending.size + this.provisional.size + this.retiredCount + this.quarantined.size >=
+        RETIRED_PREVIEW_LIMIT
     )
       return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
 
-    const requestId = this.lane.nextRequestId(this.generation());
-    if (!requestId)
+    const generation = this.generation();
+    const reservation = Symbol();
+    this.provisional.set(key, reservation);
+    const requestId = this.lane.nextRequestId(generation);
+    if (!requestId) {
+      if (this.provisional.get(key) === reservation) this.provisional.delete(key);
       return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
+    }
+    if (
+      this.provisional.get(key) !== reservation ||
+      !this.connected() ||
+      this.binding() !== binding ||
+      this.generation() !== generation
+    ) {
+      if (this.provisional.get(key) === reservation) this.provisional.delete(key);
+      return Promise.resolve({ ok: false, error: localError("invalid-state"), uncertain: false });
+    }
     let resolve!: (result: PreviewOutcome) => void;
     const promise = new Promise<PreviewOutcome>((settle) => {
       resolve = settle;
@@ -127,12 +145,14 @@ export class TerminalPreview {
       requestId,
       run: Object.freeze(parsed.data),
       knownVersion,
-      generation: this.generation(),
+      generation,
       resolve,
       reservedBytes: 0,
       startedSend: false,
+      replyObserved: false,
       settled: false,
     };
+    this.provisional.delete(key);
     this.pending.set(key, pending);
     try {
       const timer = this.scheduler.setTimer(PREVIEW_DEADLINE_MS, () => {
@@ -168,6 +188,11 @@ export class TerminalPreview {
       PREVIEW_DEADLINE_MS,
       undefined,
       (outcome) => this.onCommand(pending, outcome),
+      () =>
+        !pending.settled &&
+        this.connected() &&
+        this.binding() === binding &&
+        this.generation() === pending.generation,
     );
     return promise;
   }
@@ -180,6 +205,23 @@ export class TerminalPreview {
       return "unrouteable";
     this.process(pending, event, bytes);
     return "active";
+  }
+
+  receiveUnmatchedReply(
+    reply: Extract<TerminalResult, { type: "preview-result" }> | TerminalError,
+  ): PreviewRoute {
+    const key = runKey(reply.run);
+    const pending = this.pending.get(key);
+    if (pending?.requestId === reply.requestId && pending.generation === this.generation()) {
+      this.fail(pending, "invalid-response");
+      return "active";
+    }
+    if (
+      this.retiredRequests.get(reply.requestId) === key ||
+      this.quarantined.get(key) === reply.requestId
+    )
+      return "obsolete";
+    return "unrouteable";
   }
 
   private process(pending: PendingPreview, event: PreviewEvent, bytes: Uint8Array): void {
@@ -242,20 +284,23 @@ export class TerminalPreview {
         error: localError(reason),
         uncertain: pending.startedSend,
       });
+    this.provisional.clear();
     this.retired.clear();
-    this.retiredCount = 0;
+    this.retiredRequests.clear();
     this.quarantined.clear();
   }
 
   private onCommand(pending: PendingPreview, outcome: CommandOutcome): void {
     if (pending.settled) return;
     if (!outcome.ok) {
+      pending.replyObserved = "acceptance" in outcome.error;
       const uncertain =
         outcome.uncertain ||
         ("acceptance" in outcome.error && outcome.error.acceptance !== "not-accepted");
       this.finish(pending, { ok: false, error: outcome.error, uncertain });
       return;
     }
+    pending.replyObserved = true;
     const result = outcome.result;
     if (result.type !== "preview-result") {
       this.fail(pending, "invalid-response");
@@ -301,22 +346,18 @@ export class TerminalPreview {
     pending.settled = true;
     this.pending.delete(pending.key);
     if (!outcome.ok && (outcome.uncertain || pending.transfer)) {
-      // A run quarantine subsumes every older completed preview ID for that run.
-      const oldIds = this.retired.get(pending.key);
-      if (oldIds) {
-        this.retiredCount -= oldIds.size;
-        this.retired.delete(pending.key);
-      }
-      this.quarantined.add(pending.key);
-    } else if (pending.transfer) {
-      let ids = this.retired.get(pending.key);
-      if (!ids) {
-        ids = new Set<string>();
-        this.retired.set(pending.key, ids);
-      }
-      if (!ids.has(pending.transfer.previewId)) {
+      // Event IDs are subsumed by the run fence; older request IDs still need late-reply proof.
+      this.retired.delete(pending.key);
+      this.quarantined.set(pending.key, pending.requestId);
+    } else {
+      if (pending.replyObserved) this.retiredRequests.set(pending.requestId, pending.key);
+      if (pending.transfer) {
+        let ids = this.retired.get(pending.key);
+        if (!ids) {
+          ids = new Set<string>();
+          this.retired.set(pending.key, ids);
+        }
         ids.add(pending.transfer.previewId);
-        this.retiredCount++;
       }
     }
     if (pending.reservedBytes) {
@@ -333,5 +374,9 @@ export class TerminalPreview {
       // Ownership was cleared before an adapter can reenter.
     }
     pending.resolve(outcome);
+  }
+
+  private get retiredCount(): number {
+    return this.retiredRequests.size;
   }
 }

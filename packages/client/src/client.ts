@@ -437,6 +437,7 @@ class CoveClient implements Client {
           if (this.connectedAttempt) this.onTerminalBusinessMessage(this.connectedAttempt);
         },
         preview: (event, bytes) => this.terminalPreview.receive(event, bytes),
+        previewReply: (reply) => this.terminalPreview.receiveUnmatchedReply(reply),
       },
       options.codec,
       options.scheduler,
