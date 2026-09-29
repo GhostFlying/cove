@@ -93,6 +93,17 @@ function decodeSameReaderFrames(rawHex, reportedBytes) {
   return frames;
 }
 
+function expectedPtyOutput(nonce, count, lineEnding) {
+  return Buffer.from(
+    Array.from({ length: count }, (_, index) => `OUT:${nonce}:${index}${lineEnding}`).join(""),
+  );
+}
+
+function matchingPtyLineEnding(actual, nonce, count, selected) {
+  const endings = selected ? [selected] : ["\r\n", "\n"];
+  return endings.find((ending) => actual.equals(expectedPtyOutput(nonce, count, ending)));
+}
+
 async function ownedAbsent(start, nonce) {
   if (!start) return;
   const current = psIdentity(start.pid);
@@ -153,7 +164,11 @@ test("pure timing joins preserve uncertainty and nearest-rank finite quantiles",
 });
 
 test("the declared trace bound admits one native callback per emitted byte", () => {
-  expect(MAX_TIMING_OUTPUT_BYTES).toBe(1376);
+  expect(MAX_TIMING_OUTPUT_BYTES).toBe(1408);
+  expect(matchingPtyLineEnding(Buffer.from("OUT:n:0\r\n"), "n", 1)).toBe("\r\n");
+  expect(matchingPtyLineEnding(Buffer.from("OUT:n:0\n"), "n", 1)).toBe("\n");
+  expect(matchingPtyLineEnding(Buffer.from("OUT:n:0\r\n"), "n", 1, "\n")).toBeUndefined();
+  expect(matchingPtyLineEnding(Buffer.from("OUT:n:0\r\nextra"), "n", 1)).toBeUndefined();
   const maximallySplit = [];
   for (let index = 0; index < MAX_TIMING_OUTPUT_BYTES; index++) {
     const sampleId = `fragment:${index}`;
@@ -455,6 +470,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
       let writerCloseTick;
       let start;
       let finish;
+      let outputLineEnding;
       let shutdown;
       let observedSubmit;
       let cycleError;
@@ -599,7 +615,6 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
           owners: native.snapshot().owners,
         }),
       });
-      const getOutput = () => Buffer.concat(outputParts).toString("utf8");
       try {
         const spawn = spawnCommand(target, process.execPath, [childEntry, nonce, dir], repo);
         expect(await execution.execute(spawn.metadata, spawn.payload)).toMatchObject({
@@ -625,7 +640,13 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         });
         for (let index = 0; index < exchanges; index++) {
           await until(
-            () => getOutput().includes(`OUT:${nonce}:${index}\n`),
+            () => {
+              const actual = Buffer.concat(outputParts);
+              const matched = matchingPtyLineEnding(actual, nonce, index + 1, outputLineEnding);
+              if (!matched) return false;
+              outputLineEnding = matched;
+              return true;
+            },
             8000,
             `output ${index}`,
           );
@@ -669,6 +690,9 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
             )
             .digest("hex"),
         );
+        expect(Buffer.concat(outputParts)).toEqual(
+          expectedPtyOutput(nonce, exchanges, outputLineEnding),
+        );
         expect(Buffer.concat(nativeParts)).toEqual(Buffer.concat(outputParts));
         expect(deliveries.every((interval) => interval.completed)).toBe(true);
         expect(settlements).toHaveLength(exchanges);
@@ -687,6 +711,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
             nonce,
             start,
             finish,
+            outputLineEnding,
             nativeBytes: nativeParts.map((part) => part.toString("hex")),
             parsedBytes: outputParts.map((part) => part.toString("hex")),
             deliveries,
@@ -717,6 +742,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
             nonce,
             start,
             shutdown,
+            outputLineEnding,
             factory: native.snapshot(),
             currentIdentity: start && psIdentity(start.pid),
             primary: cycleError && { name: cycleError.name, message: cycleError.message },
@@ -731,6 +757,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         nonce,
         start,
         finish,
+        outputLineEnding,
         deliveries: deliveries.length,
         settlements: settlements.length,
         shutdown,
