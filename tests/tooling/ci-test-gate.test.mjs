@@ -190,6 +190,7 @@ test("client public-contract suites reject missing and short discovery", async (
     ["connection-rpc", 59],
     ["compiled-client", 4],
     ["terminal-recovery", 40],
+    ["terminal-state", 11],
     ["terminal-control-input", 33],
     ["terminal-budgets-preview", 29],
     ["terminal-lifecycle", 4],

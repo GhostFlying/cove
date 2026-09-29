@@ -52,9 +52,9 @@ function compile(directory) {
   });
 }
 
-test("isolated ES-only consumer imports typed RPC and preview outcomes from public entries", async () => {
+test("isolated ES-only consumer imports typed RPC, preview, and terminal state from public entries", async () => {
   const directory = await isolatedConsumer(`
-import { createClient, type Client, type ClientOptions, type ParamsFor, type PreviewOutcome, type ResultFor } from '@cove/client';
+import { createClient, type Client, type ClientOptions, type ParamsFor, type PreviewOutcome, type ResultFor, type TerminalSnapshot, type TerminalExecutionEvidence, type TerminalAppliedGeometry, type TerminalAppliedAuthority } from '@cove/client';
 import type { RunRef } from '@cove/protocol/identity';
 declare const options: ClientOptions;
 declare const run: RunRef;
@@ -75,7 +75,34 @@ async function readPreview(): Promise<number> {
   return bytes.byteLength + atSeq + generatedAtMs;
 }
 declare const typed: ResultFor<'terminal.list'>;
-void typed; void result; void readPreview;
+declare const state: TerminalSnapshot;
+const fullRun: Readonly<RunRef> = state.run;
+const evidence: TerminalExecutionEvidence = state.execution;
+function readExecution(value: TerminalExecutionEvidence): number {
+  if (value.status === 'unverifiable') return value.source === 'none' ? 0 : 1;
+  if (value.status === 'live') return value.source === 'terminal-get' ? 2 : 3;
+  if (value.source === 'terminal-get') return value.seq === null && value.exitCode === null && value.signal === null ? 4 : 5;
+  const seq: number = value.seq;
+  return seq + (value.exitCode ?? 0) + (value.signal?.length ?? 0);
+}
+function readApplied(value: TerminalSnapshot): number {
+  const geometry: TerminalAppliedGeometry | null = value.appliedGeometry;
+  const authority: TerminalAppliedAuthority | null = value.appliedAuthority;
+  if (!geometry || !authority) return 0;
+  if (authority.holder === null) return geometry.geometry.cols + authority.epoch;
+  return geometry.geometry.rows + authority.holder.connection.generation + authority.atSeq;
+}
+// @ts-expect-error A snapshot cannot change its full run identity.
+state.run.runId = 'different';
+if (state.appliedGeometry) {
+  // @ts-expect-error Applied geometry is readonly through its nested value.
+  state.appliedGeometry.geometry.cols = 1;
+}
+if (state.appliedAuthority?.holder) {
+  // @ts-expect-error Applied authority cannot change its nested connection.
+  state.appliedAuthority.holder.connection.generation = 2;
+}
+void typed; void result; void readPreview; void fullRun; void evidence; void readExecution; void readApplied;
 `);
   const result = compile(directory);
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
@@ -105,7 +132,7 @@ test("isolated runtime follows the current fixture manifest, accepts optional fi
 import { createClient } from '@cove/client';
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from '@cove/protocol/bootstrap';
 import { M0_LIMITS } from '@cove/protocol/budgets';
-import { BASELINE_ENCODING, PROFILE } from '@cove/protocol/profile';
+import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from '@cove/protocol/profile';
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const fixture = ${JSON.stringify(journey)};
@@ -150,9 +177,25 @@ const client = createClient({
   http, terminal,
 });
 const accepted = await client.connect();
+const run = { serverId: fixture.server.serverId, relayInstanceId: fixture.server.relayInstanceId, runId: 'fixture-run' };
+const view = {
+  initialize() {}, beginBaseline() {}, writeBaselineChunk() {}, finishBaseline() {}, applyEvent() {},
+  measureGrid: () => ({ cols: 80, rows: 24 }), setAppearance() {}, setVisibility() {},
+  onInputIntent: () => ({ dispose() {} }), onFocusIntent: () => ({ dispose() {} }),
+  onFailure: () => ({ dispose() {} }), dispose() {},
+};
+const opened = client.openTerminal({ run, viewId: 'fixture-view', view, initialAppearance: DEFAULT_APPEARANCE });
+if (!opened.ok) throw new Error('public terminal open failed');
+const before = opened.value.snapshot();
+run.runId = 'mutated-run';
+const detached = before.run.runId === 'fixture-run' && opened.value.snapshot().run.runId === 'fixture-run';
+const unknown = before.execution.status === 'unverifiable' && before.execution.source === 'none';
+const unapplied = before.appliedGeometry === null && before.appliedAuthority === null;
+const frozen = Object.isFrozen(before) && Object.isFrozen(before.run) && Object.isFrozen(before.execution);
+opened.value.dispose();
 phase = 1;
 const rejected = await client.reconnect();
-console.log(JSON.stringify({ accepted: accepted.ok, rejected: rejected.ok, status: client.snapshot().status }));
+console.log(JSON.stringify({ accepted: accepted.ok, rejected: rejected.ok, status: client.snapshot().status, detached, unknown, unapplied, frozen }));
 `,
   );
   const result = spawnSync(process.execPath, [join(directory, "runtime.mjs")], {
@@ -165,6 +208,10 @@ console.log(JSON.stringify({ accepted: accepted.ok, rejected: rejected.ok, statu
     accepted: true,
     rejected: false,
     status: "incompatible",
+    detached: true,
+    unknown: true,
+    unapplied: true,
+    frozen: true,
   });
 });
 
