@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { domainError } from "../../../packages/protocol/dist/errors.js";
+import { createPipeDecoder, validatePipeFrame } from "../../../packages/protocol/dist/pipe.js";
 import { waitFifoReaderHandshake, withOwnedFifoReader } from "./fifo-reader-ownership.mjs";
 import {
   budgets,
@@ -70,6 +71,28 @@ function preserve(name, value) {
   if (!root) return;
   mkdirSync(root, { recursive: true });
   writeFileSync(join(root, `${name}.json`), JSON.stringify(value, null, 2) + "\n");
+}
+
+function decodeSameReaderFrames(rawHex, reportedBytes) {
+  if (typeof rawHex !== "string" || rawHex.length % 2 || !/^[0-9a-f]*$/.test(rawHex))
+    throw Error("same-reader raw bytes malformed");
+  const raw = Buffer.from(rawHex, "hex");
+  if (raw.length !== reportedBytes) throw Error("same-reader byte count mismatch");
+  const decoder = createPipeDecoder();
+  const frames = [];
+  for (let offset = 0; offset < raw.length;) {
+    const read = decoder.read(raw.subarray(offset));
+    if (read.status === "error" || read.consumedBytes <= 0)
+      throw Error(`same-reader frame decode: ${read.error?.code ?? read.status}`);
+    offset += read.consumedBytes;
+    for (const frame of read.frames) {
+      const metadata = JSON.parse(Buffer.from(frame.metadata).toString("utf8"));
+      if (!validatePipeFrame(frame, metadata).ok) throw Error("same-reader frame invalid");
+      frames.push(metadata);
+    }
+  }
+  if (!decoder.finish().ok) throw Error("same-reader truncated frame");
+  return frames;
 }
 
 async function ownedAbsent(start, nonce) {
@@ -656,6 +679,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
       let blocked;
       let drained;
       let readerReceipt;
+      let expectedRequestIds = [];
+      let decodedResponses = [];
       let readerIdentity;
       let released = false;
       const tracker = createDrainEpochTracker({
@@ -695,6 +720,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               held: blocked,
               drained,
               readerReceipt,
+              expectedRequestIds,
+              decodedResponses,
               epochs,
               trace: trace.filter((item) => item.runId === runId),
               ownerError: ownerError && { message: ownerError.message },
@@ -747,6 +774,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
             const requests = Array.from({ length: FIFO_REQUESTS_PER_CYCLE }, () =>
               command("preview-refresh", run(runId)),
             );
+            expectedRequestIds = requests.map((item) => item.requestId);
+            expect(new Set(expectedRequestIds).size).toBe(FIFO_REQUESTS_PER_CYCLE);
             for (let offset = 0; offset < requests.length; offset += 32) {
               ingress.write(
                 Buffer.concat(requests.slice(offset, offset + 32).map((item) => encode(item))),
@@ -779,6 +808,19 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
             await until(() => writer.closed, 5000, "FIFO writer close");
             readerReceipt = await receipt(receiptPath, "same-reader bytes");
             expect(readerReceipt).toMatchObject({ nonce, pid: owner.child.pid });
+            decodedResponses = decodeSameReaderFrames(readerReceipt.hex, readerReceipt.total);
+            expect(decodedResponses).toHaveLength(FIFO_REQUESTS_PER_CYCLE + 1);
+            expect(decodedResponses[0]).toMatchObject({ type: "ready" });
+            const responses = decodedResponses.slice(1);
+            expect(
+              responses.every(
+                (item) => item.type === "error" && item.commandType === "preview-refresh",
+              ),
+            ).toBe(true);
+            expect(responses.map((item) => item.requestId)).toEqual(expectedRequestIds);
+            expect(new Set(responses.map((item) => item.requestId)).size).toBe(
+              FIFO_REQUESTS_PER_CYCLE,
+            );
             expect(await owner.exit).toEqual({ code: 0, signal: null });
             expect(
               heldEpoch.reblockedBy === null || heldEpoch.reblockedBy !== heldEpoch.sampleId,
@@ -790,6 +832,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               blocked,
               drained,
               readerReceipt,
+              expectedRequestIds,
+              decodedResponses,
               epochs,
             };
           },
@@ -804,6 +848,8 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
           blocked,
           drained,
           readerReceipt,
+          expectedRequestIds,
+          decodedResponses,
           epochs,
           trace: trace.filter((item) => item.runId === runId),
           primary: cycleError && { name: cycleError.name, message: cycleError.message },
