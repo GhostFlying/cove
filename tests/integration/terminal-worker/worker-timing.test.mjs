@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { WriteStream, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +25,7 @@ import {
   worker,
 } from "./pipe-harness.mjs";
 import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
+import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
 
 const childEntry = new URL("./fixtures/timing-exchange-child.mjs", import.meta.url).pathname;
 const fifoEntry = new URL("./fixtures/fifo-reader.mjs", import.meta.url).pathname;
@@ -214,6 +216,48 @@ test("controlled asynchronous settlement and unresolved cleanup remain distinct 
     count: 0,
     nonSuccessCount: 1,
   });
+});
+
+test("the shared drain tracker samples after production and keeps an immediate reblock distinct", async () => {
+  const writer = new EventEmitter();
+  const calls = [];
+  let blocked = true;
+  let reblock = false;
+  let tick = 0n;
+  const tracker = createDrainEpochTracker({
+    now: () => ++tick,
+    snapshot: () => ({ blocked }),
+    onStart: (time, epoch) => calls.push({ phase: "start", time, epoch }),
+    onEnd: (time, epoch) => calls.push({ phase: "end", time, epoch }),
+  });
+  tracker.arm();
+  tracker.noteWriteReturn(false);
+  tracker.attachBefore(writer);
+  writer.on("drain", () => {
+    blocked = false;
+    if (reblock) {
+      blocked = true;
+      tracker.noteWriteReturn(false);
+    }
+  });
+  tracker.attachAfter(writer);
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(tracker.current.blockedSnapshot.blocked).toBe(true);
+  writer.emit("drain");
+  expect(calls.at(-1)).toMatchObject({
+    phase: "end",
+    epoch: { after: { blocked: false }, reblockedBy: null },
+  });
+  blocked = true;
+  tracker.noteWriteReturn(false);
+  const old = tracker.current.sampleId;
+  reblock = true;
+  writer.emit("drain");
+  expect(tracker.lastDrained.sampleId).toBe(old);
+  expect(tracker.lastDrained.after.blocked).toBe(true);
+  expect(tracker.lastDrained.reblockedBy).toBe(tracker.current.sampleId);
+  expect(tracker.lastDrained.reblockedBy).not.toBe(old);
+  expect(calls.at(-1).time).toBeLessThan(tick);
 });
 
 test("four sequential owned PTYs measure native delivery, user settlement and closure", async () => {
@@ -581,32 +625,28 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
       const ingress = new PassThrough();
       let pipe;
       let writer;
-      let armed = false;
-      let current;
       let blocked;
       let drained;
       let readerReceipt;
       let readerIdentity;
       let released = false;
-      let count = 0;
-      const epochs = [];
+      const tracker = createDrainEpochTracker({
+        now: () => process.hrtime.bigint(),
+        snapshot: () => pipe.snapshot(),
+        onStart: (tick, epoch) =>
+          pointAt(tick, "pipe-block-to-drain", "start", runId, epoch.sampleId, epoch),
+        onEnd: (tick, epoch) => {
+          epoch.readerHeldAtDrain = !released;
+          pointAt(tick, "pipe-block-to-drain", "end", runId, epoch.sampleId, epoch);
+          drained = epoch;
+        },
+      });
+      const epochs = tracker.epochs;
       let cycleError;
       class ObservedWriter extends WriteStream {
         write(bytes, ...args) {
           const accepted = super.write(bytes, ...args);
-          const returnTick = process.hrtime.bigint();
-          if (armed && !accepted && !current) {
-            const sampleId = `${runId}:epoch:${count++}`;
-            current = { sampleId, bytes: bytes.length, before: pipe.snapshot(), readerIdentity };
-            epochs.push(current);
-            pointAt(returnTick, "pipe-block-to-drain", "start", runId, sampleId, current);
-            const epoch = current;
-            queueMicrotask(() =>
-              queueMicrotask(() => {
-                epoch.blockedSnapshot = pipe.snapshot();
-              }),
-            );
-          }
+          tracker.noteWriteReturn(accepted, { bytes: bytes.length, readerIdentity });
           return accepted;
         }
       }
@@ -644,16 +684,7 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
           setup: async (owner) => {
             readerIdentity = owner.initialObservation;
             writer = new ObservedWriter(fifoPath, { highWaterMark: 128 });
-            writer.on("drain", () => {
-              const drainTick = process.hrtime.bigint();
-              if (!current) return;
-              const epoch = current;
-              current = undefined;
-              epoch.after = pipe.snapshot();
-              epoch.readerHeldAtDrain = !released;
-              pointAt(drainTick, "pipe-block-to-drain", "end", runId, epoch.sampleId, epoch);
-              drained = epoch;
-            });
+            tracker.attachBefore(writer);
             pipe = runWorkerPipe(ingress, writer, {
               buildVersion: "timing-fifo",
               createExecution: () => ({
@@ -669,6 +700,7 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
                 shutdown: async () => [],
               }),
             });
+            tracker.attachAfter(writer);
             expect(await waitFifoReaderHandshake(owner)).toMatchObject({
               nonce,
               pid: owner.child.pid,
@@ -683,7 +715,7 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               8000,
               "FIFO ready",
             );
-            armed = true;
+            tracker.arm();
             const requests = Array.from({ length: 320 }, () =>
               command("preview-refresh", run(runId)),
             );
@@ -698,14 +730,13 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               );
             }
             blocked = pipe.snapshot();
-            expect(current).toBeDefined();
+            expect(tracker.current).toBeDefined();
             expect(blocked).toMatchObject({ state: "ready", blocked: true });
             expect(blocked.transportBytes).toBeGreaterThan(0);
-            const heldSample = current.sampleId;
-            armed = false;
+            const heldEpoch = tracker.current;
             released = true;
             owner.child.send("drain");
-            await until(() => drained?.sampleId === heldSample, 8000, "actual FIFO drain event");
+            await until(() => heldEpoch.after && heldEpoch, 8000, "actual FIFO drain event");
             await until(
               () => {
                 const snap = pipe.snapshot();
@@ -714,13 +745,16 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
               8000,
               "FIFO response settlement",
             );
+            tracker.disarm();
             const closed = await pipe.shutdown("timing-fifo-complete");
             expect(closed).toMatchObject({ disposalUnverifiable: false, uncertainRequestIds: [] });
             await until(() => writer.closed, 5000, "FIFO writer close");
             readerReceipt = await receipt(receiptPath, "same-reader bytes");
             expect(readerReceipt).toMatchObject({ nonce, pid: owner.child.pid });
             expect(await owner.exit).toEqual({ code: 0, signal: null });
-            expect(drained.after.blocked).toBe(false);
+            expect(
+              heldEpoch.reblockedBy === null || heldEpoch.reblockedBy !== heldEpoch.sampleId,
+            ).toBe(true);
             return {
               nonce,
               runId,
