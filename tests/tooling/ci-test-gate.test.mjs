@@ -1116,7 +1116,11 @@ test("W1 evidence suites reject missing, short, duplicate and unknown identities
       /Duplicate discovered identity/,
     );
     expect(() =>
-      verifyDiscovery([...cases, { ...cases[0], name: "unknown", file: resolve(root, "other.test.mjs") }], [file], [suite]),
+      verifyDiscovery(
+        [...cases, { ...cases[0], name: "unknown", file: resolve(root, "other.test.mjs") }],
+        [file],
+        [suite],
+      ),
     ).toThrow(/Unregistered Vitest suite/);
   }
 });
