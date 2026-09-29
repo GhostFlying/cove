@@ -47,6 +47,21 @@ export function summarizeTimingTrace(trace) {
   for (const pair of pairs.values()) {
     if (!pair.start || Boolean(pair.end) === Boolean(pair.outcome))
       throw Error("missing or conflicting timing endpoint");
+    if (
+      pair.boundary === "native-submit-to-settlement" ||
+      pair.boundary === "stop-to-owner-release"
+    ) {
+      const returned =
+        pair.start.detail?.[
+          pair.boundary === "native-submit-to-settlement" ? "admissionReturnTick" : "returnTick"
+        ];
+      if (
+        typeof returned !== "string" ||
+        !/^\d+$/.test(returned) ||
+        BigInt(returned) < BigInt(pair.start.tick)
+      )
+        throw Error("timing return observation missing");
+    }
     const key = `${pair.boundary}\0${pair.os}`;
     const group = groups.get(key) ?? {
       boundary: pair.boundary,
@@ -111,6 +126,8 @@ export function summarizeTimingTrace(trace) {
     } else {
       if (!pair.outcome.outcome || pair.outcome.outcome === "success")
         throw Error("invalid non-success timing outcome");
+      if (BigInt(pair.outcome.tick) < BigInt(pair.start.tick))
+        throw Error("negative non-success timing interval");
       group.nonSuccess.push({
         runId: pair.runId,
         sampleId: pair.sampleId,

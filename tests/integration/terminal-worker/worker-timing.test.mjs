@@ -27,6 +27,7 @@ import {
 } from "./pipe-harness.mjs";
 import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
 import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
+import { createObservedShutdown, createObservedSubmit } from "./worker-timing-ownership.mjs";
 import {
   FIFO_REQUESTS_PER_CYCLE,
   MAX_TIMING_OUTPUT_BYTES,
@@ -60,10 +61,6 @@ function pointAt(tick, boundary, phase, runId, sampleId, detail = {}, outcome) {
   };
   trace.push(value);
   return value;
-}
-
-function point(boundary, phase, runId, sampleId, detail = {}, outcome) {
-  return pointAt(process.hrtime.bigint(), boundary, phase, runId, sampleId, detail, outcome);
 }
 
 function preserve(name, value) {
@@ -187,97 +184,138 @@ test("the declared trace bound admits one native callback per emitted byte", () 
   expect(MAX_TIMING_TRACE_POINTS).toBeGreaterThan(maximallySplit.length);
 });
 
-test("controlled asynchronous settlement and unresolved cleanup remain distinct outcomes", async () => {
+test("shared native and shutdown observers retain rejected, late and uncertain outcomes", async () => {
   const controlled = [];
-  const base = (boundary, phase, id, tick, detail, outcome) => ({
-    boundary,
-    phase,
-    runId: "controlled",
-    sampleId: id,
-    os: "test-os",
-    pid: 1,
-    clock: "controlled-one-process",
-    tick,
-    detail,
-    ...(outcome && { outcome }),
-  });
+  let clockTick = 0n;
+  let mode = "written";
   let nextTicket = 1;
-  const fakeSubmit = (bytes, callback, fails) => {
-    const ticket = nextTicket++;
-    setImmediate(() =>
-      callback(
-        fails
-          ? {
-              kind: "unknown",
-              ticket,
-              status: "error",
-              originalBytes: bytes.length,
-              writtenBytes: 0,
-              remainingBytes: bytes.length,
-            }
-          : {
-              kind: "written",
-              ticket,
-              status: "written",
-              originalBytes: bytes.length,
-              writtenBytes: bytes.length,
-              remainingBytes: 0,
-            },
-      ),
-    );
-    return { kind: "accepted", ticket, byteLength: bytes.length, origin: "user" };
-  };
-  for (const fails of [false, true]) {
-    const id = fails ? "failed" : "written";
-    let settle;
-    const done = new Promise((resolve) => {
-      settle = resolve;
+  let pendingCallback;
+  let latestAdmission;
+  const now = () => ++clockTick;
+  const append = (boundary, phase, sampleId, tick, detail, outcome) =>
+    controlled.push({
+      boundary,
+      phase,
+      runId: "controlled",
+      sampleId,
+      os: "test-os",
+      pid: 1,
+      clock: "controlled-one-process",
+      tick: tick.toString(),
+      detail,
+      ...(outcome && { outcome }),
     });
-    const bytes = Buffer.from("x");
-    const start = base("native-submit-to-settlement", "start", id, "10", {
-      length: bytes.length,
-      admission: null,
-    });
-    controlled.push(start);
-    start.detail.admission = fakeSubmit(
-      bytes,
-      (result) => {
-        controlled.push(
-          base(
-            "native-submit-to-settlement",
-            result.kind === "written" ? "end" : "outcome",
-            id,
-            "20",
-            { settlement: result },
-            result.kind === "written" ? undefined : "settlement-unknown",
+  const observed = createObservedSubmit({
+    submit(bytes, callback) {
+      if (mode === "rejected" || mode === "unknown")
+        return (latestAdmission = { kind: mode, reason: "controlled" });
+      const ticket = nextTicket++;
+      latestAdmission = { kind: "accepted", ticket, byteLength: bytes.length, origin: "user" };
+      if (mode === "pending") pendingCallback = callback;
+      else
+        setImmediate(() =>
+          callback(
+            mode === "written"
+              ? { kind: "written", ticket, writtenBytes: bytes.length }
+              : {
+                  kind: "unknown",
+                  ticket,
+                  status: "error",
+                  originalBytes: bytes.length,
+                  writtenBytes: 0,
+                  remainingBytes: bytes.length,
+                },
           ),
         );
-        settle();
-      },
-      fails,
+      return latestAdmission;
+    },
+    now,
+    makeId: (index) => `input:${index}`,
+    describeBytes: () => ({ digest: "0".repeat(64) }),
+    onStart: (tick, item) =>
+      append("native-submit-to-settlement", "start", item.sampleId, tick, item),
+    onTerminal: (tick, item, phase, detail, outcome) =>
+      append("native-submit-to-settlement", phase, item.sampleId, tick, detail, outcome),
+  });
+  for (const nextMode of ["written", "failed", "rejected", "unknown", "pending"]) {
+    mode = nextMode;
+    let settled;
+    const done = new Promise((resolve) => {
+      settled = resolve;
+    });
+    const returned = observed.invoke(Buffer.from("x"), () => settled());
+    expect(returned).toBe(latestAdmission);
+    if (nextMode === "written" || nextMode === "failed") await done;
+    const item = observed.records.at(-1);
+    observed.observePublicResult(
+      item,
+      nextMode === "pending"
+        ? { type: "error", error: { kind: "RESULT_UNKNOWN" } }
+        : { type: "result", outcome: "accepted" },
     );
-    await done;
   }
-  controlled.push(base("stop-to-owner-release", "start", "unresolved", "30", { action: "stop" }));
-  controlled.push(
-    base(
-      "stop-to-owner-release",
-      "outcome",
-      "unresolved",
-      "40",
-      { writer: "pending" },
-      "unresolved",
-    ),
+  const terminalCount = controlled.filter((item) => item.phase !== "start").length;
+  pendingCallback({ kind: "written", ticket: latestAdmission.ticket, writtenBytes: 1 });
+  expect(controlled.filter((item) => item.phase !== "start")).toHaveLength(terminalCount);
+  expect(observed.records.at(-1).lateSettlements).toHaveLength(1);
+
+  const receipt = {
+    ownershipEvidence: "closure-proven",
+    writer: { kind: "closed" },
+    leader: { kind: "exit-observed" },
+  };
+  const shutdownControl = (sampleId, shutdown, ownerFacts) => {
+    let start;
+    return createObservedShutdown({
+      shutdown,
+      now,
+      ownerFacts,
+      onStart: (tick, detail) => {
+        start = { action: "execution.shutdown", ...detail };
+        append("stop-to-owner-release", "start", sampleId, tick, start);
+      },
+      onReturn: (tick, detail) => {
+        start.returnTick = tick.toString();
+        start.returnResult = detail;
+      },
+      onTerminal: (tick, phase, detail, outcome) =>
+        append("stop-to-owner-release", phase, sampleId, tick, detail, outcome),
+    });
+  };
+  const closed = shutdownControl(
+    "closed",
+    () => Promise.resolve([receipt]),
+    () => ({ observerExitTick: now(), writerCloseTick: now(), owners: 0 }),
   );
+  await closed.run("normal");
+  expect(closed.result.kind).toBe("closure-proven");
+  const unresolved = shutdownControl(
+    "unresolved",
+    () => Promise.resolve([]),
+    () => ({ observerExitTick: undefined, writerCloseTick: undefined, owners: 1 }),
+  );
+  await unresolved.run("timing-finally");
+  expect(unresolved.result.kind).toBe("closure-uncertain");
+  const rejected = shutdownControl(
+    "rejected",
+    () => Promise.reject(Error("controlled failure")),
+    () => ({ observerExitTick: undefined, writerCloseTick: undefined, owners: 1 }),
+  );
+  await expect(rejected.run("timing-finally")).rejects.toThrow("controlled failure");
   const summary = summarizeTimingTrace(controlled);
   expect(summary.find((item) => item.boundary === "native-submit-to-settlement")).toMatchObject({
     count: 1,
-    nonSuccessCount: 1,
+    nonSuccessCount: 4,
   });
   expect(summary.find((item) => item.boundary === "stop-to-owner-release")).toMatchObject({
-    count: 0,
-    nonSuccessCount: 1,
+    count: 1,
+    nonSuccessCount: 2,
   });
+  expect(
+    controlled
+      .filter((item) => item.phase === "start" && item.boundary === "stop-to-owner-release")
+      .every((item) => item.detail.returnTick),
+  ).toBe(true);
 });
 
 test("the shared drain tracker samples after production and keeps an immediate reblock distinct", async () => {
@@ -351,6 +389,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
       let start;
       let finish;
       let shutdown;
+      let observedSubmit;
       let cycleError;
       const native = createNativePtyFactory({
         maxOwners: 1,
@@ -401,48 +440,38 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
           void result.pty.writerCompletion.then(() => {
             writerCloseTick = process.hrtime.bigint();
           });
+          observedSubmit = createObservedSubmit({
+            submit: (bytes, callback) => result.pty.submit(bytes, callback),
+            now: () => process.hrtime.bigint(),
+            makeId: (index) => `${target.runId}:input:${index}`,
+            describeBytes: (bytes) => ({
+              digest: createHash("sha256").update(bytes).digest("hex"),
+            }),
+            onStart: (tick, item) => {
+              settlements.push(item);
+              pointAt(
+                tick,
+                "native-submit-to-settlement",
+                "start",
+                target.runId,
+                item.sampleId,
+                item,
+              );
+            },
+            onTerminal: (tick, item, phase, detail, outcome) =>
+              pointAt(
+                tick,
+                "native-submit-to-settlement",
+                phase,
+                target.runId,
+                item.sampleId,
+                detail,
+                outcome,
+              ),
+          });
           const pty = new Proxy(result.pty, {
             get(nativePty, key) {
-              if (key === "submit")
-                return (bytes, callback) => {
-                  const sampleId = `${target.runId}:input:${settlements.length}`;
-                  const item = {
-                    sampleId,
-                    length: bytes.length,
-                    digest: createHash("sha256").update(bytes).digest("hex"),
-                  };
-                  settlements.push(item);
-                  const entry = point(
-                    "native-submit-to-settlement",
-                    "start",
-                    target.runId,
-                    sampleId,
-                    item,
-                  );
-                  const admission = nativePty.submit(bytes, (settled) => {
-                    const settlementTick = process.hrtime.bigint();
-                    pointAt(
-                      settlementTick,
-                      "native-submit-to-settlement",
-                      settled.kind === "written" && settled.writtenBytes === bytes.length
-                        ? "end"
-                        : "outcome",
-                      target.runId,
-                      sampleId,
-                      { settlement: settled },
-                      settled.kind === "written" && settled.writtenBytes === bytes.length
-                        ? undefined
-                        : "settlement-unknown",
-                    );
-                    callback(settled);
-                  });
-                  item.admission = admission;
-                  item.admissionReturnTick = process.hrtime.bigint().toString();
-                  entry.detail.admissionReturnTick = item.admissionReturnTick;
-                  if (admission.kind !== "accepted")
-                    throw Error(`native input was not accepted: ${admission.kind}`);
-                  return admission;
-                };
+              if (key === "submit") return observedSubmit.invoke;
               const value = nativePty[key];
               return typeof value === "function" ? value.bind(nativePty) : value;
             },
@@ -471,6 +500,37 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
             });
           }
         },
+      });
+      const stopSampleId = `${target.runId}:stop`;
+      let stopStart;
+      const observedShutdown = createObservedShutdown({
+        shutdown: (reason) => execution.shutdown(reason),
+        now: () => process.hrtime.bigint(),
+        onStart: (tick, detail) => {
+          stopStart = pointAt(tick, "stop-to-owner-release", "start", target.runId, stopSampleId, {
+            action: "execution.shutdown",
+            ...detail,
+          });
+        },
+        onReturn: (tick, detail) => {
+          stopStart.detail.returnTick = tick.toString();
+          stopStart.detail.returnResult = detail;
+        },
+        onTerminal: (tick, phase, detail, outcome) =>
+          pointAt(
+            tick,
+            "stop-to-owner-release",
+            phase,
+            target.runId,
+            stopSampleId,
+            detail,
+            outcome,
+          ),
+        ownerFacts: () => ({
+          observerExitTick,
+          writerCloseTick,
+          owners: native.snapshot().owners,
+        }),
       });
       const getOutput = () => Buffer.concat(outputParts).toString("utf8");
       try {
@@ -508,7 +568,17 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
             epoch: 1,
             inputSeq: index + 1,
           });
-          expect(await execution.execute(input, payload)).toMatchObject({
+          const beforeInput = settlements.length;
+          let inputResult;
+          try {
+            inputResult = await execution.execute(input, payload);
+          } finally {
+            observedSubmit?.observePublicResult(
+              settlements[beforeInput],
+              inputResult ?? { kind: "public-execute-threw" },
+            );
+          }
+          expect(inputResult).toMatchObject({
             type: "result",
             outcome: "accepted",
             writtenBytes: payload.length,
@@ -536,66 +606,36 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         expect(deliveries.every((interval) => interval.completed)).toBe(true);
         expect(settlements).toHaveLength(exchanges);
         expect(faults).toEqual([]);
-        const sampleId = `${target.runId}:stop`;
-        point("stop-to-owner-release", "start", target.runId, sampleId, {
-          action: "execution.shutdown",
-        });
-        shutdown = await execution.shutdown("timing-measurement");
-        await Promise.resolve();
-        const closed =
-          shutdown.length === 1 &&
-          shutdown[0].ownershipEvidence === "closure-proven" &&
-          shutdown[0].writer.kind === "closed" &&
-          shutdown[0].leader.kind === "exit-observed" &&
-          observerExitTick &&
-          writerCloseTick &&
-          native.snapshot().owners === 0;
-        if (closed) {
-          const later = observerExitTick > writerCloseTick ? observerExitTick : writerCloseTick;
-          pointAt(later, "stop-to-owner-release", "end", target.runId, sampleId, {
-            observerExitTick: observerExitTick.toString(),
-            writerCloseTick: writerCloseTick.toString(),
-            receipt: shutdown[0],
-          });
-        } else {
-          point(
-            "stop-to-owner-release",
-            "outcome",
-            target.runId,
-            sampleId,
-            {
-              shutdown,
-              observerExitTick: observerExitTick?.toString(),
-              writerCloseTick: writerCloseTick?.toString(),
-              factory: native.snapshot(),
-            },
-            "closure-uncertain",
-          );
+        shutdown = await observedShutdown.run("timing-measurement");
+        if (observedShutdown.result?.kind !== "closure-proven")
           throw Error("owned timing cleanup is not closure-proven");
-        }
         await until(() => !psIdentity(start.pid), 5000, "timing PTY leader absence");
       } catch (error) {
         cycleError = error;
       } finally {
-        preserve(`timing-pty-${cycle}-${nonce}-before-cleanup`, {
-          clock,
-          os,
-          nonce,
-          start,
-          finish,
-          nativeBytes: nativeParts.map((part) => part.toString("hex")),
-          parsedBytes: outputParts.map((part) => part.toString("hex")),
-          deliveries,
-          settlements,
-          faults,
-          shutdown,
-          factory: native.snapshot(),
-          trace: trace.filter((item) => item.runId === target.runId),
-          primary: cycleError && { name: cycleError.name, message: cycleError.message },
-        });
-        if (!shutdown) {
+        try {
+          preserve(`timing-pty-${cycle}-${nonce}-before-cleanup`, {
+            clock,
+            os,
+            nonce,
+            start,
+            finish,
+            nativeBytes: nativeParts.map((part) => part.toString("hex")),
+            parsedBytes: outputParts.map((part) => part.toString("hex")),
+            deliveries,
+            settlements,
+            faults,
+            shutdown,
+            factory: native.snapshot(),
+            trace: trace.filter((item) => item.runId === target.runId),
+            primary: cycleError && { name: cycleError.name, message: cycleError.message },
+          });
+        } catch (error) {
+          cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
+        }
+        if (!observedShutdown.attempted) {
           try {
-            shutdown = await execution.shutdown("timing-finally");
+            shutdown = await observedShutdown.run("timing-finally");
           } catch (error) {
             cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
           }
@@ -605,14 +645,18 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         } catch (error) {
           cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
         }
-        preserve(`timing-pty-${cycle}-${nonce}-after-cleanup`, {
-          nonce,
-          start,
-          shutdown,
-          factory: native.snapshot(),
-          currentIdentity: start && psIdentity(start.pid),
-          primary: cycleError && { name: cycleError.name, message: cycleError.message },
-        });
+        try {
+          preserve(`timing-pty-${cycle}-${nonce}-after-cleanup`, {
+            nonce,
+            start,
+            shutdown,
+            factory: native.snapshot(),
+            currentIdentity: start && psIdentity(start.pid),
+            primary: cycleError && { name: cycleError.name, message: cycleError.message },
+          });
+        } catch (error) {
+          cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
+        }
         if (!cycleError) rmSync(dir, { recursive: true, force: true });
       }
       cyclesEvidence.push({
