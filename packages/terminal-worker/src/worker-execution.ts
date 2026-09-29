@@ -33,6 +33,7 @@ import {
 import { WorkerRetainedBytes, type RetainedLease } from "./worker-retained-bytes.js";
 import { ReplayWindow } from "./replay-window.js";
 import { RecoverySubscriptions } from "./recovery-subscription.js";
+import { PreviewService } from "./preview-service.js";
 
 export { createRunSession } from "./run-session.js";
 export type {
@@ -185,6 +186,7 @@ class WorkerExecutionCore {
   readonly #onFault: RunSessionOptions["onFault"];
   readonly #delivery: WorkerDeliveryPort | undefined;
   readonly #recovery: RecoverySubscriptions | undefined;
+  readonly #preview: PreviewService | undefined;
   readonly #runs = new Map<string, RunRecord>();
   readonly #pendingRequests = new Set<string>();
   readonly #account: WorkerRetainedBytes;
@@ -229,6 +231,13 @@ class WorkerExecutionCore {
         (bytes) => this.#account.reserve("worker", bytes),
         this.#delivery,
       );
+      this.#preview = new PreviewService(
+        this.#worker,
+        this.#budgets,
+        (bytes) => this.#account.reserve("worker", bytes),
+        this.#delivery,
+        (runId, operation) => this.#recovery!.capture(runId, operation),
+      );
     }
   }
 
@@ -255,6 +264,7 @@ class WorkerExecutionCore {
 
   deliveryCapacity(): void {
     this.#recovery?.capacity();
+    this.#preview?.capacity();
   }
 
   async execute(input: PipeCommand, payload?: Uint8Array): Promise<PipeResult | PipeError> {
@@ -377,7 +387,10 @@ class WorkerExecutionCore {
         return "result" in outcome ? outcome.result : correlatedError(command, outcome.failure);
       }
       if (command.type === "preview-refresh") {
-        return correlatedError(command, "CAPABILITY_UNAVAILABLE");
+        const outcome = await this.#preview!.refresh(command, record.run, () =>
+          record.capability!.capturePreview(),
+        );
+        return "result" in outcome ? outcome.result : correlatedError(command, outcome.failure);
       }
       const outcome = this.#recovery.command(command);
       return "result" in outcome ? outcome.result : correlatedError(command, outcome.failure);
@@ -608,6 +621,7 @@ class WorkerExecutionCore {
   shutdown(_reason: string): Promise<readonly RunSessionDisposalReceipt[]> {
     if (this.#shutdownPromise) return this.#shutdownPromise;
     this.#shuttingDown = true;
+    this.#preview?.shutdown();
     this.#recovery?.shutdown();
     for (const requestId of this.#routeCommandLeases.keys()) this.responseSettled(requestId);
     this.#routeControlHeadroom?.release();

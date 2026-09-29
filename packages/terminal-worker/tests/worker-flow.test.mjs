@@ -282,3 +282,105 @@ test("W2 pending capture expires with a correlated result and no late producer",
   }
   expect(account.snapshot().workerBytes).toBe(0);
 });
+
+test("W2 one slow route overflows without hiding a healthy peer's exact live facts", async () => {
+  const budgets = { ...M0_LIMITS, postNEvents: 1 };
+  const account = new WorkerRetainedBytes(budgets.workerBytes, budgets.reservedControlBytes);
+  const slow = { ...ref, subscriptionId: "slow" };
+  const healthy = { ...ref, subscriptionId: "healthy" };
+  const delivered = [];
+  let blockSlow = false;
+  const recovery = new RecoverySubscriptions(
+    worker,
+    budgets,
+    (bytes) => account.reserve("worker", bytes),
+    {
+      enqueue(event, payload) {
+        if (blockSlow && event.subscription.subscriptionId === "slow") return false;
+        delivered.push({ event, payload: Uint8Array.from(payload) });
+        return 16 + new TextEncoder().encode(JSON.stringify(event)).byteLength + payload.length;
+      },
+      cancelUnsent() {},
+    },
+  );
+  const source = {
+    run,
+    replay: new ReplayWindow(1024, 2, (bytes) => account.reserve("worker", bytes)),
+    captureBaseline: async (reserveDetached) => {
+      expect(reserveDetached(4097)).toBe(true);
+      return {
+        status: "ready",
+        baseline: {
+          profile: PROFILE,
+          encoding: BASELINE_ENCODING,
+          checkpointSeq: 0,
+          atSeq: 0,
+          captureGeometry: { cols: 12, rows: 4 },
+          currentGeometry: { cols: 12, rows: 4 },
+          coverage: {
+            normal: {
+              historyLines: 0,
+              includedHistoryLines: 0,
+              trimmedBefore: false,
+              resizeContext: "complete",
+            },
+            alternate: { included: true, resizeContext: "complete" },
+          },
+          vt: Uint8Array.from([65]),
+          tail: new Uint8Array(),
+          appearance: DEFAULT_APPEARANCE,
+        },
+      };
+    },
+  };
+  try {
+    for (const subscription of [slow, healthy]) {
+      const subscribe = command("subscribe", { subscription, atSeq: 0 });
+      const opened = await recovery.open(subscribe, source);
+      expect(opened.result.outcome).toBe("accepted");
+      recovery.markerEnqueued(subscribe, opened.result);
+      await tick();
+      const start = delivered.find(
+        (item) =>
+          item.event.subscription.subscriptionId === subscription.subscriptionId &&
+          item.event.terminal.type === "baseline-start",
+      );
+      const progress = command("baseline-progress", {
+        subscription,
+        baselineId: start.event.terminal.descriptor.baselineId,
+        lastParsedOrdinal: 0,
+      });
+      expect(recovery.command(progress).result.outcome).toBe("accepted");
+      expect(
+        recovery.command(command("applied-ack", { subscription, appliedSeq: 0 })).result.outcome,
+      ).toBe("accepted");
+    }
+    blockSlow = true;
+    recovery.onFact(run, { event: { type: "output", run, seq: 1 }, bytes: Uint8Array.from([66]) });
+    await tick();
+    recovery.onFact(run, { event: { type: "output", run, seq: 2 }, bytes: Uint8Array.from([67]) });
+    await tick();
+    expect(
+      recovery.command(command("applied-ack", { subscription: slow, appliedSeq: 0 })).failure,
+    ).toBe("RESYNC_REQUIRED");
+    expect(
+      delivered
+        .filter(
+          (item) =>
+            item.event.subscription.subscriptionId === "healthy" &&
+            item.event.terminal.type === "output",
+        )
+        .map((item) => [item.event.terminal.seq, item.payload[0]]),
+    ).toEqual([
+      [1, 66],
+      [2, 67],
+    ]);
+    expect(
+      recovery.command(command("applied-ack", { subscription: healthy, appliedSeq: 2 })).result
+        .outcome,
+    ).toBe("accepted");
+  } finally {
+    recovery.shutdown();
+  }
+  expect(account.snapshot().workerBytes).toBe(0);
+});
