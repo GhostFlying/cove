@@ -1,7 +1,7 @@
 import { TextDecoder, TextEncoder } from "node:util";
 import { describe, expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
-import { createTerminalDecoder } from "@cove/protocol/terminal";
+import { createTerminalDecoder, encodeTerminalFrame } from "@cove/protocol/terminal";
 import { TerminalLane } from "../dist/terminal-delivery.js";
 
 const encoder = new TextEncoder();
@@ -30,9 +30,7 @@ function laneFixture(onSend = () => "handed-off") {
       invalid: () => {
         throw new Error("unexpected invalid connection");
       },
-      preview: () => {
-        throw new Error("unexpected preview");
-      },
+      preview: () => "unrouteable",
     },
     { encode: (text) => encoder.encode(text), decodeFatal: () => "" },
     { nowMs: () => 0, setTimer: () => ({ dispose() {} }), yieldTurn: async () => {} },
@@ -70,7 +68,52 @@ function sentRequestId(bytes) {
   return JSON.parse(decoder.decode(read.frames[0].metadata)).requestId;
 }
 
+function resultFrame(metadata) {
+  const encoded = encodeTerminalFrame(
+    2,
+    encoder.encode(JSON.stringify(metadata)),
+    new Uint8Array(),
+  );
+  if (!encoded.ok) throw new Error("invalid fixture result");
+  return encoded.value;
+}
+
 describe("lane residual bounds — explicitly white-box compiled branch", () => {
+  test("224 result-first preview joins retain ordinary slots and leave only 32 control slots", async () => {
+    const { lane, sent } = laneFixture();
+    const completedResults = [];
+    for (let index = 1; index <= 224; index++) {
+      const requestId = `preview-${index}`;
+      completedResults.push(lane.send({ type: "preview", requestId, run }, 5_000));
+      lane.receive(
+        resultFrame({ type: "preview-result", requestId, run, status: "transfer", version: 1 }),
+        connection,
+      );
+    }
+    expect(lane.pendingCount).toBe(224);
+    expect(sent).toHaveLength(224);
+    expect(
+      await lane.send({ type: "preview", requestId: "preview-225", run }, 5_000),
+    ).toMatchObject({
+      ok: false,
+      error: { reason: "capacity" },
+    });
+    const progress = [];
+    for (let index = 1; index <= 32; index++)
+      progress.push(lane.send(ack(`held-ack-${index}`), 5_000));
+    expect(lane.pendingCount).toBe(256);
+    expect(await lane.send(ack("held-ack-33"), 5_000)).toMatchObject({
+      ok: false,
+      error: { reason: "capacity" },
+    });
+    for (let index = 1; index <= 224; index++) lane.cancelPreview(`preview-${index}`);
+    expect(lane.pendingCount).toBe(32);
+    lane.close("transport");
+    expect(lane.pendingCount).toBe(0);
+    expect((await Promise.all(completedResults)).every((value) => value.ok)).toBe(true);
+    expect((await Promise.all(progress)).every((value) => !value.ok)).toBe(true);
+  });
+
   test("224 actual handed-off input frames leave 32 slots for progress and cap total at 256", async () => {
     // Controller input serialization cannot naturally expose all 224 lane slots.
     const { lane, sent } = laneFixture();

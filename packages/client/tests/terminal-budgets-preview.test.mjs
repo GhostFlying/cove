@@ -206,6 +206,40 @@ describe("client preview transaction", () => {
     },
   );
 
+  test("result-first public request retains its logical lane slot until transfer completion", async () => {
+    const h = await harness();
+    const pending = h.client.getPreview(run);
+    h.peer.result(h.commands.at(-1), "transfer", 1);
+    // Counter observation is white-box; request and result use the public compiled path.
+    expect(h.client.terminalLane.pendingCount).toBe(1);
+    h.peer.transfer("held", 1, new Uint8Array([1]));
+    expect(await pending).toMatchObject({ ok: true, status: "transfer" });
+    expect(h.client.terminalLane.pendingCount).toBe(0);
+    expect(h.scheduler.active).toBe(0);
+    h.client.dispose();
+  });
+
+  test("result-first held slot retires once on deadline and on client disposal", async () => {
+    const expired = await harness();
+    const first = expired.client.getPreview(run);
+    expired.peer.result(expired.commands.at(-1), "transfer", 1);
+    expect(expired.client.terminalLane.pendingCount).toBe(1);
+    expired.scheduler.advance(5_000);
+    expect(await first).toMatchObject({ ok: false, error: { reason: "timeout" } });
+    expect(expired.client.terminalLane.pendingCount).toBe(0);
+    expect(expired.scheduler.active).toBe(0);
+    expired.client.dispose();
+
+    const disposed = await harness();
+    const second = disposed.client.getPreview(run);
+    disposed.peer.result(disposed.commands.at(-1), "transfer", 1);
+    expect(disposed.client.terminalLane.pendingCount).toBe(1);
+    disposed.client.dispose();
+    expect(await second).toMatchObject({ ok: false, error: { reason: "disposed" } });
+    expect(disposed.client.terminalLane.pendingCount).toBe(0);
+    expect(disposed.scheduler.active).toBe(0);
+  });
+
   test("accepts unchanged only for the matching supplied version", async () => {
     const h = await harness();
     const promise = h.client.getPreview(run, 5);
@@ -266,6 +300,45 @@ describe("client preview transaction", () => {
     h.client.dispose();
   });
 
+  test("interleaved same-connection runs each retain their own transfer", async () => {
+    const h = await harness();
+    const other = { ...run, runId: "run-2" };
+    const first = h.client.getPreview(run);
+    const second = h.client.getPreview(other);
+    const [firstCommand, secondCommand] = h.commands;
+    h.peer.result(secondCommand, "transfer", 2);
+    h.peer.emit(3, {
+      type: "preview-start",
+      run,
+      previewId: "first",
+      version: 1,
+      atSeq: 7,
+      geometry,
+      generatedAtMs: 123,
+      vtBytes: 1,
+      chunkCount: 1,
+    });
+    h.peer.transfer("second", 2, new Uint8Array([2]), other);
+    h.peer.emit(
+      3,
+      { type: "preview-chunk", run, previewId: "first", version: 1, ordinal: 0 },
+      new Uint8Array([1]),
+    );
+    h.peer.emit(3, {
+      type: "preview-end",
+      run,
+      previewId: "first",
+      version: 1,
+      atSeq: 7,
+      totalBytes: 1,
+    });
+    h.peer.result(firstCommand, "transfer", 1);
+    expect([...((await first).bytes ?? [])]).toEqual([1]);
+    expect([...((await second).bytes ?? [])]).toEqual([2]);
+    expect(h.client.terminalLane.pendingCount).toBe(0);
+    h.client.dispose();
+  });
+
   test("rejects chunk before start and duplicate chunk without retiring the live connection", async () => {
     const h = await harness();
     const first = h.client.getPreview(run);
@@ -300,6 +373,78 @@ describe("client preview transaction", () => {
     another.client.dispose();
   });
 
+  test("wrong preview ID and end sequence fail only the identified active run", async () => {
+    for (const mismatch of ["preview-id", "end-sequence"]) {
+      const h = await harness();
+      const pending = h.client.getPreview(run);
+      h.peer.emit(3, {
+        type: "preview-start",
+        run,
+        previewId: "selected",
+        version: 1,
+        atSeq: 7,
+        geometry,
+        generatedAtMs: 1,
+        vtBytes: 1,
+        chunkCount: 1,
+      });
+      h.peer.emit(
+        3,
+        {
+          type: "preview-chunk",
+          run,
+          previewId: mismatch === "preview-id" ? "other" : "selected",
+          version: 1,
+          ordinal: 0,
+        },
+        new Uint8Array([1]),
+      );
+      if (mismatch === "end-sequence")
+        h.peer.emit(3, {
+          type: "preview-end",
+          run,
+          previewId: "selected",
+          version: 1,
+          atSeq: 8,
+          totalBytes: 1,
+        });
+      expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+      expect(h.client.snapshot().status).toBe("connected");
+      h.client.dispose();
+    }
+  });
+
+  test("wrong request result cannot settle a preview; wrong correlated run invalidates connection", async () => {
+    const h = await harness();
+    const pending = h.client.getPreview(run);
+    const sent = h.commands.at(-1);
+    h.peer.emit(2, {
+      type: "preview-result",
+      requestId: "unknown-request",
+      run,
+      status: "transfer",
+      version: 1,
+    });
+    expect(h.client.terminalLane.pendingCount).toBe(1);
+    h.peer.result(sent, "transfer", 1);
+    h.peer.transfer("correct", 1, new Uint8Array([1]));
+    expect((await pending).ok).toBe(true);
+    h.client.dispose();
+
+    const wrongRun = await harness();
+    const other = wrongRun.client.getPreview(run);
+    wrongRun.peer.emit(2, {
+      type: "preview-result",
+      requestId: wrongRun.commands.at(-1).requestId,
+      run: { ...run, runId: "other" },
+      status: "transfer",
+      version: 1,
+    });
+    expect(wrongRun.client.snapshot().status).toBe("incompatible");
+    expect(await other).toMatchObject({ ok: false, error: { reason: "transport" } });
+    wrongRun.client.dispose();
+  });
+
   test("keeps an unseen timed-out transfer quarantined until explicit reconnect", async () => {
     const h = await harness();
     const first = h.client.getPreview(run);
@@ -319,6 +464,71 @@ describe("client preview transaction", () => {
     h.peer.result(h.commands.at(-1), "transfer", 4);
     expect(await next).toMatchObject({ ok: true, status: "transfer", version: 4 });
     h.client.dispose();
+  });
+
+  test("256 distinct ambiguous runs consume the entire connection fence budget", async () => {
+    const h = await harness({ onSend: () => "unknown" });
+    for (let index = 0; index < 256; index++) {
+      const distinct = { ...run, runId: `ambiguous-${index}` };
+      expect(await h.client.getPreview(distinct)).toMatchObject({ ok: false, uncertain: true });
+    }
+    expect(await h.client.getPreview({ ...run, runId: "ambiguous-256" })).toMatchObject({
+      ok: false,
+      error: { reason: "capacity" },
+    });
+    expect(h.commands).toHaveLength(256);
+    expect(h.scheduler.active).toBe(0);
+    h.client.dispose();
+  });
+
+  test("quarantine subsumes older retired IDs for the same run", async () => {
+    const h = await harness();
+    const first = h.client.getPreview(run);
+    h.peer.transfer("old-complete", 1, new Uint8Array([1]));
+    h.peer.result(h.commands.at(-1), "transfer", 1);
+    expect((await first).ok).toBe(true);
+    expect(h.client.terminalPreview.retiredCount).toBe(1);
+    const second = h.client.getPreview(run);
+    h.scheduler.advance(5_000);
+    expect(await second).toMatchObject({ ok: false, error: { reason: "timeout" } });
+    // The run fence covers all old IDs; there is no redundant retained ID charge.
+    expect(h.client.terminalPreview.retiredCount).toBe(0);
+    expect(h.client.terminalPreview.quarantined.size).toBe(1);
+    h.peer.transfer("old-complete", 1, new Uint8Array([1]));
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
+  });
+
+  test("unsolicited and wrong-run preview events invalidate the connected attempt", async () => {
+    const eventBytes = new Uint8Array([1]);
+    const unsolicited = await harness();
+    unsolicited.peer.transfer("unsolicited", 1, eventBytes);
+    expect(unsolicited.client.snapshot().status).toBe("incompatible");
+    unsolicited.client.dispose();
+
+    const wrongRun = await harness();
+    const pending = wrongRun.client.getPreview(run);
+    wrongRun.peer.transfer("wrong-run", 1, eventBytes, { ...run, runId: "other-run" });
+    expect(wrongRun.client.snapshot().status).toBe("incompatible");
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "transport" } });
+    wrongRun.client.dispose();
+  });
+
+  test("late known retired or quarantined identities stay local", async () => {
+    const completed = await harness();
+    const pending = completed.client.getPreview(run);
+    completed.peer.transfer("completed", 1, new Uint8Array([1]));
+    completed.peer.result(completed.commands.at(-1), "transfer", 1);
+    expect((await pending).ok).toBe(true);
+    completed.peer.transfer("completed", 1, new Uint8Array([1]));
+    expect(completed.client.snapshot().status).toBe("connected");
+    completed.client.dispose();
+
+    const ambiguous = await harness({ onSend: () => "unknown" });
+    expect(await ambiguous.client.getPreview(run)).toMatchObject({ ok: false, uncertain: true });
+    ambiguous.peer.transfer("late-unknown", 1, new Uint8Array([1]));
+    expect(ambiguous.client.snapshot().status).toBe("connected");
+    ambiguous.client.dispose();
   });
 
   test("retirement ledger refuses its 257th transfer identity without eviction", async () => {
@@ -355,7 +565,7 @@ describe("client preview transaction", () => {
     lower.client.dispose();
   });
 
-  test("controlled live ingress debt and current decoder reservation block preview retention", async () => {
+  test("white-box ingress lease and current decoder reservation block preview retention", async () => {
     const h = await harness();
     const start = {
       type: "preview-start",
@@ -371,7 +581,7 @@ describe("client preview transaction", () => {
     const frameLease = frame(3, start).byteLength * 3 + MAX_METADATA_BYTES * 3;
     const cap = M0_LIMITS.outboundConnectionBytes + M0_LIMITS.reservedControlBytes;
     const simulatedBlockedParse = cap - frameLease - M0_LIMITS.previewBytesPerRun + 1;
-    // The existing lane lease is the same counter used by blocked live parsers.
+    // This controlled lease projects blocked parser debt; it is not a public blocked view.
     expect(h.client.terminalLane.reserveIngress(simulatedBlockedParse)).toBe(true);
     const pending = h.client.getPreview(run);
     h.peer.emit(3, start);
