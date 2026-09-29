@@ -205,7 +205,27 @@ export type TerminalInputNotice =
   | { readonly kind: "input"; readonly outcome: TerminalInputOutcome }
   | { readonly kind: "renderer-rejection"; readonly error: DomainError };
 
+export type TerminalExecutionEvidence =
+  | { readonly status: "unverifiable"; readonly source: "none" | "terminal-get" }
+  | { readonly status: "live"; readonly source: "terminal-get" }
+  | {
+      readonly status: "exited";
+      readonly source: "terminal-get";
+      readonly seq: null;
+      readonly exitCode: null;
+      readonly signal: null;
+    }
+  | {
+      readonly status: "exited";
+      readonly source: "run-event";
+      readonly seq: number;
+      readonly exitCode: number | null;
+      readonly signal: string | null;
+    };
+
 export interface TerminalSnapshot {
+  readonly run: Readonly<RunRef>;
+  readonly execution: TerminalExecutionEvidence;
   readonly phase:
     "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
   readonly appliedSeq: number;
@@ -566,7 +586,7 @@ class CoveClient implements Client {
       if (operation) this.activeOperationIntents.delete(operation.operationId);
       return this.localCallFailure("capacity");
     }
-    return this.dispatchRpc(prepared, body, binding, operation);
+    return this.dispatchRpc(prepared, body, binding, operation, requestSequence);
   }
 
   getOperation(operationId: string): Promise<CallOutcome<ResultFor<"operation.get">>> {
@@ -1047,6 +1067,7 @@ class CoveClient implements Client {
     body: Uint8Array,
     binding: NegotiatedConnection,
     operation: OperationReference | undefined,
+    ordinal: number,
   ): Promise<CallOutcome<ResultFor<M>>> {
     const generation = this.generation;
     const requestId = prepared.request.id;
@@ -1065,6 +1086,25 @@ class CoveClient implements Client {
     let timerDisposalRequested = false;
     let timerDisposalStarted = false;
     let disposition: TransferDisposition | undefined;
+    type GetCapture = { readonly controller: RoutedTerminalController; readonly token: number };
+    let getCaptures: readonly GetCapture[] = [];
+    let getPublications: readonly GetCapture[] = [];
+
+    const installGetEvidence = (status: "live" | "unverifiable" | "exited"): void => {
+      const captures = getCaptures;
+      getCaptures = [];
+      if (prepared.method !== "terminal.get" || !captures.length) return;
+      if (generation !== this.generation || this.connection !== binding) return;
+      const publications: GetCapture[] = [];
+      for (const capture of captures) {
+        if (
+          this.controllers.has(capture.controller) &&
+          capture.controller.installGetEvidence(capture.token, ordinal, status)
+        )
+          publications.push(capture);
+      }
+      getPublications = publications;
+    };
 
     const disposeTimerOnce = (): void => {
       timerDisposalRequested = true;
@@ -1090,10 +1130,19 @@ class CoveClient implements Client {
       settlement = "settled";
       resolve(Object.freeze(outcome));
       if (!this.suppressRpcState) this.emitState();
+      for (const capture of getPublications)
+        if (this.controllers.has(capture.controller))
+          capture.controller.publishGetEvidence(capture.token);
+      getPublications = [];
     };
     const finish = (outcome: CallOutcome<ResultFor<M>>): void => {
       if (settlement !== "active") return;
       settlement = "settling";
+      installGetEvidence(
+        outcome.ok && prepared.method === "terminal.get"
+          ? (outcome.value as ResultFor<"terminal.get">).record.status
+          : "unverifiable",
+      );
       complete(outcome);
     };
     const completeUncertain = (reason: LocalErrorReason): void => {
@@ -1118,6 +1167,7 @@ class CoveClient implements Client {
     const uncertainOrLocal = (reason: LocalErrorReason): void => {
       if (settlement !== "active") return;
       settlement = "settling";
+      installGetEvidence("unverifiable");
       disposeTimerOnce();
       cancelOnce();
       if (postInProgress && !cancellation) {
@@ -1172,6 +1222,15 @@ class CoveClient implements Client {
             )
               return;
             // This boundary is monotonic even when post() reenters or throws.
+            if (prepared.method === "terminal.get") {
+              const target = (prepared.params as ParamsFor<"terminal.get">).run;
+              getCaptures = [...this.controllers]
+                .filter((controller) => controller.matchesRun(target))
+                .flatMap((controller) => {
+                  const token = controller.noteGetDispatched(ordinal);
+                  return token === null ? [] : [{ controller, token }];
+                });
+            }
             postEntered = true;
             postInProgress = true;
             const returnedCancellation = this.options.http.post(
