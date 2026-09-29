@@ -169,6 +169,17 @@ export class ReplayWindow {
     return true;
   }
 
+  evictOldestUnpinned(): boolean {
+    const index = this.#entries.findIndex((entry) => entry.refs === 1);
+    if (index < 0) return false;
+    const entry = this.#entries[index]!;
+    this.#entries.splice(index, 1);
+    entry.inWindow = false;
+    this.#bytes -= entry.charge;
+    this.#release(entry);
+    return true;
+  }
+
   #evict(): void {
     const entry = this.#entries.shift();
     if (!entry) return;

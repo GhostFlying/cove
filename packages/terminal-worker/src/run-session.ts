@@ -87,6 +87,7 @@ export type RunSessionOperation =
       readonly epoch: number;
       readonly inputSeq: number;
       readonly bytes: Uint8Array;
+      readonly beforeNativeInput?: () => boolean;
     };
 export type RunSessionOperationResult =
   | { readonly kind: "stopped"; readonly receipt: RunSessionDisposalReceipt }
@@ -982,6 +983,13 @@ class RunSessionCore {
         return { kind: "rejected", reason: "input-identity-cap" };
       // Attempted identities survive control loss and uncertain native completion.
       this.#inputSequences.set(key, operation.inputSeq);
+      // Reclamation is authorized only after this ordered authority and identity decision.
+      try {
+        if (operation.beforeNativeInput && !operation.beforeNativeInput())
+          return { kind: "rejected", reason: "worker-byte-limit" };
+      } catch {
+        return { kind: "rejected", reason: "worker-byte-limit" };
+      }
       return this.#writeInput(operation.bytes);
     }
     const current = await this.#model!.barrier();

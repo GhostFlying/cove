@@ -220,6 +220,31 @@ test("W2 memory-pressure eviction preserves pinned ownership and makes a gap req
   expect(account.snapshot().workerBytes).toBe(0);
 });
 
+test("W2 input-priority reclaim skips a pinned oldest fact and releases only an unpinned whole fact", () => {
+  const account = new WorkerRetainedBytes(16_384, 4112);
+  const replay = new ReplayWindow(4096, 4, (bytes) => account.reserve("worker", bytes));
+  replay.append({ event: { type: "output", run, seq: 1 }, bytes: Uint8Array.from([65]) });
+  replay.append({ event: { type: "output", run, seq: 2 }, bytes: Uint8Array.from([66]) });
+  const pin = replay.pin(1);
+  const before = account.snapshot().workerBytes;
+  expect(replay.evictOldestUnpinned()).toBe(true);
+  expect(replay.retainedEvents).toBe(1);
+  expect(replay.retainedBytes).toBe(retainedFactCharge(pin.fact));
+  expect(account.snapshot().workerBytes).toBe(
+    before -
+      retainedFactCharge({
+        event: { type: "output", run, seq: 2 },
+        bytes: Uint8Array.from([66]),
+      }),
+  );
+  expect(replay.evictOldestUnpinned()).toBe(false);
+  expect(replay.select(1, 2)).toBeUndefined();
+  replay.clear();
+  expect(account.snapshot().workerBytes).toBeGreaterThan(0);
+  pin.release();
+  expect(account.snapshot().workerBytes).toBe(0);
+});
+
 test("W2 replay eviction cannot retire an installed route's unacknowledged delivery", async () => {
   const account = new WorkerRetainedBytes(M0_LIMITS.workerBytes, M0_LIMITS.reservedControlBytes);
   const replay = new ReplayWindow(16_384, 4, (bytes) => account.reserve("worker", bytes));
