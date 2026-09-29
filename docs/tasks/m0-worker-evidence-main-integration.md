@@ -10,11 +10,11 @@ Independent source review APPROVED SHA-256 `ca1829c791a9cdec8ebfcfb71f597f8e155b
 
 ## Coverage ledger and registration
 
-| Gap | Source suite | Declared / expected runtime | Bounded observation |
-| --- | --- | ---: | --- |
-| A: invalid executable and cwd through the public native factory | `tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs` | 1 / 2 | Exact `missing-executable` and `missing-cwd` finite expansions, typed failure or created-adapter lifecycle, slot reuse after cleanup. |
-| B: query authority at 0/1/2 passive recipients and real reply-shaped user input | `tests/integration/terminal-worker/worker-query-observation.test.mjs` | 2 / 2 | Same automatic bytes across passive observation cardinalities; distinct automatic and authorized user-byte origins. |
-| C: four worker timing boundaries | `tests/integration/terminal-worker/worker-timing.test.mjs` | 7 / 7 | Host-monotonic public-boundary raw ticks, nearest-rank p50/p95/p99/max, finite positive and negative trace controls. |
+| Gap                                                                             | Source suite                                                             | Declared / expected runtime | Bounded observation                                                                                                                   |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | --------------------------: | ------------------------------------------------------------------------------------------------------------------------------------- |
+| A: invalid executable and cwd through the public native factory                 | `tests/integration/terminal-worker/worker-native-spawn-failure.test.mjs` |                       1 / 2 | Exact `missing-executable` and `missing-cwd` finite expansions, typed failure or created-adapter lifecycle, slot reuse after cleanup. |
+| B: query authority at 0/1/2 passive recipients and real reply-shaped user input | `tests/integration/terminal-worker/worker-query-observation.test.mjs`    |                       2 / 2 | Same automatic bytes across passive observation cardinalities; distinct automatic and authorized user-byte origins.                   |
+| C: four worker timing boundaries                                                | `tests/integration/terminal-worker/worker-timing.test.mjs`               |                       7 / 7 | Host-monotonic public-boundary raw ticks, nearest-rank p50/p95/p99/max, finite positive and negative trace controls.                  |
 
 The integration glob already owns all three files. `scripts/ci-test-gate.mjs` registers exact suite floors 1/2/7 and the two A runtime names; its discovery scanner rejects missing, short, duplicate and unknown identities. The ordinary check gate already sets `COVE_QUALIFICATION_EVIDENCE_DIR` to `.cache/ci/worker-qualification`, binding source/tree/run/attempt and pinned environment. `.github/workflows/check.yml` already uploads `.cache/ci/` even on failure, so no separate diagnostic workflow or CI change is needed.
 
