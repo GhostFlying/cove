@@ -193,6 +193,7 @@ export const requiredSuites = [
   },
   { project: "client", file: "packages/client/tests/terminal-lifecycle.test.mjs", minimumTests: 4 },
   { project: "client", file: "packages/client/tests/terminal-recovery.test.mjs", minimumTests: 40 },
+  { project: "client", file: "packages/client/tests/terminal-state.test.mjs", minimumTests: 11 },
   {
     project: "client",
     file: "packages/client/tests/terminal-control-input.test.mjs",
