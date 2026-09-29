@@ -31,8 +31,9 @@ function laneFixture(onSend = () => "handed-off") {
         throw new Error("unexpected invalid connection");
       },
       preview: () => "unrouteable",
+      previewReply: () => "unrouteable",
     },
-    { encode: (text) => encoder.encode(text), decodeFatal: () => "" },
+    { encode: (text) => encoder.encode(text), decodeFatal: (bytes) => decoder.decode(bytes) },
     { nowMs: () => 0, setTimer: () => ({ dispose() {} }), yieldTurn: async () => {} },
     () => `id-${++sequence}`,
   );
