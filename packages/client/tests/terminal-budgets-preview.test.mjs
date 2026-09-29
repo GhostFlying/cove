@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { createClient } from "@cove/client";
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import {
   createTerminalDecoder,
@@ -71,12 +72,14 @@ async function harness({
   budgets = {},
   capabilities = M0_CAPABILITIES,
   onSend,
+  createOpaqueId,
   scheduler = clock(),
 } = {}) {
   const commands = [];
   const attempts = [];
   let nextId = 0;
-  const client = createClient({
+  let client;
+  client = createClient({
     expectedServerId: identity.serverId,
     expectedRelayInstanceId: identity.relayInstanceId,
     buildVersion: "client-build",
@@ -85,7 +88,10 @@ async function harness({
       encode: (text) => encoder.encode(text),
       decodeFatal: (bytes) => decoder.decode(bytes),
     },
-    createOpaqueId: () => `request-${++nextId}`,
+    createOpaqueId: () => {
+      const id = ++nextId;
+      return createOpaqueId ? createOpaqueId(client, id) : `request-${id}`;
+    },
     scheduler,
     http: {
       post(_request, callbacks) {
@@ -414,10 +420,9 @@ describe("client preview transaction", () => {
     }
   });
 
-  test("wrong request result cannot settle a preview; wrong correlated run invalidates connection", async () => {
+  test("never-issued preview result invalidates the connection; wrong correlated run also invalidates", async () => {
     const h = await harness();
     const pending = h.client.getPreview(run);
-    const sent = h.commands.at(-1);
     h.peer.emit(2, {
       type: "preview-result",
       requestId: "unknown-request",
@@ -425,10 +430,8 @@ describe("client preview transaction", () => {
       status: "transfer",
       version: 1,
     });
-    expect(h.client.terminalLane.pendingCount).toBe(1);
-    h.peer.result(sent, "transfer", 1);
-    h.peer.transfer("correct", 1, new Uint8Array([1]));
-    expect((await pending).ok).toBe(true);
+    expect(h.client.snapshot().status).toBe("incompatible");
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "transport" } });
     h.client.dispose();
 
     const wrongRun = await harness();
@@ -443,6 +446,58 @@ describe("client preview transaction", () => {
     expect(wrongRun.client.snapshot().status).toBe("incompatible");
     expect(await other).toMatchObject({ ok: false, error: { reason: "transport" } });
     wrongRun.client.dispose();
+  });
+
+  test("completed preview request IDs retire locally while a new unknown ID invalidates", async () => {
+    const h = await harness();
+    const pending = h.client.getPreview(run, 1);
+    const sent = h.commands.at(-1);
+    h.peer.result(sent, "unchanged", 1);
+    expect(await pending).toMatchObject({ ok: true, status: "unchanged" });
+    h.peer.result(sent, "unchanged", 1);
+    expect(h.client.snapshot().status).toBe("connected");
+    h.peer.emit(2, {
+      type: "preview-result",
+      requestId: "never-issued",
+      run,
+      status: "transfer",
+      version: 2,
+    });
+    expect(h.client.snapshot().status).toBe("incompatible");
+    h.client.dispose();
+  });
+
+  test("a rejected preview error retires its request ID but an unissued error invalidates", async () => {
+    const h = await harness();
+    const pending = h.client.getPreview(run);
+    const sent = h.commands.at(-1);
+    const rejected = {
+      type: "error",
+      requestId: sent.requestId,
+      run,
+      commandType: "preview",
+      error: domainError("RUN_NOT_FOUND"),
+    };
+    h.peer.emit(4, rejected);
+    expect(await pending).toMatchObject({ ok: false, uncertain: false });
+    h.peer.emit(4, rejected);
+    expect(h.client.snapshot().status).toBe("connected");
+    h.peer.emit(4, { ...rejected, requestId: "never-issued-error" });
+    expect(h.client.snapshot().status).toBe("incompatible");
+    h.client.dispose();
+  });
+
+  test("duplicate result after result-first transfer fails only its active preview", async () => {
+    const h = await harness();
+    const pending = h.client.getPreview(run);
+    const sent = h.commands.at(-1);
+    h.peer.result(sent, "transfer", 1);
+    expect(h.client.terminalLane.pendingCount).toBe(1);
+    h.peer.result(sent, "transfer", 1);
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.terminalLane.pendingCount).toBe(0);
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
   });
 
   test("keeps an unseen timed-out transfer quarantined until explicit reconnect", async () => {
@@ -491,10 +546,11 @@ describe("client preview transaction", () => {
     const second = h.client.getPreview(run);
     h.scheduler.advance(5_000);
     expect(await second).toMatchObject({ ok: false, error: { reason: "timeout" } });
-    // The run fence covers all old IDs; there is no redundant retained ID charge.
-    expect(h.client.terminalPreview.retiredCount).toBe(0);
+    // The run fence subsumes event IDs; the old request ID still proves a late result.
+    expect(h.client.terminalPreview.retiredCount).toBe(1);
     expect(h.client.terminalPreview.quarantined.size).toBe(1);
     h.peer.transfer("old-complete", 1, new Uint8Array([1]));
+    h.peer.result(h.commands[0], "transfer", 1);
     expect(h.client.snapshot().status).toBe("connected");
     h.client.dispose();
   });
@@ -546,6 +602,91 @@ describe("client preview transaction", () => {
     expect(h.commands).toHaveLength(256);
     expect(h.scheduler.active).toBe(0);
     h.client.dispose();
+  });
+
+  test("opaque ID supplier reentry cannot issue a second preview for the same run", async () => {
+    let armed = false;
+    let nested;
+    const h = await harness({
+      createOpaqueId(client, id) {
+        if (armed) {
+          armed = false;
+          nested = client.getPreview(run);
+        }
+        return `request-${id}`;
+      },
+    });
+    armed = true;
+    const outer = h.client.getPreview(run);
+    expect(await nested).toMatchObject({ ok: false, error: { reason: "capacity" } });
+    expect(h.commands).toHaveLength(1);
+    h.peer.transfer("outer", 1, new Uint8Array([1]));
+    h.peer.result(h.commands[0], "transfer", 1);
+    expect((await outer).ok).toBe(true);
+    expect(h.client.terminalPreview.provisional.size).toBe(0);
+    h.client.dispose();
+  });
+
+  test("provisional fence blocks distinct-run ID reentry at the 256th entry", async () => {
+    let armed = false;
+    let nested;
+    const h = await harness({
+      onSend: () => "unknown",
+      createOpaqueId(client, id) {
+        if (armed) {
+          armed = false;
+          nested = client.getPreview({ ...run, runId: "nested-257" });
+        }
+        return `request-${id}`;
+      },
+    });
+    for (let index = 0; index < 255; index++) {
+      expect(await h.client.getPreview({ ...run, runId: `fenced-${index}` })).toMatchObject({
+        ok: false,
+        uncertain: true,
+      });
+    }
+    armed = true;
+    const outer = h.client.getPreview({ ...run, runId: "outer-256" });
+    expect(await nested).toMatchObject({ ok: false, error: { reason: "capacity" } });
+    expect(await outer).toMatchObject({ ok: false, uncertain: true });
+    expect(h.commands).toHaveLength(256);
+    expect(new Set(h.commands.map((value) => value.requestId)).size).toBe(256);
+    expect(h.client.terminalPreview.provisional.size).toBe(0);
+    expect(h.client.terminalPreview.quarantined.size).toBe(256);
+    h.client.dispose();
+  });
+
+  test("rejected and throwing IDs release provisional ownership; connection change fences send", async () => {
+    let mode = "invalid";
+    const h = await harness({
+      createOpaqueId(client, id) {
+        if (mode === "invalid") return "";
+        if (mode === "throw") throw new Error("supplier failed");
+        if (mode === "dispose") client.dispose();
+        return `request-${id}`;
+      },
+    });
+    for (const rejected of ["invalid", "throw"]) {
+      mode = rejected;
+      expect(await h.client.getPreview(run)).toMatchObject({
+        ok: false,
+        error: { reason: "capacity" },
+      });
+      expect(h.client.terminalPreview.provisional.size).toBe(0);
+    }
+    mode = "valid";
+    const pending = h.client.getPreview(run, 1);
+    h.peer.result(h.commands.at(-1), "unchanged", 1);
+    expect((await pending).ok).toBe(true);
+    mode = "dispose";
+    expect(await h.client.getPreview({ ...run, runId: "on-dispose" })).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    expect(h.commands).toHaveLength(1);
+    expect(h.client.terminalPreview.provisional.size).toBe(0);
+    expect(h.client.terminalPreview.retiredCount).toBe(0);
   });
 
   test("accepts the exact 64KiB payload and rejects an effective cap excess", async () => {

@@ -70,6 +70,9 @@ export interface TerminalLaneOwner {
     >,
     bytes: Uint8Array,
   ): "active" | "obsolete" | "unrouteable";
+  previewReply(
+    reply: Extract<TerminalResult, { type: "preview-result" }> | TerminalError,
+  ): "active" | "obsolete" | "unrouteable";
 }
 
 // The lane owns correlation and the only ordered terminal send path; controllers own parsing.
@@ -100,6 +103,8 @@ export class TerminalLane {
   nextRequestId(generation: number): string | null {
     const next = this.requestSequence + 1;
     if (!Number.isSafeInteger(next)) return null;
+    // Reserve the suffix before an injected ID supplier can synchronously reenter.
+    this.requestSequence = next;
     let supplied: string;
     try {
       supplied = this.createOpaqueId();
@@ -107,7 +112,6 @@ export class TerminalLane {
       return null;
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(supplied)) return null;
-    this.requestSequence = next;
     const suffix = `.t${generation}.${next}`;
     return `${supplied.slice(0, 128 - suffix.length)}${suffix}`;
   }
@@ -398,7 +402,25 @@ export class TerminalLane {
       }
       const reply = value as TerminalResult | TerminalError;
       const pending = this.pending.get(reply.requestId);
-      if (!pending || pending.settled) return; // A retired command may finish late.
+      if (!pending || pending.settled) {
+        const previewReply =
+          frame.kind === 2
+            ? (reply as TerminalResult).type === "preview-result"
+            : (reply as TerminalError).commandType === "preview";
+        if (previewReply) {
+          let route: "active" | "obsolete" | "unrouteable";
+          try {
+            route = this.owner.previewReply(
+              reply as Extract<TerminalResult, { type: "preview-result" }> | TerminalError,
+            );
+          } catch {
+            this.owner.invalid();
+            return;
+          }
+          if (route === "unrouteable") this.owner.invalid();
+        }
+        return;
+      }
       if (frame.kind === 4) {
         const error = reply as TerminalError;
         if (
