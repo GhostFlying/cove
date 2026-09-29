@@ -119,10 +119,13 @@ export class TerminalControl {
     return true;
   }
 
-  apply(fact: object): void {
+  apply(fact: object): ControlFact | undefined {
     const canonical = this.canonicalFacts.get(fact);
-    if (canonical && (!this.applied || canonical.epoch >= this.applied.epoch))
+    if (canonical && (!this.applied || canonical.epoch >= this.applied.epoch)) {
       this.applied = canonical;
+      return canonical;
+    }
+    return undefined;
   }
 
   ready(ref: SubscriptionRef, viewGeneration: number, appliedSeq: number): boolean {

@@ -30,6 +30,8 @@ import type {
   LocalErrorReason,
   TerminalController,
   TerminalControlReceipt,
+  TerminalAppliedAuthority,
+  TerminalAppliedGeometry,
   TerminalExecutionEvidence,
   TerminalInputOutcome,
   TerminalInputNotice,
@@ -38,6 +40,7 @@ import type {
   TerminalOutcome,
   TerminalReady,
   TerminalSnapshot,
+  ReadonlyTerminalControlHolder,
 } from "./client.js";
 import type { NegotiatedConnection } from "./connection-session.js";
 import { TerminalLane, type CommandOutcome } from "./terminal-delivery.js";
@@ -59,6 +62,7 @@ interface Operation {
   mode?: "baseline" | "replay";
   atSeq?: number;
   readonly priorParses: readonly Promise<void>[];
+  readonly resumeGeometry?: TerminalAppliedGeometry;
   markerAttempted: boolean;
   attachDisposition?: "not-accepted" | "accepted" | "unknown";
 }
@@ -121,6 +125,28 @@ function identityCopy(ref: SubscriptionRef): SubscriptionRef {
   });
 }
 
+function geometryFact(geometry: Geometry, atSeq: number): TerminalAppliedGeometry {
+  return Object.freeze({ geometry: Object.freeze({ ...geometry }), atSeq });
+}
+
+function authorityFact(
+  epoch: number,
+  holder: ReadonlyTerminalControlHolder | null,
+  atSeq: number,
+): TerminalAppliedAuthority {
+  return Object.freeze({
+    epoch,
+    holder: holder
+      ? Object.freeze({
+          connection: Object.freeze({ ...holder.connection }),
+          viewId: holder.viewId,
+          subscriptionId: holder.subscriptionId,
+        })
+      : null,
+    atSeq,
+  });
+}
+
 function inputReceipt(
   source: TerminalInputSource,
   total: number,
@@ -178,6 +204,8 @@ export class RoutedTerminalController implements TerminalController {
   private provenSeq = 0;
   private retainedModel = false;
   private retainedGeometry: Geometry | undefined;
+  private appliedGeometry: TerminalAppliedGeometry | null = null;
+  private appliedAuthority: TerminalAppliedAuthority | null = null;
   private baseline: BaselineDescriptor | undefined;
   private baselineOrdinal = 0;
   private baselineBytes = 0;
@@ -328,6 +356,7 @@ export class RoutedTerminalController implements TerminalController {
     if (
       this.retainedModel &&
       this.retainedGeometry &&
+      this.appliedGeometry &&
       ![...this.viewWork.values()].some((work) => work.view === this.view) &&
       reason !== "gap" &&
       reason !== "resize-context"
@@ -359,7 +388,11 @@ export class RoutedTerminalController implements TerminalController {
     )
       return Promise.resolve(errorOutcome(localError("invalid-state")));
     if ([...this.viewWork.values()].some((work) => work.view === this.view)) resume = undefined;
-    const operation = this.beginOperation(binding, "recover");
+    const resumeGeometry =
+      resume && this.appliedGeometry
+        ? geometryFact(this.appliedGeometry.geometry, this.appliedGeometry.atSeq)
+        : undefined;
+    const operation = this.beginOperation(binding, "recover", resumeGeometry);
     if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (operation.settled) return operation.promise;
     this.control.resetForRecovery();
@@ -934,7 +967,17 @@ export class RoutedTerminalController implements TerminalController {
       this.control.ready(this.ref, this.viewGeneration, this.appliedSeq);
     return Object.freeze({
       run: Object.freeze({ ...this.run }),
-      execution: this.execution,
+      execution: Object.freeze({ ...this.execution }),
+      appliedGeometry: this.appliedGeometry
+        ? geometryFact(this.appliedGeometry.geometry, this.appliedGeometry.atSeq)
+        : null,
+      appliedAuthority: this.appliedAuthority
+        ? authorityFact(
+            this.appliedAuthority.epoch,
+            this.appliedAuthority.holder,
+            this.appliedAuthority.atSeq,
+          )
+        : null,
       phase: this.phase,
       appliedSeq: this.appliedSeq,
       viewGeneration: this.viewGeneration,
@@ -1043,11 +1086,14 @@ export class RoutedTerminalController implements TerminalController {
   private beginOperation(
     binding: NegotiatedConnection,
     kind: "attach" | "recover",
+    resumeGeometry?: TerminalAppliedGeometry,
   ): Operation | null {
     const token = nextCounter(this.token);
     if (token === null) return null;
     this.token = token;
     this.resetExecution();
+    this.appliedGeometry = null;
+    this.appliedAuthority = null;
     // The correlated result is the downlink barrier; same-ref events before it are stale.
     this.clearQueued();
     this.baseline = undefined;
@@ -1072,6 +1118,7 @@ export class RoutedTerminalController implements TerminalController {
       priorParses: [...this.viewWork.values()]
         .filter((work) => work.view === this.view)
         .map((work) => work.promise),
+      ...(resumeGeometry ? { resumeGeometry } : {}),
     };
     this.operation = operation;
     if (kind === "recover") {
@@ -1150,6 +1197,10 @@ export class RoutedTerminalController implements TerminalController {
       if (result.mode === "replay" && !this.retainedModel) {
         this.fail(localError("invalid-response"), operation.token);
         return;
+      }
+      if (result.mode === "baseline") {
+        this.retainedModel = false;
+        this.retainedGeometry = undefined;
       }
       this.phase = result.mode === "baseline" ? "baseline" : "replay";
       this.publish();
@@ -1251,16 +1302,24 @@ export class RoutedTerminalController implements TerminalController {
       await view.initialize({
         profile: PROFILE,
         encoding: BASELINE_ENCODING,
-        geometry: descriptor.captureGeometry,
+        geometry: Object.freeze({ ...descriptor.captureGeometry }),
         appearance: this.appearance,
         viewGeneration: generation,
       });
       if (item.token !== this.token) return;
-      await view.beginBaseline({
-        ...descriptor,
-        run: Object.freeze({ ...descriptor.run }),
-        subscription: identityCopy(descriptor.subscription),
-      });
+      await view.beginBaseline(
+        Object.freeze({
+          ...descriptor,
+          run: Object.freeze({ ...descriptor.run }),
+          subscription: identityCopy(descriptor.subscription),
+          captureGeometry: Object.freeze({ ...descriptor.captureGeometry }),
+          currentGeometry: Object.freeze({ ...descriptor.currentGeometry }),
+          coverage: Object.freeze({
+            normal: Object.freeze({ ...descriptor.coverage.normal }),
+            alternate: Object.freeze({ ...descriptor.coverage.alternate }),
+          }),
+        }),
+      );
       this.finishViewWork(item);
       return;
     }
@@ -1302,7 +1361,9 @@ export class RoutedTerminalController implements TerminalController {
       this.appliedSeq = event.atSeq;
       this.provenSeq = Math.max(this.provenSeq, event.atSeq);
       this.retainedModel = true;
-      this.retainedGeometry = this.baseline.currentGeometry;
+      this.retainedGeometry = Object.freeze({ ...this.baseline.currentGeometry });
+      this.appliedGeometry = geometryFact(this.baseline.currentGeometry, event.atSeq);
+      this.appliedAuthority = null;
       this.baseline = undefined;
       this.commit(operation);
       return;
@@ -1331,9 +1392,19 @@ export class RoutedTerminalController implements TerminalController {
     if (item.token !== this.token) return;
     this.appliedSeq = factSeq;
     this.provenSeq = Math.max(this.provenSeq, factSeq);
-    if (factType === "control") this.control.apply(fact);
+    if (factType === "control") {
+      const applied = this.control.apply(fact);
+      if (applied) {
+        this.appliedGeometry = geometryFact(applied.geometry, applied.seq);
+        this.appliedAuthority = authorityFact(applied.epoch, applied.holder, applied.seq);
+        this.retainedGeometry = Object.freeze({ ...applied.geometry });
+      }
+    }
     if (appearance) this.appearance = appearance;
-    if (resizeGeometry) this.retainedGeometry = resizeGeometry;
+    if (resizeGeometry) {
+      this.retainedGeometry = Object.freeze({ ...resizeGeometry });
+      this.appliedGeometry = geometryFact(resizeGeometry, factSeq);
+    }
     if (this.phase === "replay" && operation && this.appliedSeq === operation.atSeq)
       this.commit(operation);
     else if (this.phase === "ready") this.sendAck(this.appliedSeq);
@@ -1345,6 +1416,11 @@ export class RoutedTerminalController implements TerminalController {
     // Parsed N is usable only after ACK N enters the ordered uplink.
     this.sendAck(this.appliedSeq, () => {
       if (this.operation !== operation || operation.settled) return;
+      if (operation.mode === "replay" && !this.appliedGeometry && operation.resumeGeometry)
+        this.appliedGeometry = geometryFact(
+          operation.resumeGeometry.geometry,
+          operation.resumeGeometry.atSeq,
+        );
       this.phase = "ready";
       this.retainedModel = true;
       this.autoRecoveryUsed = false;
@@ -1528,6 +1604,8 @@ export class RoutedTerminalController implements TerminalController {
     this.baseline = undefined;
     this.retainedModel = false;
     this.retainedGeometry = undefined;
+    this.appliedGeometry = null;
+    this.appliedAuthority = null;
     this.ackInFlight = false;
     this.pendingAck = undefined;
     this.progressInFlight = false;

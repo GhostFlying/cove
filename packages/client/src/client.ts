@@ -11,6 +11,7 @@ import {
   nextCounter,
   OpaqueIdSchema,
   RunRefSchema,
+  type ConnectionRef,
   type RunRef,
   type SubscriptionRef,
 } from "@cove/protocol/identity";
@@ -223,9 +224,28 @@ export type TerminalExecutionEvidence =
       readonly signal: string | null;
     };
 
+export interface ReadonlyTerminalControlHolder {
+  readonly connection: Readonly<ConnectionRef>;
+  readonly viewId: string;
+  readonly subscriptionId: string;
+}
+
+export interface TerminalAppliedGeometry {
+  readonly geometry: Readonly<Geometry>;
+  readonly atSeq: number;
+}
+
+export interface TerminalAppliedAuthority {
+  readonly epoch: number;
+  readonly holder: ReadonlyTerminalControlHolder | null;
+  readonly atSeq: number;
+}
+
 export interface TerminalSnapshot {
   readonly run: Readonly<RunRef>;
   readonly execution: TerminalExecutionEvidence;
+  readonly appliedGeometry: TerminalAppliedGeometry | null;
+  readonly appliedAuthority: TerminalAppliedAuthority | null;
   readonly phase:
     "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
   readonly appliedSeq: number;
