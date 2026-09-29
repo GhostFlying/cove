@@ -1092,6 +1092,35 @@ test("compiled worker qualification suites cannot disappear or shrink", async ()
   }
 });
 
+test("W1 evidence suites reject missing, short, duplicate and unknown identities", async () => {
+  for (const [name, minimumTests] of [
+    ["worker-native-spawn-failure", 1],
+    ["worker-query-observation", 2],
+    ["worker-timing", 7],
+  ]) {
+    const file = `tests/integration/terminal-worker/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "terminal-worker", minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(file);
+    const cases = Array.from({ length: minimumTests }, (_, index) => ({
+      projectName: "terminal-worker",
+      file: resolve(root, file),
+      name: `case ${index}`,
+    }));
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests/);
+    expect(() => verifyDiscovery(cases.slice(0, -1), [file], [suite])).toThrow(/needs/);
+    expect(verifyDiscovery(cases, [file], [suite]).found.get(`terminal-worker:${file}`)).toBe(
+      minimumTests,
+    );
+    expect(() => verifyDiscovery([...cases, cases[0]], [file], [suite])).toThrow(
+      /Duplicate discovered identity/,
+    );
+    expect(() =>
+      verifyDiscovery([...cases, { ...cases[0], name: "unknown", file: resolve(root, "other.test.mjs") }], [file], [suite]),
+    ).toThrow(/Unregistered Vitest suite/);
+  }
+});
+
 test("finite worker templates require every exact expanded runtime identity", () => {
   const groups = Map.groupBy(finiteRuntimeExpansions, ({ project, file }) => `${project}:${file}`);
   for (const expansions of groups.values()) {
