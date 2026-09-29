@@ -298,8 +298,7 @@ class WorkerExecutionCore {
     const reservedRoute =
       command.type === "applied-ack" ||
       command.type === "baseline-progress" ||
-      command.type === "unsubscribe" ||
-      command.type === "recover";
+      command.type === "unsubscribe";
     if (
       reservedStatus
         ? this.#reservedStatusPending
@@ -327,6 +326,15 @@ class WorkerExecutionCore {
           : COMMAND_RECORD_BYTES +
             Buffer.byteLength(JSON.stringify(command)) +
             (payload?.byteLength ?? 0);
+    if (
+      command.type === "input" &&
+      payload &&
+      this.#runs.get(command.run.runId)?.session &&
+      this.#recovery?.installed(command.subscription)
+    ) {
+      // The W1 native-input queue retains two byte copies plus its 768-byte ticket.
+      this.#reclaimReplay(charge + 2 * payload.byteLength + 768);
+    }
     const routeLease =
       reservedRoute && !this.#routeControlHeadroom
         ? this.#account.reserve("worker", charge)
@@ -518,7 +526,7 @@ class WorkerExecutionCore {
         ...(this.#onFact && { onFact: this.#onFact }),
         onRetainedFact: (fact) => {
           record.replay.append(fact);
-          this.#recovery?.onFact(record.run, fact);
+          this.#recovery?.onFact(record.run, fact, record.replay);
         },
         isSubscriptionInstalled: (subscription) => this.#recovery?.installed(subscription) ?? false,
         ...(this.#onFault && { onFault: this.#onFault }),
@@ -647,6 +655,15 @@ class WorkerExecutionCore {
     leases.push(lease);
     this.#workerLeases.set(bytes, leases);
     return true;
+  }
+
+  #reclaimReplay(neededBytes: number): void {
+    const replays = [...this.#runs.values()].map((record) => record.replay);
+    while (this.#account.availableOrdinaryBytes() < neededBytes) {
+      let evicted = false;
+      for (const replay of replays) evicted = replay.evictOldest() || evicted;
+      if (!evicted) break;
+    }
   }
 
   #releaseBytes(bytes: number): void {

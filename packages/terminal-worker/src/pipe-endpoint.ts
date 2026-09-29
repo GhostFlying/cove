@@ -294,8 +294,7 @@ class WorkerPipeCore {
     if (
       command.type === "applied-ack" ||
       command.type === "baseline-progress" ||
-      command.type === "unsubscribe" ||
-      command.type === "recover"
+      command.type === "unsubscribe"
     )
       return "route";
     return "ordinary";

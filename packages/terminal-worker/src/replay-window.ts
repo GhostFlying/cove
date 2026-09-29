@@ -1,7 +1,20 @@
 import type { RunEvent } from "@cove/protocol/terminal";
 import type { RetainedLease } from "./worker-retained-bytes.js";
 
-const FACT_RECORD_BYTES = 128;
+const FACT_RECORD_BYTES = 256;
+const SELECTED_REFERENCE_BYTES = 64;
+
+// JSON's code-unit length bounds cloned string content even when UTF-8 is shorter.
+export function retainedFactCharge(fact: RetainedFact): number {
+  const paletteObjects =
+    fact.event.type === "appearance" ? 64 * fact.event.appearance.palette.length : 0;
+  return (
+    FACT_RECORD_BYTES +
+    2 * JSON.stringify(fact.event).length +
+    paletteObjects +
+    (fact.bytes?.byteLength ?? 0)
+  );
+}
 
 export interface RetainedFact {
   readonly event: RunEvent;
@@ -17,6 +30,11 @@ interface Entry extends RetainedFact {
 
 export interface ReplaySlice {
   readonly facts: readonly RetainedFact[];
+  release(): void;
+}
+
+export interface ReplayPin {
+  readonly fact: RetainedFact;
   release(): void;
 }
 
@@ -51,12 +69,27 @@ export class ReplayWindow {
     return this.#entries.length;
   }
 
+  pin(seq: number): ReplayPin | undefined {
+    const entry = this.#entries.findLast((item) => item.event.seq === seq);
+    if (!entry) return undefined;
+    entry.refs++;
+    let released = false;
+    return {
+      fact: entry,
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#release(entry);
+      },
+    };
+  }
+
   append(fact: RetainedFact): void {
     const seq = fact.event.seq;
     if (seq <= this.#latestSeq) return;
     this.#latestSeq = seq;
     const payload = fact.bytes;
-    const charge = FACT_RECORD_BYTES + (payload?.byteLength ?? 0);
+    const charge = retainedFactCharge(fact);
     if (charge > this.#maxBytes) {
       this.clear();
       return;
@@ -91,12 +124,28 @@ export class ReplayWindow {
   select(afterSeq: number, throughSeq: number): ReplaySlice | undefined {
     if (afterSeq > throughSeq || throughSeq > this.#latestSeq) return undefined;
     if (afterSeq === throughSeq) return { facts: [], release: () => {} };
-    const selected = this.#entries.filter(
-      (entry) => entry.event.seq > afterSeq && entry.event.seq <= throughSeq,
-    );
-    if (selected.length !== throughSeq - afterSeq) return undefined;
-    for (let index = 0; index < selected.length; index++)
-      if (selected[index]!.event.seq !== afterSeq + index + 1) return undefined;
+    const count = throughSeq - afterSeq;
+    if (count > this.#maxEvents) return undefined;
+    let expected = afterSeq + 1;
+    for (const entry of this.#entries) {
+      if (entry.event.seq <= afterSeq) continue;
+      if (entry.event.seq > throughSeq) break;
+      if (entry.event.seq !== expected) return undefined;
+      if (entry.event.type === "resize" && entry.event.requiresBaseline) return undefined;
+      expected++;
+    }
+    if (expected !== throughSeq + 1) return undefined;
+    const references = this.#reserve(64 + SELECTED_REFERENCE_BYTES * count);
+    if (!references) return undefined;
+    let selected: Entry[];
+    try {
+      selected = this.#entries.filter(
+        (entry) => entry.event.seq > afterSeq && entry.event.seq <= throughSeq,
+      );
+    } catch (error) {
+      references.release();
+      throw error;
+    }
     for (const entry of selected) entry.refs++;
     let released = false;
     return {
@@ -105,12 +154,19 @@ export class ReplayWindow {
         if (released) return;
         released = true;
         for (const entry of selected) this.#release(entry);
+        references.release();
       },
     };
   }
 
   clear(): void {
     while (this.#entries.length) this.#evict();
+  }
+
+  evictOldest(): boolean {
+    if (!this.#entries.length) return false;
+    this.#evict();
+    return true;
   }
 
   #evict(): void {
