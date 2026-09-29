@@ -10,6 +10,7 @@ import {
 } from "@cove/protocol/pipe";
 import { PROFILE, DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { createRunSession, createWorkerExecution } from "@cove/terminal-worker/execution";
+import { retainedFactCharge } from "../dist/src/replay-window.js";
 
 const worker = {
   serverId: "server",
@@ -242,6 +243,62 @@ async function start(config = {}, budgets = M0_LIMITS, onFact, installDefault = 
   };
 }
 
+async function startF5Pressure(
+  budgets = { ...M0_LIMITS, workerBytes: 256 * 1024, reservedControlBytes: 4112 },
+  extraSubscription = false,
+) {
+  const facts = [];
+  let factObserver;
+  const setup = await start({}, budgets, (fact) => {
+    facts.push(fact);
+    factObserver?.(fact);
+  });
+  const secondRun = run("second");
+  const secondSpawn = spawnCommand(secondRun, budgets);
+  expect(await setup.execution.execute(secondSpawn.command, secondSpawn.payload)).toMatchObject({
+    type: "result",
+    outcome: "accepted",
+  });
+  await setup.install(subscription("sub", secondRun));
+  if (extraSubscription) await setup.install(subscription("other"));
+  const items = [...setup.factory.owned.values()];
+  for (const target of [run(), secondRun])
+    expect(
+      await setup.execution.execute(
+        command(
+          "set-control",
+          { expectedEpoch: 0, nextEpoch: 1, holder: holder(), geometry },
+          target,
+        ),
+      ),
+    ).toMatchObject({ type: "result", outcome: "accepted" });
+  items[0].observer.onData(Buffer.alloc(5_000, 0x41));
+  items[1].observer.onData(Buffer.alloc(5_000, 0x42));
+  await setup.execution.execute(command("status"));
+  await setup.execution.execute(command("status", {}, secondRun));
+  for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setImmediate(resolve));
+  for (const target of [run(), secondRun]) {
+    const ack = command(
+      "applied-ack",
+      { subscription: subscription("sub", target), appliedSeq: 1 },
+      target,
+    );
+    expect(await setup.execution.execute(ack)).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    setup.execution.responseSettled(ack.requestId);
+  }
+  return {
+    ...setup,
+    items,
+    secondRun,
+    budgets,
+    facts,
+    observeFact: (observer) => (factObserver = observer),
+  };
+}
+
 test.each([
   ["one chunk", [65_536], 1],
   ["separate callbacks", [65_536, 1], 2],
@@ -312,6 +369,208 @@ test("W2 rejected unknown-subscription input retains replay cache and releases a
     expect(result).toMatchObject({ type: "error", error: { kind: "RESYNC_REQUIRED" } });
     expect(execution.snapshot().replay[0].events).toBe(before.replay[0].events);
     expect(execution.snapshot().accountedBytes).toBe(before.accountedBytes);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test.each([
+  {
+    name: "stale epoch",
+    expected: "STALE_CONTROL",
+    input: () => ({ subscription: subscription(), epoch: 2, inputSeq: 1 }),
+  },
+  {
+    name: "wrong installed holder",
+    expected: "STALE_CONTROL",
+    extraSubscription: true,
+    input: () => ({ subscription: subscription("other"), epoch: 1, inputSeq: 1 }),
+  },
+  {
+    name: "duplicate sequence",
+    expected: "INPUT_REJECTED",
+    async prepare({ execution }) {
+      expect(
+        await execution.execute(
+          command("input", { subscription: subscription(), epoch: 1, inputSeq: 3 }),
+          Buffer.from([65]),
+        ),
+      ).toMatchObject({ type: "result", writtenBytes: 1 });
+    },
+    input: () => ({ subscription: subscription(), epoch: 1, inputSeq: 3 }),
+  },
+  {
+    name: "lower sequence",
+    expected: "INPUT_REJECTED",
+    async prepare({ execution }) {
+      expect(
+        await execution.execute(
+          command("input", { subscription: subscription(), epoch: 1, inputSeq: 3 }),
+          Buffer.from([65]),
+        ),
+      ).toMatchObject({ type: "result", writtenBytes: 1 });
+    },
+    input: () => ({ subscription: subscription(), epoch: 1, inputSeq: 2 }),
+  },
+  {
+    name: "exhausted sequence",
+    expected: "COUNTER_EXHAUSTED",
+    async prepare({ execution }) {
+      expect(
+        await execution.execute(
+          command("input", {
+            subscription: subscription(),
+            epoch: 1,
+            inputSeq: Number.MAX_SAFE_INTEGER,
+          }),
+          Buffer.from([65]),
+        ),
+      ).toMatchObject({ type: "result", writtenBytes: 1 });
+    },
+    input: () => ({ subscription: subscription(), epoch: 1, inputSeq: Number.MAX_SAFE_INTEGER }),
+  },
+  {
+    name: "identity cap",
+    expected: "BUSY",
+    budgets: {
+      ...M0_LIMITS,
+      workerBytes: 256 * 1024,
+      reservedControlBytes: 4112,
+      pendingWorkerCommands: 1,
+    },
+    async prepare({ execution }) {
+      expect(
+        await execution.execute(
+          command("input", { subscription: subscription(), epoch: 1, inputSeq: 1 }),
+          Buffer.from([65]),
+        ),
+      ).toMatchObject({ type: "result", writtenBytes: 1 });
+    },
+    input: ({ secondRun }) => ({
+      subscription: subscription("sub", secondRun),
+      epoch: 1,
+      inputSeq: 1,
+    }),
+    target: ({ secondRun }) => secondRun,
+  },
+])(
+  "W2 pressure rejects $name without evicting either run or changing replay mode",
+  async (caseInfo) => {
+    const setup = await startF5Pressure(caseInfo.budgets, caseInfo.extraSubscription);
+    const { execution, items } = setup;
+    try {
+      await caseInfo.prepare?.(setup);
+      const target = caseInfo.target?.(setup) ?? run();
+      const fields = caseInfo.input(setup);
+      const input = command("input", fields, target);
+      const before = execution.snapshot();
+      const beforeWrites = items.map((item) => item.writes.length);
+      expect(before.replay.map(({ events }) => events)).toEqual([2, 2]);
+      const fullCharge = 128 + Buffer.byteLength(JSON.stringify(input)) + 20_000 + 40_768;
+      expect((caseInfo.budgets?.workerBytes ?? 256 * 1024) - before.accountedBytes).toBeLessThan(
+        fullCharge,
+      );
+      const rejected = await execution.execute(input, Buffer.alloc(20_000));
+      expect(rejected).toMatchObject({ type: "error", error: { kind: caseInfo.expected } });
+      const after = execution.snapshot();
+      expect(after.replay).toEqual(before.replay);
+      expect(after.accountedBytes).toBe(before.accountedBytes);
+      expect(items.map((item) => item.writes.length)).toEqual(beforeWrites);
+      const recover = command(
+        "recover",
+        { subscription: subscription("sub", target), appliedSeq: 1 },
+        target,
+      );
+      expect(await execution.execute(recover)).toMatchObject({
+        type: "result",
+        recoveryMode: "replay",
+      });
+    } finally {
+      await execution.shutdown("test");
+    }
+  },
+);
+
+test("W2 valid ordered input reclaims only the required unpinned whole facts and writes once", async () => {
+  const { execution, items, facts, budgets } = await startF5Pressure();
+  try {
+    const input = command("input", { subscription: subscription(), epoch: 1, inputSeq: 1 });
+    const before = execution.snapshot();
+    const byRun = [run(), run("second")].map((target) =>
+      facts.filter((fact) => fact.event.run.runId === target.runId),
+    );
+    expect(byRun.map((entries) => entries.map((fact) => fact.event.seq))).toEqual([
+      [1, 2],
+      [1, 2],
+    ]);
+    const identityCharge =
+      192 + Buffer.byteLength("connection") + Buffer.byteLength("view") + Buffer.byteLength("sub");
+    const commandCharge = 128 + Buffer.byteLength(JSON.stringify(input)) + 20_000;
+    let shortfall =
+      commandCharge +
+      identityCharge +
+      2 * 20_000 +
+      768 -
+      (budgets.workerBytes - before.accountedBytes);
+    expect(shortfall).toBeGreaterThan(0);
+    const expected = before.replay.map((state) => ({ ...state }));
+    let cursor = 0;
+    while (shortfall > 0) {
+      const fact = byRun[cursor].shift();
+      expect(fact).toBeDefined();
+      const charge = retainedFactCharge(fact);
+      expected[cursor].events--;
+      expected[cursor].bytes -= charge;
+      shortfall -= charge;
+      cursor = (cursor + 1) % byRun.length;
+    }
+    expect(await execution.execute(input, Buffer.alloc(20_000))).toMatchObject({
+      type: "result",
+      writtenBytes: 20_000,
+    });
+    expect(execution.snapshot().replay).toEqual(expected);
+    expect(items.map((item) => item.writes.length)).toEqual([1, 0]);
+    expect(items[0].writes[0]).toEqual(Buffer.alloc(20_000));
+    expect(execution.snapshot().peakAccountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
+    const evictedOutput = expected.findIndex((state) => state.events === 0);
+    expect(evictedOutput).toBeGreaterThanOrEqual(0);
+    const target = evictedOutput === 0 ? run() : run("second");
+    const recover = command(
+      "recover",
+      { subscription: subscription("sub", target), appliedSeq: 1 },
+      target,
+    );
+    expect(await execution.execute(recover)).toMatchObject({
+      type: "result",
+      recoveryMode: "baseline",
+    });
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("W2 queued control loss decides input at pump order without replay reclamation", async () => {
+  const { execution, items, observeFact, budgets } = await startF5Pressure();
+  try {
+    let afterControl;
+    observeFact((fact) => {
+      if (fact.event.run.runId === "run" && fact.event.type === "control" && fact.event.seq === 3)
+        afterControl = execution.snapshot().replay;
+    });
+    const release = execution.execute(
+      command("set-control", { expectedEpoch: 1, nextEpoch: 1, holder: null, geometry }),
+    );
+    const input = command("input", { subscription: subscription(), epoch: 1, inputSeq: 1 });
+    const before = execution.snapshot();
+    expect(budgets.workerBytes - before.accountedBytes).toBeLessThan(
+      128 + Buffer.byteLength(JSON.stringify(input)) + 20_000 + 40_768,
+    );
+    const rejected = execution.execute(input, Buffer.alloc(20_000));
+    expect(await release).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(await rejected).toMatchObject({ type: "error", error: { kind: "STALE_CONTROL" } });
+    expect(afterControl).toBeDefined();
+    expect(execution.snapshot().replay).toEqual(afterControl);
+    expect(items.map((item) => item.writes.length)).toEqual([0, 0]);
   } finally {
     await execution.shutdown("test");
   }

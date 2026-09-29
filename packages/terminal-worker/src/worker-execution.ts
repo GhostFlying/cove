@@ -193,6 +193,7 @@ class WorkerExecutionCore {
   readonly #workerLeases = new Map<number, RetainedLease[]>();
   readonly #routeCommandLeases = new Map<string, RetainedLease | null>();
   #routeControlHeadroom: RetainedLease | undefined;
+  #replayEvictionCursor = 0;
   #inputIdentities = 0;
   #ordinaryPendingCommands = 0;
   #reservedStatusPending = false;
@@ -326,15 +327,6 @@ class WorkerExecutionCore {
           : COMMAND_RECORD_BYTES +
             Buffer.byteLength(JSON.stringify(command)) +
             (payload?.byteLength ?? 0);
-    if (
-      command.type === "input" &&
-      payload &&
-      this.#runs.get(command.run.runId)?.session &&
-      this.#recovery?.installed(command.subscription)
-    ) {
-      // The W1 native-input queue retains two byte copies plus its 768-byte ticket.
-      this.#reclaimReplay(charge + 2 * payload.byteLength + 768);
-    }
     const routeLease =
       reservedRoute && !this.#routeControlHeadroom
         ? this.#account.reserve("worker", charge)
@@ -444,6 +436,9 @@ class WorkerExecutionCore {
               epoch: command.epoch,
               inputSeq: command.inputSeq,
               bytes: payload!,
+              // The command copy is already charged; the ordered pump decides whether
+              // the two native copies and settlement ticket may reclaim best-effort replay.
+              beforeNativeInput: () => this.#reclaimReplay(2 * payload!.byteLength + 768),
             }
           : command.type === "resize"
             ? {
@@ -657,13 +652,20 @@ class WorkerExecutionCore {
     return true;
   }
 
-  #reclaimReplay(neededBytes: number): void {
+  #reclaimReplay(neededBytes: number): boolean {
     const replays = [...this.#runs.values()].map((record) => record.replay);
     while (this.#account.availableOrdinaryBytes() < neededBytes) {
       let evicted = false;
-      for (const replay of replays) evicted = replay.evictOldest() || evicted;
-      if (!evicted) break;
+      for (let offset = 0; offset < replays.length; offset++) {
+        const index = (this.#replayEvictionCursor + offset) % replays.length;
+        if (!replays[index]!.evictOldestUnpinned()) continue;
+        this.#replayEvictionCursor = (index + 1) % replays.length;
+        evicted = true;
+        break;
+      }
+      if (!evicted) return false;
     }
+    return true;
   }
 
   #releaseBytes(bytes: number): void {
