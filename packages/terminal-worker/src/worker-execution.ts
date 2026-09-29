@@ -14,6 +14,7 @@ import {
   validateSpawnPayload,
   type PipeCommand,
   type PipeError,
+  type PipeEvent,
   type PipeResult,
   type RunStatus,
 } from "@cove/protocol/pipe";
@@ -30,6 +31,8 @@ import {
   type WorkerRunSessionCapability,
 } from "./run-session.js";
 import { WorkerRetainedBytes, type RetainedLease } from "./worker-retained-bytes.js";
+import { ReplayWindow } from "./replay-window.js";
+import { RecoverySubscriptions } from "./recovery-subscription.js";
 
 export { createRunSession } from "./run-session.js";
 export type {
@@ -44,10 +47,12 @@ export type {
 const RUN_RECORD_BYTES = 6144;
 const INPUT_KEY_BYTES = 192;
 const COMMAND_RECORD_BYTES = 128;
+const ROUTE_COMMAND_BYTES = COMMAND_RECORD_BYTES + 2 * 4096;
 const MAX_INPUT_BYTES = 65_536;
 
 interface RunRecord {
   readonly run: RunRef;
+  readonly replay: ReplayWindow;
   readonly session?: RunSession;
   readonly capability?: WorkerRunSessionCapability;
   readonly initialGeometry: Geometry;
@@ -62,6 +67,12 @@ export interface WorkerExecutionOptions {
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly onFact?: RunSessionOptions["onFact"];
   readonly onFault?: RunSessionOptions["onFault"];
+  readonly delivery?: WorkerDeliveryPort;
+}
+
+export interface WorkerDeliveryPort {
+  enqueue(event: PipeEvent, payload: Uint8Array, token: number): number | false;
+  cancelUnsent(token: number): void;
 }
 
 export interface WorkerExecutionSnapshot {
@@ -78,10 +89,18 @@ export interface WorkerExecutionSnapshot {
   readonly shuttingDown: boolean;
   readonly runs: readonly RunStatus[];
   readonly sessions: readonly { readonly run: RunRef; readonly snapshot: RunSessionSnapshot }[];
+  readonly replay: readonly {
+    readonly run: RunRef;
+    readonly events: number;
+    readonly bytes: number;
+  }[];
 }
 
 export interface WorkerExecution {
   execute(command: PipeCommand, payload?: Uint8Array): Promise<PipeResult | PipeError>;
+  markerEnqueued(command: PipeCommand, response: PipeResult | PipeError): void;
+  responseSettled(requestId: string): void;
+  deliveryCapacity(): void;
   snapshot(): WorkerExecutionSnapshot;
   shutdown(reason: string): Promise<readonly RunSessionDisposalReceipt[]>;
 }
@@ -119,15 +138,17 @@ function resultError(command: PipeCommand, result: RunSessionOperationResult): P
     return correlatedError(command, "RESULT_UNKNOWN", "unknown", command.type === "input");
   const reason = result.kind === "rejected" ? result.reason : "session-fenced";
   const kind: DomainErrorKind =
-    reason === "stale-control"
-      ? "STALE_CONTROL"
-      : reason === "input-sequence"
-        ? "INPUT_REJECTED"
-        : reason === "counter-exhausted"
-          ? "COUNTER_EXHAUSTED"
-          : reason === "input-identity-cap" || reason === "queue-full" || reason.includes("limit")
-            ? "BUSY"
-            : "WORKER_UNAVAILABLE";
+    reason === "subscription-not-installed"
+      ? "RESYNC_REQUIRED"
+      : reason === "stale-control"
+        ? "STALE_CONTROL"
+        : reason === "input-sequence"
+          ? "INPUT_REJECTED"
+          : reason === "counter-exhausted"
+            ? "COUNTER_EXHAUSTED"
+            : reason === "input-identity-cap" || reason === "queue-full" || reason.includes("limit")
+              ? "BUSY"
+              : "WORKER_UNAVAILABLE";
   return correlatedError(command, kind);
 }
 
@@ -162,14 +183,19 @@ class WorkerExecutionCore {
   readonly #env: Readonly<Record<string, string | undefined>>;
   readonly #onFact: RunSessionOptions["onFact"];
   readonly #onFault: RunSessionOptions["onFault"];
+  readonly #delivery: WorkerDeliveryPort | undefined;
+  readonly #recovery: RecoverySubscriptions | undefined;
   readonly #runs = new Map<string, RunRecord>();
   readonly #pendingRequests = new Set<string>();
   readonly #account: WorkerRetainedBytes;
   readonly #workerLeases = new Map<number, RetainedLease[]>();
+  readonly #routeCommandLeases = new Map<string, RetainedLease | null>();
+  #routeControlHeadroom: RetainedLease | undefined;
   #inputIdentities = 0;
   #ordinaryPendingCommands = 0;
   #reservedStatusPending = false;
   #reservedStopPending = false;
+  #reservedRoutePending = false;
   #shuttingDown = false;
   #shutdownPromise: Promise<readonly RunSessionDisposalReceipt[]> | undefined;
 
@@ -195,6 +221,40 @@ class WorkerExecutionCore {
     this.#env = options.env ?? process.env;
     this.#onFact = options.onFact;
     this.#onFault = options.onFault;
+    this.#delivery = options.delivery;
+    if (this.#delivery) {
+      this.#recovery = new RecoverySubscriptions(
+        this.#worker,
+        this.#budgets,
+        (bytes) => this.#account.reserve("worker", bytes),
+        this.#delivery,
+      );
+    }
+  }
+
+  markerEnqueued(command: PipeCommand, response: PipeResult | PipeError): void {
+    if (response.type === "result") this.#recovery?.markerEnqueued(command, response);
+  }
+
+  responseSettled(requestId: string): void {
+    if (!this.#routeCommandLeases.has(requestId)) return;
+    const lease = this.#routeCommandLeases.get(requestId);
+    this.#routeCommandLeases.delete(requestId);
+    lease?.release();
+    this.#reservedRoutePending = false;
+    this.#pendingRequests.delete(requestId);
+    this.#recovery?.responseSettled(requestId);
+    this.#releaseControlHeadroomIfIdle();
+  }
+
+  #releaseControlHeadroomIfIdle(): void {
+    if (this.#recovery?.routeCount || this.#reservedRoutePending) return;
+    this.#routeControlHeadroom?.release();
+    this.#routeControlHeadroom = undefined;
+  }
+
+  deliveryCapacity(): void {
+    this.#recovery?.capacity();
   }
 
   async execute(input: PipeCommand, payload?: Uint8Array): Promise<PipeResult | PipeError> {
@@ -225,12 +285,19 @@ class WorkerExecutionCore {
       return correlatedError(command, "OPERATION_ID_CONFLICT");
     const reservedStatus = command.type === "status";
     const reservedStop = command.type === "stop";
+    const reservedRoute =
+      command.type === "applied-ack" ||
+      command.type === "baseline-progress" ||
+      command.type === "unsubscribe" ||
+      command.type === "recover";
     if (
       reservedStatus
         ? this.#reservedStatusPending
         : reservedStop
           ? this.#reservedStopPending
-          : this.#ordinaryPendingCommands >= this.#budgets.pendingWorkerCommands
+          : reservedRoute
+            ? this.#reservedRoutePending
+            : this.#ordinaryPendingCommands >= this.#budgets.pendingWorkerCommands
     )
       return correlatedError(command, "BUSY");
     if (command.type !== "spawn" && command.type !== "input" && payload !== undefined)
@@ -245,29 +312,47 @@ class WorkerExecutionCore {
     const charge =
       reservedStatus || reservedStop
         ? 0
-        : COMMAND_RECORD_BYTES +
-          Buffer.byteLength(JSON.stringify(command)) +
-          (payload?.byteLength ?? 0);
-    if (charge && !this.#reserveBytes(charge)) return correlatedError(command, "BUSY");
+        : reservedRoute
+          ? ROUTE_COMMAND_BYTES
+          : COMMAND_RECORD_BYTES +
+            Buffer.byteLength(JSON.stringify(command)) +
+            (payload?.byteLength ?? 0);
+    const routeLease =
+      reservedRoute && !this.#routeControlHeadroom
+        ? this.#account.reserve("worker", charge)
+        : undefined;
+    if (
+      reservedRoute
+        ? !this.#routeControlHeadroom && !routeLease
+        : charge && !this.#reserveBytes(charge)
+    )
+      return correlatedError(command, "BUSY");
     this.#pendingRequests.add(command.requestId);
     if (reservedStatus) this.#reservedStatusPending = true;
     else if (reservedStop) this.#reservedStopPending = true;
-    else this.#ordinaryPendingCommands++;
+    else if (reservedRoute) {
+      this.#reservedRoutePending = true;
+      this.#routeCommandLeases.set(command.requestId, routeLease ?? null);
+    } else this.#ordinaryPendingCommands++;
     try {
       // Reserve before copying caller memory, which may be reused immediately.
       const copied = payload === undefined ? undefined : Buffer.from(payload);
       return await this.#executeAdmitted(command, copied);
     } finally {
-      this.#pendingRequests.delete(command.requestId);
+      if (!reservedRoute || !this.#delivery) this.#pendingRequests.delete(command.requestId);
       if (reservedStatus) this.#reservedStatusPending = false;
       else if (reservedStop) this.#reservedStopPending = false;
-      else this.#ordinaryPendingCommands--;
-      if (charge) this.#releaseBytes(charge);
+      else if (reservedRoute) {
+        if (!this.#delivery) this.responseSettled(command.requestId);
+      } else this.#ordinaryPendingCommands--;
+      if (charge && !reservedRoute) this.#releaseBytes(charge);
     }
   }
 
   async #executeAdmitted(command: PipeCommand, payload?: Buffer): Promise<PipeResult | PipeError> {
     if (command.type === "spawn") return this.#spawn(command, payload!);
+    const record = this.#runs.get(command.run.runId);
+    if (!record?.session || !record.capability) return correlatedError(command, "RUN_NOT_FOUND");
     if (
       command.type === "subscribe" ||
       command.type === "recover" ||
@@ -275,10 +360,28 @@ class WorkerExecutionCore {
       command.type === "applied-ack" ||
       command.type === "baseline-progress" ||
       command.type === "preview-refresh"
-    )
-      return correlatedError(command, "CAPABILITY_UNAVAILABLE");
-    const record = this.#runs.get(command.run.runId);
-    if (!record?.session || !record.capability) return correlatedError(command, "RUN_NOT_FOUND");
+    ) {
+      if (!this.#recovery) return correlatedError(command, "CAPABILITY_UNAVAILABLE");
+      if (command.type === "subscribe" || command.type === "recover") {
+        if (!this.#routeControlHeadroom) {
+          const headroom = this.#account.reserve("worker", 2 * ROUTE_COMMAND_BYTES);
+          if (!headroom) return correlatedError(command, "BUSY");
+          this.#routeControlHeadroom = headroom;
+        }
+        const outcome = await this.#recovery.open(command, {
+          run: record.run,
+          replay: record.replay,
+          captureBaseline: (reserveDetached) => record.capability!.captureBaseline(reserveDetached),
+        });
+        this.#releaseControlHeadroomIfIdle();
+        return "result" in outcome ? outcome.result : correlatedError(command, outcome.failure);
+      }
+      if (command.type === "preview-refresh") {
+        return correlatedError(command, "CAPABILITY_UNAVAILABLE");
+      }
+      const outcome = this.#recovery.command(command);
+      return "result" in outcome ? outcome.result : correlatedError(command, outcome.failure);
+    }
     if (command.type === "stop") {
       const stopped = await record.capability.execute({ type: "stop" });
       if (stopped.kind !== "stopped") return resultError(command, stopped);
@@ -298,6 +401,11 @@ class WorkerExecutionCore {
       record.lastStatus = status;
       return accepted(command, { runStatus: status });
     }
+    if (
+      (command.type === "input" || command.type === "resize" || command.type === "appearance") &&
+      !this.#recovery?.installed(command.subscription)
+    )
+      return correlatedError(command, "RESYNC_REQUIRED");
     const operation: RunSessionOperation =
       command.type === "set-control"
         ? {
@@ -372,6 +480,9 @@ class WorkerExecutionCore {
     if (!this.#reserveBytes(identityBytes)) return correlatedError(command, "BUSY");
     const record: RunRecord = {
       run: Object.freeze({ ...command.run }),
+      replay: new ReplayWindow(this.#budgets.replayBytes, this.#budgets.replayEvents, (bytes) =>
+        this.#account.reserve("worker", bytes),
+      ),
       initialGeometry: command.geometry,
     };
     this.#runs.set(command.run.runId, record);
@@ -392,6 +503,11 @@ class WorkerExecutionCore {
         },
         factory: this.#factory,
         ...(this.#onFact && { onFact: this.#onFact }),
+        onRetainedFact: (fact) => {
+          record.replay.append(fact);
+          this.#recovery?.onFact(record.run, fact);
+        },
+        isSubscriptionInstalled: (subscription) => this.#recovery?.installed(subscription) ?? false,
         ...(this.#onFault && { onFault: this.#onFault }),
         reserveIngressBytes: (bytes) => this.#account.reserve("worker", bytes),
         reserveRetainedBytes: (bytes) => this.#account.reserve("engine", bytes),
@@ -466,6 +582,11 @@ class WorkerExecutionCore {
     const sessions = [...this.#runs.values()]
       .filter((record): record is RunRecord & { session: RunSession } => !!record.session)
       .map((record) => ({ run: record.run, snapshot: record.session.snapshot() }));
+    const replay = [...this.#runs.values()].map((record) => ({
+      run: record.run,
+      events: record.replay.retainedEvents,
+      bytes: record.replay.retainedBytes,
+    }));
     return {
       worker: this.#worker,
       runIds: this.#runs.size,
@@ -480,12 +601,17 @@ class WorkerExecutionCore {
       shuttingDown: this.#shuttingDown,
       runs,
       sessions,
+      replay,
     };
   }
 
   shutdown(_reason: string): Promise<readonly RunSessionDisposalReceipt[]> {
     if (this.#shutdownPromise) return this.#shutdownPromise;
     this.#shuttingDown = true;
+    this.#recovery?.shutdown();
+    for (const requestId of this.#routeCommandLeases.keys()) this.responseSettled(requestId);
+    this.#routeControlHeadroom?.release();
+    this.#routeControlHeadroom = undefined;
     // Every owned session starts its bounded stop before any deadline is awaited.
     this.#shutdownPromise = Promise.all(
       [...this.#runs.values()]
@@ -493,6 +619,7 @@ class WorkerExecutionCore {
         .map(async (record) => {
           const receipt = await record.session.dispose();
           record.stopReceipt = receipt;
+          record.replay.clear();
           return receipt;
         }),
     );
@@ -519,6 +646,10 @@ export function createWorkerExecution(options: WorkerExecutionOptions): WorkerEx
   const core = new WorkerExecutionCore(options);
   return Object.freeze({
     execute: (command: PipeCommand, payload?: Uint8Array) => core.execute(command, payload),
+    markerEnqueued: (command: PipeCommand, response: PipeResult | PipeError) =>
+      core.markerEnqueued(command, response),
+    responseSettled: (requestId: string) => core.responseSettled(requestId),
+    deliveryCapacity: () => core.deliveryCapacity(),
     snapshot: () => core.snapshot(),
     shutdown: (reason: string) => core.shutdown(reason),
   });

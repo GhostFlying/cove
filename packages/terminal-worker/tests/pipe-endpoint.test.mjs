@@ -247,9 +247,15 @@ function createRealExecutionHarness() {
 async function sendAndRead(harness, command, payload) {
   const before = harness.frames().length;
   harness.input.write(encode(command, payload));
-  for (let attempt = 0; attempt < 20 && harness.frames().length === before; attempt++) await tick();
-  expect(harness.frames()).toHaveLength(before + 1);
-  return harness.frames().at(-1);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const reply = harness
+      .frames()
+      .slice(before)
+      .find((frame) => frame.requestId === command.requestId);
+    if (reply) return reply;
+    await tick();
+  }
+  throw new Error(`No correlated reply for ${command.requestId}`);
 }
 
 function seamSpawn(requestId = "seam-spawn") {
@@ -297,6 +303,51 @@ test("public pipe normalizes validated empty commands for real worker execution"
       args: ["-c", "exit 0"],
       cwd: "/",
     });
+
+    const subscribe = {
+      type: "subscribe",
+      worker,
+      run,
+      requestId: "seam-subscribe",
+      subscription,
+      atSeq: 0,
+    };
+    expect(await sendAndRead(h, subscribe)).toMatchObject({
+      type: "result",
+      recoveryMode: "baseline",
+      atSeq: 0,
+    });
+    for (
+      let turn = 0;
+      turn < 20 && !h.frames().some((frame) => frame.terminal?.type === "baseline-end");
+      turn++
+    )
+      await tick();
+    const start = h.frames().find((frame) => frame.terminal?.type === "baseline-start");
+    const chunks = h.frames().filter((frame) => frame.terminal?.type === "baseline-chunk");
+    expect(start).toBeDefined();
+    expect(h.frames().filter((frame) => frame.terminal?.type === "baseline-end")).toHaveLength(1);
+    for (let index = 0; index < chunks.length; index++) {
+      const progress = {
+        type: "baseline-progress",
+        worker,
+        run,
+        requestId: `seam-progress-${index}`,
+        subscription,
+        baselineId: start.terminal.descriptor.baselineId,
+        lastParsedOrdinal: index,
+      };
+      expect((await sendAndRead(h, progress)).outcome).toBe("accepted");
+    }
+    const ack = {
+      type: "applied-ack",
+      worker,
+      run,
+      requestId: "seam-ack",
+      subscription,
+      appliedSeq: 0,
+    };
+    expect((await sendAndRead(h, ack)).outcome).toBe("accepted");
 
     const control = {
       type: "set-control",
@@ -372,24 +423,6 @@ test("public pipe normalizes validated empty commands for real worker execution"
       commandType: "appearance",
       outcome: "accepted",
     });
-
-    const unavailable = [
-      { type: "subscribe", subscription, atSeq: 0 },
-      { type: "recover", subscription },
-      { type: "unsubscribe", subscription },
-      { type: "applied-ack", subscription, appliedSeq: 0 },
-      { type: "baseline-progress", subscription, baselineId: "baseline", lastParsedOrdinal: 0 },
-      { type: "preview-refresh" },
-    ];
-    for (const [index, fields] of unavailable.entries()) {
-      const command = { ...fields, worker, run, requestId: `seam-w2-${index}` };
-      expect(await sendAndRead(h, command)).toMatchObject({
-        type: "error",
-        requestId: command.requestId,
-        commandType: command.type,
-        error: { kind: "CAPABILITY_UNAVAILABLE" },
-      });
-    }
 
     const stop = { type: "stop", worker, run, requestId: "seam-stop", operationId: "stop-op" };
     expect(await sendAndRead(h, stop)).toMatchObject({
@@ -756,7 +789,7 @@ test("pre-hello default and decoder partial count toward the ingress cap", async
   expect(retainedBacking.pipe.snapshot().ingressBytes).toBe(0);
 });
 
-test("all W2-only commands are explicitly unavailable through the pipe", async () => {
+test("stub execution preserves correlated W2 unavailability through the pipe", async () => {
   const h = createHarness();
   await ready(h);
   const commands = [
@@ -767,9 +800,8 @@ test("all W2-only commands are explicitly unavailable through the pipe", async (
     { type: "baseline-progress", subscription, baselineId: "b", lastParsedOrdinal: 0 },
     { type: "preview-refresh" },
   ].map((fields, index) => ({ ...fields, worker, run, requestId: `q${index}` }));
-  h.input.write(Buffer.concat(commands.map((command) => encode(command))));
-  await tick();
-  const replies = h.frames().slice(1);
+  const replies = [];
+  for (const command of commands) replies.push(await sendAndRead(h, command));
   expect(replies).toHaveLength(commands.length);
   replies.forEach((reply, index) => {
     expect(reply.error.kind).toBe("CAPABILITY_UNAVAILABLE");
