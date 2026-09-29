@@ -3,6 +3,7 @@ import type { RetainedLease } from "./worker-retained-bytes.js";
 
 const FACT_RECORD_BYTES = 256;
 const SELECTED_REFERENCE_BYTES = 64;
+type ReplayReservationOwner = "replay-fact" | "replay-selected-references";
 
 // JSON's code-unit length bounds cloned string content even when UTF-8 is shorter.
 export function retainedFactCharge(fact: RetainedFact): number {
@@ -42,7 +43,7 @@ export interface ReplayPin {
 export class ReplayWindow {
   readonly #maxBytes: number;
   readonly #maxEvents: number;
-  readonly #reserve: (bytes: number) => RetainedLease | undefined;
+  readonly #reserve: (bytes: number, owner: ReplayReservationOwner) => RetainedLease | undefined;
   readonly #entries: Entry[] = [];
   #bytes = 0;
   #latestSeq = 0;
@@ -50,7 +51,7 @@ export class ReplayWindow {
   constructor(
     maxBytes: number,
     maxEvents: number,
-    reserve: (bytes: number) => RetainedLease | undefined,
+    reserve: (bytes: number, owner: ReplayReservationOwner) => RetainedLease | undefined,
   ) {
     this.#maxBytes = maxBytes;
     this.#maxEvents = maxEvents;
@@ -99,10 +100,10 @@ export class ReplayWindow {
       (this.#entries.length >= this.#maxEvents || this.#bytes + charge > this.#maxBytes)
     )
       this.#evict();
-    let lease = this.#reserve(charge);
+    let lease = this.#reserve(charge, "replay-fact");
     while (!lease && this.#entries.length) {
       this.#evict();
-      lease = this.#reserve(charge);
+      lease = this.#reserve(charge, "replay-fact");
     }
     if (!lease) return;
     try {
@@ -135,7 +136,10 @@ export class ReplayWindow {
       expected++;
     }
     if (expected !== throughSeq + 1) return undefined;
-    const references = this.#reserve(64 + SELECTED_REFERENCE_BYTES * count);
+    const references = this.#reserve(
+      64 + SELECTED_REFERENCE_BYTES * count,
+      "replay-selected-references",
+    );
     if (!references) return undefined;
     let selected: Entry[];
     try {
