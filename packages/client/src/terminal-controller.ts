@@ -22,6 +22,7 @@ import {
   MAX_PAYLOAD_BYTES,
   type BaselineDescriptor,
   type ExternalTerminalEvent,
+  type RunEvent,
   type TerminalCommand,
 } from "@cove/protocol/terminal";
 import type {
@@ -29,6 +30,7 @@ import type {
   LocalErrorReason,
   TerminalController,
   TerminalControlReceipt,
+  TerminalExecutionEvidence,
   TerminalInputOutcome,
   TerminalInputNotice,
   TerminalInputReceipt,
@@ -151,6 +153,12 @@ function inputFailure(
 }
 
 export class RoutedTerminalController implements TerminalController {
+  private execution: TerminalExecutionEvidence = Object.freeze({
+    status: "unverifiable",
+    source: "none",
+  });
+  private latestGetOrdinal = 0;
+  private publicationRevision = Symbol();
   private phase: Phase = "idle";
   private ref: SubscriptionRef | undefined;
   private operation: Operation | undefined;
@@ -201,6 +209,61 @@ export class RoutedTerminalController implements TerminalController {
     private view: TerminalView,
     private appearance: Appearance,
   ) {}
+
+  matchesRun(run: RunRef): boolean {
+    return sameRunRef(this.run, run);
+  }
+
+  noteGetDispatched(ordinal: number): number | null {
+    if (this.phase === "disposed") return null;
+    if (ordinal > this.latestGetOrdinal) this.latestGetOrdinal = ordinal;
+    return this.token;
+  }
+
+  installGetEvidence(
+    token: number,
+    ordinal: number,
+    status: "live" | "unverifiable" | "exited",
+  ): boolean {
+    if (token !== this.token || this.phase === "disposed") return false;
+    if (this.execution.status === "exited") return false;
+    if (status === "exited") {
+      this.execution = Object.freeze({
+        status: "exited",
+        source: "terminal-get",
+        seq: null,
+        exitCode: null,
+        signal: null,
+      });
+      this.control.exit();
+      return true;
+    }
+    if (ordinal !== this.latestGetOrdinal) return false;
+    this.execution = Object.freeze({ status, source: "terminal-get" });
+    return true;
+  }
+
+  publishGetEvidence(token: number): void {
+    if (token === this.token && this.phase !== "disposed") this.publish();
+  }
+
+  private resetExecution(): void {
+    if (this.execution.status !== "exited")
+      this.execution = Object.freeze({ status: "unverifiable", source: "none" });
+  }
+
+  private latchExit(fact: Extract<RunEvent, { type: "exit" }>): void {
+    if (this.execution.status === "exited" && this.execution.source === "run-event") return;
+    this.execution = Object.freeze({
+      status: "exited",
+      source: "run-event",
+      seq: fact.seq,
+      exitCode: fact.exitCode,
+      signal: fact.signal,
+    });
+    this.control.exit();
+    this.publish();
+  }
 
   attach(): Promise<TerminalOutcome<TerminalReady>> {
     if (this.phase === "disposed") return Promise.resolve(errorOutcome(localError("disposed")));
@@ -870,6 +933,8 @@ export class RoutedTerminalController implements TerminalController {
       !!this.host.binding() &&
       this.control.ready(this.ref, this.viewGeneration, this.appliedSeq);
     return Object.freeze({
+      run: Object.freeze({ ...this.run }),
+      execution: this.execution,
       phase: this.phase,
       appliedSeq: this.appliedSeq,
       viewGeneration: this.viewGeneration,
@@ -947,7 +1012,6 @@ export class RoutedTerminalController implements TerminalController {
       this.control.observe(event.event, ref);
       this.publish();
     }
-    if (event.type === "run-event" && event.event.type === "exit") this.control.exit();
     const binding = this.host.binding();
     if (!binding) return;
     const charge = bytes.byteLength + JSON.stringify(event).length * 3;
@@ -983,6 +1047,7 @@ export class RoutedTerminalController implements TerminalController {
     const token = nextCounter(this.token);
     if (token === null) return null;
     this.token = token;
+    this.resetExecution();
     // The correlated result is the downlink barrier; same-ref events before it are stale.
     this.clearQueued();
     this.baseline = undefined;
@@ -1257,6 +1322,10 @@ export class RoutedTerminalController implements TerminalController {
       this.triggerRecovery(factType === "resize" ? "resize-context" : "gap");
       return;
     }
+    if (fact.type === "exit") {
+      this.latchExit(fact);
+      if (item.token !== this.token) return;
+    }
     await this.view.applyEvent(fact, item.payload);
     this.finishViewWork(item);
     if (item.token !== this.token) return;
@@ -1264,7 +1333,6 @@ export class RoutedTerminalController implements TerminalController {
     this.provenSeq = Math.max(this.provenSeq, factSeq);
     if (factType === "control") this.control.apply(fact);
     if (appearance) this.appearance = appearance;
-    if (factType === "exit") this.control.exit();
     if (resizeGeometry) this.retainedGeometry = resizeGeometry;
     if (this.phase === "replay" && operation && this.appliedSeq === operation.atSeq)
       this.commit(operation);
@@ -1455,6 +1523,7 @@ export class RoutedTerminalController implements TerminalController {
     this.inputListener = undefined;
     this.control.resetForRecovery();
     this.token = nextCounter(this.token) ?? -1;
+    this.resetExecution();
     this.drainToken = this.token;
     this.baseline = undefined;
     this.retainedModel = false;
@@ -1663,8 +1732,12 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   private publish(): void {
+    const revision = Symbol();
+    this.publicationRevision = revision;
     const snapshot = this.snapshot();
     for (const listener of [...this.listeners]) {
+      if (this.publicationRevision !== revision) break;
+      if (!this.listeners.has(listener)) continue;
       try {
         consumeObserverResult(listener(snapshot));
       } catch {
