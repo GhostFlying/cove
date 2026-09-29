@@ -28,6 +28,7 @@ import {
 import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
 import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
 import { createObservedShutdown, createObservedSubmit } from "./worker-timing-ownership.mjs";
+import { finalizeTimingCycle, finalizeTimingRun } from "./worker-timing-finalizers.mjs";
 import {
   FIFO_REQUESTS_PER_CYCLE,
   MAX_TIMING_OUTPUT_BYTES,
@@ -316,6 +317,72 @@ test("shared native and shutdown observers retain rejected, late and uncertain o
       .filter((item) => item.phase === "start" && item.boundary === "stop-to-owner-release")
       .every((item) => item.detail.returnTick),
   ).toBe(true);
+});
+
+test("actual timing finalizers keep primary causes and attempt independent cleanup", () => {
+  const primary = Error("primary");
+  const evidence = Error("evidence");
+  const cleanup = Error("cleanup");
+  const calls = [];
+  const result = finalizeTimingRun({
+    primary,
+    preserveEvidence: () => {
+      calls.push("preserve");
+      throw evidence;
+    },
+    cleanupDelivery: () => {
+      calls.push("delivery-cleanup");
+      throw cleanup;
+    },
+  });
+  expect(calls).toEqual(["preserve", "delivery-cleanup"]);
+  expect(result).toBeInstanceOf(AggregateError);
+  expect(result.errors).toEqual([primary, evidence, cleanup]);
+
+  calls.length = 0;
+  const writeFailure = finalizeTimingRun({
+    preserveEvidence: () => {
+      calls.push("preserve");
+      throw evidence;
+    },
+    cleanupDelivery: () => calls.push("delivery-cleanup"),
+  });
+  expect(calls).toEqual(["preserve", "delivery-cleanup"]);
+  expect(writeFailure).toBe(evidence);
+
+  calls.length = 0;
+  const retained = finalizeTimingCycle({
+    primary,
+    preserveEvidence: () => {
+      calls.push("preserve");
+      throw evidence;
+    },
+    cleanupDirectory: () => calls.push("directory-cleanup"),
+  });
+  expect(calls).toEqual(["preserve"]);
+  expect(retained.errors).toEqual([primary, evidence]);
+
+  calls.length = 0;
+  const retainedOnWriteFailure = finalizeTimingCycle({
+    preserveEvidence: () => {
+      calls.push("preserve");
+      throw evidence;
+    },
+    cleanupDirectory: () => calls.push("directory-cleanup"),
+  });
+  expect(calls).toEqual(["preserve"]);
+  expect(retainedOnWriteFailure).toBe(evidence);
+
+  calls.length = 0;
+  const failedRemoval = finalizeTimingCycle({
+    preserveEvidence: () => calls.push("preserve"),
+    cleanupDirectory: () => {
+      calls.push("directory-cleanup");
+      throw cleanup;
+    },
+  });
+  expect(calls).toEqual(["preserve", "directory-cleanup"]);
+  expect(failedRemoval).toBe(cleanup);
 });
 
 test("the shared drain tracker samples after production and keeps an immediate reblock distinct", async () => {
@@ -683,21 +750,25 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
   } catch (error) {
     primary = error;
   } finally {
-    preserve("timing-pty-summary", {
-      clock,
-      os,
-      cyclesEvidence,
-      trace,
-      primary: primary && { name: primary.name, message: primary.message },
-      ...(primary
-        ? {}
-        : {
-            summary: summarizeTimingTrace(
-              trace.filter((item) => item.boundary !== "pipe-block-to-drain"),
-            ),
-          }),
+    primary = finalizeTimingRun({
+      primary,
+      preserveEvidence: () =>
+        preserve("timing-pty-summary", {
+          clock,
+          os,
+          cyclesEvidence,
+          trace,
+          primary: primary && { name: primary.name, message: primary.message },
+          ...(primary
+            ? {}
+            : {
+                summary: summarizeTimingTrace(
+                  trace.filter((item) => item.boundary !== "pipe-block-to-drain"),
+                ),
+              }),
+        }),
+      cleanupDelivery: () => delivery.cleanup(),
     });
-    delivery.cleanup();
   }
   if (primary) throw primary;
 });
@@ -886,19 +957,23 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
       } catch (error) {
         cycleError = error;
       } finally {
-        preserve(`timing-fifo-${cycle}-${nonce}`, {
-          nonce,
-          runId,
-          blocked,
-          drained,
-          readerReceipt,
-          expectedRequestIds,
-          decodedResponses,
-          epochs,
-          trace: trace.filter((item) => item.runId === runId),
-          primary: cycleError && { name: cycleError.name, message: cycleError.message },
+        cycleError = finalizeTimingCycle({
+          primary: cycleError,
+          preserveEvidence: () =>
+            preserve(`timing-fifo-${cycle}-${nonce}`, {
+              nonce,
+              runId,
+              blocked,
+              drained,
+              readerReceipt,
+              expectedRequestIds,
+              decodedResponses,
+              epochs,
+              trace: trace.filter((item) => item.runId === runId),
+              primary: cycleError && { name: cycleError.name, message: cycleError.message },
+            }),
+          cleanupDirectory: () => rmSync(dir, { recursive: true, force: true }),
         });
-        if (!cycleError) rmSync(dir, { recursive: true, force: true });
       }
       if (cycleError) throw cycleError;
     }
@@ -909,21 +984,25 @@ test("four held-open OS FIFO epochs measure actual write(false) to drain", async
   } catch (error) {
     primary = error;
   } finally {
-    preserve("timing-fifo-summary", {
-      clock,
-      os,
-      fifoEvidence,
-      trace: trace.filter((item) => item.boundary === "pipe-block-to-drain"),
-      primary: primary && { name: primary.name, message: primary.message },
-      ...(primary
-        ? {}
-        : {
-            summary: summarizeTimingTrace(
-              trace.filter((item) => item.boundary === "pipe-block-to-drain"),
-            ),
-          }),
+    primary = finalizeTimingRun({
+      primary,
+      preserveEvidence: () =>
+        preserve("timing-fifo-summary", {
+          clock,
+          os,
+          fifoEvidence,
+          trace: trace.filter((item) => item.boundary === "pipe-block-to-drain"),
+          primary: primary && { name: primary.name, message: primary.message },
+          ...(primary
+            ? {}
+            : {
+                summary: summarizeTimingTrace(
+                  trace.filter((item) => item.boundary === "pipe-block-to-drain"),
+                ),
+              }),
+        }),
+      cleanupDelivery: () => delivery.cleanup(),
     });
-    delivery.cleanup();
   }
   if (primary) throw primary;
 });
