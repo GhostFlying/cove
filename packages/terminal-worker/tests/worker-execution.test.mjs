@@ -259,8 +259,59 @@ test.each([
     expect(facts.reduce((sum, fact) => sum + fact.bytes.length, 0)).toBe(
       lengths.reduce((sum, length) => sum + length, 0),
     );
+    for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setImmediate(resolve));
+    for (const id of ["sub", "a", "b", "other"]) {
+      const ack = command("applied-ack", {
+        subscription: subscription(id),
+        appliedSeq: expectedFacts,
+      });
+      expect(await execution.execute(ack)).toMatchObject({ type: "result", outcome: "accepted" });
+      execution.responseSettled(ack.requestId);
+    }
     const retained = execution.snapshot();
     expect(retained.retainedBreakdown.workerBytes - retained.replay[0].bytes).toBe(baseline);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("W2 direct O recover in progress does not consume the X ACK slot", async () => {
+  const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1 };
+  const { execution, install: installRun } = await start({}, budgets, undefined, false);
+  try {
+    await installRun(subscription("recover"));
+    await installRun(subscription("ack"));
+    const recover = command("recover", { subscription: subscription("recover") });
+    const pending = execution.execute(recover);
+    expect(execution.snapshot().ordinaryPendingCommands).toBe(1);
+    const ack = command("applied-ack", {
+      subscription: subscription("ack"),
+      appliedSeq: 0,
+    });
+    expect(await execution.execute(ack)).toMatchObject({ type: "result", outcome: "accepted" });
+    execution.responseSettled(ack.requestId);
+    expect(await pending).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(execution.snapshot().ordinaryPendingCommands).toBe(0);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("W2 rejected unknown-subscription input retains replay cache and releases admission bytes", async () => {
+  const { execution, item } = await start();
+  try {
+    item.observer.onData(Buffer.from("cached"));
+    await execution.execute(command("status"));
+    await new Promise((resolve) => setImmediate(resolve));
+    const before = execution.snapshot();
+    expect(before.replay[0].events).toBeGreaterThan(0);
+    const result = await execution.execute(
+      command("input", { subscription: subscription("unknown"), epoch: 1, inputSeq: 1 }),
+      Buffer.alloc(20_000),
+    );
+    expect(result).toMatchObject({ type: "error", error: { kind: "RESYNC_REQUIRED" } });
+    expect(execution.snapshot().replay[0].events).toBe(before.replay[0].events);
+    expect(execution.snapshot().accountedBytes).toBe(before.accountedBytes);
   } finally {
     await execution.shutdown("test");
   }
@@ -1227,6 +1278,9 @@ test("two T2 tails and held N2 input share one worker pre-admission cap", async 
           target,
         ),
       );
+    const replayBeforeInput = execution
+      .snapshot()
+      .replay.reduce((sum, item) => sum + item.events, 0);
     const held = execution.execute(
       command("input", {
         subscription: subscription("sub", run()),
@@ -1235,8 +1289,12 @@ test("two T2 tails and held N2 input share one worker pre-admission cap", async 
       }),
       Buffer.alloc(20_000),
     );
-    await new Promise((resolve) => setImmediate(resolve));
+    for (let turn = 0; turn < 32 && !releaseFirst; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
     expect(typeof releaseFirst).toBe("function");
+    expect(execution.snapshot().replay.reduce((sum, item) => sum + item.events, 0)).toBeLessThan(
+      replayBeforeInput,
+    );
     expect(budgets.workerBytes - execution.snapshot().accountedBytes).toBeLessThan(20_000);
     const secondResult = await execution.execute(
       command(

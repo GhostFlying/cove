@@ -862,6 +862,76 @@ test("reserved status and stop execute while the one ordinary slot is held", asy
   await h.pipe.shutdown("test-complete");
 });
 
+test("W2 O recover leaves X available and parks one next X until the prior write callback", async () => {
+  const callbacks = [];
+  const writes = [];
+  const output = new Writable({
+    highWaterMark: 1,
+    write(chunk, _encoding, callback) {
+      writes.push(Buffer.from(chunk));
+      callbacks.push(callback);
+    },
+  });
+  const h = createHarness({
+    output,
+    execute(command) {
+      return Promise.resolve({
+        type: "result",
+        worker,
+        run,
+        requestId: command.requestId,
+        commandType: command.type,
+        outcome: "accepted",
+        ...(command.type === "recover" ? { recoveryMode: "baseline", atSeq: 0 } : { atSeq: 0 }),
+      });
+    },
+  });
+  const budgets = { ...M0_LIMITS, pendingWorkerCommands: 1, reservedControlBytes: 4112 };
+  h.input.write(encode({ ...hello, effectiveBudgets: budgets }));
+  expect(callbacks).toHaveLength(1);
+  callbacks.shift()();
+  await tick();
+  const recover = { type: "recover", worker, run, subscription, requestId: "recover-o" };
+  const ack = { type: "applied-ack", worker, run, subscription, requestId: "ack-x", appliedSeq: 0 };
+  const progress = {
+    type: "baseline-progress",
+    worker,
+    run,
+    subscription,
+    requestId: "progress-x",
+    baselineId: "b",
+    lastParsedOrdinal: 0,
+  };
+  h.input.write(encode(recover));
+  await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["recover-o"]);
+  expect(h.pipe.snapshot().outstandingRequests).toBe(1);
+  h.input.write(encode(ack));
+  await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["recover-o", "ack-x"]);
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 2 });
+  expect(writes).toHaveLength(2);
+  callbacks.shift()();
+  await tick();
+  expect(writes).toHaveLength(3);
+  h.input.write(encode(progress));
+  await tick();
+  expect(h.calls).toHaveLength(2);
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 1 });
+  callbacks.shift()();
+  await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual([
+    "recover-o",
+    "ack-x",
+    "progress-x",
+  ]);
+  expect(writes).toHaveLength(4);
+  callbacks.shift()();
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 0 });
+  await h.pipe.shutdown("test-complete");
+});
+
 test("ordinary response reservations stop before spending the control reserve", async () => {
   const budgets = {
     ...M0_LIMITS,
