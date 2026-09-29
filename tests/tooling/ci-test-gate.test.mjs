@@ -133,6 +133,7 @@ test("client public-contract suites reject missing and short discovery", async (
     ["connection-rpc", 59],
     ["compiled-client", 4],
     ["terminal-recovery", 40],
+    ["terminal-control-input", 33],
   ]) {
     const file = `packages/client/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
