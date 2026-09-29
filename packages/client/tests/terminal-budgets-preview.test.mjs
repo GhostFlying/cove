@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { createClient } from "@cove/client";
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
-import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
+import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import {
   createTerminalDecoder,
   encodeTerminalFrame,
@@ -475,5 +475,38 @@ describe("client preview transaction", () => {
     expect(reentered).toBe(true);
     expect(h.client.snapshot().status).toBe("disposed");
     expect(scheduler.active).toBe(0);
+  });
+
+  test("disposing an idle view while preview is pending does not stop or steal the run", async () => {
+    const h = await harness();
+    const view = {
+      initialize: async () => {},
+      beginBaseline: async () => {},
+      writeBaselineChunk: async () => {},
+      finishBaseline: async () => {},
+      applyEvent: async () => {},
+      measureGrid: () => geometry,
+      setAppearance: () => {},
+      setVisibility: () => {},
+      onInputIntent: () => ({ dispose() {} }),
+      onFocusIntent: () => ({ dispose() {} }),
+      onFailure: () => ({ dispose() {} }),
+      dispose: () => {},
+    };
+    const opened = h.client.openTerminal({
+      run,
+      viewId: "view-idle",
+      view,
+      initialAppearance: DEFAULT_APPEARANCE,
+    });
+    expect(opened.ok).toBe(true);
+    const pending = h.client.getPreview(run);
+    opened.value.dispose();
+    h.peer.transfer("after-view-disposal", 1, new Uint8Array([9]));
+    h.peer.result(h.commands.at(-1), "transfer", 1);
+    expect(await pending).toMatchObject({ ok: true, status: "transfer" });
+    expect(h.commands.map((value) => value.type)).toEqual(["preview"]);
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
   });
 });
