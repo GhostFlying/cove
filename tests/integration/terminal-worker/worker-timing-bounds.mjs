@@ -6,10 +6,10 @@ const UUID_BYTES = 36;
 export const MAX_TIMING_OUTPUT_BYTES =
   TIMING_CYCLES *
   Array.from({ length: TIMING_EXCHANGES }, (_, index) =>
-    Buffer.byteLength(`OUT:${"x".repeat(UUID_BYTES)}:${index}\n`),
+    Buffer.byteLength(`OUT:${"x".repeat(UUID_BYTES)}:${index}\r\n`),
   ).reduce((sum, bytes) => sum + bytes, 0);
 
-// One native callback per emitted byte, one write per encoded FIFO response frame.
+// PTY ONLCR can add CR; bound one native callback per delivered byte.
 export const MAX_TIMING_TRACE_POINTS =
   2 *
   (MAX_TIMING_OUTPUT_BYTES +
