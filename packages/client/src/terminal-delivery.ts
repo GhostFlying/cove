@@ -63,6 +63,13 @@ export interface TerminalLaneOwner {
   binding(): NegotiatedConnection | undefined;
   socket(): TerminalConnection | undefined;
   invalid(): void;
+  preview(
+    event: Extract<
+      ExternalTerminalEvent,
+      { type: "preview-start" | "preview-chunk" | "preview-end" }
+    >,
+    bytes: Uint8Array,
+  ): void;
 }
 
 // The lane owns correlation and the only ordered terminal send path; controllers own parsing.
@@ -145,8 +152,10 @@ export class TerminalLane {
     if (this.pending.has(command.requestId) || this.pending.size >= M0_LIMITS.pendingWorkerCommands)
       return rejectBeforeSend("capacity");
     if (
-      command.type === "input" &&
-      [...this.pending.values()].filter((pending) => pending.command.type === "input").length >=
+      (command.type === "input" || command.type === "preview") &&
+      [...this.pending.values()].filter(
+        (pending) => pending.command.type === "input" || pending.command.type === "preview",
+      ).length >=
         M0_LIMITS.pendingWorkerCommands - 32
     )
       return rejectBeforeSend("capacity");
@@ -169,7 +178,7 @@ export class TerminalLane {
       binding.effectiveBudgets.reservedControlBytes;
     if (
       this.retainedOutboundBytes + bytes.byteLength > cap ||
-      (command.type === "input" &&
+      ((command.type === "input" || command.type === "preview") &&
         this.retainedOutboundBytes + bytes.byteLength >
           binding.effectiveBudgets.outboundConnectionBytes)
     )
@@ -274,6 +283,16 @@ export class TerminalLane {
     }
   }
 
+  cancelPreview(requestId: string): void {
+    const pending = this.pending.get(requestId);
+    if (!pending || pending.command.type !== "preview") return;
+    this.finish(pending, {
+      ok: false,
+      error: localError("invalid-state"),
+      uncertain: pending.attempting || pending.handedOff,
+    });
+  }
+
   // Leases survive lane closure while retired view calls still retain their payloads.
   reserveIngress(bytes: number): boolean {
     const budgets = this.owner.binding()?.effectiveBudgets;
@@ -342,7 +361,20 @@ export class TerminalLane {
       if (frame.kind === 3) {
         const event = value as ExternalTerminalEvent;
         const ref = externalEventSubscription(event);
-        if (!ref) return; // Preview belongs to the later P3d slice.
+        if (!ref) {
+          try {
+            this.owner.preview(
+              event as Extract<
+                ExternalTerminalEvent,
+                { type: "preview-start" | "preview-chunk" | "preview-end" }
+              >,
+              frame.payload,
+            );
+          } catch {
+            this.owner.invalid();
+          }
+          return;
+        }
         try {
           this.routes.get(routeKey(ref))?.(event, frame.payload);
         } catch {
@@ -485,7 +517,10 @@ export class TerminalLane {
     const candidates = [...firstByRoute].filter(([, index]) => !this.outbound[index]!.settled);
     const preferred = candidates.filter(([key]) => key !== this.lastSentRoute);
     const pool = preferred.length ? preferred : candidates;
-    const control = pool.find(([, index]) => this.outbound[index]!.command.type !== "input");
+    const control = pool.find(([, index]) => {
+      const type = this.outbound[index]!.command.type;
+      return type !== "input" && type !== "preview";
+    });
     const index = (control ?? pool[0])?.[1] ?? 0;
     return this.outbound.splice(index, 1)[0]!;
   }
