@@ -10,6 +10,66 @@ Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic
 
 ## Current state and dispatch
 
+Accepted current main is `082ae77b7836c08debb342f7596635b8f6930c96`, tree
+`4f4bc8392a3d6e4f1c51f8e66c55a96f667d45e7`, after protected rebase of
+[P2 PR #58](https://github.com/GhostFlying/cove/pull/58). All seven atomic commits
+retain identical source patches and a recorded original-to-main map. Root
+accepted the bounded private server registration/control slice after independent
+source projection and actual-main dual-OS artifact validation: ordinary
+[run 37053733893](https://github.com/GhostFlying/cove/actions/runs/37053733893),
+attempt 1, passed 801/801 identities across 68 physical inventory files per OS,
+zero skips, failures, pending or todo. Independent runtime report SHA256 is
+`668bb6b40dfdaa933c6025529feaad90b5127e8758a27a6317a7e6cd8e00a577`;
+[root acceptance](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p2-practical-final-main-acceptance-r1.json)
+binds the exact main/tree. Server compiled cases are 43, tooling 58 and timing 13.
+The runtime composition, transient bash identity and timing receipt publication
+corrections are integrated. Historical failed PR run 37045074253 is preserved;
+a publication race is an inference because its failed raw bytes were not captured.
+
+Ordinary practical M0 work is authorized. Select both verified Node26.10.0 and
+pnpm12.6.0 binary directories as recorded in the practical toolchain plan and use
+normal frozen checkout-local installs/builds. Historical custom P9 bridge,
+R5/R6 exact-environment and one-use controller machinery remain archived evidence;
+they are not prerequisites for routine Node/pnpm setup or ready pure engineering.
+No generic provenance or permission gate is added. W2's historical EPERM cause is
+unknown and its real ordered producer/retirement barrier remains unproved.
+PTY closure/leader/writer and FIFO/browser cleanup evidence remains bounded;
+initial process-group verification is false and does not prove blanket descendant
+absence. Full P2/W2/P3/H1/C3, devbox 100-real-PTY qualification, M0 exit and M1 entry
+remain incomplete. No browser-close diagnostic quota is renewed.
+
+Root previously accepted bounded P3d client preview on main `97d884f` after
+[PR #57](https://github.com/GhostFlying/cove/pull/57), independent actual-main
+review `ba974594bbfe314203a2c1f4c02a1331d1d52bd98347b06d00ae08ce7904ab85`
+and ordinary dual-OS run 36555271564 with 747 identities per OS. Full W1 in its
+frozen M0 scope was accepted at `8707a76` and Issue #16 closed. Those accepted
+slices remain valid; Issue #19 remains open for full P3 and its real integration.
+
+P3e practical integration now uses the existing recovery checkout on append-only
+`p/luchengxuan/m0-19-client-state-practical-integration`, based on accepted main
+`082ae77`. The three retained source/test atoms have normal user-hooked mappings
+`4fb2623`→`845f7dd`, `aef2fe1`→`d29ed95`, `2292bb4`→`be2c0ea`. Client source/test
+blobs and built-public consumer match the retained approved source; the sole
+registrar adds terminal-state floor11 and missing/short controls while preserving
+server17/11/15, tooling38 and all scanner/discovery/inventory guards. The
+[composition task](tasks/m0-client-state-main-integration.md) distinguishes
+historical finite evidence from current candidate checks. Independent new-head
+ordinary full validation/review, normal PR dual-OS artifacts, protected mapping
+and final-main acceptance remain pending. The old 758 identity inventory is not
+a current oracle or executed result.
+
+Native GPT-6.1 Sol/high is the P3e integration and sole shared registration/handoff
+owner; B1's separate native author is SOURCE_ONLY in the primary checkout and
+excludes registration, handoff and build until the serialized heavy lease is
+released. B1 private subscription/FIFO/parsed-credit preparation is accepted for
+engineering from this main but implementation/runtime acceptance is pending.
+Root remains dispatch-only, with separate authors, validators and reviewers.
+
+### Superseded practical P2, W1 and P3d checkpoints
+
+The following paragraphs preserve earlier source identities, failures and
+pending-gate wording. Current accepted main and allocations are the records above.
+
 The human explicitly resumed practical M0 work on 2026-10-03 and superseded the
 2026-10-02 waiting/cancellation phase for ordinary toolchain recovery. The
 historical custom P9 bridge and R5/R6 controller records remain frozen evidence,
@@ -223,4 +283,10 @@ The read-only `ssh devbox` environment probe failed GSSAPI authentication. Local
 
 Orca research pinned fork `322c1839888f4a462e2d68839deafb1fe616c685`, upstream main `646e9a5b02514795af5139961ccca225dfa01b12`, and stable v1.4.211 `5534462b50c660888487a2108700d4cf284270db`; compare relevant implementation when deciding, without treating upstream as authority or modifying the user's Orca checkout.
 
-Next: independently review the frozen P3a/W1a/diagnostic composition, docs and actual discovery inventory; then publish PR #51 for its normal full dual-OS gate and independently read both artifacts. Serial rebase mapping and actual final-main dual-OS artifacts precede P3a acceptance and any P3b allocation. Keep shared registration serialized and W1 later slices separately allocated. Devbox awaits restored SSH/Kerberos login; 100-real-PTY and three real-agent gates remain. M0 exit/M1 entry remain unapproved.
+Next: freeze the clean practical P3e candidate and release its serialized heavy
+lease for independent exact-head ordinary full validation and source/runtime
+review, then follow normal dual-OS PR and final-main gates. B1 proceeds only in
+its disjoint source allocation; shared registration and downstream release remain
+serialized by root. Do not repeat the accepted old finite driver or consumed
+browser-close/devbox probes. Full P2/W2/P3/H1/C3 and M0 exit remain open; M1 entry
+requires user review and permission.
