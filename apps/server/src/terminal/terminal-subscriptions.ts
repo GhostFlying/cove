@@ -131,7 +131,13 @@ export class TerminalSubscriptions {
     return now;
   }
   private id(role: string): string | null {
-    if (this.generating || this.sequence === Number.MAX_SAFE_INTEGER) return null;
+    if (
+      this.closed ||
+      this.delivery.closed ||
+      this.generating ||
+      this.sequence === Number.MAX_SAFE_INTEGER
+    )
+      return null;
     const suffix = `.${role}${++this.sequence}`;
     this.generating = true;
     try {
@@ -247,6 +253,7 @@ export class TerminalSubscriptions {
       return this.reject(command, "WORKER_UNAVAILABLE");
     const requestLease = this.composition.bytes.reserve(6 * 4096 + 2048, control);
     if (!requestLease) return this.reject(command, "BUSY");
+    let internalId: string | null;
     if (command.type === "attach") {
       const lease = this.composition.bytes.reserve(8192);
       if (!lease) {
@@ -255,9 +262,11 @@ export class TerminalSubscriptions {
       }
       const subscriptionId = this.id("s");
       const unsubscribeId = this.id("u");
+      internalId = this.id("r");
       if (
         !subscriptionId ||
         !unsubscribeId ||
+        !internalId ||
         this.closed ||
         this.delivery.closed ||
         this.routes.has(subscriptionId)
@@ -285,11 +294,9 @@ export class TerminalSubscriptions {
         running: false,
       };
       this.routes.set(subscriptionId, route);
-    }
-    const internalId = this.id("r");
+    } else internalId = this.id("r");
     if (!internalId || this.closed || this.delivery.closed) {
       requestLease.release();
-      if (command.type === "attach") this.retire(route!, domainError("COUNTER_EXHAUSTED"));
       return this.reject(command, "COUNTER_EXHAUSTED");
     }
     let resolve!: (reply: Reply) => void;

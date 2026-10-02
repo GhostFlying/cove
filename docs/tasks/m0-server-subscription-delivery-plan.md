@@ -134,3 +134,33 @@ remains charged until the continuation completes. No uncertain command retry,
 new public seam, timer/default or worker cap change. Add one real-parser close
 cap-plus-one regression in the owned subscription test file, preserve its failing
 run on the original atom, then validate this narrow correction and final scope.
+
+## F1 predispatch attach identity correction
+
+Allocation `p2-subscription-delivery-f1-source-fix-r1`, source owner
+`/root/p2_subscription_delivery_impl`, native GPT-6.1 Sol/high. Base is the
+preserved independent red regression atom `2bf37bdb98b933dfa59973bcef396374ed7a9d62`,
+tree `d206980e838dc143ef2f718fbb3f7f70702fd319`, in the same assigned primary
+checkout. Root grants exclusive scoped build and sole primary index ownership.
+Independent raw invalid/throw third-ID witnesses show no subscribe, unintended
+unsubscribe, one phantom route/tombstone and 34816 retained bytes after the
+correlated external error settles. Do not rerun or alter that frozen counterexample.
+
+Before publishing an attach route, obtain and validate subscription, teardown and
+request identities, and recheck service/delivery closure after supplier callbacks.
+Release unpublished request/route reservations directly on failure; do not retire
+or unsubscribe an unpublished route. Prevent later supplier calls once closed.
+Keep already dispatched unknown-outcome owned teardown unchanged. No ID/public
+interface, wire, budget, core, independent-test or shared registration change.
+
+Writable files remain only terminal-subscriptions.ts, the owned subscription
+author test and optional passive peer, and these two task plan/results docs. Add
+production-parser author contrasts for invalid/throw third identity and supplier
+closure of service/delivery. Assert no new worker command, no route publication,
+zero retained growth after error callback settlement (or expected service closure
+release), and final cleanup zero. Use fixed Node26.10.0/pnpm12.6.0 and approved
+cache for scoped tsc server/client and coherent owned two-file tests, then owned
+format/lint/diff checks. Normal user-hooked separate atomic commit; no push, full
+check, browser/native/CI or network action. Seal actual logs, final H/T/module
+hashes and handoff, then release lane/index for independent coherent postfix
+testing and minimal-diff review.

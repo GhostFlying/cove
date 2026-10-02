@@ -119,3 +119,31 @@ run exited 0 with **19/19 authored cases passed**, zero skipped/timeout. Formatt
 lint, normal hooked correction commit and final head/tree/module hashes are in the
 sealed author evidence. Independent testing/review and composition gates remain
 open; the root owns the next exclusive build allocation.
+
+## F1 unpublished attach identity correction
+
+Allocation `p2-subscription-delivery-f1-source-fix-r1` follows the independently
+committed red atom `2bf37bdb98b933dfa59973bcef396374ed7a9d62` and preserves its
+invalid/throw third-ID failure witnesses. The source now obtains and validates
+all three attach IDs before route publication. Failure releases unpublished
+route/request reservations directly, with no retire/tombstone or worker
+unsubscribe. The ID path checks service/delivery closure before invoking later
+supplier callbacks; publication checks closure again after the final callback.
+Already dispatched effective requests and unknown-outcome owned teardown retain
+their existing behavior. No core, public, shared or independent test changed.
+
+Author passive peer accepts an optional ID supplier. Two production-parser
+contrasts verify invalid and throwing third IDs yield the correlated error, no
+worker command/route/request identity, zero external physical backing after its
+callback and no common retained growth. Six closure contrasts cover service or
+delivery closure at each of the three ID calls, with no later supplier call or
+route/worker side effect. All fixture final cleanups reach retained total zero.
+
+Fixed Node26.10.0/pnpm12.6.0 scoped server/client tsc exited 0 on the first run.
+One coherent owned two-file Vitest run exited 0 with **27/27 authored cases
+passed**, no skipped/timeout. Owned format/lint/diff checks and the normal
+user-hooked separate correction atom are sealed with final head/tree/module
+hashes under the fresh off-tree F1 source-fix allocation. No old independent
+counterexample rerun, full check, install, native/browser, network, push or CI
+action ran. Independent coherent 47-case postfix validation and minimal-diff
+review remain separate gates; this result is author evidence only.
