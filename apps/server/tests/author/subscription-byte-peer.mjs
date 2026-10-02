@@ -108,7 +108,7 @@ export function fixture(changes = {}, limits = {}) {
       failed: () => service?.close(),
     });
     service = new TerminalSubscriptions(composition, runtime, delivery, {
-      createOpaqueId: () => `id-${++id}`,
+      createOpaqueId: connectionLimits.createOpaqueId ?? (() => `id-${++id}`),
       now: () => now,
       identityLimit: connectionLimits.identityLimit ?? limits.identityLimit ?? 32,
       requestLimit: connectionLimits.requestLimit ?? limits.requestLimit ?? 128,

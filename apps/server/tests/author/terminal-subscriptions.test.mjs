@@ -31,6 +31,75 @@ const command = (type, ref, requestId, rest = {}) => ({
 });
 
 describe("private terminal subscription delivery", () => {
+  it.each(["invalid", "throw"])(
+    "releases unpublished attach ownership when the third identity is %s",
+    async (failure) => {
+      const f = fixture();
+      let calls = 0;
+      const a = f.connect("identity", {
+        createOpaqueId: () => {
+          if (++calls !== 3) return `id-${calls}`;
+          if (failure === "throw") throw new Error("controlled supplier failure");
+          return "invalid identity";
+        },
+      });
+      try {
+        const before = f.bytes.snapshot().total;
+        const commands = f.pipeWrites.length;
+        const refused = await a.service.handle(a.attach("refused-third-id", 0));
+        expect(refused).toMatchObject({
+          type: "error",
+          requestId: "refused-third-id",
+          run,
+          error: { kind: "COUNTER_EXHAUSTED" },
+        });
+        expect(calls).toBe(3);
+        expect(decode(a.writes[0].data).metadata).toEqual(refused);
+        a.writes[0].settled();
+        await turns();
+        expect(f.pipeWrites).toHaveLength(commands);
+        expect(a.service.snapshot()).toMatchObject({ routes: 0, identities: 0, pending: 0 });
+        expect(a.delivery.snapshot().physicalBytes).toBe(0);
+        expect(f.bytes.snapshot().total).toBe(before);
+      } finally {
+        await f.dispose();
+      }
+      expect(f.bytes.snapshot().total).toBe(0);
+    },
+  );
+
+  it.each([
+    ["service", 1],
+    ["service", 2],
+    ["service", 3],
+    ["delivery", 1],
+    ["delivery", 2],
+    ["delivery", 3],
+  ])("refuses unpublished attach after supplier closes %s at identity %i", async (owner, at) => {
+    const f = fixture();
+    let calls = 0;
+    const a = f.connect("supplier-close", {
+      createOpaqueId: () => {
+        if (++calls === at) a[owner].close();
+        return `id-${calls}`;
+      },
+    });
+    try {
+      const before = f.bytes.snapshot().total;
+      const commands = f.pipeWrites.length;
+      expect((await a.service.handle(a.attach("supplier-close", 0))).type).toBe("error");
+      await turns();
+      expect(calls).toBe(at);
+      expect(f.pipeWrites).toHaveLength(commands);
+      expect(a.service.snapshot()).toMatchObject({ routes: 0, identities: 0, pending: 0 });
+      expect(a.writes).toHaveLength(0);
+      expect(f.bytes.snapshot().total).toBeLessThanOrEqual(before);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
   it("translates full resume and routes same-run connections independently before coalesced output", async () => {
     const f = fixture();
     const a = f.connect("a");
