@@ -27,19 +27,29 @@ and nested `pnpm exec node` selection is Node 26.10.0 on Darwin arm64. The
 non-frozen lock operation added only the ten-line `apps/server` importer, and a
 subsequent frozen install completed using the task-owned pnpm store/cache.
 
-The separately owned source/test correction is complete without compiler
-relaxation: `WorkerPipeSession.request` now declares an explicit `Uint8Array`
-default payload, the runtime-admission assertion names `Invalid session limits`,
-and all seven server source files plus three author tests match the pinned
-formatter. The pinned server build, all 31 compiled author tests, and bounded
-format/lint checks passed; the earlier tooling project result remains 58/58.
-Root `pnpm check` then passed native preparation, format, lint, build,
-environment and discovery before the existing clean-source guard stopped it
-ahead of runtime tests because the composed source was not yet committed. The
-next gates are the coherent commit, a full check on that clean exact head, and
-independent validation/review. These author checks do not accept full P2. W2
-runtime observation, full P2/P3/H1, M0 exit and M1 entry remain pending; P3b
-remains accepted rather than outstanding.
+The registration and separately owned source/test correction were committed as
+`b4c57f52753b99995ec411d9732dc442b87818b6`, tree
+`79093ff5932e9b5dd9e696738986bbf253f05185`, with the frozen 25-path manifest
+`8ed17610e9c42e663843bda990e6ca851928d052565cde5aea2f241f848e3b24`.
+The explicit payload type, concrete `Invalid session limits` assertion, pinned
+server build, 31 compiled author tests, bounded format/lint, and earlier tooling
+58/58 result remain part of that snapshot. The author full-check stop at the
+clean-source guard happened before the commit and is retained as historical
+evidence, not current status.
+
+Independent clean-snapshot validation passed frozen install and server package
+build/tests, then one full `pnpm check` exited 1 with 780/781 tests, zero
+skipped/pending/todo and no timeout. Its sole failure was a terminal-worker
+qualification row transiently reported as `(bash)` before the same-birth exact
+Node entry was observed; bounded failed-process cleanup reached exit and
+absence. This is not W2 EPERM, and no full-gate PASS is claimed. Independent
+source review separately found the server runtime composition boundary did not
+enforce one shared ledger/budget and server/relay authority. Narrow fixture and
+composition owners are correcting those findings against `b4c57f5`; their
+working bytes are not yet a frozen combined candidate. The later integration
+handoff must record the next exact identity before fresh independent validation
+and review. W2 runtime observation, full P2/P3/H1, M0 exit and M1 entry remain
+pending; P3b remains accepted rather than outstanding.
 
 ## Current P3c acceptance and W1 evidence composition checkpoint (2026-09-29)
 

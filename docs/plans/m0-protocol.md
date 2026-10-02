@@ -162,11 +162,15 @@ P5 证据需包含真实 PTY、已编译 exports/入口、两个客户端断言�
 
 2026-10-03 的当前 P2 注册恢复采用普通受支持的 Node/pnpm 命令边界；历史
 P9/R5/R6 自定义 provenance/controller 不再作为安装或锁文件更新的前置条件。
-精确 pin 不变，`apps/server` importer 已机械生成。独立所有者已完成最小源码/测试
-修正且没有放宽编译器：显式收窄默认 payload 类型、补充具体错误断言，并将七个
-server 源文件和三个 author tests 投影到 pinned formatter。pinned server build、
-31 个 compiled author tests 及 bounded format/lint 均通过。根 `pnpm check` 已通过
-native prepare、format、lint、build、environment 和 discovery，随后因组合字节尚未
-提交而在既有 clean-source guard 处、runtime tests 之前停止。下一步是形成一致提交，
-在 clean exact head 上完成完整 gate 和独立验证/审查。该恢复仍不证明 W2 observer、
-完整 P2/P3/H1，也不改变 M0/M1 gate。
+精确 pin 不变，`apps/server` importer 与最小源码/测试修正已形成正常 hooks 提交
+`b4c57f52753b99995ec411d9732dc442b87818b6`，tree
+`79093ff5932e9b5dd9e696738986bbf253f05185`。提交前 author `pnpm check` 因 dirty
+source 在 clean-source guard 停止是保留的历史结果，不再描述当前基线。独立验证在
+该 clean snapshot 上通过 frozen install 和 server package build/tests 31/31；唯一一次
+完整 `pnpm check` 无超时地以 780/781、零 skipped/pending/todo、exit 1 结束，失败是
+terminal-worker qualification 对短暂 `(bash)` 行的分类，且失败进程的 bounded cleanup
+已证明 exit/absent。这不是历史 W2 EPERM，也不是 full-gate PASS。独立源码审查另要求
+server runtime composition 强制同一 ledger/budget 与 server/relay authority。两个窄修正
+由不同所有者在 `b4c57f5` 上进行；当前 working bytes 尚未冻结，后续 integration handoff
+必须记录新的 exact identity，再做独立验证/审查。该恢复仍不证明 W2 observer、完整
+P2/P3/H1，也不改变 M0/M1 gate。
