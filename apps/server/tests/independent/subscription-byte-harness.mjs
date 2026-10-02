@@ -195,6 +195,7 @@ export function fixture({
   identityLimit = 32,
   requestLimit = 256,
   itemLimit = 64,
+  createOpaqueId,
   transport = carrier(),
   connection = { connectionId: "ind-connection", generation: 1 },
 } = {}) {
@@ -251,7 +252,7 @@ export function fixture({
       itemLimit,
     });
     const service = new TerminalSubscriptions(composition, runtime, delivery, {
-      createOpaqueId: () => `ind-id-${++nextId}`,
+      createOpaqueId: createOpaqueId ?? (() => `ind-id-${++nextId}`),
       now: () => now,
       identityLimit: limits.identityLimit ?? identityLimit,
       requestLimit: limits.requestLimit ?? requestLimit,
