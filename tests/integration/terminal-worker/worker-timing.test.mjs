@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   WriteStream,
+  closeSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { domainError } from "../../../packages/protocol/dist/errors.js";
@@ -187,6 +188,151 @@ test("failed timing receipt publication preserves prior bytes and cleans owned t
     expect(readFileSync(path)).toEqual(original);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("compound timing receipt failures retain the primary cause before independent cleanup errors", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-compound-"));
+  const path = join(dir, "finish.json");
+  const previous = { nonce: randomUUID(), pid: process.pid, exchanges: 8 };
+  const primary = Error("primary timing write failed");
+  const closeFailure = Error("timing descriptor close reported failure");
+  const removeFailure = Error("timing temporary removal failed");
+  const attempts = [];
+  let descriptor;
+  let descriptorOwned = false;
+  let temporary;
+  let failure;
+  try {
+    publishTimingReceipt(path, previous);
+    const original = readFileSync(path);
+    try {
+      publishTimingReceipt(
+        path,
+        { ...previous, nonce: randomUUID() },
+        (opened) => {
+          descriptor = opened;
+          descriptorOwned = true;
+          writeFileSync(opened, "{");
+          throw primary;
+        },
+        {
+          closeTemporary: (opened) => {
+            attempts.push("close");
+            closeSync(opened);
+            descriptorOwned = false;
+            throw closeFailure;
+          },
+          removeTemporary: (ownedPath) => {
+            attempts.push("remove");
+            temporary = ownedPath;
+            throw removeFailure;
+          },
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.cause).toBe(primary);
+    expect(failure.errors).toEqual([primary, closeFailure, removeFailure]);
+    expect(attempts).toEqual(["close", "remove"]);
+    expect(() => writeFileSync(descriptor, "unexpected open descriptor")).toThrow(/EBADF/);
+    expect(readFileSync(path)).toEqual(original);
+    expect(await receipt(path, "prior timing receipt after compound failure")).toEqual(previous);
+    expect(readFileSync(temporary, "utf8")).toBe("{");
+    expect(readdirSync(dir).sort()).toEqual([basename(temporary), "finish.json"].sort());
+  } finally {
+    try {
+      if (descriptorOwned) closeSync(descriptor);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("real timing rename failure remains primary when owned temporary removal also fails", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-rename-"));
+  const path = join(dir, "start.json");
+  const blocked = join(dir, "blocked.json");
+  const previous = { nonce: randomUUID(), pid: process.pid, ppid: process.ppid };
+  const removeFailure = Error("owned timing temporary removal failed");
+  let temporary;
+  let failure;
+  try {
+    publishTimingReceipt(path, previous);
+    const original = readFileSync(path);
+    mkdirSync(blocked);
+    try {
+      publishTimingReceipt(blocked, previous, writeFileSync, {
+        removeTemporary: (ownedPath) => {
+          temporary = ownedPath;
+          throw removeFailure;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure.errors).toHaveLength(2);
+    expect(failure.cause).toBe(failure.errors[0]);
+    expect(failure.cause.code).toMatch(/EISDIR|ENOTEMPTY|EEXIST|EPERM|EACCES/);
+    expect(failure.errors[1]).toBe(removeFailure);
+    expect(readFileSync(path)).toEqual(original);
+    expect(readdirSync(blocked)).toEqual([]);
+    expect(JSON.parse(readFileSync(temporary, "utf8"))).toEqual(previous);
+    expect(readdirSync(dir).sort()).toEqual(
+      [basename(temporary), "blocked.json", "start.json"].sort(),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("successful timing rename relinquishes its temporary name without removal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-ownership-"));
+  const path = join(dir, "start.json");
+  const value = { nonce: randomUUID(), pid: process.pid, ppid: process.ppid };
+  const removals = [];
+  let descriptor;
+  let descriptorOwned = false;
+  let temporary;
+  try {
+    publishTimingReceipt(
+      path,
+      value,
+      (opened, serialized) => {
+        descriptor = opened;
+        descriptorOwned = true;
+        temporary = join(dir, readdirSync(dir)[0]);
+        writeFileSync(opened, serialized);
+      },
+      {
+        closeTemporary: (opened) => {
+          closeSync(opened);
+          descriptorOwned = false;
+        },
+        removeTemporary: (unownedPath) => {
+          removals.push(unownedPath);
+          throw Error("removal attempted after successful timing rename");
+        },
+      },
+    );
+    expect(removals).toEqual([]);
+    expect(await receipt(path, "published timing receipt with ownership transferred")).toEqual(
+      value,
+    );
+    expect(() => writeFileSync(descriptor, "unexpected open descriptor")).toThrow(/EBADF/);
+    expect(() => readFileSync(temporary)).toThrow(/ENOENT/);
+    writeFileSync(temporary, "subsequent pathname owner", { flag: "wx" });
+    expect(readFileSync(temporary, "utf8")).toBe("subsequent pathname owner");
+    expect(removals).toEqual([]);
+  } finally {
+    try {
+      if (descriptorOwned) closeSync(descriptor);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
