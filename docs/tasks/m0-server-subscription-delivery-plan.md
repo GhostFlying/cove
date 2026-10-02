@@ -121,3 +121,16 @@ violating marker/credit contrasts; no fake server handler as oracle.
 Excluded: B2 focus/control/input/preview, real HTTP/WS/native/process/browser,
 full W2/D/Q/H1/P3 or M0 exit/M1 entry, new dependencies/config/lock/wire/defaults,
 CI workflow and shared gate edits, old provenance/probe/devbox retry/pool changes.
+
+## F11 close correction before final source freeze
+
+After the first normal author atom, source inspection identified a concrete
+counterexample: closing five owned routes concurrently can fill the existing
+worker's four progress slots and refuse the fifth unsubscribe before handoff.
+Keep existing core read-only. Add a finite teardown queue bounded by the already
+reserved lifetime route records, with one first-send unsubscribe at a time after
+this service's preceding effective commands settle. Its route/request ownership
+remains charged until the continuation completes. No uncertain command retry,
+new public seam, timer/default or worker cap change. Add one real-parser close
+cap-plus-one regression in the owned subscription test file, preserve its failing
+run on the original atom, then validate this narrow correction and final scope.

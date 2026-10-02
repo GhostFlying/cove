@@ -96,3 +96,26 @@ assigned separate owners. Full W2/P2/P3/H1/M0 and real HTTP/WS/worker/carrier
 qualification remain open; B2 control/input, preview and M1 are excluded.
 No public integration, PR, push, full check, native/browser/network/process probe,
 old provenance pipeline or additional user approval was performed here.
+
+## Final F11 close correction
+
+Initial hooked atom `40d23aa` is preserved as a nonfinal implementation snapshot.
+A concrete five-live-route close regression failed against that snapshot: four
+unsubscribe frames were emitted concurrently and the fifth was refused by the
+existing worker progress cap. The focused diagnostic executed one failure and
+intentionally filtered eleven cases; it is not a gate pass. Its log is preserved.
+
+Root authorized the narrow correction within existing owned files. The service
+now keeps a finite teardown queue in already-reserved lifetime route records,
+waits its preceding effective runtime work, and sends one owned unsubscribe at
+a time. It performs first sends only, does not retry uncertain or refused commands,
+and preserves unresolved continuation and external physical backing charges.
+No worker cap/core/public/shared file changed. The new real-parser case verifies
+all five unique routes reach unsubscribe in order while authoritative run capacity
+remains owned and no stop command is sent.
+
+Scoped compiled server/client build exited 0. The final corrected two-file
+run exited 0 with **19/19 authored cases passed**, zero skipped/timeout. Formatting,
+lint, normal hooked correction commit and final head/tree/module hashes are in the
+sealed author evidence. Independent testing/review and composition gates remain
+open; the root owns the next exclusive build allocation.

@@ -64,6 +64,7 @@ type Request = {
 export class TerminalSubscriptions {
   private readonly routes = new Map<string, Route>();
   private readonly requests = new Map<string, Request>();
+  private readonly teardownQueue: Route[] = [];
   private readonly externalIds = new Set<string>();
   private readonly requestLeases: ByteReservation[] = [];
   private readonly listener: { dispose(): void };
@@ -339,6 +340,7 @@ export class TerminalSubscriptions {
           this.finish(request, this.error(request.command, route.failure!));
         } finally {
           this.inFlight--;
+          this.flushTeardown();
           this.releaseClosedRecords();
         }
         route.queue.shift();
@@ -573,7 +575,19 @@ export class TerminalSubscriptions {
   private unsubscribe(route: Route): void {
     if (route.teardownSent) return;
     route.teardownSent = true;
+    this.teardownQueue.push(route);
+    this.flushTeardown();
+  }
+  private flushTeardown(): void {
+    if (this.inFlight || !this.teardownQueue.length) return;
+    // Close cannot consume all progress slots before its fifth owned route reaches them.
+    const route = this.teardownQueue.shift()!;
     this.inFlight++;
+    const complete = () => {
+      this.inFlight--;
+      this.flushTeardown();
+      this.releaseClosedRecords();
+    };
     try {
       void this.runtime
         .closeSubscription({
@@ -584,13 +598,9 @@ export class TerminalSubscriptions {
           subscription: structuredClone(route.ref),
         })
         .catch(() => {})
-        .finally(() => {
-          this.inFlight--;
-          this.releaseClosedRecords();
-        });
+        .finally(complete);
     } catch {
-      this.inFlight--;
-      this.releaseClosedRecords();
+      complete();
     }
   }
   private finish(request: Request, reply: Reply, published = false): void {
@@ -640,7 +650,7 @@ export class TerminalSubscriptions {
     this.releaseClosedRecords();
   }
   private releaseClosedRecords(): void {
-    if (!this.closed || this.inFlight || this.released) return;
+    if (!this.closed || this.inFlight || this.teardownQueue.length || this.released) return;
     this.released = true;
     for (const route of this.routes.values()) {
       route.lease.release();
