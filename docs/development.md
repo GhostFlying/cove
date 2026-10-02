@@ -1,6 +1,6 @@
 # 开发环境与工程检查
 
-根工程已初始化，业务应用尚未实现。当前构建编译工具配置及两个实验环境探针；没有可启动的 Cove server、CLI、Desktop 或 Mobile。
+根工程已初始化，业务应用尚未完整实现。当前构建编译工具配置、两个实验环境探针和私有 server 控制模块；仍没有可启动的完整 Cove server、CLI、Desktop 或 Mobile。
 
 ## 固定工具版本
 
@@ -33,6 +33,11 @@ pnpm/action-setup v6.1.0、upload-artifact v7.0.1。上传 action 的 SHA 由官
 每个 checkout 单独安装依赖；可共享 pnpm 内容存储，不共享 node_modules、dist 或 tsbuildinfo。
 仓库根目录的 `.npmrc` 固定公共 npm registry；在私有镜像配置的机器上也应使用该项目配置生成根锁文件。
 根锁文件由 pnpm 生成，不要手工替换 tarball URL；提交前在干净 checkout 中验证冻结安装。
+若使用单独下载的 Node 和 pnpm 可执行文件，应把 Node 的 `bin` 目录和 pnpm
+可执行文件所在目录依次放在 `PATH` 最前面。只直接执行一次 pnpm 的绝对路径还
+不够：package script 内的 `pnpm` 与 `node` 也必须解析到同一组 pin。安装后用
+`command -v node`、`command -v pnpm` 和 `pnpm exec node --version` 一并核对；
+不要把登录 shell 的默认 Node 或能自动下载其他版本的用户级 launcher 当作证明。
 
 ```sh
 node --version
@@ -51,7 +56,7 @@ pnpm check
 | `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-当前有 tooling、protocol、terminal-engine、terminal-engine-probes 和 terminal-web-probes 五个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
+当前注册 tooling、protocol、server、terminal-engine、terminal-engine-probes 和 terminal-web-probes 六个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
 已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与其拥有的
 `tests/tooling`、协议包 `tests`、引擎包 `tests` 及两个终端实验包的 `probes` 下测试文件，
 再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。

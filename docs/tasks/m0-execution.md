@@ -10,6 +10,37 @@
 - Checks: use exact Node/pnpm pins; root tooling changes require pnpm check; independent negative-path tests and separate Sol review; exact-head required macOS/Linux CI; rebase-only merge; tree/commit mapping and final main CI before dependent work.
 - Constraints: preserve selected architecture and accepted devbox 100 synthetic real-PTY gate; no keeper, SQLite/task/product GUI or later milestone scope in C1. No existing services are restarted. Implementation/test logs contain only task-owned synthetic data.
 
+## P2 practical toolchain recovery R1 (2026-10-03)
+
+The human resumed ordinary implementation work and superseded the preceding
+waiting/cancellation phase for this bounded recovery. The sole registrar works
+from `29cb3637810c646db607389601b7a81bb7ef910d` in
+`m0-probes-verify`, preserving the eight inherited server-registration paths.
+The practical path does not reuse the historical P9/R5/R6 bridge, require its
+bespoke provenance/controller machinery, or repeat accepted W1/P3a-d/V1 gates.
+
+The observed tool mismatch was ordinary executable resolution: the login shell
+found Node 24.14.0 and a user-level pnpm launcher that attempted to provision
+under `~/Library/pnpm` and failed with EPERM. With the verified Node 26.10.0 bin
+directory and verified standalone pnpm 12.6.0 directory first on `PATH`, direct
+and nested `pnpm exec node` selection is Node 26.10.0 on Darwin arm64. The
+non-frozen lock operation added only the ten-line `apps/server` importer, and a
+subsequent frozen install completed using the task-owned pnpm store/cache.
+
+The separately owned source/test correction is complete without compiler
+relaxation: `WorkerPipeSession.request` now declares an explicit `Uint8Array`
+default payload, the runtime-admission assertion names `Invalid session limits`,
+and all seven server source files plus three author tests match the pinned
+formatter. The pinned server build, all 31 compiled author tests, and bounded
+format/lint checks passed; the earlier tooling project result remains 58/58.
+Root `pnpm check` then passed native preparation, format, lint, build,
+environment and discovery before the existing clean-source guard stopped it
+ahead of runtime tests because the composed source was not yet committed. The
+next gates are the coherent commit, a full check on that clean exact head, and
+independent validation/review. These author checks do not accept full P2. W2
+runtime observation, full P2/P3/H1, M0 exit and M1 entry remain pending; P3b
+remains accepted rather than outstanding.
+
 ## Current P3c acceptance and W1 evidence composition checkpoint (2026-09-29)
 
 Accepted main is `76dbc017215a517f5c0bf199c821f57873e472be`, tree `7d37dce441c3f4c7502b290058fe2ae1b04e6de0`. Root accepted **bounded P3c client control/input only** after protected [PR #55](https://github.com/GhostFlying/cove/pull/55), all 15 candidate-to-main commits, normal [actual-main run 36514691811](https://github.com/GhostFlying/cove/actions/runs/36514691811) attempt 1 on both OSes and independent final-main review SHA-256 `f7238efe3c22a8220e2d1f378544cddc2d7701f599ab23faa59ea89928b819a4`. The [off-tree accepted handoff](/Users/luchengxuan/WORKSPACE/cove-evidence/p3c-main-integration/accepted-handoff.md) SHA-256 is `4f11307c5680d72c25bcdaa4b8a387e2140b05119c2f6b5961185e7dac247036`. Full P3 and P3d remain pending; Issue #19 stays open.

@@ -213,10 +213,25 @@ export const requiredSuites = [
     file: "packages/protocol/tests/consumer-contracts.test.mjs",
     minimumTests: 12,
   },
-  { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 37 },
+  {
+    project: "server",
+    file: "apps/server/tests/author/runtime-admission.test.mjs",
+    minimumTests: 8,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/worker-pipe-session.test.mjs",
+    minimumTests: 11,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/operation-receipts.test.mjs",
+    minimumTests: 12,
+  },
+  { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 7 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 8 },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
@@ -815,6 +830,7 @@ async function testFilesIn(directory, prefix) {
 
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
   return Promise.all([
+    testFilesIn(join(checkoutRoot, "apps/server/tests"), "apps/server/tests"),
     testFilesIn(join(checkoutRoot, "packages/client/tests"), "packages/client/tests"),
     testFilesIn(join(checkoutRoot, "packages/protocol/tests"), "packages/protocol/tests"),
     testFilesIn(join(checkoutRoot, "tests/tooling"), "tests/tooling"),

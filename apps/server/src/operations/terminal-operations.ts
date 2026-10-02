@@ -1,5 +1,8 @@
 import {
-  canonicalOperationIntent, RPC_METHODS, type OperationRecord, type OperationReceiptKey,
+  canonicalOperationIntent,
+  RPC_METHODS,
+  type OperationRecord,
+  type OperationReceiptKey,
 } from "@cove/protocol/rpc";
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
@@ -15,14 +18,24 @@ export class TerminalOperations {
   private runCounter = 0;
   private requestCounter = 0;
   private disposed = false;
-  constructor(private readonly options: {
-    serverId: string; relayInstanceId: string; budgets: EffectiveBudgets;
-    runtime: LocalRuntime; receipts: OperationReceipts; encodeUtf8: (text: string) => Uint8Array;
-  }) {}
+  constructor(
+    private readonly options: {
+      serverId: string;
+      relayInstanceId: string;
+      budgets: EffectiveBudgets;
+      runtime: LocalRuntime;
+      receipts: OperationReceipts;
+      encodeUtf8: (text: string) => Uint8Array;
+    },
+  ) {}
 
   private key(principalId: string, operationId: string): OperationReceiptKey {
-    return { serverId: this.options.serverId, relayInstanceId: this.options.relayInstanceId,
-      principalId, operationId };
+    return {
+      serverId: this.options.serverId,
+      relayInstanceId: this.options.relayInstanceId,
+      principalId,
+      operationId,
+    };
   }
   private failure(kind: Parameters<typeof domainError>[0]): OperationOutcome {
     return { error: domainError(kind) };
@@ -51,25 +64,49 @@ export class TerminalOperations {
     if (!requestId) return this.failure("COUNTER_EXHAUSTED");
     const preparation = this.options.receipts.prepare(key, intent);
     if (!preparation) return this.failure("BUSY");
-    const run: RunRef = { serverId: this.options.serverId,
-      relayInstanceId: this.options.relayInstanceId, runId: `run-${++this.runCounter}` };
+    const run: RunRef = {
+      serverId: this.options.serverId,
+      relayInstanceId: this.options.relayInstanceId,
+      runId: `run-${++this.runCounter}`,
+    };
     const worker = this.options.runtime.reserveRun(run, params.geometry);
-    if (!worker) { preparation.cancel(); return this.failure("BUSY"); }
-    const record: OperationRecord = { operationId: params.operationId, method: "terminal.create",
-      revision: 0, state: "accepted", run };
+    if (!worker) {
+      preparation.cancel();
+      return this.failure("BUSY");
+    }
+    const record: OperationRecord = {
+      operationId: params.operationId,
+      method: "terminal.create",
+      revision: 0,
+      state: "accepted",
+      run,
+    };
     if (!preparation.commit(record)) {
-      preparation.cancel(); this.options.runtime.cancelRunReservation(run, worker);
+      preparation.cancel();
+      this.options.runtime.cancelRunReservation(run, worker);
       return this.failure("BUSY");
     }
     this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
     let result: RuntimeResult;
     try {
-      result = await this.options.runtime.spawn({ ...params, worker, run, requestId,
+      result = await this.options.runtime.spawn({
+        ...params,
+        worker,
+        run,
+        requestId,
         appearance: params.appearance ?? DEFAULT_APPEARANCE,
-        effectiveBudgets: this.options.budgets, profile: PROFILE });
+        effectiveBudgets: this.options.budgets,
+        profile: PROFILE,
+      });
     } catch {
-      result = { type: "error", commandType: "spawn", worker, run, requestId,
-        error: domainError("RESULT_UNKNOWN", "unknown") };
+      result = {
+        type: "error",
+        commandType: "spawn",
+        worker,
+        run,
+        requestId,
+        error: domainError("RESULT_UNKNOWN", "unknown"),
+      };
     }
     return this.complete(key, result);
   }
@@ -79,9 +116,11 @@ export class TerminalOperations {
     if (this.disposed || !OpaqueIdSchema.safeParse(principalId).success || !parsed.success)
       return this.failure("CAPABILITY_UNAVAILABLE");
     const params = parsed.data;
-    if (params.expectedRelayInstanceId !== this.options.relayInstanceId ||
-        params.run.serverId !== this.options.serverId ||
-        params.run.relayInstanceId !== this.options.relayInstanceId)
+    if (
+      params.expectedRelayInstanceId !== this.options.relayInstanceId ||
+      params.run.serverId !== this.options.serverId ||
+      params.run.relayInstanceId !== this.options.relayInstanceId
+    )
       return this.failure("INSTANCE_MISMATCH");
     const intent = canonicalOperationIntent("terminal.stop", params, this.options.encodeUtf8);
     if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
@@ -96,17 +135,36 @@ export class TerminalOperations {
     if (!requestId) return this.failure("COUNTER_EXHAUSTED");
     const preparation = this.options.receipts.prepare(key, intent);
     if (!preparation) return this.failure("BUSY");
-    const record: OperationRecord = { operationId: params.operationId, method: "terminal.stop",
-      revision: 0, state: "accepted", run: params.run };
-    if (!preparation.commit(record)) { preparation.cancel(); return this.failure("BUSY"); }
+    const record: OperationRecord = {
+      operationId: params.operationId,
+      method: "terminal.stop",
+      revision: 0,
+      state: "accepted",
+      run: params.run,
+    };
+    if (!preparation.commit(record)) {
+      preparation.cancel();
+      return this.failure("BUSY");
+    }
     this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
     let result: RuntimeResult;
     try {
-      result = await this.options.runtime.stop({ type: "stop", worker: entry.worker,
-        run: params.run, requestId, operationId: params.operationId });
+      result = await this.options.runtime.stop({
+        type: "stop",
+        worker: entry.worker,
+        run: params.run,
+        requestId,
+        operationId: params.operationId,
+      });
     } catch {
-      result = { type: "error", commandType: "stop", worker: entry.worker, run: params.run,
-        requestId, error: domainError("RESULT_UNKNOWN", "unknown") };
+      result = {
+        type: "error",
+        commandType: "stop",
+        worker: entry.worker,
+        run: params.run,
+        requestId,
+        error: domainError("RESULT_UNKNOWN", "unknown"),
+      };
     }
     return this.complete(key, result);
   }
@@ -114,36 +172,65 @@ export class TerminalOperations {
   private complete(key: OperationReceiptKey, result: RuntimeResult): OperationOutcome {
     const record = this.options.receipts.get(key);
     if (!record) return this.failure("OPERATION_NOT_FOUND");
-    const uncertain = (result.type === "error" && result.error.acceptance === "unknown") ||
+    const uncertain =
+      (result.type === "error" && result.error.acceptance === "unknown") ||
       (result.type === "result" && result.outcome === "unknown");
     const rejected = result.type === "error" || result.outcome === "rejected";
     const exited = result.type === "result" && result.runStatus?.status === "exited";
-    const state = uncertain ? "requires_attention" : rejected ? "failed" :
-      record.method === "terminal.create" || exited ? "succeeded" : "running";
-    const next: OperationRecord = { ...record, revision: record.revision + 1, state,
-      ...(uncertain ? { error: domainError("RESULT_UNKNOWN", "unknown") } :
-        result.type === "error" ? { error: result.error } : {}),
-      ...(state === "succeeded" ? { result: { run: record.run!,
-        ...(exited ? { exitCode: result.type === "result" ? result.runStatus!.exitCode : null,
-          signal: result.type === "result" ? result.runStatus!.signal : null } : {}) } } : {}),
+    const state = uncertain
+      ? "requires_attention"
+      : rejected
+        ? "failed"
+        : record.method === "terminal.create" || exited
+          ? "succeeded"
+          : "running";
+    const next: OperationRecord = {
+      ...record,
+      revision: record.revision + 1,
+      state,
+      ...(uncertain
+        ? { error: domainError("RESULT_UNKNOWN", "unknown") }
+        : result.type === "error"
+          ? { error: result.error }
+          : {}),
+      ...(state === "succeeded"
+        ? {
+            result: {
+              run: record.run!,
+              ...(exited
+                ? {
+                    exitCode: result.type === "result" ? result.runStatus!.exitCode : null,
+                    signal: result.type === "result" ? result.runStatus!.signal : null,
+                  }
+                : {}),
+            },
+          }
+        : {}),
     };
     this.options.receipts.update(key, next);
     return { operation: this.options.receipts.get(key)! };
   }
 
   get(principalId: string, operationId: string, expectedRelayInstanceId: string): OperationOutcome {
-    if (expectedRelayInstanceId !== this.options.relayInstanceId) return this.failure("INSTANCE_MISMATCH");
+    if (expectedRelayInstanceId !== this.options.relayInstanceId)
+      return this.failure("INSTANCE_MISMATCH");
     const key = this.key(principalId, operationId);
     let record = this.options.receipts.get(key);
     if (record?.method === "terminal.stop" && record.state === "running" && record.run) {
       const status = this.options.runtime.registry.get(record.run)?.status;
       if (status?.status === "exited") {
-        this.options.receipts.update(key, { ...record, revision: record.revision + 1, state: "succeeded",
-          result: { run: record.run, exitCode: status.exitCode, signal: status.signal } });
+        this.options.receipts.update(key, {
+          ...record,
+          revision: record.revision + 1,
+          state: "succeeded",
+          result: { run: record.run, exitCode: status.exitCode, signal: status.signal },
+        });
         record = this.options.receipts.get(key);
       }
     }
     return record ? { operation: record } : this.failure("OPERATION_NOT_FOUND");
   }
-  dispose(): void { this.disposed = true; }
+  dispose(): void {
+    this.disposed = true;
+  }
 }

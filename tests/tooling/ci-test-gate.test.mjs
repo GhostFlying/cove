@@ -127,6 +127,63 @@ test("protocol registration and its actual test root are required", async () => 
   );
 });
 
+test("server author suites are exact, fail-closed, and fully owned by Vitest", async () => {
+  const files = await readVitestOwnedTestFiles();
+  const registrations = [
+    ["runtime-admission", 8],
+    ["worker-pipe-session", 11],
+    ["operation-receipts", 12],
+  ].map(([name, minimumTests]) => {
+    const file = `apps/server/tests/author/${name}.test.mjs`;
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project: "server", minimumTests });
+    expect(files).toContain(file);
+    return suite;
+  });
+  for (const suite of registrations) {
+    expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite server:/);
+    const complete = Array.from({ length: suite.minimumTests }, (_, index) => ({
+      projectName: "server",
+      file: resolve(root, suite.file),
+      name: `${suite.file} ${index}`,
+    }));
+    expect(() => verifyDiscovery(complete.slice(0, -1), [suite.file], [suite])).toThrow(
+      `discovered ${suite.minimumTests - 1} tests; needs ${suite.minimumTests}`,
+    );
+    expect(() => verifyDiscovery([...complete, complete[0]], [suite.file], [suite])).toThrow(
+      /Duplicate discovered identity/,
+    );
+    const execution = {
+      success: true,
+      numTotalTests: complete.length,
+      numPassedTests: complete.length - 1,
+      numFailedTests: 0,
+      numPendingTests: 1,
+      numTodoTests: 0,
+      testResults: [
+        {
+          name: resolve(root, suite.file),
+          status: "passed",
+          assertionResults: complete.map((_, index) => ({
+            status: index === 0 ? "pending" : "passed",
+          })),
+        },
+      ],
+    };
+    expect(() => verifyInventory(complete, execution, [suite.file], [suite])).toThrow(
+      /skipped, pending/,
+    );
+  }
+  const extra = "apps/server/tests/author/unregistered.test.mjs";
+  expect(() =>
+    verifyDiscovery(
+      [{ projectName: "server", file: resolve(root, extra), name: "extra" }],
+      [extra],
+      registrations,
+    ),
+  ).toThrow(/Unregistered Vitest suite/);
+});
+
 test("client public-contract suites reject missing and short discovery", async () => {
   const files = await readVitestOwnedTestFiles();
   for (const [name, minimumTests] of [
@@ -1268,12 +1325,12 @@ test("records spawn and timeout failures before propagating them", async () => {
 test("rejects removal of a gate test below the required floor", () => {
   const requiredGateSuites = requiredSuites.filter(({ file }) => file === first || file === second);
   const complete = [
-    ...Array.from({ length: 3 }, (_, index) => ({
+    ...Array.from({ length: 4 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 37 }, (_, index) => ({
+    ...Array.from({ length: 38 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -1281,7 +1338,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 36 tests; needs 37/,
+    /discovered 37 tests; needs 38/,
   );
 });
 
@@ -1289,6 +1346,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   const checkout = await mkdtemp(resolve(tmpdir(), "cove-ci-scan-"));
   temporaryDirectories.push(checkout);
   await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
+  await mkdir(resolve(checkout, "apps/server/tests/author"), { recursive: true });
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/tests"), { recursive: true });
@@ -1299,6 +1357,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/client/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
+  await writeFile(resolve(checkout, "apps/server/tests/author/runtime.test.mjs"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
@@ -1310,6 +1369,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/client/tests/contract.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "apps/server/tests/author/runtime.test.mjs",
     "packages/client/tests/contract.test.mjs",
     "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",

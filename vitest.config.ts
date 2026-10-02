@@ -21,6 +21,15 @@ export default defineConfig({
       },
       {
         test: {
+          name: "server",
+          environment: "node",
+          include: ["apps/server/tests/**/*.test.mjs"],
+          testTimeout: 30_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "tooling",
           environment: "node",
           include: ["tests/tooling/**/*.test.{ts,mjs}"],
