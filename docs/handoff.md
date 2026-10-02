@@ -10,6 +10,48 @@ Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic
 
 ## Current state and dispatch
 
+Accepted actual main is `5ac9e8089b20c62518d139a10c4a453f1bfd60ab`, tree
+`68569b0a416b4a2dd6d406debe3f0f5e2114d74f`, after protected rebase of
+[P3e PR #59](https://github.com/GhostFlying/cove/pull/59), retaining all five atomic
+commits and exact source-to-main mapping. Independent final-main projection and
+ordinary [run37061794296](https://github.com/GhostFlying/cove/actions/runs/37061794296)
+artifacts passed812/812 identities in69 inventory files per OS, attempt1.
+[Root acceptance](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p3e-practical-final-main-acceptance-r1.json)
+SHA256 `821f43b43b56118a3723a38ba2c776e18a5b90f6d2c5187d88b3ddb5d8de3869`
+accepts bounded public execution/applied client state only. Prior P2 private
+registration/control, W1 and P3a-d acceptance remains valid; full P3 stays open.
+
+B1 private subscription delivery original `3ab5d80`, tree12727667, has independent
+R2 source approval/F1 closure and scoped47/47 (contract42/client5), root intake
+`faa93b8acce0cbdc9a15dc75b8739f60c0d10195405082e24aec6b60e58fe7ec`.
+The sole native GPT-6.1 Sol/high registrar composed five unchanged source/test
+atoms on this accepted main in existing primary branch
+`p/luchengxuan/m0-18-subscription-main-integration`. The
+[B1 composition record](tasks/m0-server-subscription-main-integration.md) retains
+five mappings, source equality and authored27/27 (subscription20/delivery7).
+Actual declaration floors are14/7/30/5, with eight exact finite expansions yielding
+expected20/7/42/5 runtime cases. Server17/11/15, clientstate11, tooling38 and all
+fail-closed scanner/identity/failure guards remain. This new composition still
+requires its independent clean-head full check/review, normal PR dual-OS artifacts,
+protected mapping and actual-main acceptance. Registration is not a runtime pass.
+
+Ordinary pinned Node26.10.0/pnpm12.6.0 practical work remains authorized;
+historical custom P9/R5/R6 exact-environment and one-use machinery are archived,
+not normal engineering prerequisites. P3e seals extracted artifacts only, with
+no retained ZIP-byte proof; API archive digests remain metadata. Initial process
+group verification false, controlled FIFO drift, synthetic stale shim uncertainty
+and controlled browser rejection outcomes remain explicit. No blanket descendant
+absence is claimed. W2 EPERM and failed Ubuntu EOF causality remain uncertain.
+Full B1/P2/W2/P3/H1/C3, devbox100-real-PTY, real journeys and M0 exit remain open;
+M1 requires user review/permission. The consumed browser-close diagnostic is not
+renewed. Root dispatches independent authors, validators and reviewers; shared
+registration/handoff and primary index have one allocated writer.
+
+### Superseded P3e composition checkpoint
+
+The following current-at-the-time paragraphs retain the pre-acceptance P3e and
+B1 preparation state; their pending wording is historical.
+
 Accepted current main is `082ae77b7836c08debb342f7596635b8f6930c96`, tree
 `4f4bc8392a3d6e4f1c51f8e66c55a96f667d45e7`, after protected rebase of
 [P2 PR #58](https://github.com/GhostFlying/cove/pull/58). All seven atomic commits

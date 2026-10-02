@@ -164,3 +164,15 @@ format/lint/diff checks. Normal user-hooked separate atomic commit; no push, ful
 check, browser/native/CI or network action. Seal actual logs, final H/T/module
 hashes and handoff, then release lane/index for independent coherent postfix
 testing and minimal-diff review.
+
+## Subsequent accepted source and practical composition
+
+The preceding source-author/scoped checkpoints are historical. Root accepted R2
+independent source approval/F1 closure and scoped47/47 at original3ab5d80; final
+authored cases are20+7=27, independent cases42+5=47. The sole registrar replays
+all five atoms without source/test byte changes onto independently accepted
+P3e actual main5ac9e808. The [current composition record](m0-server-subscription-main-integration.md)
+binds mappings, actual static declaration floors14/7/30/5, eight exact finite
+expansions and the next independent composed full gate. Neither old scoped
+evidence nor registration establishes composed runtime, hosted/main acceptance
+or full B1/P2/W2/P3/H1/M0. All historical failures and cleanup limits remain.
