@@ -27,11 +27,14 @@ import type { ByteReservation } from "./runtime-retained-bytes.js";
 import { TerminalConnectionDelivery, type DeliveryFence } from "./terminal-connection-delivery.js";
 import { TerminalDeliveryCredit } from "./terminal-delivery-credit.js";
 import type { ResultHandoff } from "./worker-pipe-session.js";
+import { ControlArbiter, type ControlCommand, type ControlJob } from "./control-arbiter.js";
 
-type Supported = Extract<
-  TerminalCommand,
-  { type: "attach" | "recover" | "detach" | "applied-ack" | "baseline-progress" }
->;
+type Supported =
+  | Extract<
+      TerminalCommand,
+      { type: "attach" | "recover" | "detach" | "applied-ack" | "baseline-progress" }
+    >
+  | ControlCommand;
 type Reply = TerminalResult | TerminalError;
 type Route = {
   ref: SubscriptionRef;
@@ -58,6 +61,7 @@ type Request = {
   lease: ByteReservation;
   control: boolean;
   settled: boolean;
+  domain?: ControlJob;
 };
 
 // One authenticated connection owns refs; the runtime still owns execution facts.
@@ -88,10 +92,12 @@ export class TerminalSubscriptions {
       now: () => number;
       identityLimit: number;
       requestLimit: number;
+      arbiter?: ControlArbiter;
     },
   ) {
     if (
       runtime.composition !== composition ||
+      (options.arbiter && options.arbiter.runtime !== runtime) ||
       delivery.composition !== composition ||
       delivery.closed ||
       !Number.isSafeInteger(options.identityLimit) ||
@@ -193,7 +199,7 @@ export class TerminalSubscriptions {
     );
   }
 
-  handle(input: TerminalCommand): Promise<Reply> {
+  handle(input: TerminalCommand, payload: Uint8Array = new Uint8Array()): Promise<Reply> {
     if (this.closed || this.delivery.closed) return this.reject(input, "STALE_CONNECTION");
     let now: number;
     try {
@@ -210,12 +216,16 @@ export class TerminalSubscriptions {
       command.type !== "recover" &&
       command.type !== "detach" &&
       command.type !== "applied-ack" &&
-      command.type !== "baseline-progress"
+      command.type !== "baseline-progress" &&
+      (!this.options.arbiter || !this.isDomain(command))
     )
       return this.reject(command, "CAPABILITY_UNAVAILABLE");
     if (!this.composition.owns(command.run)) return this.reject(command, "INSTANCE_MISMATCH");
     if (this.externalIds.has(command.requestId)) return this.reject(command, "COUNTER_EXHAUSTED");
-    const control = command.type !== "attach" && command.type !== "recover";
+    const control =
+      command.type === "detach" ||
+      command.type === "applied-ack" ||
+      command.type === "baseline-progress";
     if (
       this.externalIds.size >= this.options.requestLimit ||
       (control
@@ -299,6 +309,41 @@ export class TerminalSubscriptions {
       requestLease.release();
       return this.reject(command, "COUNTER_EXHAUSTED");
     }
+    let domain: ControlJob | undefined;
+    if (this.isDomain(command)) {
+      const attempt = route!.attempt;
+      const token = route!.token;
+      const current = () =>
+        !this.closed &&
+        !this.delivery.closed &&
+        route!.phase === "active" &&
+        route!.attempt === attempt &&
+        token.current;
+      const admitted = this.options.arbiter!.admit(
+        command,
+        {
+          subscription: structuredClone(route!.ref),
+          worker: structuredClone(route!.worker),
+          requestId: internalId,
+          releaseId: route!.unsubscribeId + ".c",
+          current,
+          installed: (atSeq = 0) => {
+            const credit = route!.credit?.snapshot();
+            return (
+              current() &&
+              !!credit?.installed &&
+              credit.appliedSeq >= Math.max(route!.credit!.atSeq, atSeq)
+            );
+          },
+        },
+        payload,
+      );
+      if (!("promise" in admitted)) {
+        requestLease.release();
+        return this.reject(command, admitted);
+      }
+      domain = admitted;
+    }
     let resolve!: (reply: Reply) => void;
     const promise = new Promise<Reply>((done) => {
       resolve = done;
@@ -312,6 +357,7 @@ export class TerminalSubscriptions {
       lease: requestLease,
       control,
       settled: false,
+      ...(domain ? { domain } : {}),
     };
     this.externalIds.add(command.requestId);
     this.requestLeases.push(requestLease);
@@ -321,6 +367,16 @@ export class TerminalSubscriptions {
     route!.queue.push(request);
     void this.run(route!);
     return promise;
+  }
+
+  private isDomain(command: TerminalCommand): command is ControlCommand {
+    return (
+      command.type === "focus" ||
+      command.type === "blur" ||
+      command.type === "resize" ||
+      command.type === "appearance" ||
+      command.type === "input"
+    );
   }
 
   private fence(route: Route, attempt = route.attempt): DeliveryFence {
@@ -359,6 +415,18 @@ export class TerminalSubscriptions {
 
   private async execute(request: Request): Promise<void> {
     const { command, route, internalId } = request;
+    if (request.domain) {
+      const reply = await this.options.arbiter!.execute(request.domain);
+      this.finish(
+        request,
+        reply,
+        this.closed ||
+          this.delivery.closed ||
+          route.phase === "retired" ||
+          route.attempt !== request.attempt,
+      );
+      return;
+    }
     if (command.type === "recover") {
       if (route.attempt === Number.MAX_SAFE_INTEGER) {
         this.retire(route, domainError("COUNTER_EXHAUSTED"));
@@ -412,7 +480,7 @@ export class TerminalSubscriptions {
         type: "applied-ack",
         appliedSeq: command.appliedSeq,
       });
-    } else {
+    } else if (command.type === "baseline-progress") {
       if (!route.credit?.progress(command.baselineId, command.lastParsedOrdinal)) {
         this.finish(request, this.error(command, "RESYNC_REQUIRED"));
         return;
@@ -428,6 +496,9 @@ export class TerminalSubscriptions {
         baselineId: command.baselineId,
         lastParsedOrdinal: command.lastParsedOrdinal,
       });
+    } else {
+      this.finish(request, this.error(command, "CAPABILITY_UNAVAILABLE"));
+      return;
     }
     if (request.settled) return;
     if ((command.type === "attach" || command.type === "recover") && request.marker) {
@@ -577,6 +648,7 @@ export class TerminalSubscriptions {
     route.failure ??= error;
     route.credit?.retire();
     route.credit = undefined;
+    this.options.arbiter?.retire(route.ref);
     if (error) this.unsubscribe(route);
   }
   private unsubscribe(route: Route): void {
@@ -625,6 +697,7 @@ export class TerminalSubscriptions {
     request.resolve(structuredClone(reply));
   }
   tick(): void {
+    this.options.arbiter?.tick();
     if (this.closed) return;
     if (this.delivery.closed) {
       this.close();
@@ -640,7 +713,8 @@ export class TerminalSubscriptions {
       ) {
         this.retire(route, domainError("RECOVERY_EXPIRED", "unknown"));
         for (const request of route.queue)
-          this.finish(request, this.error(request.command, route.failure!));
+          if (!(request.command.type === "input" && request.domain?.dispatched))
+            this.finish(request, this.error(request.command, route.failure!));
       }
   }
   close(): void {
@@ -651,7 +725,8 @@ export class TerminalSubscriptions {
     for (const route of this.routes.values()) {
       this.retire(route, domainError("STALE_CONNECTION"));
       for (const request of route.queue)
-        this.finish(request, this.error(request.command, route.failure!));
+        if (!(request.command.type === "input" && request.domain?.dispatched))
+          this.finish(request, this.error(request.command, route.failure!));
       this.unsubscribe(route);
     }
     this.releaseClosedRecords();
