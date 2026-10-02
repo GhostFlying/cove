@@ -64,6 +64,58 @@ describe("P2-B1 independent trace oracle controls", () => {
 });
 
 describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
+  test.each(["invalid", "throw"])(
+    "F06-F1 third attach identity supplier %s refuses before publishing ownership",
+    async (failure) => {
+      let supplied = 0;
+      const createOpaqueId = () => {
+        supplied++;
+        if (supplied < 3) return `f1-valid-${supplied}`;
+        if (failure === "throw") throw new Error("controlled third supplier failure");
+        return "invalid id";
+      };
+      await usingRig({ createOpaqueId }, async (rig) => {
+        const before = {
+          commands: rig.commands.length,
+          retained: rig.account.snapshot().total,
+          service: rig.service.snapshot(),
+        };
+        const command = rig.attachCommand();
+        const reply = await rig.service.handle(command);
+        await turns();
+        expect(reply).toMatchObject({
+          type: "error",
+          requestId: command.requestId,
+          run: command.run,
+          commandType: "attach",
+          error: { kind: "COUNTER_EXHAUSTED" },
+        });
+        expect(rig.transport.trace().at(-1).metadata).toEqual(reply);
+        expect(rig.delivery.snapshot()).toMatchObject({ physicalBytes: 0, queuedBytes: 0 });
+        const service = rig.service.snapshot();
+        const observed = {
+          failure,
+          supplied,
+          pipeCommands: rig.commands.slice(before.commands).map((value) => value.type),
+          routesDelta: service.routes - before.service.routes,
+          tombstonesDelta:
+            service.routes - service.active - (before.service.routes - before.service.active),
+          identitiesDelta: service.identities - before.service.identities,
+          pendingDelta: service.pending - before.service.pending,
+          retainedDelta: rig.account.snapshot().total - before.retained,
+        };
+        console.log("P2_B1_F1_WITNESS", JSON.stringify(observed));
+        expect(observed.supplied).toBe(3);
+        expect.soft(observed.pipeCommands).toEqual([]);
+        expect.soft(observed.routesDelta).toBe(0);
+        expect.soft(observed.tombstonesDelta).toBe(0);
+        expect.soft(observed.identitiesDelta).toBe(0);
+        expect.soft(observed.pendingDelta).toBe(0);
+        expect.soft(observed.retainedDelta).toBe(0);
+      });
+    },
+  );
+
   test("F06-01 two connections retain distinct same-run routes and offered cursors", async () => {
     await usingRig({}, async (rig) => {
       const first = await attach(rig, { offered: resume(3), atSeq: 3 });
