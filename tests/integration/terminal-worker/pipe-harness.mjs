@@ -113,7 +113,8 @@ export function parseWorkerProcessRow(
     return { kind: "unverifiable", raw, reason: "malformed-or-wrong-pid" };
   const [, , started, commandLine] = match;
   const base = { pid, started, commandLine, raw };
-  if (commandLine === "(sh)") return { kind: "unverifiable", ...base, reason: "pre-exec-shell" };
+  if (commandLine === "(sh)" || commandLine === "(bash)")
+    return { kind: "unverifiable", ...base, reason: "pre-exec-shell" };
   if (anchors.error || !anchors.installed || !anchors.compiled)
     return {
       kind: "unverifiable",

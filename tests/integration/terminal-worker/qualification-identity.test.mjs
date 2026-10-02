@@ -223,17 +223,17 @@ test("real SIGTERM branch signals once only for a fresh matching compiled birth"
 });
 
 test("bounded admission waits through transient shell and shim before caller hello", async () => {
-  const transient = {
-    kind: "unverifiable",
-    pid,
-    started,
-    commandLine: "(sh)",
-    reason: "pre-exec-shell",
-    raw: `${pid} ${started} (sh)`,
-  };
+  const transient = parse("(sh)");
+  const bash = parse("(bash)");
+  expect(bash).toMatchObject({ kind: "unverifiable", pid, started, reason: "pre-exec-shell" });
   const shim = parse(`/bin/sh ${bin}`);
   const exec = parse(`node ${linuxEntry}`);
-  const { harness, sends } = startupHarness(transient, [shim, exec, exec]);
+  const { harness, sends } = startupHarness(transient, [shim, bash, exec, exec]);
+  const observe = harness.observe;
+  harness.observe = (...args) => {
+    expect(sends).toEqual([]);
+    return observe(...args);
+  };
   const pending = startWorkerPipe(harness, hello, { deadlineMs: 1000 });
   expect(sends).toEqual([]);
   await pending;
@@ -243,9 +243,70 @@ test("bounded admission waits through transient shell and shim before caller hel
   expect(harness.startupSamples.map((sample) => sample.commandLine)).toEqual([
     "(sh)",
     shim.commandLine,
+    "(bash)",
     exec.commandLine,
   ]);
   expect(sends).toEqual([hello]);
+});
+
+test("only exact known shell titles remain pending during startup", async () => {
+  const shim = parse(`/bin/sh ${bin}`);
+  const exec = parse(`node ${linuxEntry}`);
+  for (const title of [
+    "(node)",
+    "(zsh)",
+    "(arbitrary)",
+    "(bash) --extra",
+    `/bin/bash ${bin}`,
+    "/bin/sh /wrong/wrapper",
+  ]) {
+    const rejected = parse(title);
+    expect(rejected).toMatchObject({ kind: "unverifiable", reason: "unrelated-argv" });
+    const { harness, sends, sampleCount } = startupHarness(shim, [rejected, exec]);
+    await expect(startWorkerPipe(harness, hello)).rejects.toThrow(
+      "worker startup identity rejected",
+    );
+    expect(sampleCount()).toBe(1);
+    expect(sends).toEqual([]);
+    expect(harness.startupFailureObservation).toEqual(rejected);
+  }
+  const wrongPid = parse("(bash)", pid + 1);
+  expect(wrongPid).toMatchObject({ kind: "unverifiable", reason: "malformed-or-wrong-pid" });
+  const { harness, sends } = startupHarness(wrongPid, [exec]);
+  await expect(startWorkerPipe(harness, hello)).rejects.toThrow("worker startup identity rejected");
+  expect(sends).toEqual([]);
+});
+
+test("bash transient cannot authorize changed birth, wrong entry, hello or signals", async () => {
+  const bash = parse("(bash)");
+  const exec = parse(`node ${linuxEntry}`);
+  expect(sameOwnedWorker(exec, bash)).toBe(false);
+  const changed = { ...exec, started: "Mon Sep 28 18:16:49 2026" };
+  const birth = startupHarness(bash, [changed]);
+  await expect(startWorkerPipe(birth.harness, hello)).rejects.toThrow("worker birth changed");
+  expect(birth.sends).toEqual([]);
+  expect(birth.harness.startupFailureObservation).toEqual(changed);
+
+  const wrongEntry = parse("node /wrong/main.js");
+  const entry = startupHarness(bash, [wrongEntry, exec]);
+  await expect(startWorkerPipe(entry.harness, hello)).rejects.toThrow(
+    "worker startup identity rejected",
+  );
+  expect(entry.sampleCount()).toBe(1);
+  expect(entry.sends).toEqual([]);
+
+  const fresh = startupHarness(exec, [bash]);
+  await expect(startWorkerPipe(fresh.harness, hello)).rejects.toThrow("worker identity uncertain");
+  expect(fresh.sends).toEqual([]);
+  expect(fresh.harness.helloWrite.attempted).toBe(false);
+  expect(fresh.harness.startupFailureObservation).toEqual(bash);
+
+  const signals = [];
+  fresh.harness.child.kill = (signal) => signals.push(signal);
+  expect(() => signalVerifiedWorkerExec(fresh.harness, "SIGTERM")).toThrow(
+    "worker identity uncertain",
+  );
+  expect(signals).toEqual([]);
 });
 
 test("direct expected compiled entry admits before caller hello", async () => {
