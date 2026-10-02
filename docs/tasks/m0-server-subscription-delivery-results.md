@@ -1,0 +1,98 @@
+# M0 P2-B1 private subscription delivery results
+
+Source author `/root/p2_subscription_delivery_impl`, native GPT-6.1 Sol/high,
+allocation `p2-subscription-delivery-implementation-r1`. Assigned checkout and
+branch are recorded in [the pre-code plan](m0-server-subscription-delivery-plan.md).
+Base H `082ae77b7836c08debb342f7596635b8f6930c96`, tree
+`4f4bc8392a3d6e4f1c51f8e66c55a96f667d45e7`. Existing original refs remain
+preserved; no core/public/config/manifest/lock/workflow file was changed.
+
+## Implemented private boundary
+
+`TerminalSubscriptions` takes the same RuntimeComposition, actual LocalRuntime,
+TerminalConnectionDelivery and finite ID/request limits, supplier and monotonic
+clock. `handle()` serializes attach/recover/ACK/progress/detach per owned route;
+`handoff` binds the existing synchronous pipe ResultHandoff. The LocalRuntime's
+injected closure must route a result to the corresponding connection service
+before worker receive starts. `tick`, `close` and `snapshot` provide deterministic
+private lifecycle/observability seams. No capability or server entry is advertised.
+
+`TerminalConnectionDelivery` encodes validated terminal3 result/event/error frames,
+owns bounded queued/handed records and full ref-counted backing leases, preserves
+same-route FIFO and four reserved control positions, and makes write(false) a
+single handoff. Credit-blocked routes permit another eligible route to proceed.
+`TerminalDeliveryCredit` records exact external header/metadata/payload charges;
+socket callbacks return physical ownership only. Progress releases exact sent
+baseline ordinals; final ACK N requires the complete validated handed-off end.
+Stable-ref recovery cancels unsent frames, retires only old logical credit and
+fences old callbacks with a standalone token. Close preserves callback ownership
+and unresolved runtime continuation records, and issues only owned unsubscribe.
+
+Internal request IDs are namespaced by SHA-256 of the full connection ID and
+generation plus a checked monotonic suffix, so separate connection ID suppliers
+cannot collide. Fresh subscription IDs and retired tombstones are finite and
+never reused; exhaustion refuses ownership. Route overflow/expiry preserves the
+first correlated failure, unsubscribes that ownership and leaves healthy routes
+and authoritative run capacity intact. B1 sends no stop/control/input command.
+
+## Checks actually run
+
+Fixed tools: Node26.10.0, pnpm12.6.0, macOS/arm64; selected binaries in
+`/private/tmp/cove-engineering-toolchain`, approved XDG cache. Existing task-owned
+installation was usable; no frozen install or native preparation was needed.
+Root released the exclusive author scoped lane after P3e's actual full-check exit.
+
+- An initial PATH error selected the empty fixed pnpm/bin directory and fell
+  through to the user pnpm wrapper. It failed registry acquisition before tsc or
+  tests. Corrected to the exact directory containing the pinned binary; no
+  registry/config/dependency change. The failed log is preserved.
+- First actual scoped `tsc -b apps/server packages/client` exited 2 for new-file
+  type errors: literal history-limit argument, exact optional properties and the
+  correlated marker union. Corrected only owned files; scoped tsc retake exited 0.
+  The public descriptor validator is used at its fixed maximum followed by the
+  effective-history check; existing protocol source remains unchanged.
+- First owned Vitest invocation exited 1: delivery/credit **7/7 passed**, while
+  subscription had an import-time failure with zero executed cases because the
+  server importer has no client dependency. An import-only export cannot be
+  resolved with createRequire either; that attempted binding failure is retained.
+  The fixture now reads the selected client manifest's public import export and
+  imports that compiled entry using URL resolution, without src aliases.
+- First actual subscription run executed **11 cases: 8 passed, 3 failed**. Two
+  passive fixture responses arrived before the preceding command's serialized
+  await boundary; those fixtures now wait deterministic microtasks before
+  replying. The public client intentionally omits resume for gap recovery; the
+  retained-model contrast now uses its valid expired recovery path. No server
+  behavior was weakened to satisfy either fixture. The affected subscription
+  retake exited 0 with **11/11 passed**. The owned linter initially rejected conditional expectations in the baseline
+  loop; the fixture now separates the first chunk from subsequent progress
+  steps, retaining every boundary assertion. Owned lint retake exited 0. After
+  formatting and this fixture correction, a final scoped tsc exited 0 and one
+  coherent two-file authored run exited 0 with **18/18 passed**, zero skipped or
+  timeout. This is not a composed full-suite claim.
+
+Author cases execute compiled private modules, real WorkerPipeSession.receive and
+LocalRuntime, decode actual external/pipe bytes, inspect the common retained
+account and current logical ledger, and hold real injected carrier callbacks.
+Contrasts cover dual connections/cursors, full ref rejection, absent/valid resume,
+coalesced marker+event, reentrant close, old unsent versus handed recovery frames,
+ACK serialization/forgery/duplicates, baseline progress larger than minimum credit,
+expiry isolation, finite tombstones/control positions, detach without stop and
+idempotent late callbacks. The public client case holds controlled finishBaseline:
+no ACK N before installation, then legal stable-ref recovery and detach through
+captured production B1 frames/uplink. No network/browser/native worker was used.
+
+Raw logs and final source H/T/hash/command receipts are sealed off-tree under
+`/Users/luchengxuan/WORKSPACE/cove-evidence/p2-subscription-delivery-implementation-r1`.
+Owned formatter/linter passed. Ordinary hooked atomic commit identity and
+outcome are recorded there after this file is frozen. Stage only author paths: the independent tester
+has disjoint same-tree write ownership and its unfinished files are excluded.
+
+## Remaining gates and limits
+
+This is authored private B1 implementation evidence, not independent acceptance.
+The independent contract/client files, source review, sole registration,
+composition/full/normal dual-OS CI/protected rebase/final-main review remain with
+assigned separate owners. Full W2/P2/P3/H1/M0 and real HTTP/WS/worker/carrier
+qualification remain open; B2 control/input, preview and M1 are excluded.
+No public integration, PR, push, full check, native/browser/network/process probe,
+old provenance pipeline or additional user approval was performed here.
