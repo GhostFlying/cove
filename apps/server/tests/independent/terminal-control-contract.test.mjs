@@ -3,6 +3,7 @@ import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import {
   backingOracle,
   binary,
+  controlFixture,
   grantOracle,
   holder,
   onceOracle,
@@ -865,4 +866,146 @@ describe("P2-B2 independent lifetime and uncertainty fences", () => {
       expect((await q).epoch).toBe(8);
       expect(state(r).uncertain).toBe(false);
     }));
+});
+
+describe("P2-B2 independent F1 held-result close unsubscribe", () => {
+  test.each(["focus", "input"])(
+    "F1 owned unsubscribe precedes held %s result settlement",
+    async (kind) => {
+      const r = controlFixture({ pipeHold: true });
+      const trace = { kind, steps: [] };
+      const record = (phase) =>
+        trace.steps.push({
+          phase,
+          commands: structuredClone(r.commands),
+          primary: r.primary.service.snapshot(),
+          arbiter: state(r),
+          pipe: r.session.snapshot(),
+          retained: r.account.snapshot(),
+        });
+      try {
+        const c = r.primary;
+        const operator = kind === "input" ? await installedOperator(r) : undefined;
+        const ref = operator?.ref ?? (await r.attach(c));
+        const watcher = r.addConnection();
+        const watcherRef = await r.attach(watcher);
+        const external = r.command(
+          kind,
+          ref,
+          kind === "focus" ? { focusSeq: 1, geometry } : { inputSeq: 1, epoch: operator.epoch },
+        );
+        const pending = c.service.handle(external, kind === "input" ? binary : new Uint8Array());
+        await turns();
+        if (kind === "focus") {
+          r.status();
+          await turns();
+        }
+        const held = r.last(kind === "focus" ? "set-control" : "input");
+        const physical = r.pipeWrites.findLast((w) =>
+          w.frames.some((frame) => frame.metadata.requestId === held.requestId),
+        );
+        expect(physical.released).toBe(false);
+        trace.held = held;
+        trace.backingBytes = physical.encoded.buffer.byteLength;
+        const newer =
+          kind === "focus"
+            ? watcher.service.handle(r.command("focus", watcherRef, { focusSeq: 1, geometry }))
+            : undefined;
+        await turns();
+        record("held-before-close");
+        c.service.close();
+        expect(c.service.closed).toBe(true);
+        expect(c.service.snapshot(ref.subscriptionId).route.phase).toBe("retired");
+        const beforeRefusal = business(r).length;
+        const refusal = await c.service.handle(
+          r.command("input", ref, { epoch: 6, inputSeq: 2 }),
+          binary,
+        );
+        expect(refusal.type).toBe("error");
+        expect(refusal.error.acceptance).toBe("not-accepted");
+        expect(business(r)).toHaveLength(beforeRefusal);
+        await turns();
+        const ownUnsubscribes = () =>
+          r.commands.filter(
+            (x) => x.type === "unsubscribe" && x.subscription.subscriptionId === ref.subscriptionId,
+          );
+        const immediate = structuredClone(ownUnsubscribes());
+        trace.immediateOwnedUnsubscribes = immediate;
+        record("closed-before-held-result");
+        expect(
+          r.commands.filter(
+            (x) =>
+              x.type === "unsubscribe" &&
+              x.subscription.subscriptionId === watcherRef.subscriptionId,
+          ),
+        ).toHaveLength(0);
+        expect(
+          r.commands.filter((x) => x.type === "set-control" && x.holder === null),
+        ).toHaveLength(0);
+        expect(r.count("stop")).toBe(0);
+        r.accept(
+          held,
+          kind === "focus" ? { atSeq: 11 } : { inputSeq: 1, writtenBytes: binary.length },
+        );
+        const reply = await pending;
+        trace.heldReply = reply;
+        expect(reply.type).toBe(kind === "focus" ? "error" : "input-result");
+        expect(reply.writtenBytes).toBe(kind === "input" ? binary.length : undefined);
+        await turns();
+        record("held-result-settled");
+        expect(
+          c.transport.trace().filter((x) => x.metadata.requestId === external.requestId),
+        ).toHaveLength(0);
+        expect(r.session.snapshot().physicalBytes).toBeGreaterThanOrEqual(trace.backingBytes);
+        const next = r.last("set-control");
+        expect(next.holder).toEqual(kind === "focus" ? holder(watcherRef) : null);
+        expect(next.expectedEpoch).toBe(6);
+        expect(next.nextEpoch).toBe(kind === "focus" ? 7 : operator.epoch);
+        expect(next.geometry).toEqual(geometry);
+        if (kind === "input")
+          releaseOracle(
+            { ...next, owner: holder(ref) },
+            { holder: holder(ref), epoch: operator.epoch, geometry },
+          );
+        r.accept(next, { atSeq: 12 });
+        const newerReply = await newer;
+        expect(newerReply?.epoch).toBe(kind === "focus" ? 7 : undefined);
+        await turns();
+        expect(ownUnsubscribes()).toHaveLength(1);
+        expect(ownUnsubscribes()[0].subscription).toEqual(ref);
+        r.accept(ownUnsubscribes()[0]);
+        await turns();
+        c.service.close();
+        r.arbiter.retire(ref);
+        r.arbiter.tick();
+        await turns();
+        expect(ownUnsubscribes()).toHaveLength(1);
+        expect(
+          r.commands.filter((x) => x.type === "set-control" && x.holder === null),
+        ).toHaveLength(kind === "focus" ? 0 : 1);
+        expect(state(r).boundary.holder).toEqual(kind === "focus" ? holder(watcherRef) : null);
+        expect(watcher.service.snapshot(watcherRef.subscriptionId).route.phase).toBe("active");
+        expect(
+          r.commands.filter(
+            (x) =>
+              x.type === "unsubscribe" &&
+              x.subscription.subscriptionId === watcherRef.subscriptionId,
+          ),
+        ).toHaveLength(0);
+        expect(r.count("stop")).toBe(0);
+        record("conditional-tail-settled");
+        await r.stop();
+        record("owned-carriers-released");
+        // Compare the saved close-time observation after collecting settlement and cleanup evidence.
+        expect(immediate, "owned unsubscribe must precede held B2 result settlement").toHaveLength(
+          1,
+        );
+        expect(immediate[0].subscription).toEqual(ref);
+      } finally {
+        await r.stop();
+        record("finally-owned-cleanup");
+        console.info("F1_REGRESSION_TRACE " + JSON.stringify(trace));
+      }
+    },
+  );
 });
