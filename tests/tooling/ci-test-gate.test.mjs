@@ -127,14 +127,18 @@ test("protocol registration and its actual test root are required", async () => 
   );
 });
 
-test("server author suites are exact, fail-closed, and fully owned by Vitest", async () => {
+test("server author and independent suites are fail-closed and fully owned by Vitest", async () => {
   const files = await readVitestOwnedTestFiles();
   const registrations = [
-    ["runtime-admission", 17],
-    ["worker-pipe-session", 11],
-    ["operation-receipts", 15],
-  ].map(([name, minimumTests]) => {
-    const file = `apps/server/tests/author/${name}.test.mjs`;
+    ["author", "runtime-admission", 17],
+    ["author", "worker-pipe-session", 11],
+    ["author", "operation-receipts", 15],
+    ["author", "terminal-subscriptions", 14],
+    ["author", "terminal-connection-delivery", 7],
+    ["independent", "subscription-contract", 30],
+    ["independent", "subscription-client", 5],
+  ].map(([directory, name, minimumTests]) => {
+    const file = `apps/server/tests/${directory}/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
     expect(suite).toMatchObject({ project: "server", minimumTests });
     expect(files).toContain(file);
@@ -149,6 +153,9 @@ test("server author suites are exact, fail-closed, and fully owned by Vitest", a
     }));
     expect(() => verifyDiscovery(complete.slice(0, -1), [suite.file], [suite])).toThrow(
       `discovered ${suite.minimumTests - 1} tests; needs ${suite.minimumTests}`,
+    );
+    expect(verifyDiscovery(complete, [suite.file], [suite]).found.get(`server:${suite.file}`)).toBe(
+      suite.minimumTests,
     );
     expect(() => verifyDiscovery([...complete, complete[0]], [suite.file], [suite])).toThrow(
       /Duplicate discovered identity/,
@@ -174,14 +181,16 @@ test("server author suites are exact, fail-closed, and fully owned by Vitest", a
       /skipped, pending/,
     );
   }
-  const extra = "apps/server/tests/author/unregistered.test.mjs";
-  expect(() =>
-    verifyDiscovery(
-      [{ projectName: "server", file: resolve(root, extra), name: "extra" }],
-      [extra],
-      registrations,
-    ),
-  ).toThrow(/Unregistered Vitest suite/);
+  for (const directory of ["author", "independent"]) {
+    const extra = `apps/server/tests/${directory}/unregistered.test.mjs`;
+    expect(() =>
+      verifyDiscovery(
+        [{ projectName: "server", file: resolve(root, extra), name: "extra" }],
+        [extra],
+        registrations,
+      ),
+    ).toThrow(/Unregistered Vitest suite/);
+  }
 });
 
 test("client public-contract suites reject missing and short discovery", async () => {
@@ -1348,6 +1357,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   temporaryDirectories.push(checkout);
   await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
   await mkdir(resolve(checkout, "apps/server/tests/author"), { recursive: true });
+  await mkdir(resolve(checkout, "apps/server/tests/independent"), { recursive: true });
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/probes"), { recursive: true });
   await mkdir(resolve(checkout, "packages/terminal-engine/tests"), { recursive: true });
@@ -1359,6 +1369,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/client/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "apps/server/tests/author/runtime.test.mjs"), "");
+  await writeFile(resolve(checkout, "apps/server/tests/independent/contract.test.mjs"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
   await writeFile(resolve(checkout, "tests/browser/terminal.spec.ts"), "");
   await writeFile(resolve(checkout, "packages/terminal-engine/probes/native.test.mjs"), "");
@@ -1371,6 +1382,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/client/tests/contract.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
     "apps/server/tests/author/runtime.test.mjs",
+    "apps/server/tests/independent/contract.test.mjs",
     "packages/client/tests/contract.test.mjs",
     "packages/protocol/tests/metadata.test.mjs",
     "packages/terminal-engine/probes/native.test.mjs",
