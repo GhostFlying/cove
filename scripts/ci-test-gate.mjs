@@ -229,6 +229,26 @@ export const requiredSuites = [
     file: "apps/server/tests/author/operation-receipts.test.mjs",
     minimumTests: 15,
   },
+  {
+    project: "server",
+    file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
+    minimumTests: 14,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/terminal-connection-delivery.test.mjs",
+    minimumTests: 7,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    minimumTests: 30,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-client.test.mjs",
+    minimumTests: 5,
+  },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
@@ -476,6 +496,104 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "server",
+    file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
+    template:
+      "private terminal subscription delivery > releases unpublished attach ownership when the third identity is %s",
+    names: [
+      "private terminal subscription delivery > releases unpublished attach ownership when the third identity is invalid",
+      "private terminal subscription delivery > releases unpublished attach ownership when the third identity is throw",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
+    template:
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes %s at identity %i",
+    names: [
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes service at identity 1",
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes service at identity 2",
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes service at identity 3",
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes delivery at identity 1",
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes delivery at identity 2",
+      "private terminal subscription delivery > refuses unpublished attach after supplier closes delivery at identity 3",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-F1 third attach identity supplier %s refuses before publishing ownership",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-F1 third attach identity supplier invalid refuses before publishing ownership",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-F1 third attach identity supplier throw refuses before publishing ownership",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field %s cannot dispatch",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field serverId cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field relayInstanceId cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field runId cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field connectionId cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field generation cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field viewId cannot dispatch",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 stale complete subscription field subscriptionId cannot dispatch",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 foreign worker %s cannot publish",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 foreign worker workerId cannot publish",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F06-02 foreign worker workerIncarnationId cannot publish",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 invalid resume %s has no dispatch or allocation",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 invalid resume profile has no dispatch or allocation",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 invalid resume encoding has no dispatch or allocation",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 invalid resume geometry has no dispatch or allocation",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 impossible %s result cannot activate",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 impossible replay-without-offer result cannot activate",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F07-02 impossible rollback result cannot activate",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/subscription-contract.test.mjs",
+    template:
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F09-02 %s cannot activate same-chunk delivery",
+    names: [
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F09-02 reentrant-close cannot activate same-chunk delivery",
+      "P2-B1 actual compiled parser/runtime/subscription contracts > F09-02 marker-capacity-refusal cannot activate same-chunk delivery",
+    ],
+    reporterIdentity: "ancestry",
+  },
   {
     project: "client",
     file: "packages/client/tests/terminal-budgets-preview.test.mjs",
