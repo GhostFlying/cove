@@ -13,7 +13,7 @@ import {
   type PipeEvent,
 } from "@cove/protocol/pipe";
 import { domainError, type DomainErrorKind } from "@cove/protocol/errors";
-import { validateEffectiveBudgets, type EffectiveBudgets } from "@cove/protocol/budgets";
+import type { EffectiveBudgets } from "@cove/protocol/budgets";
 import {
   sameWorkerRef,
   sameRunRef,
@@ -23,7 +23,8 @@ import {
   type SubscriptionRef,
 } from "@cove/protocol/identity";
 import type { RuntimeResult } from "@cove/protocol/runtime";
-import { RuntimeRetainedBytes, type ByteReservation } from "./runtime-retained-bytes.js";
+import type { ByteReservation } from "./runtime-retained-bytes.js";
+import { RuntimeComposition } from "./runtime-composition.js";
 
 export const SESSION_CONTROL_RESERVE = 6 * (6 * MAX_METADATA_BYTES + 2048) + 64 * 1024;
 
@@ -55,6 +56,7 @@ type Route = { ref: SubscriptionRef; active: boolean; lease: ByteReservation };
 
 export class WorkerPipeSession {
   readonly worker: WorkerRef;
+  readonly composition: RuntimeComposition;
   private readonly hello: Extract<PipeMetadata, { type: "hello" }>;
   private readonly decoder = createPipeDecoder();
   private readonly arena: ByteReservation;
@@ -83,9 +85,8 @@ export class WorkerPipeSession {
   constructor(
     private readonly options: {
       worker: WorkerRef;
-      budgets: EffectiveBudgets;
+      composition: RuntimeComposition;
       buildVersion: string;
-      bytes: RuntimeRetainedBytes;
       transport: PipeByteTransport;
       codec: PipeCodec;
       now: () => number;
@@ -95,9 +96,8 @@ export class WorkerPipeSession {
     },
   ) {
     if (
-      !validateEffectiveBudgets(options.budgets) ||
-      options.bytes.limit > options.budgets.runtimeBytes ||
-      options.bytes.controlReserve < SESSION_CONTROL_RESERVE ||
+      !options.composition.owns(options.worker) ||
+      options.composition.bytes.controlReserve < SESSION_CONTROL_RESERVE ||
       !Number.isSafeInteger(options.timeoutMs) ||
       options.timeoutMs < 1 ||
       !Number.isSafeInteger(options.identityLimit) ||
@@ -105,15 +105,16 @@ export class WorkerPipeSession {
       options.identityLimit > 4096
     )
       throw new Error("Invalid session limits");
+    this.composition = options.composition;
     this.worker = Object.freeze({ ...options.worker });
     this.hello = {
       type: "hello",
       worker: this.worker,
       pipeVersion: PIPE_VERSION,
-      effectiveBudgets: { ...options.budgets },
+      effectiveBudgets: { ...options.composition.budgets },
       buildVersion: options.buildVersion,
     };
-    const arena = options.bytes.reserve(
+    const arena = options.composition.bytes.reserve(
       2 * MAX_READ_BYTES + 3 * MAX_FRAME_BYTES + 6 * MAX_METADATA_BYTES + 1024,
     );
     if (!arena) throw new Error("Session byte capacity unavailable");
@@ -165,7 +166,7 @@ export class WorkerPipeSession {
       return false;
     const existing = this.runs.get(run.runId);
     if (existing) return sameRunRef(existing, run);
-    if (this.runs.size >= this.options.budgets.maxRuns) return false;
+    if (this.runs.size >= this.composition.budgets.maxRuns) return false;
     this.runs.set(run.runId, { ...run });
     return true;
   }
@@ -236,7 +237,7 @@ export class WorkerPipeSession {
     const count = [...this.pending.values()].filter((entry) => entry.role === role).length;
     const cap =
       role === "ordinary"
-        ? this.options.budgets.pendingWorkerCommands
+        ? this.composition.budgets.pendingWorkerCommands
         : role === "progress"
           ? 4
           : 1;
@@ -245,10 +246,10 @@ export class WorkerPipeSession {
     if ((command.type === "subscribe" || command.type === "recover") && !handoff)
       return Promise.resolve(this.error(command, "BUSY"));
     if (
-      (command.type === "input" && payload.byteLength > this.options.budgets.inputQueueBytes) ||
+      (command.type === "input" && payload.byteLength > this.composition.budgets.inputQueueBytes) ||
       (command.type === "spawn" &&
-        (command.geometry.cols > this.options.budgets.maxCols ||
-          command.geometry.rows > this.options.budgets.maxRows)) ||
+        (command.geometry.cols > this.composition.budgets.maxCols ||
+          command.geometry.rows > this.composition.budgets.maxRows)) ||
       payload.buffer.byteLength > MAX_FRAME_BYTES
     )
       return Promise.resolve(this.error(command, "BUSY"));
@@ -267,7 +268,7 @@ export class WorkerPipeSession {
     const snapshot = JSON.parse(
       this.options.codec.decode(bytes.subarray(16, bytes.byteLength - payload.byteLength)),
     ) as PipeCommand;
-    const identityLease = this.options.bytes.reserve(
+    const identityLease = this.composition.bytes.reserve(
       6 * MAX_METADATA_BYTES + 2048,
       role !== "ordinary",
     );
@@ -279,12 +280,12 @@ export class WorkerPipeSession {
       if (!route) {
         if (
           this.routes.length >=
-          this.options.budgets.maxRuns * this.options.budgets.subscriptionsPerConnection
+          this.composition.budgets.maxRuns * this.composition.budgets.subscriptionsPerConnection
         ) {
           identityLease.release();
           return Promise.resolve(this.error(command, "BUSY"));
         }
-        const lease = this.options.bytes.reserve(4096);
+        const lease = this.composition.bytes.reserve(4096);
         if (!lease) {
           identityLease.release();
           return Promise.resolve(this.error(command, "BUSY"));
@@ -325,15 +326,15 @@ export class WorkerPipeSession {
     const control = role !== "ordinary";
     const size = bytes.buffer.byteLength;
     if (
-      size > this.options.budgets.pipeQueuedBytes - this.queuedBytes - this.physicalBytes ||
+      size > this.composition.budgets.pipeQueuedBytes - this.queuedBytes - this.physicalBytes ||
       (!control &&
         size >
-          this.options.budgets.pipeQueuedBytes -
-            this.options.budgets.reservedControlBytes -
+          this.composition.budgets.pipeQueuedBytes -
+            this.composition.budgets.reservedControlBytes -
             this.ordinaryBytes)
     )
       return false;
-    const lease = this.options.bytes.reserve(size, control);
+    const lease = this.composition.bytes.reserve(size, control);
     if (!lease) return false;
     this.queuedBytes += size;
     if (!control) this.ordinaryBytes += size;
@@ -494,7 +495,7 @@ export class WorkerPipeSession {
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void } {
     if (this.closed || this.listeners.size >= 32 || this.listeners.has(listener))
       throw new Error("Event listener capacity unavailable");
-    const lease = this.options.bytes.reserve(512);
+    const lease = this.composition.bytes.reserve(512);
     if (!lease) throw new Error("Event listener byte capacity unavailable");
     this.listeners.set(listener, lease);
     return {

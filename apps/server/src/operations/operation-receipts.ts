@@ -5,8 +5,8 @@ import {
   type OperationReceiptKey,
   type OperationRecord,
 } from "@cove/protocol/rpc";
-import type { EffectiveBudgets } from "@cove/protocol/budgets";
-import { RuntimeRetainedBytes, type ByteReservation } from "../terminal/runtime-retained-bytes.js";
+import type { ByteReservation } from "../terminal/runtime-retained-bytes.js";
+import { RuntimeComposition } from "../terminal/runtime-composition.js";
 
 type Entry = {
   key: OperationReceiptKey;
@@ -27,18 +27,21 @@ export class OperationReceipts {
   private readonly scratch: ByteReservation;
   private disposed = false;
   constructor(
-    readonly serverId: string,
-    readonly relayInstanceId: string,
-    private readonly budgets: EffectiveBudgets,
-    private readonly bytes: RuntimeRetainedBytes,
+    readonly composition: RuntimeComposition,
     private readonly encodeUtf8: (text: string) => Uint8Array,
   ) {
-    if (bytes.limit > budgets.runtimeBytes) throw new Error("Runtime budget mismatch");
-    const scratch = bytes.reserve(
-      6 * budgets.operationRecordBytes + 6 * budgets.canonicalIntentBytes,
+    const scratch = this.bytes.reserve(
+      6 * this.budgets.operationRecordBytes + 6 * this.budgets.canonicalIntentBytes,
     );
     if (!scratch) throw new Error("Receipt scratch capacity unavailable");
     this.scratch = scratch;
+  }
+
+  private get budgets() {
+    return this.composition.budgets;
+  }
+  private get bytes() {
+    return this.composition.bytes;
   }
 
   private id(key: OperationReceiptKey): string {
@@ -49,8 +52,8 @@ export class OperationReceipts {
     return (
       !this.disposed &&
       OperationReceiptKeySchema.safeParse(key).success &&
-      key.serverId === this.serverId &&
-      key.relayInstanceId === this.relayInstanceId
+      key.serverId === this.composition.serverId &&
+      key.relayInstanceId === this.composition.relayInstanceId
     );
   }
 
@@ -115,8 +118,8 @@ export class OperationReceipts {
       !checked ||
       this.encodeUtf8(JSON.stringify(checked)).byteLength > this.budgets.operationRecordBytes ||
       checked.operationId !== entry.key.operationId ||
-      checked.run?.serverId !== this.serverId ||
-      checked.run.relayInstanceId !== this.relayInstanceId
+      checked.run?.serverId !== this.composition.serverId ||
+      checked.run.relayInstanceId !== this.composition.relayInstanceId
     )
       return null;
     return checked;

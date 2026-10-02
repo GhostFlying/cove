@@ -130,9 +130,9 @@ test("protocol registration and its actual test root are required", async () => 
 test("server author suites are exact, fail-closed, and fully owned by Vitest", async () => {
   const files = await readVitestOwnedTestFiles();
   const registrations = [
-    ["runtime-admission", 8],
+    ["runtime-admission", 17],
     ["worker-pipe-session", 11],
-    ["operation-receipts", 12],
+    ["operation-receipts", 15],
   ].map(([name, minimumTests]) => {
     const file = `apps/server/tests/author/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
