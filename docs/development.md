@@ -56,10 +56,16 @@ pnpm check
 | `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-当前注册 tooling、protocol、server、terminal-engine、terminal-engine-probes 和 terminal-web-probes 六个测试 project。`scripts/ci-test-gate.mjs` 的 required suite inventory 精确列出
-已有工具链测试文件及最低用例数；`pnpm test` 先比较 Vitest project 发现结果与其拥有的
-`tests/tooling`、协议包 `tests`、引擎包 `tests` 及两个终端实验包的 `probes` 下测试文件，
-再核验实际 JSON 执行结果与 JUnit 非空。缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
+当前注册 `protocol`、`client`、`server`、`tooling`、`terminal-engine`、
+`terminal-engine-probes`、`terminal-worker`、`terminal-web-probes` 和
+`terminal-web` 九个 Vitest project。`scripts/ci-test-gate.mjs` 的 required suite
+inventory 精确列出已有测试文件及最低用例数；`pnpm test` 先比较 Vitest project
+发现结果与它拥有的 `apps/server/tests`、`packages/client/tests`、
+`packages/protocol/tests`、`tests/tooling`、`packages/terminal-engine/tests`、
+`packages/terminal-engine/probes`、`packages/terminal-worker/tests`、
+`tests/integration/terminal-worker`、`packages/terminal-web/probes` 和
+`packages/terminal-web/tests` 下测试文件，再核验实际 JSON 执行结果与 JUnit 非空。
+缺 suite、零用例、skip/pending/todo、失败或未执行均失败。
 新增真实包时，在同一 PR 将 tsconfig 加入引用图、将其真实测试根目录及 suite 加入
 Vitest projects 和 inventory，
 提供对应包脚本，再使用 `pnpm --filter <package> <script>` 做局部验证。`pnpm test:watch` 供开发交互使用，

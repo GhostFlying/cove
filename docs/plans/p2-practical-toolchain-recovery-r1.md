@@ -102,12 +102,24 @@ written only under
 
 ## Final integration status
 
-The practical toolchain and registration work is complete, and the separately
-owned minimal server source/test correction has passed its pinned server build,
-31 compiled author tests, and bounded format/lint checks. Root `pnpm check`
-passed through native preparation, format, lint, build, environment and
-discovery, then stopped before runtime tests at the existing clean-source guard
-because the composed bytes were not yet committed. The remaining gates are a
-coherent commit, a full check on its clean exact head, and independent
-validation/review; no full P2, W2 observer, H1, M0-exit or M1-entry acceptance is
-claimed.
+The practical toolchain, registration and minimal server source/test correction
+were committed as the normal hooked snapshot
+`b4c57f52753b99995ec411d9732dc442b87818b6`, tree
+`79093ff5932e9b5dd9e696738986bbf253f05185`. The pinned server build, 31 compiled
+author tests and bounded format/lint passed. The earlier author `pnpm check`
+stopped before runtime tests at the clean-source guard while the bytes were
+dirty; that result is historical and does not describe the committed snapshot.
+
+Independent validation of `b4c57f5` passed frozen install and server package
+build/tests, but the sole full `pnpm check` exited 1 with 780/781 tests, zero
+skipped/pending/todo and no timeout. The terminal-worker qualification harness
+rejected a transient `(bash)` row before a later same-birth exact Node
+observation; bounded cleanup for the failed owned process reached exit and
+absence. No full-gate PASS is claimed. Independent source review separately
+requires a shared-ledger/budget and server/relay-authority composition boundary.
+Narrow owners are correcting the fixture and composition findings against the
+validated snapshot. Their working bytes are not yet a frozen combined candidate,
+so the later integration handoff must record its exact identity before fresh
+independent validation/review. The current documentation slice is recorded at
+`/Users/luchengxuan/WORKSPACE/cove-evidence/p2-practical-status-docs-fix-r1/handoff.json`.
+No full P2, W2 observer, H1, M0-exit or M1-entry acceptance is claimed.

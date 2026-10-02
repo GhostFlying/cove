@@ -23,19 +23,31 @@ Node 26.10.0 and pnpm 12.6.0. The generated lockfile delta is limited to the
 compiled server author tests passed 31/31 and the affected tooling project passed
 58/58 after correcting its registration fixture.
 
-The separately owned minimal source/test correction is now complete: the
-`WorkerPipeSession.request` payload default has an explicit `Uint8Array` type,
-the runtime-admission assertion includes its concrete error message, and the
-seven server source files plus three author tests match the pinned formatter.
-The pinned server build, all 31 compiled author tests, and bounded format/lint
-checks passed. Root `pnpm check` also passed native preparation, format, lint,
-build, environment and discovery before its clean-source guard intentionally
-stopped ahead of runtime tests because these composed bytes were still
-uncommitted. The next gates are this coherent commit, a full check on its clean
-exact head, and independent validation/review. The author results do not yet
-independently accept P2; W2's real observer capability remains unproved, full
-P2/P3/H1 and downstream gates remain open, M0 is incomplete, and M1 still
-requires user review and permission.
+The registration and minimal source/test correction were committed together as
+the normal hooked commit `b4c57f52753b99995ec411d9732dc442b87818b6`, tree
+`79093ff5932e9b5dd9e696738986bbf253f05185`, parent `29cb3637810c646db607389601b7a81bb7ef910d`.
+That exact last-validated snapshot retains the frozen 25-path manifest
+`8ed17610e9c42e663843bda990e6ca851928d052565cde5aea2f241f848e3b24`.
+The earlier author `pnpm check` stop at the clean-source guard occurred while
+those bytes were still dirty and remains historical; it is not the current
+candidate state.
+
+Independent validation of the clean `b4c57f5` snapshot passed the frozen
+install and server package build/tests (31/31), but its single full `pnpm check`
+exited 1 with 780/781 tests, zero skipped/pending/todo and no timeout. The sole
+failure was the terminal-worker qualification harness classifying a transient
+`(bash)` row as unrelated before later observing the same-birth exact Node
+entry; bounded cleanup for that failed owned process reached exit and absence.
+This is not the historical W2 EPERM boundary and does not establish a passing
+full gate. Independent source review also requires an enforceable server
+runtime composition boundary. Separate owners are correcting those two narrow
+areas against `b4c57f5`; their current working bytes are not yet a frozen
+candidate. The next combined identity must be recorded by the later integration
+handoff; this documentation slice is checkpointed off-tree at
+`/Users/luchengxuan/WORKSPACE/cove-evidence/p2-practical-status-docs-fix-r1/handoff.json`.
+Fresh independent validation/review remain required. W2's real observer
+capability remains unproved; full P2/P3/H1 and downstream gates remain open, M0
+is incomplete, and M1 still requires user review and permission.
 
 Accepted main is `8707a760d45643e855178a19e43d442bbddac51b` (tree `354e8a4762722779a3dc9746c4ecdae8018f96df`) after protected W1 [PR #56](https://github.com/GhostFlying/cove/pull/56). Its normal actual-main [run 36538432118](https://github.com/GhostFlying/cove/actions/runs/36538432118), attempt 1, passed macOS and Ubuntu with 713 exact runtime identities, 63 physical files and all eleven new A/B/C cases per OS. Independent actual-main review is APPROVED at report SHA-256 `873ae4464a97eef077052f98034ef32ebda0050855de1a9528b7d2d1c5575313`, including all thirteen protected source-to-main commit mappings. Root formally accepted **full W1 in its frozen M0 scope**; [Issue #16](https://github.com/GhostFlying/cove/issues/16) can close, and W2 is released for separate planning. The FIFO final-zero state has only a passing fixture assertion, not an independently persisted raw final snapshot; two xterm parsing diagnostics per OS have unknown cause. Earlier W1 failures and their narrower cleanup evidence remain preserved. Devbox 100-PTY validation remains on hold.
 
