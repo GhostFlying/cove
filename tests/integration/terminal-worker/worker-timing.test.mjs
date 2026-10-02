@@ -2,7 +2,15 @@ import { expect, test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { WriteStream, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  WriteStream,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -27,6 +35,7 @@ import {
 } from "./pipe-harness.mjs";
 import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
 import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
+import { publishTimingReceipt } from "./fixtures/timing-receipt-publication.mjs";
 import { createObservedShutdown, createObservedSubmit } from "./worker-timing-ownership.mjs";
 import { finalizeTimingCycle, finalizeTimingRun } from "./worker-timing-finalizers.mjs";
 import {
@@ -113,6 +122,88 @@ async function ownedAbsent(start, nonce) {
   process.kill(start.pid, "SIGHUP");
   await until(() => !psIdentity(start.pid), 5000, "measurement child absence");
 }
+
+test("timing receipts expose complete JSON only after same-directory publication", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-"));
+  const path = join(dir, "start.json");
+  const first = { nonce: randomUUID(), pid: process.pid, ppid: process.ppid };
+  const next = { ...first, nonce: randomUUID() };
+  try {
+    publishTimingReceipt(path, first, (descriptor, serialized) => {
+      const partial = serialized.slice(0, 1);
+      writeFileSync(descriptor, partial);
+      const [temporary] = readdirSync(dir);
+      expect(readdirSync(dir)).toHaveLength(1);
+      expect(temporary).toMatch(/^\.start\.json-.*\.tmp$/);
+      expect(readFileSync(join(dir, temporary), "utf8")).toBe(partial);
+      expect(() => readFileSync(path, "utf8")).toThrow(/ENOENT/);
+      writeFileSync(descriptor, serialized.slice(partial.length));
+      expect(readFileSync(join(dir, temporary), "utf8")).toBe(serialized);
+      expect(() => readFileSync(path, "utf8")).toThrow(/ENOENT/);
+    });
+    expect(await receipt(path, "complete timing start publication")).toEqual(first);
+    expect(readdirSync(dir)).toEqual(["start.json"]);
+    publishTimingReceipt(path, next, (descriptor, serialized) => {
+      writeFileSync(descriptor, serialized.slice(0, 1));
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(first);
+      writeFileSync(descriptor, serialized.slice(1));
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(first);
+    });
+    expect(await receipt(path, "complete timing replacement publication")).toEqual(next);
+    expect(readdirSync(dir)).toEqual(["start.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("failed timing receipt publication preserves prior bytes and cleans owned temporary files", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-failure-"));
+  const path = join(dir, "finish.json");
+  const previous = { nonce: randomUUID(), pid: process.pid, exchanges: 8 };
+  const failure = Error("staged timing receipt write failed");
+  let failedDescriptor;
+  try {
+    publishTimingReceipt(path, previous);
+    const original = readFileSync(path);
+    expect(() =>
+      publishTimingReceipt(path, { ...previous, nonce: randomUUID() }, (descriptor) => {
+        failedDescriptor = descriptor;
+        writeFileSync(descriptor, "{");
+        expect(readFileSync(path)).toEqual(original);
+        throw failure;
+      }),
+    ).toThrow(failure);
+    expect(() => writeFileSync(failedDescriptor, "unexpected open descriptor")).toThrow(/EBADF/);
+    expect(readFileSync(path)).toEqual(original);
+    expect(await receipt(path, "prior timing receipt after failed publication")).toEqual(previous);
+    expect(readdirSync(dir)).toEqual(["finish.json"]);
+    const blocked = join(dir, "blocked.json");
+    mkdirSync(blocked);
+    expect(() => publishTimingReceipt(blocked, previous)).toThrow(
+      /EISDIR|ENOTEMPTY|EEXIST|EPERM|EACCES/,
+    );
+    expect(readdirSync(blocked)).toEqual([]);
+    expect(readdirSync(dir).sort()).toEqual(["blocked.json", "finish.json"]);
+    expect(readFileSync(path)).toEqual(original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("malformed completed timing receipts remain strict parse failures", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cove-timing-publication-malformed-"));
+  const path = join(dir, "start.json");
+  try {
+    writeFileSync(path, '{"nonce":');
+    await expect(receipt(path, "malformed completed timing receipt")).rejects.toBeInstanceOf(
+      SyntaxError,
+    );
+    expect(readFileSync(path, "utf8")).toBe('{"nonce":');
+    expect(readdirSync(dir)).toEqual(["start.json"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("pure timing joins preserve uncertainty and nearest-rank finite quantiles", () => {
   expect(nearestRank([1n, 3n, 8n, 13n], 0.5)).toBe("3");
