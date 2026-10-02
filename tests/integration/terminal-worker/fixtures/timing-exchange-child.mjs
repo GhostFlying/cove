@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { publishTimingReceipt } from "./timing-receipt-publication.mjs";
 
 const [nonce, receiptDir] = process.argv.slice(2);
 if (!nonce || !receiptDir) process.exit(64);
@@ -10,10 +10,11 @@ process.on("SIGHUP", () => process.exit(0));
 const received = [];
 let pending = Buffer.alloc(0);
 let index = 0;
-writeFileSync(
-  join(receiptDir, "start.json"),
-  JSON.stringify({ nonce, pid: process.pid, ppid: process.ppid }),
-);
+publishTimingReceipt(join(receiptDir, "start.json"), {
+  nonce,
+  pid: process.pid,
+  ppid: process.ppid,
+});
 const emit = (next) => process.stdout.write(`OUT:${nonce}:${next}\n`);
 emit(index);
 process.stdin.on("data", (chunk) => {
@@ -29,14 +30,11 @@ process.stdin.on("data", (chunk) => {
   }
   if (pending.length) process.exit(66);
   const bytes = Buffer.concat(received);
-  writeFileSync(
-    join(receiptDir, "finish.json"),
-    JSON.stringify({
-      nonce,
-      pid: process.pid,
-      exchanges: index,
-      bytes: bytes.length,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-    }),
-  );
+  publishTimingReceipt(join(receiptDir, "finish.json"), {
+    nonce,
+    pid: process.pid,
+    exchanges: index,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
 });
