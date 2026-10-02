@@ -1,0 +1,17 @@
+{
+  "name": "@cove/server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project server",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@cove/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2"
+  }
+}

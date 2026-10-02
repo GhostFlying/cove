@@ -130,3 +130,36 @@ test("the client project builds from the public protocol reference", async () =>
     "createClient",
   );
 });
+
+test("the private server project emits from its public protocol reference", async () => {
+  const rootReferences = JSON.parse(await readFile(join(repository, "tsconfig.json"), "utf8"));
+  const serverProject = JSON.parse(
+    await readFile(join(repository, "apps/server/tsconfig.json"), "utf8"),
+  );
+  expect(rootReferences.references).toContainEqual({ path: "./apps/server/tsconfig.json" });
+  expect(serverProject).toMatchObject({
+    extends: "../../tsconfig.base.json",
+    compilerOptions: {
+      rootDir: "src",
+      outDir: "dist",
+      tsBuildInfoFile: "dist/server.tsbuildinfo",
+      types: ["node"],
+    },
+    include: ["src/**/*.ts"],
+    references: [{ path: "../../packages/protocol" }],
+  });
+  const declarations = [
+    "operations/operation-receipts.d.ts",
+    "operations/terminal-operations.d.ts",
+    "terminal/local-runtime.d.ts",
+    "terminal/run-registry.d.ts",
+    "terminal/runtime-retained-bytes.d.ts",
+    "terminal/worker-pipe-session.d.ts",
+    "terminal/worker-pool.d.ts",
+  ];
+  for (const declaration of declarations) {
+    expect(await readFile(join(repository, "apps/server/dist", declaration), "utf8")).toMatch(
+      /export/,
+    );
+  }
+});

@@ -159,3 +159,14 @@ P5 证据需包含真实 PTY、已编译 exports/入口、两个客户端断言�
 ## 汇总交接补充
 
 实施任务以 [M0 汇总 DAG](../milestones/m0.md) 为派发入口：P2 完整验收依赖 T3/T4/T5；T5 需要的 S-runtime 接口在 P1b 联合冻结，不等待 P2 实现。P1b owns bootstrap/Origin/instance 与本地凭据交付契约；P2 owns secret 生成、受限 rendezvous 与 admission 校验；P4 owns CLI/浏览器 harness 的显式注入与清理，凭据不进入 URL/log/trace。C2 随 worker/server/CLI 入口分批接线，C3 等完整 P4 与恢复路径，C4a 冻结完整 A7 所需旅程。
+
+2026-10-03 的当前 P2 注册恢复采用普通受支持的 Node/pnpm 命令边界；历史
+P9/R5/R6 自定义 provenance/controller 不再作为安装或锁文件更新的前置条件。
+精确 pin 不变，`apps/server` importer 已机械生成。独立所有者已完成最小源码/测试
+修正且没有放宽编译器：显式收窄默认 payload 类型、补充具体错误断言，并将七个
+server 源文件和三个 author tests 投影到 pinned formatter。pinned server build、
+31 个 compiled author tests 及 bounded format/lint 均通过。根 `pnpm check` 已通过
+native prepare、format、lint、build、environment 和 discovery，随后因组合字节尚未
+提交而在既有 clean-source guard 处、runtime tests 之前停止。下一步是形成一致提交，
+在 clean exact head 上完成完整 gate 和独立验证/审查。该恢复仍不证明 W2 observer、
+完整 P2/P3/H1，也不改变 M0/M1 gate。

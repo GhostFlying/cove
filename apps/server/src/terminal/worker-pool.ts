@@ -4,24 +4,41 @@ import { RuntimeRetainedBytes, type ByteReservation } from "./runtime-retained-b
 import { SESSION_CONTROL_RESERVE, type WorkerPipeSession } from "./worker-pipe-session.js";
 
 type Placement = { worker: WorkerRef; session: WorkerPipeSession; run: RunRef };
-type WorkerEntry = { worker: WorkerRef; session: WorkerPipeSession; runs: Set<string>;
-  lease: ByteReservation };
+type WorkerEntry = {
+  worker: WorkerRef;
+  session: WorkerPipeSession;
+  runs: Set<string>;
+  lease: ByteReservation;
+};
 
 export class WorkerPool {
   private readonly workers: WorkerEntry[] = [];
   private readonly placements = new Map<string, Placement>();
-  constructor(readonly budgets: EffectiveBudgets,
+  constructor(
+    readonly budgets: EffectiveBudgets,
     private readonly bytes: RuntimeRetainedBytes,
-    readonly maxWorkers: number, readonly runsPerWorker: number) {
-    if (bytes.limit > budgets.runtimeBytes || bytes.controlReserve < maxWorkers * SESSION_CONTROL_RESERVE ||
-        !Number.isSafeInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > budgets.maxRuns ||
-        !Number.isSafeInteger(runsPerWorker) || runsPerWorker < 1 ||
-        runsPerWorker > budgets.maxRuns) throw new Error("Invalid pool limits");
+    readonly maxWorkers: number,
+    readonly runsPerWorker: number,
+  ) {
+    if (
+      bytes.limit > budgets.runtimeBytes ||
+      bytes.controlReserve < maxWorkers * SESSION_CONTROL_RESERVE ||
+      !Number.isSafeInteger(maxWorkers) ||
+      maxWorkers < 1 ||
+      maxWorkers > budgets.maxRuns ||
+      !Number.isSafeInteger(runsPerWorker) ||
+      runsPerWorker < 1 ||
+      runsPerWorker > budgets.maxRuns
+    )
+      throw new Error("Invalid pool limits");
   }
 
   add(session: WorkerPipeSession): boolean {
-    if (this.workers.length >= this.maxWorkers ||
-        this.workers.some((entry) => entry.worker.workerId === session.worker.workerId)) return false;
+    if (
+      this.workers.length >= this.maxWorkers ||
+      this.workers.some((entry) => entry.worker.workerId === session.worker.workerId)
+    )
+      return false;
     const lease = this.bytes.reserve(4096);
     if (!lease) return false;
     this.workers.push({ worker: { ...session.worker }, session, runs: new Set(), lease });
@@ -32,13 +49,21 @@ export class WorkerPool {
     if (this.placements.has(run.runId) || this.placements.size >= this.budgets.maxRuns) return null;
     let selected: WorkerEntry | undefined;
     for (const entry of this.workers) {
-      if (!entry.session.ready || entry.worker.serverId !== run.serverId ||
-          entry.worker.relayInstanceId !== run.relayInstanceId ||
-          entry.runs.size >= this.runsPerWorker) continue;
+      if (
+        !entry.session.ready ||
+        entry.worker.serverId !== run.serverId ||
+        entry.worker.relayInstanceId !== run.relayInstanceId ||
+        entry.runs.size >= this.runsPerWorker
+      )
+        continue;
       if (!selected || entry.runs.size < selected.runs.size) selected = entry;
     }
     if (!selected) return null;
-    const placement = { worker: { ...selected.worker }, session: selected.session, run: { ...run } };
+    const placement = {
+      worker: { ...selected.worker },
+      session: selected.session,
+      run: { ...run },
+    };
     selected.runs.add(run.runId);
     this.placements.set(run.runId, placement);
     return { ...placement, worker: { ...placement.worker }, run: { ...placement.run } };
@@ -46,9 +71,11 @@ export class WorkerPool {
 
   get(run: RunRef): Placement | null {
     const found = this.placements.get(run.runId);
-    return found && found.run.serverId === run.serverId &&
-      found.run.relayInstanceId === run.relayInstanceId ?
-      { ...found, worker: { ...found.worker }, run: { ...found.run } } : null;
+    return found &&
+      found.run.serverId === run.serverId &&
+      found.run.relayInstanceId === run.relayInstanceId
+      ? { ...found, worker: { ...found.worker }, run: { ...found.run } }
+      : null;
   }
 
   release(run: RunRef, worker: WorkerRef): boolean {
@@ -59,10 +86,15 @@ export class WorkerPool {
     return true;
   }
 
-  sessions(): readonly WorkerPipeSession[] { return this.workers.map((entry) => entry.session); }
+  sessions(): readonly WorkerPipeSession[] {
+    return this.workers.map((entry) => entry.session);
+  }
   snapshot(): { workers: number; runs: number; readyWorkers: number } {
-    return { workers: this.workers.length, runs: this.placements.size,
-      readyWorkers: this.workers.filter((entry) => entry.session.ready).length };
+    return {
+      workers: this.workers.length,
+      runs: this.placements.size,
+      readyWorkers: this.workers.filter((entry) => entry.session.ready).length,
+    };
   }
   dispose(): void {
     for (const entry of this.workers) entry.lease.release();

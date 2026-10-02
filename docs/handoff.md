@@ -1,6 +1,6 @@
 # Cove current handoff
 
-Updated: 2026-09-29. Verify live GitHub/checkout state before resuming. Accepted behavior remains in the design documents; exact task evidence belongs to linked Issues/PRs.
+Updated: 2026-10-03. Verify live GitHub/checkout state before resuming. Accepted behavior remains in the design documents; exact task evidence belongs to linked Issues/PRs.
 
 ## Authorized stage
 
@@ -9,6 +9,33 @@ The user explicitly approved M0 implementation on 2026-09-26 after reviewing [th
 Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic commits by rebase. Baseline main `a902ee0bae0e6539afab6555c0585ff6745261d5` passed macOS/Linux checks; tree equality, independent validation/review, corrected review findings and commit mappings are recorded in PR #27 and [Issue #5](https://github.com/GhostFlying/cove/issues/5). Planning Issues #5–#8 are closed and their clean worktrees were removed.
 
 ## Current state and dispatch
+
+The human explicitly resumed practical M0 work on 2026-10-03 and superseded the
+2026-10-02 waiting/cancellation phase for ordinary toolchain recovery. The
+historical custom P9 bridge and R5/R6 controller records remain frozen evidence,
+but their full provenance, exact-environment and one-use-grant machinery is not
+a prerequisite for normal Node/pnpm setup. In
+[P2 practical toolchain recovery R1](plans/p2-practical-toolchain-recovery-r1.md),
+the registrar confirmed that the login shell selected Node 24.14.0 and a
+user-level pnpm launcher, while the explicitly selected verified binaries resolve
+Node 26.10.0 and pnpm 12.6.0. The generated lockfile delta is limited to the
+`apps/server` importer. Frozen install completed with the pinned versions; direct
+compiled server author tests passed 31/31 and the affected tooling project passed
+58/58 after correcting its registration fixture.
+
+The separately owned minimal source/test correction is now complete: the
+`WorkerPipeSession.request` payload default has an explicit `Uint8Array` type,
+the runtime-admission assertion includes its concrete error message, and the
+seven server source files plus three author tests match the pinned formatter.
+The pinned server build, all 31 compiled author tests, and bounded format/lint
+checks passed. Root `pnpm check` also passed native preparation, format, lint,
+build, environment and discovery before its clean-source guard intentionally
+stopped ahead of runtime tests because these composed bytes were still
+uncommitted. The next gates are this coherent commit, a full check on its clean
+exact head, and independent validation/review. The author results do not yet
+independently accept P2; W2's real observer capability remains unproved, full
+P2/P3/H1 and downstream gates remain open, M0 is incomplete, and M1 still
+requires user review and permission.
 
 Accepted main is `8707a760d45643e855178a19e43d442bbddac51b` (tree `354e8a4762722779a3dc9746c4ecdae8018f96df`) after protected W1 [PR #56](https://github.com/GhostFlying/cove/pull/56). Its normal actual-main [run 36538432118](https://github.com/GhostFlying/cove/actions/runs/36538432118), attempt 1, passed macOS and Ubuntu with 713 exact runtime identities, 63 physical files and all eleven new A/B/C cases per OS. Independent actual-main review is APPROVED at report SHA-256 `873ae4464a97eef077052f98034ef32ebda0050855de1a9528b7d2d1c5575313`, including all thirteen protected source-to-main commit mappings. Root formally accepted **full W1 in its frozen M0 scope**; [Issue #16](https://github.com/GhostFlying/cove/issues/16) can close, and W2 is released for separate planning. The FIFO final-zero state has only a passing fixture assertion, not an independently persisted raw final snapshot; two xterm parsing diagnostics per OS have unknown cause. Earlier W1 failures and their narrower cleanup evidence remain preserved. Devbox 100-PTY validation remains on hold.
 

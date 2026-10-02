@@ -10,6 +10,7 @@ const web = join(root, "packages/terminal-web");
 const protocol = join(root, "packages/protocol");
 const client = join(root, "packages/client");
 const worker = join(root, "packages/terminal-worker");
+const server = join(root, "apps/server");
 const directories: string[] = [];
 
 afterEach(async () => {
@@ -121,6 +122,59 @@ test("client manifest exposes one ES-only entry and only the protocol runtime de
       exports: { ...manifest.exports, "./src/client": "./src/client.ts" },
     }),
   ).toThrow(/public export/);
+});
+
+function assertServerBoundary(manifest: Record<string, unknown>): void {
+  if (
+    manifest.name !== "@cove/server" ||
+    manifest.private !== true ||
+    manifest.version !== "0.0.0" ||
+    manifest.type !== "module"
+  )
+    throw new Error("Server package identity escaped the private application boundary");
+  if ("exports" in manifest || "bin" in manifest)
+    throw new Error("Server package advertised a public contract before D");
+  if (
+    JSON.stringify(manifest.scripts) !==
+    JSON.stringify({
+      build: "tsc -b",
+      test: "pnpm build && pnpm --dir ../.. exec vitest run --project server",
+      clean: "tsc -b --clean",
+    })
+  )
+    throw new Error("Server scripts escaped the Project Reference boundary");
+  if (
+    JSON.stringify(manifest.dependencies) !== JSON.stringify({ "@cove/protocol": "workspace:*" }) ||
+    JSON.stringify(manifest.devDependencies) !== JSON.stringify({ "@types/node": "26.6.2" })
+  )
+    throw new Error("Server dependencies escaped the pure P2-A boundary");
+}
+
+test("private server manifest keeps P2-A inside the protocol-only Node boundary", async () => {
+  const manifest = JSON.parse(await readFile(join(server, "package.json"), "utf8"));
+  expect(() => assertServerBoundary(manifest)).not.toThrow();
+  for (const dependency of [
+    "@cove/terminal-worker",
+    "node-pty",
+    "fastify",
+    "@fastify/websocket",
+    "@cove/client",
+    "@cove/terminal-web",
+    "playwright",
+  ]) {
+    expect(() =>
+      assertServerBoundary({
+        ...manifest,
+        dependencies: { ...manifest.dependencies, [dependency]: "forbidden" },
+      }),
+    ).toThrow(/pure P2-A boundary/);
+  }
+  expect(() => assertServerBoundary({ ...manifest, exports: { ".": "./dist/server.js" } })).toThrow(
+    /public contract/,
+  );
+  expect(() => assertServerBoundary({ ...manifest, bin: { cove: "./dist/server.js" } })).toThrow(
+    /public contract/,
+  );
 });
 
 test("Vite rejects side-effect, dynamic, native, and transitive Node imports in isolated builds", async () => {
