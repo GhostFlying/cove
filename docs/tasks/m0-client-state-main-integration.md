@@ -38,6 +38,48 @@ with their later corrections; the historical Ubuntu publication race is inferenc
 not a proved cause. W2 real ordered production/retirement, fullP2/P3, H1/C3 actual
 journeys, devbox100realPTY qualification and M0/M1 gates remain open.
 
+## Retained finite acceptance and current projection
+
+Root accepted the bounded fake-port/public-client finite evidence at retained
+source `aef2fe1`/tree `c25d97e`: reviewer exec74304 exited0, matched94/94 frozen
+members and audited28 ordered cases, 28PASS/0FAIL/0NOTRUN. Report SHA256 is
+`3aa84262169f81df8c1e1ff8ce119d3a20ef832013906c49874765fbef461d17`, accepted
+decision SHA256 `857d091b33ff06e85fb58b5bd02bc894c6a4c93d0d5f47d07f974df3504e0867`.
+Case27 used legal91x31 applied-sequence4 recovery with retained stickyexit;
+case28 proved once-only timer/cancellation settlement. Relevant production source,
+package/API/dependency pins and approved source/test blobs remain equal on this
+practical composition; off-tree retained-finite-reuse-projection.json binds that
+comparison. The accepted28 cases are carried only within that bounded equivalent
+projection. The old finite driver was not repeated.
+
+R2 remains26PASS/1FAIL/1NOTRUN with exact error/debt/partial trace unknown;
+R3 remains28NOTRUN environmentHOLD. Detach and restore each attempted two denied
+common .git/packed-refs.lock creations. No successful common-admin write was
+evidenced; both switches returned0 and exact verifier identity was restored.
+Do not replace that history with a claim that no attempt occurred. Historical
+source/composition/finite acceptance does not establish the new coherent full run,
+real transports, fullP3 or Issue19 closure.
+
+## Current author scoped results
+
+The normal frozen install and publicclient reference build exited0 with pinned
+Node26.10.0/pnpm12.6.0. Install lifecycle hooks rebuilt the checkout's own patched
+node-pty; no separate native/browser/probe or finite-driver run was invoked.
+The first formatting attempt stopped on pnpm workspace-structure verification
+before formatting; it is preserved and resolved by that authorized frozen install.
+One affected invocation passed223/223 across8 files:181 client cases (including
+state11 and built-public consumer4) and42 CI-gate tooling cases. All individual
+statuses are passed, zero skipped/failed/pending/todo, no timeout. Fresh scoped
+list yielded222 declarations; ordinary finite expansion accounts for the extra
+runtime identity. Strict verifyInventory passed for all8 scoped files; the source
+scanner currently enumerates69 owned Vitest files. Full runtime count is pending
+independent execution and is not inferred by adding to an old total.
+
+Formatting/lint/diff checks and the exact final head/tree,5commit map and11file
+manifest are frozen off-tree after the final documentation atom. Author scoped
+results are separate from the required independent new-head ordinary full gate,
+source/runtime review and hosted/main acceptance.
+
 ## Current ordinary validation and later gates
 
 Use pinned Node26.10.0/ABI147 and pnpm12.6.0 through both verified binary
@@ -48,9 +90,8 @@ snapshots are retained in immutable22f8e63 and off-tree reports; the old66files,
 735declarations and758expectedidentities are not the new candidate oracle.
 Do not rerun the old finite driver or consumed browser-close diagnostic.
 
-The author owns one scoped client+tooling run, package build and bounded
-format/lint/diff checks. Actual results are recorded after execution, independently
-of historical approval. Freeze the clean candidate with5original-to-candidate
+The author scoped execution above is complete; bounded format/lint/diff and final
+source freezing accompany this documentation. Freeze the clean candidate with5original-to-candidate
 mappings and retained-source/dependency/blob projections. A separate validator
 must run the ordinary coherent full pnpm check on that new head, and a separate
 reviewer must assess the current composition/source/runtime evidence. Normal

@@ -58,6 +58,19 @@ ordinary full validation/review, normal PR dual-OS artifacts, protected mapping
 and final-main acceptance remain pending. The old 758 identity inventory is not
 a current oracle or executed result.
 
+The retained P3e bounded finite gate is accepted and remains reusable only within
+the freshly verified equal source/API/dependency projection:28/28 cases, reviewer
+exec74304 exit0, report `3aa84262169f81df8c1e1ff8ce119d3a20ef832013906c49874765fbef461d17`.
+It was not rerun. Historical R2 failure/R3 HOLD and the two denied common
+packed-refs.lock attempts during each verifier detach/restore remain explicit in
+the composition record. This practical author passed one scoped223/223 run across
+8files (client181 including state11/compiledconsumer4; affected gate42), with strict
+scoped inventory222 declarations/223 runtime identities. Scanner enumeration is
+69 current source files; coherent full runtime and independent new-head approval
+are pending. Normal frozen install/client reference build passed, retaining the
+first pnpm workspace-structure formatting stop and ordinary install lifecycle
+native rebuild evidence. No oldfinite/browserdiagnostic/devbox/probe was repeated.
+
 Native GPT-6.1 Sol/high is the P3e integration and sole shared registration/handoff
 owner; B1's separate native author is SOURCE_ONLY in the primary checkout and
 excludes registration, handoff and build until the serialized heavy lease is
