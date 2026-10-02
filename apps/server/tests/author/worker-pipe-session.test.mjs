@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { encodePipeFrame } from "@cove/protocol/pipe";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
+import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { WorkerPipeSession } from "../../dist/terminal/worker-pipe-session.js";
 
 const codec = {
@@ -29,15 +30,15 @@ function frame(value, payload = new Uint8Array()) {
 }
 function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32) {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+  const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const writes = [];
   let blocked = false;
   let now = 0;
   let lost = 0;
   const session = new WorkerPipeSession({
     worker,
-    budgets,
+    composition,
     buildVersion: "author",
-    bytes,
     codec,
     transport: {
       write: (data, settled) => {

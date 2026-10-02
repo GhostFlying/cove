@@ -3,6 +3,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import { canonicalOperationIntent } from "@cove/protocol/rpc";
 import { encodePipeFrame } from "@cove/protocol/pipe";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
+import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { WorkerPipeSession } from "../../dist/terminal/worker-pipe-session.js";
 import { WorkerPool } from "../../dist/terminal/worker-pool.js";
 import { RunRegistry } from "../../dist/terminal/run-registry.js";
@@ -31,11 +32,11 @@ const create = (operationId = "create") => ({
 function fixture(changes = {}) {
   const budgets = { ...M0_LIMITS, ...changes };
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+  const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const commands = [];
   const session = new WorkerPipeSession({
     worker,
-    budgets,
-    bytes,
+    composition,
     codec,
     buildVersion: "author",
     transport: {
@@ -67,15 +68,13 @@ function fixture(changes = {}) {
       new Uint8Array(),
     ).value,
   );
-  const pool = new WorkerPool(budgets, bytes, 1, budgets.maxRuns);
-  const registry = new RunRegistry("server", "instance", budgets.maxRuns, bytes);
-  const runtime = new LocalRuntime(pool, registry, bytes, codec.encode);
+  const pool = new WorkerPool(composition, 1, budgets.maxRuns);
+  const registry = new RunRegistry(composition);
+  const runtime = new LocalRuntime(pool, registry, codec.encode);
   runtime.addWorker(session);
-  const receipts = new OperationReceipts("server", "instance", budgets, bytes, codec.encode);
+  const receipts = new OperationReceipts(composition, codec.encode);
   const operations = new TerminalOperations({
-    serverId: "server",
-    relayInstanceId: "instance",
-    budgets,
+    composition,
     runtime,
     receipts,
     encodeUtf8: codec.encode,
@@ -107,10 +106,107 @@ function fixture(changes = {}) {
     runtime.dispose();
     session.transportReleased();
   };
-  return { bytes, commands, session, runtime, registry, receipts, operations, reply, close };
+  return {
+    bytes,
+    composition,
+    commands,
+    session,
+    runtime,
+    registry,
+    receipts,
+    operations,
+    reply,
+    close,
+  };
 }
 
 describe("instance-bound operation receipts", () => {
+  it("rejects a receipts store on an equal-limit separate ledger before operations can run", () => {
+    const f = fixture();
+    const otherBytes = new RuntimeRetainedBytes(f.bytes.limit, f.bytes.controlReserve);
+    const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, otherBytes);
+    const receipts = new OperationReceipts(composition, codec.encode);
+    const before = f.bytes.snapshot();
+    const otherBefore = otherBytes.snapshot();
+    expect(
+      () =>
+        new TerminalOperations({
+          composition: f.composition,
+          runtime: f.runtime,
+          receipts,
+          encodeUtf8: codec.encode,
+        }),
+    ).toThrow("Runtime composition mismatch");
+    expect(f.commands).toHaveLength(0);
+    expect(f.registry.count).toBe(0);
+    expect(f.bytes.snapshot()).toEqual(before);
+    expect(otherBytes.snapshot()).toEqual(otherBefore);
+    receipts.dispose();
+    f.close();
+    expect(f.bytes.snapshot().total).toBe(0);
+    expect(otherBytes.snapshot().total).toBe(0);
+  });
+
+  it("rejects operation composition with different budgets despite sharing the same ledger", () => {
+    const f = fixture();
+    const composition = new RuntimeComposition(
+      "server",
+      "instance",
+      { ...M0_LIMITS, operationReceipts: 1 },
+      f.bytes,
+    );
+    const receipts = new OperationReceipts(composition, codec.encode);
+    const before = f.bytes.snapshot();
+    for (const supplied of [f.composition, composition]) {
+      expect(
+        () =>
+          new TerminalOperations({
+            composition: supplied,
+            runtime: f.runtime,
+            receipts,
+            encodeUtf8: codec.encode,
+          }),
+      ).toThrow("Runtime composition mismatch");
+    }
+    expect(f.commands).toHaveLength(0);
+    expect(f.bytes.snapshot()).toEqual(before);
+    receipts.dispose();
+    f.close();
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("rejects foreign receipt authority before creating an operation", () => {
+    const f = fixture();
+    for (const [serverId, relayInstanceId] of [
+      ["foreign-server", "instance"],
+      ["server", "foreign-instance"],
+    ]) {
+      const composition = new RuntimeComposition(
+        serverId,
+        relayInstanceId,
+        { ...M0_LIMITS },
+        f.bytes,
+      );
+      const receipts = new OperationReceipts(composition, codec.encode);
+      const before = f.bytes.snapshot();
+      expect(
+        () =>
+          new TerminalOperations({
+            composition: f.composition,
+            runtime: f.runtime,
+            receipts,
+            encodeUtf8: codec.encode,
+          }),
+      ).toThrow("Runtime composition mismatch");
+      expect(f.bytes.snapshot()).toEqual(before);
+      expect(receipts.count).toBe(0);
+      receipts.dispose();
+    }
+    expect(f.commands).toHaveLength(0);
+    f.close();
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
   it("reserves before spawn and concurrent same intent starts only one run", async () => {
     const f = fixture();
     const first = f.operations.create("principal", create());

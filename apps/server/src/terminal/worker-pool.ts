@@ -1,6 +1,6 @@
 import { sameWorkerRef, type RunRef, type WorkerRef } from "@cove/protocol/identity";
-import type { EffectiveBudgets } from "@cove/protocol/budgets";
-import { RuntimeRetainedBytes, type ByteReservation } from "./runtime-retained-bytes.js";
+import type { ByteReservation } from "./runtime-retained-bytes.js";
+import { RuntimeComposition } from "./runtime-composition.js";
 import { SESSION_CONTROL_RESERVE, type WorkerPipeSession } from "./worker-pipe-session.js";
 
 type Placement = { worker: WorkerRef; session: WorkerPipeSession; run: RunRef };
@@ -15,26 +15,36 @@ export class WorkerPool {
   private readonly workers: WorkerEntry[] = [];
   private readonly placements = new Map<string, Placement>();
   constructor(
-    readonly budgets: EffectiveBudgets,
-    private readonly bytes: RuntimeRetainedBytes,
+    readonly composition: RuntimeComposition,
     readonly maxWorkers: number,
     readonly runsPerWorker: number,
   ) {
     if (
-      bytes.limit > budgets.runtimeBytes ||
-      bytes.controlReserve < maxWorkers * SESSION_CONTROL_RESERVE ||
+      this.bytes.controlReserve < maxWorkers * SESSION_CONTROL_RESERVE ||
       !Number.isSafeInteger(maxWorkers) ||
       maxWorkers < 1 ||
-      maxWorkers > budgets.maxRuns ||
+      maxWorkers > this.budgets.maxRuns ||
       !Number.isSafeInteger(runsPerWorker) ||
       runsPerWorker < 1 ||
-      runsPerWorker > budgets.maxRuns
+      runsPerWorker > this.budgets.maxRuns
     )
       throw new Error("Invalid pool limits");
   }
 
+  get budgets() {
+    return this.composition.budgets;
+  }
+  private get bytes() {
+    return this.composition.bytes;
+  }
+
+  accepts(session: WorkerPipeSession): boolean {
+    return session.composition === this.composition && this.composition.owns(session.worker);
+  }
+
   add(session: WorkerPipeSession): boolean {
     if (
+      !this.accepts(session) ||
       this.workers.length >= this.maxWorkers ||
       this.workers.some((entry) => entry.worker.workerId === session.worker.workerId)
     )

@@ -6,7 +6,7 @@ import type { RuntimeResult, RuntimeTerminalPort } from "@cove/protocol/runtime"
 import { WorkerPool } from "./worker-pool.js";
 import { RunRegistry } from "./run-registry.js";
 import { WorkerPipeSession, type ResultHandoff } from "./worker-pipe-session.js";
-import { RuntimeRetainedBytes, type ByteReservation } from "./runtime-retained-bytes.js";
+import type { ByteReservation } from "./runtime-retained-bytes.js";
 
 export class LocalRuntime implements RuntimeTerminalPort {
   private readonly listeners = new Map<
@@ -18,16 +18,22 @@ export class LocalRuntime implements RuntimeTerminalPort {
   constructor(
     readonly pool: WorkerPool,
     readonly registry: RunRegistry,
-    private readonly bytes: RuntimeRetainedBytes,
     private readonly encodeUtf8: (text: string) => Uint8Array,
     private readonly resultHandoff?: ResultHandoff,
   ) {
-    if (registry.maxRuns > pool.budgets.maxRuns || bytes.limit > pool.budgets.runtimeBytes)
+    if (registry.composition !== pool.composition || registry.maxRuns > pool.budgets.maxRuns)
       throw new Error("Runtime budget mismatch");
   }
 
+  get composition() {
+    return this.pool.composition;
+  }
+  private get bytes() {
+    return this.composition.bytes;
+  }
+
   addWorker(session: WorkerPipeSession): boolean {
-    if (this.disposed) return false;
+    if (this.disposed || !this.pool.accepts(session)) return false;
     let listener: { dispose(): void };
     try {
       listener = session.onEvent((event, payload) => {

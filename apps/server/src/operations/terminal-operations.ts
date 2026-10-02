@@ -7,9 +7,9 @@ import {
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { OpaqueIdSchema, type RunRef } from "@cove/protocol/identity";
-import type { EffectiveBudgets } from "@cove/protocol/budgets";
 import type { RuntimeResult } from "@cove/protocol/runtime";
 import { LocalRuntime } from "../terminal/local-runtime.js";
+import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import { OperationReceipts } from "./operation-receipts.js";
 
 export type OperationOutcome = { operation: OperationRecord } | { error: DomainError };
@@ -20,19 +20,24 @@ export class TerminalOperations {
   private disposed = false;
   constructor(
     private readonly options: {
-      serverId: string;
-      relayInstanceId: string;
-      budgets: EffectiveBudgets;
+      composition: RuntimeComposition;
       runtime: LocalRuntime;
       receipts: OperationReceipts;
       encodeUtf8: (text: string) => Uint8Array;
     },
-  ) {}
+  ) {
+    if (
+      options.runtime.composition !== options.composition ||
+      options.receipts.composition !== options.composition
+    )
+      throw new Error("Runtime composition mismatch");
+    this.options = { ...options };
+  }
 
   private key(principalId: string, operationId: string): OperationReceiptKey {
     return {
-      serverId: this.options.serverId,
-      relayInstanceId: this.options.relayInstanceId,
+      serverId: this.options.composition.serverId,
+      relayInstanceId: this.options.composition.relayInstanceId,
       principalId,
       operationId,
     };
@@ -50,7 +55,7 @@ export class TerminalOperations {
     if (this.disposed || !OpaqueIdSchema.safeParse(principalId).success || !parsed.success)
       return this.failure("CAPABILITY_UNAVAILABLE");
     const params = parsed.data;
-    if (params.expectedRelayInstanceId !== this.options.relayInstanceId)
+    if (params.expectedRelayInstanceId !== this.options.composition.relayInstanceId)
       return this.failure("INSTANCE_MISMATCH");
     const intent = canonicalOperationIntent("terminal.create", params, this.options.encodeUtf8);
     if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
@@ -65,8 +70,8 @@ export class TerminalOperations {
     const preparation = this.options.receipts.prepare(key, intent);
     if (!preparation) return this.failure("BUSY");
     const run: RunRef = {
-      serverId: this.options.serverId,
-      relayInstanceId: this.options.relayInstanceId,
+      serverId: this.options.composition.serverId,
+      relayInstanceId: this.options.composition.relayInstanceId,
       runId: `run-${++this.runCounter}`,
     };
     const worker = this.options.runtime.reserveRun(run, params.geometry);
@@ -95,7 +100,7 @@ export class TerminalOperations {
         run,
         requestId,
         appearance: params.appearance ?? DEFAULT_APPEARANCE,
-        effectiveBudgets: this.options.budgets,
+        effectiveBudgets: this.options.composition.budgets,
         profile: PROFILE,
       });
     } catch {
@@ -117,9 +122,9 @@ export class TerminalOperations {
       return this.failure("CAPABILITY_UNAVAILABLE");
     const params = parsed.data;
     if (
-      params.expectedRelayInstanceId !== this.options.relayInstanceId ||
-      params.run.serverId !== this.options.serverId ||
-      params.run.relayInstanceId !== this.options.relayInstanceId
+      params.expectedRelayInstanceId !== this.options.composition.relayInstanceId ||
+      params.run.serverId !== this.options.composition.serverId ||
+      params.run.relayInstanceId !== this.options.composition.relayInstanceId
     )
       return this.failure("INSTANCE_MISMATCH");
     const intent = canonicalOperationIntent("terminal.stop", params, this.options.encodeUtf8);
@@ -212,7 +217,7 @@ export class TerminalOperations {
   }
 
   get(principalId: string, operationId: string, expectedRelayInstanceId: string): OperationOutcome {
-    if (expectedRelayInstanceId !== this.options.relayInstanceId)
+    if (expectedRelayInstanceId !== this.options.composition.relayInstanceId)
       return this.failure("INSTANCE_MISMATCH");
     const key = this.key(principalId, operationId);
     let record = this.options.receipts.get(key);

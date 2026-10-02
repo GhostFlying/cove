@@ -1,7 +1,8 @@
 import { sameRunRef, sameWorkerRef, type RunRef, type WorkerRef } from "@cove/protocol/identity";
 import { RunStatusSchema, type RunStatus } from "@cove/protocol/pipe";
 import type { Geometry } from "@cove/protocol/profile";
-import { RuntimeRetainedBytes, type ByteReservation } from "./runtime-retained-bytes.js";
+import type { ByteReservation } from "./runtime-retained-bytes.js";
+import { RuntimeComposition } from "./runtime-composition.js";
 
 type Entry = {
   run: RunRef;
@@ -16,21 +17,21 @@ const copy = (status: RunStatus): RunStatus => structuredClone(status);
 export class RunRegistry {
   private readonly entries = new Map<string, Entry>();
   constructor(
-    readonly serverId: string,
-    readonly relayInstanceId: string,
-    readonly maxRuns: number,
-    private readonly bytes: RuntimeRetainedBytes,
+    readonly composition: RuntimeComposition,
+    readonly maxRuns: number = composition.budgets.maxRuns,
   ) {
-    if (!Number.isSafeInteger(maxRuns) || maxRuns < 1 || maxRuns > 128)
+    if (!Number.isSafeInteger(maxRuns) || maxRuns < 1 || maxRuns > composition.budgets.maxRuns)
       throw new Error("Invalid run limit");
+  }
+
+  private get bytes() {
+    return this.composition.bytes;
   }
 
   reserve(run: RunRef, worker: WorkerRef, geometry: Geometry): boolean {
     if (
-      run.serverId !== this.serverId ||
-      run.relayInstanceId !== this.relayInstanceId ||
-      worker.serverId !== this.serverId ||
-      worker.relayInstanceId !== this.relayInstanceId ||
+      !this.composition.owns(run) ||
+      !this.composition.owns(worker) ||
       this.entries.has(run.runId) ||
       this.entries.size >= this.maxRuns
     )
