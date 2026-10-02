@@ -48,6 +48,7 @@ type Route = {
   unsubscribeId: string;
   token: { current: boolean };
   teardownSent: boolean;
+  teardown?: Promise<RuntimeResult> | undefined;
   queue: Request[];
   running: boolean;
 };
@@ -64,11 +65,21 @@ type Request = {
   domain?: ControlJob;
 };
 
+type Teardown = {
+  route: Route;
+  requestId: string;
+  resolve: (result: RuntimeResult) => void;
+  reject: (error: unknown) => void;
+};
+
 // One authenticated connection owns refs; the runtime still owns execution facts.
 export class TerminalSubscriptions {
   private readonly routes = new Map<string, Route>();
   private readonly requests = new Map<string, Request>();
-  private readonly teardownQueue: Route[] = [];
+  private readonly teardownQueue: Teardown[] = [];
+  private teardownActive = false;
+  private backgroundTeardownActive = false;
+  private progressInFlight = 0;
   private readonly externalIds = new Set<string>();
   private readonly requestLeases: ByteReservation[] = [];
   private readonly listener: { dispose(): void };
@@ -229,7 +240,7 @@ export class TerminalSubscriptions {
     if (
       this.externalIds.size >= this.options.requestLimit ||
       (control
-        ? this.controlPending >= 4
+        ? this.controlPending + (this.backgroundTeardownActive ? 1 : 0) >= 4
         : this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands)
     )
       return this.reject(command, "BUSY");
@@ -395,7 +406,10 @@ export class TerminalSubscriptions {
           route.queue.shift();
           continue;
         }
+        const progress =
+          request.command.type === "applied-ack" || request.command.type === "baseline-progress";
         this.inFlight++;
+        if (progress) this.progressInFlight++;
         try {
           await this.execute(request);
         } catch {
@@ -403,6 +417,7 @@ export class TerminalSubscriptions {
           this.finish(request, this.error(request.command, route.failure!));
         } finally {
           this.inFlight--;
+          if (progress) this.progressInFlight--;
           this.flushTeardown();
           this.releaseClosedRecords();
         }
@@ -462,9 +477,13 @@ export class TerminalSubscriptions {
             };
       result = await this.runtime.openSubscription(pipe);
     } else if (command.type === "detach") {
-      route.teardownSent = true;
       this.retire(route);
-      result = await this.runtime.closeSubscription({ ...common, type: "unsubscribe" });
+      const teardown = this.unsubscribe(route, internalId);
+      if (!teardown) {
+        this.finish(request, this.error(command, route.failure ?? "STALE_CONNECTION"));
+        return;
+      }
+      result = await teardown;
     } else if (command.type === "applied-ack") {
       if (!route.credit?.ack(command.appliedSeq)) {
         this.finish(request, this.error(command, "RESYNC_REQUIRED"));
@@ -651,18 +670,39 @@ export class TerminalSubscriptions {
     this.options.arbiter?.retire(route.ref);
     if (error) this.unsubscribe(route);
   }
-  private unsubscribe(route: Route): void {
-    if (route.teardownSent) return;
+  private unsubscribe(
+    route: Route,
+    requestId = route.unsubscribeId,
+  ): Promise<RuntimeResult> | undefined {
+    if (route.teardownSent) return route.teardown;
     route.teardownSent = true;
-    this.teardownQueue.push(route);
+    let resolve!: (result: RuntimeResult) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<RuntimeResult>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    // Close has no result consumer; detach still receives the original rejection.
+    void promise.catch(() => {});
+    route.teardown = promise;
+    this.teardownQueue.push({ route, requestId, resolve, reject });
     this.flushTeardown();
+    return promise;
   }
   private flushTeardown(): void {
-    if (this.inFlight || !this.teardownQueue.length) return;
-    // Close cannot consume all progress slots before its fifth owned route reaches them.
-    const route = this.teardownQueue.shift()!;
+    if (this.teardownActive || this.progressInFlight >= 4 || !this.teardownQueue.length) return;
+    // Preserve the four-slot progress capacity without waiting for ordinary B2 results.
+    const { route, requestId, resolve, reject } = this.teardownQueue.shift()!;
+    this.teardownActive = true;
+    this.backgroundTeardownActive = !this.requests.has(requestId);
     this.inFlight++;
+    let completed = false;
     const complete = () => {
+      if (completed) return;
+      completed = true;
+      route.teardown = undefined;
+      this.teardownActive = false;
+      this.backgroundTeardownActive = false;
       this.inFlight--;
       this.flushTeardown();
       this.releaseClosedRecords();
@@ -671,14 +711,23 @@ export class TerminalSubscriptions {
       void this.runtime
         .closeSubscription({
           type: "unsubscribe",
-          requestId: route.unsubscribeId,
+          requestId,
           worker: structuredClone(route.worker),
           run: structuredClone(route.ref.run),
           subscription: structuredClone(route.ref),
         })
-        .catch(() => {})
-        .finally(complete);
-    } catch {
+        .then(
+          (result) => {
+            resolve(result);
+            complete();
+          },
+          (error: unknown) => {
+            reject(error);
+            complete();
+          },
+        );
+    } catch (error) {
+      reject(error);
       complete();
     }
   }
