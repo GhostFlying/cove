@@ -525,4 +525,30 @@ describe("private terminal subscription delivery", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+
+  it("serializes owned close unsubscribe at the worker progress cap plus one without stopping any run", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      for (let index = 0; index < 5; index++) await f.attach(a, 0, `attach-${index}`);
+      const start = f.pipeWrites.length;
+      a.service.close();
+      await turns();
+      const first = f.pipeWrites.slice(start).map((item) => decode(item.data, true).metadata);
+      expect(first.map((value) => value.type)).toEqual(["unsubscribe"]);
+      for (let index = 0; index < 5; index++) {
+        const current = decode(f.pipeWrites[start + index].data, true).metadata;
+        expect(current.type).toBe("unsubscribe");
+        f.session.receive(f.reply(current));
+        await turns();
+      }
+      const cleanup = f.pipeWrites.slice(start).map((item) => decode(item.data, true).metadata);
+      expect(cleanup).toHaveLength(5);
+      expect(new Set(cleanup.map((value) => value.subscription.subscriptionId)).size).toBe(5);
+      expect(f.runtime.registry.get(run).capacityOwned).toBe(true);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
 });
