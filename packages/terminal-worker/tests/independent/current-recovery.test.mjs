@@ -1101,7 +1101,13 @@ describe("W2 current recovery", () => {
           assert(before.physical.length > 0, "logical final ACK leaves handed physical ownership");
           for (const frame of before.physical) {
             assert.equal(frame.settled, false);
-            assert(frame.payloadBytes > 0);
+            assert(frame.encodedBytes > 0);
+            if (frame.event.terminal.type === "baseline-chunk") {
+              assert(frame.payloadBytes > 0);
+            } else {
+              assert(["baseline-start", "baseline-end"].includes(frame.event.terminal.type));
+              assert.equal(frame.payloadBytes, 0);
+            }
             assert(
               before.ledger.owners.some(
                 (owner) =>
