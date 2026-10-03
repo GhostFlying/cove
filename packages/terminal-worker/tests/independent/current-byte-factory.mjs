@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { PtyInputController, SharedNativeInputBudget } from "../../dist/src/pty-input.js";
 
 export function currentByteFactory(options = {}) {
-  const shared = new SharedNativeInputBudget(options.sharedBytes ?? 64 * 1024 * 1024, 256);
+  const shared = new SharedNativeInputBudget(
+    options.sharedBytes ?? 64 * 1024 * 1024,
+    options.sharedTasks ?? 256,
+  );
   const owners = [];
   const receipts = [];
   let ticket = 0;
