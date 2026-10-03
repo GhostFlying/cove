@@ -548,7 +548,24 @@ export async function currentWorkerLink(patch = {}) {
       session.transportReleased();
       arbiter.dispose();
       await Promise.all(peers.flatMap((peer) => peer.pending));
-      capture("cleanup-before-assertions");
+      capture("cleanup-arbiter-before-completion", {
+        arbiter: arbiter.snapshot(target.runId),
+      });
+      try {
+        await untilTurn(() => {
+          const actual = arbiter.snapshot(target.runId);
+          return actual.runs === 0 && actual.pending === 0;
+        }, "actual disposed control arbiter drain completion");
+      } catch (error) {
+        capture("cleanup-arbiter-completion-not-exercised", {
+          arbiter: arbiter.snapshot(target.runId),
+          error: { name: error.name, message: error.message },
+        });
+        throw error;
+      }
+      capture("cleanup-before-assertions", {
+        arbiter: arbiter.snapshot(target.runId),
+      });
       record("consumer-cleanup", {
         account: account.snapshot(),
         owners: [...live.values()],
