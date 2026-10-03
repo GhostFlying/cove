@@ -610,7 +610,35 @@ export function endpointRig(patch = {}, options = {}) {
     buildVersion: "current-QA",
     createExecution(opts) {
       execution = createWorkerExecution({ ...opts, factory: native });
-      return execution;
+      if (!options.executionObserver) return execution;
+      const observe = (method, args) => {
+        options.executionObserver({ phase: "before", method, args, worker: execution.snapshot() });
+        try {
+          const result = execution[method].apply(execution, args);
+          options.executionObserver({
+            phase: "returned",
+            method,
+            args,
+            result,
+            worker: execution.snapshot(),
+          });
+          return result;
+        } catch (error) {
+          options.executionObserver({
+            phase: "threw",
+            method,
+            args,
+            error: { name: error.name, message: error.message },
+            worker: execution.snapshot(),
+          });
+          throw error;
+        }
+      };
+      return Object.freeze({
+        ...execution,
+        markerEnqueued: (...args) => observe("markerEnqueued", args),
+        responseSettled: (...args) => observe("responseSettled", args),
+      });
     },
   });
   const send = (metadata, payload) => input.write(encoded(metadata, payload, 1));

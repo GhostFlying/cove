@@ -96,7 +96,20 @@ export function controlledView() {
 export async function currentWorkerLink(patch = {}) {
   const effective = budgets(patch);
   const time = clock();
-  const endpoint = endpointRig(patch, { externalHello: true });
+  let observationOrdinal = 0;
+  let passiveSnapshot = () => ({ localNow: time.now(), diagnosticWall: 1000 + time.now() });
+  const capture = (phase, value = {}) =>
+    record("consumer-observation", {
+      ordinal: ++observationOrdinal,
+      ...structuredClone(value),
+      phase,
+      ...(value.phase ? { eventPhase: value.phase } : {}),
+      state: structuredClone(passiveSnapshot()),
+    });
+  const endpoint = endpointRig(patch, {
+    externalHello: true,
+    executionObserver: (event) => capture("worker-execution", event),
+  });
   const account = new RuntimeRetainedBytes(effective.runtimeBytes, SESSION_CONTROL_RESERVE);
   const leaseEvents = [];
   const live = new Map();
@@ -145,6 +158,40 @@ export async function currentWorkerLink(patch = {}) {
       identityLimit: 256,
     },
   );
+  let observedPreviewOwner;
+  const previewsGetter = Object.getOwnPropertyDescriptor(LocalRuntime.prototype, "previews").get;
+  Object.defineProperty(runtime, "previews", {
+    get() {
+      const actual = previewsGetter.call(this);
+      if (!observedPreviewOwner) {
+        observedPreviewOwner = actual;
+        const originalCommit = actual.cache.commit;
+        actual.cache.commit = function (picture, owned) {
+          const input = {
+            picture,
+            ownedVT: {
+              bytes: owned.vt.length,
+              sha256: hash(owned.vt),
+              rawHex: Buffer.from(owned.vt).toString("hex"),
+            },
+          };
+          capture("cache-commit-before", input);
+          try {
+            const result = originalCommit.call(this, picture, owned);
+            capture("cache-commit-returned", { ...input, result });
+            return result;
+          } catch (error) {
+            capture("cache-commit-threw", {
+              ...input,
+              error: { name: error.name, message: error.message },
+            });
+            throw error;
+          }
+        };
+      }
+      return actual;
+    },
+  });
   const commands = [];
   const received = [];
   const mutations = [];
@@ -164,7 +211,9 @@ export async function currentWorkerLink(patch = {}) {
           rawHex: Buffer.from(owned.raw).toString("hex"),
         });
       }
+      capture("worker-receive-before", { rawHex: Buffer.from(owned.raw).toString("hex") });
       const consumed = session.receive(owned.raw);
+      capture("worker-receive-returned", { consumed });
       if (!session.closed) assert.equal(consumed, owned.raw.length);
     } finally {
       owned.lease.release();
@@ -243,9 +292,14 @@ export async function currentWorkerLink(patch = {}) {
           assert(commands.length < 256);
           commands.push(structuredClone(frame.metadata));
         }
+        capture("worker-command-handoff", { rawHex: Buffer.from(raw).toString("hex") });
         return endpoint.input.write(raw, (error) => {
+          capture("worker-command-callback-before", {
+            error: error ? { name: error.name, message: error.message } : null,
+          });
           settled(error ?? undefined);
           session.drain();
+          capture("worker-command-callback-after");
         });
       },
     },
@@ -294,6 +348,7 @@ export async function currentWorkerLink(patch = {}) {
     time,
     live,
     leaseEvents,
+    capture,
     setMutation(value) {
       assert(!heldEnd && !heldMarker);
       mutation = value;
@@ -327,10 +382,18 @@ export async function currentWorkerLink(patch = {}) {
             );
             const item = { raw, settled };
             physical.add(item);
+            capture("terminal-downlink-before", {
+              connection,
+              rawHex: Buffer.from(raw).toString("hex"),
+            });
             callbacks.onBinary(raw);
             if (!options.hold) {
               physical.delete(item);
               settled();
+              capture("terminal-downlink-settled", {
+                connection,
+                rawHex: Buffer.from(raw).toString("hex"),
+              });
             }
             return options.writable !== false;
           },
@@ -392,8 +455,31 @@ export async function currentWorkerLink(patch = {}) {
                       metadata: structuredClone(frame.metadata),
                       bytes: frame.payload.length,
                       sha256: hash(frame.payload),
+                      rawHex: Buffer.from(message).toString("hex"),
+                      payloadHex: Buffer.from(frame.payload).toString("hex"),
                     });
-                    pending.push(service.handle(frame.metadata, frame.payload));
+                    capture("public-handle-before", {
+                      connection,
+                      command: frame.metadata,
+                      payloadHex: Buffer.from(frame.payload).toString("hex"),
+                    });
+                    const actual = service.handle(frame.metadata, frame.payload);
+                    pending.push(actual);
+                    actual.then(
+                      (result) =>
+                        capture("public-handle-returned", {
+                          connection,
+                          command: frame.metadata,
+                          result,
+                          returnedUndefined: result === undefined,
+                        }),
+                      (error) =>
+                        capture("public-handle-threw", {
+                          connection,
+                          command: frame.metadata,
+                          error: { name: error.name, message: error.message },
+                        }),
+                    );
                   }
                 return "handed-off";
               },
@@ -462,6 +548,7 @@ export async function currentWorkerLink(patch = {}) {
       session.transportReleased();
       arbiter.dispose();
       await Promise.all(peers.flatMap((peer) => peer.pending));
+      capture("cleanup-before-assertions");
       record("consumer-cleanup", {
         account: account.snapshot(),
         owners: [...live.values()],
@@ -473,6 +560,43 @@ export async function currentWorkerLink(patch = {}) {
       assert.equal(live.size, 0);
     },
   };
+  passiveSnapshot = () => ({
+    effective,
+    worker,
+    run: target,
+    localNow: time.now(),
+    diagnosticWall: 1000 + time.now(),
+    account: account.snapshot(),
+    liveLeases: [...live.values()],
+    leaseEvents,
+    execution: endpoint.execution.snapshot(),
+    native: endpoint.native.snapshot(),
+    registry: registry.get(target),
+    session: session.snapshot(),
+    pipe: endpoint.pipe.snapshot(),
+    pendingReadCopies: [...pendingReads].map((item) => ({
+      bytes: item.raw.length,
+      sha256: hash(item.raw),
+    })),
+    cache: observedPreviewOwner?.cache.snapshot(),
+    cacheRecord: observedPreviewOwner?.cache.getRecord(target),
+    refresh: observedPreviewOwner?.snapshot(),
+    commands,
+    received,
+    peers: peers.map((peer) => ({
+      connection: peer.connection,
+      uplink: peer.uplink,
+      downlink: peer.downlink,
+      service: peer.service.snapshot(),
+      delivery: peer.delivery.snapshot(),
+      pendingCommands: peer.pending.length,
+      physical: [...peer.physical].map((item) => ({
+        bytes: item.raw.length,
+        sha256: hash(item.raw),
+        rawHex: Buffer.from(item.raw).toString("hex"),
+      })),
+    })),
+  });
   return rig;
 }
 export async function withWorkerLink(exercise, patch) {
