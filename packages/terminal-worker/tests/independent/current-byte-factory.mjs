@@ -124,6 +124,17 @@ export function currentByteFactory(options = {}) {
         },
         async stop() {
           controller.retire();
+          if (options.stopUnverifiable)
+            return {
+              kind: "unverifiable",
+              cause: "controlled contact loss",
+              cleanup: {
+                scope: "initial-process-group",
+                verified: false,
+                graceful: { kind: "not-attempted", reason: "already-exited" },
+                force: { kind: "not-attempted", reason: "already-exited" },
+              },
+            };
           if (!exited) owner.exit();
           return {
             kind: "exited",

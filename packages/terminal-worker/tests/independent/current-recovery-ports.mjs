@@ -16,6 +16,8 @@ import { WorkerRetainedBytes } from "../../dist/src/worker-retained-bytes.js";
 import { RecoverySubscriptions } from "../../dist/src/recovery-subscription.js";
 import { ReplayWindow } from "../../dist/src/replay-window.js";
 import { currentByteFactory } from "./current-byte-factory.mjs";
+import { createWorkerRunSession } from "../../dist/src/run-session.js";
+import { validateBaselineTransfer } from "@cove/protocol/terminal";
 
 export const utf8 = (value) => new TextEncoder().encode(value);
 export const worker = {
@@ -271,6 +273,35 @@ export function executionRig(patch = {}, nativeOptions = {}) {
   const sink = delivery();
   const facts = [];
   const faults = [];
+  const leaseEvents = [];
+  const liveLeases = new Map();
+  let leaseId = 0;
+  const originalReserve = WorkerRetainedBytes.prototype.reserve;
+  const observedReserve = function (category, bytes) {
+    const actual = originalReserve.call(this, category, bytes);
+    if (this === sink.ledger.account) return actual;
+    if (!actual) {
+      leaseEvents.push({ phase: "denied", category, bytes });
+      return;
+    }
+    const id = ++leaseId;
+    const entry = { id, category, bytes };
+    liveLeases.set(id, entry);
+    leaseEvents.push({ phase: "acquire", ...entry });
+    return {
+      release() {
+        leaseEvents.push({ phase: liveLeases.has(id) ? "release" : "duplicate-release", ...entry });
+        liveLeases.delete(id);
+        actual.release();
+      },
+      shrinkTo(next) {
+        actual.shrinkTo(next);
+        entry.bytes = next;
+        leaseEvents.push({ phase: "shrink", ...entry });
+      },
+    };
+  };
+  WorkerRetainedBytes.prototype.reserve = observedReserve;
   const execution = createWorkerExecution({
     worker,
     effectiveBudgets: effective,
@@ -303,6 +334,8 @@ export function executionRig(patch = {}, nativeOptions = {}) {
     sink,
     facts,
     faults,
+    leaseEvents,
+    liveLeases,
     execution,
     command,
     execute,
@@ -384,13 +417,20 @@ export function executionRig(patch = {}, nativeOptions = {}) {
       return value;
     },
     async close() {
-      const value = await execution.shutdown("current-QA-only");
-      sink.close();
-      record("execution-cleanup", {
-        value,
-        state: execution.snapshot(),
-        native: native.snapshot(),
-      });
+      try {
+        const value = await execution.shutdown("current-QA-only");
+        sink.close();
+        record("execution-cleanup", {
+          value,
+          state: execution.snapshot(),
+          native: native.snapshot(),
+          leaseEvents,
+          liveLeases: [...liveLeases.values()],
+        });
+      } finally {
+        assert.equal(WorkerRetainedBytes.prototype.reserve, observedReserve);
+        WorkerRetainedBytes.prototype.reserve = originalReserve;
+      }
     },
   };
 }
@@ -404,9 +444,11 @@ export function endpointRig(patch = {}, options = {}) {
   let execution;
   let held = false;
   let reader;
+  let rawReader;
   const output = new Writable({
     highWaterMark: 1,
     write(raw, _encoding, callback) {
+      rawReader?.(raw);
       const result = decoder.read(raw);
       assert.notEqual(result.status, "error");
       for (const frame of result.frames) {
@@ -431,13 +473,14 @@ export function endpointRig(patch = {}, options = {}) {
     },
   });
   const send = (metadata, payload) => input.write(encoded(metadata, payload, 1));
-  send({
-    type: "hello",
-    worker,
-    pipeVersion: 2,
-    buildVersion: "current-QA",
-    effectiveBudgets: effective,
-  });
+  if (!options.externalHello)
+    send({
+      type: "hello",
+      worker,
+      pipeVersion: 2,
+      buildVersion: "current-QA",
+      effectiveBudgets: effective,
+    });
   return {
     effective,
     native,
@@ -456,6 +499,9 @@ export function endpointRig(patch = {}, options = {}) {
     reader(callback) {
       reader = callback;
     },
+    rawReader(callback) {
+      rawReader = callback;
+    },
     release() {
       const callback = callbacks.shift();
       assert(callback, "real physical callback");
@@ -468,6 +514,145 @@ export function endpointRig(patch = {}, options = {}) {
       await pipe.closed;
       output.destroy();
       record("endpoint-cleanup", pipe.snapshot());
+    },
+  };
+}
+
+export async function parseBaseline(rig, subscription, marker) {
+  assert.equal(marker.result.outcome, "accepted");
+  const first = rig.sink.frames.length;
+  assert.equal(rig.recovery.installed(subscription), false);
+  rig.recovery.markerEnqueued(marker.command, marker.result);
+  let parsed = -1;
+  let baselineId;
+  for (let turn = 0; turn < 192; turn++) {
+    await turns(1);
+    const frames = rig.sink.frames
+      .slice(first)
+      .filter((frame) => JSON.stringify(frame.event.subscription) === JSON.stringify(subscription));
+    const start = frames.find((frame) => frame.event.terminal.type === "baseline-start");
+    if (!start) continue;
+    baselineId = start.event.terminal.descriptor.baselineId;
+    const chunks = frames.filter(
+      (frame) =>
+        frame.event.terminal.type === "baseline-chunk" &&
+        frame.event.terminal.baselineId === baselineId,
+    );
+    if (chunks.length && chunks.at(-1).event.terminal.ordinal > parsed) {
+      parsed = chunks.at(-1).event.terminal.ordinal;
+      const progress = rig.recovery.command(
+        rig.command("baseline-progress", subscription, { baselineId, lastParsedOrdinal: parsed }),
+      );
+      assert.equal(progress.result?.outcome, "accepted");
+    }
+    const end = frames.find(
+      (frame) =>
+        frame.event.terminal.type === "baseline-end" &&
+        frame.event.terminal.baselineId === baselineId,
+    );
+    if (!end) continue;
+    assert(
+      validateBaselineTransfer(
+        start.event.terminal.descriptor,
+        chunks.map((frame) => ({ metadata: frame.event.terminal, payload: frame.payload })),
+        end.event.terminal,
+      ),
+    );
+    assert.equal(rig.recovery.installed(subscription), false);
+    const ack = rig.recovery.command(
+      rig.command("applied-ack", subscription, { appliedSeq: marker.result.atSeq }),
+    );
+    assert.equal(ack.result?.outcome, "accepted");
+    assert(rig.recovery.installed(subscription));
+    return { frames, baselineId, descriptor: start.event.terminal.descriptor };
+  }
+  assert.fail("NOT_EXERCISED: valid complete parsed baseline");
+}
+
+export function sessionRecoveryRig(patch = {}) {
+  const rig = recoveryRig(patch);
+  const native = currentByteFactory();
+  const target = run("capture-real");
+  const replay = new ReplayWindow(
+    rig.effective.replayBytes,
+    rig.effective.replayEvents,
+    rig.ledger.reserve,
+  );
+  const facts = [];
+  const identities = [];
+  const pending = [];
+  const created = createWorkerRunSession({
+    run: target,
+    geometry: { cols: 12, rows: 4 },
+    effectiveBudgets: rig.effective,
+    spawn: { file: "fixture", args: [], cwd: process.cwd(), inputBytes: 65536, inputTasks: 256 },
+    factory: native,
+    isSubscriptionInstalled: (subscription) => rig.recovery.installed(subscription),
+    reserveIngressBytes: (bytes) => rig.ledger.reserve(bytes, "run-ingress"),
+    reserveInputIdentity: () => {
+      const lease = rig.ledger.reserve(512, "input-identity");
+      if (!lease) return false;
+      identities.push(lease);
+      return true;
+    },
+    reserveRetainedBytes: (bytes) => rig.ledger.reserve(bytes, "engine", "engine"),
+    availableRetainedBytes: () => rig.ledger.account.availableOrdinaryBytes(),
+    reserveNativeRetainedBytes: (category, bytes) =>
+      rig.ledger.reserve(
+        bytes,
+        category,
+        category === "native-input" ? "native-input" : "native-output",
+      ),
+    onRetainedFact(fact) {
+      replay.append(fact);
+      rig.recovery.onFact(target, fact, replay);
+    },
+    onFact(fact) {
+      facts.push({
+        event: structuredClone(fact.event),
+        hex: fact.bytes && Buffer.from(fact.bytes).toString("hex"),
+      });
+    },
+  });
+  assert.equal(created.kind, "created");
+  let onDetached;
+  const source = {
+    run: target,
+    replay,
+    captureBaseline: (reserve) =>
+      created.capability.captureBaseline((bytes) => {
+        const accepted = reserve(bytes);
+        if (accepted) onDetached?.(bytes);
+        return accepted;
+      }),
+  };
+  return {
+    ...rig,
+    target,
+    native,
+    replay,
+    facts,
+    pending,
+    session: created.session,
+    capability: created.capability,
+    source,
+    setDetached(callback) {
+      onDetached = callback;
+    },
+    async install(subscription) {
+      const command = rig.command("subscribe", subscription, { atSeq: 0 });
+      const outcome = await rig.recovery.open(command, source);
+      assert(outcome.result);
+      return parseBaseline(rig, subscription, { command, result: outcome.result });
+    },
+    async close() {
+      rig.recovery.shutdown();
+      await created.capability.execute({ type: "stop" });
+      await Promise.all(pending);
+      replay.clear();
+      identities.forEach((lease) => lease.release());
+      rig.sink.close();
+      record("session-cleanup", { state: rig.ledger.snapshot(), native: native.snapshot() });
     },
   };
 }
