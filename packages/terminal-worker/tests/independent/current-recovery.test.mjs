@@ -1389,22 +1389,176 @@ describe("W2 current recovery", () => {
   });
   it("W2C-R11 complete next frame yields before byte and frame turn caps", async () => {
     for (const payloadBytes of [1, 65536]) {
-      const rig = recoveryRig({ subscriptionCreditBytes: 1048576 });
+      const semanticVariant = payloadBytes === 1 ? "frame-cap" : "byte-cap";
+      const countPlanned = payloadBytes === 1 ? 40 : 12;
+      record("W2C-R11-requested-budget", {
+        semanticVariant,
+        patch: { subscriptionCreditBytes: 262144 },
+        payloadBytes,
+        records: countPlanned,
+        atSeq: 1,
+        selected: countPlanned - 1,
+      });
+      const rig = recoveryRig({ subscriptionCreditBytes: 262144 });
       const source = rig.source();
       const subscription = ref();
+      const originalEnqueue = rig.sink.enqueue;
+      const decoder = createPipeDecoder();
+      const handoffs = [];
+      const acknowledgments = [];
+      let previous;
+      let ordinal = 0;
+      let bodyFailure;
+      const state = () => ({
+        effectiveBudgets: rig.effective,
+        ledger: rig.ledger.snapshot(),
+        events: structuredClone(rig.ledger.events),
+        availableOrdinaryBytes: rig.ledger.account.availableOrdinaryBytes(),
+        physical: rig.sink.physical.map((frame, index) => ({
+          index,
+          token: frame.token,
+          encodedBytes: frame.encodedBytes,
+          settled: frame.settled,
+          terminal: frame.event.terminal,
+        })),
+      });
+      const capture = (phase, value = {}) => {
+        const observation = {
+          ordinal: ++ordinal,
+          semanticVariant,
+          phase,
+          ...value,
+          state: state(),
+        };
+        record("W2C-R11-port-event", observation);
+        return observation;
+      };
+      rig.sink.enqueue = (event, payload, token) => {
+        capture("enqueue-entry", { event, payloadBytes: payload.length, token, previous });
+        if (previous) {
+          const command = rig.command("applied-ack", subscription, { appliedSeq: previous.seq });
+          capture("prior-handoff-ACK-before", { event, previous, command });
+          assert.equal(event.terminal.seq, previous.seq + 1);
+          assert(previous.seq >= 2 && previous.seq < countPlanned);
+          assert.equal(event.terminal.type, "output");
+          assert.deepEqual(command.worker, worker);
+          assert.deepEqual(command.run, subscription.run);
+          assert.deepEqual(command.subscription, subscription);
+          assert(
+            !acknowledgments.some(
+              (ack) =>
+                ack.command.requestId === command.requestId ||
+                ack.command.appliedSeq === command.appliedSeq,
+            ),
+          );
+          const physicalIds = [...rig.ledger.live.values()]
+            .filter((owner) => owner.owner === "physical-delivery")
+            .map((owner) => owner.id);
+          const outcome = rig.recovery.command(command);
+          acknowledgments.push({ command, outcome, priorSeq: previous.seq });
+          capture("prior-handoff-ACK-result", { event, previous, command, outcome, physicalIds });
+          assert.equal(outcome.result?.outcome, "accepted");
+          assert.equal(outcome.result.requestId, command.requestId);
+          assert.deepEqual(outcome.result.worker, worker);
+          assert.deepEqual(outcome.result.run, subscription.run);
+          assert(physicalIds.length > 0);
+          assert(
+            physicalIds.every((id) => rig.ledger.live.has(id)),
+            "logical ACK does not retire actual physical backing",
+          );
+        }
+        let charge;
+        try {
+          charge = originalEnqueue.call(rig.sink, event, payload, token);
+        } catch (error) {
+          capture("enqueue-throw", {
+            event,
+            token,
+            error: { name: error.name, message: error.message },
+          });
+          throw error;
+        }
+        if (charge === false) {
+          handoffs.push({ event, charge });
+          capture("enqueue-false", { event, token });
+          return charge;
+        }
+        const frame = rig.sink.frames.at(-1);
+        const raw = Buffer.from(frame.rawHex, "hex");
+        const decoded = decoder.read(raw);
+        const metadata =
+          decoded.frames[0] && JSON.parse(Buffer.from(decoded.frames[0].metadata).toString());
+        const validated = decoded.frames[0] && validatePipeFrame(decoded.frames[0], metadata);
+        const observed = {
+          event,
+          charge,
+          rawHex: frame.rawHex,
+          rawSHA256: createHash("sha256").update(raw).digest("hex"),
+          rawBytes: raw.length,
+          decodedStatus: decoded.status,
+          decodedFrames: decoded.frames.length,
+          metadata,
+          validation: validated,
+        };
+        handoffs.push(observed);
+        capture("enqueue-successful-real-handoff", observed);
+        assert(charge > 0);
+        assert.equal(charge, raw.length);
+        assert.notEqual(decoded.status, "error");
+        assert.equal(decoded.frames.length, 1);
+        assert(validated.ok);
+        assert.deepEqual(metadata, event);
+        assert.equal(metadata.terminal.type, "output");
+        previous = {
+          seq: metadata.terminal.seq,
+          rawSHA256: observed.rawSHA256,
+          encodedBytes: charge,
+        };
+        return charge;
+      };
       try {
-        for (let seq = 1; seq <= (payloadBytes === 1 ? 40 : 12); seq++)
+        capture("effective-legal-budget");
+        assert.equal(rig.effective.subscriptionCreditBytes, 262144);
+        for (let seq = 1; seq <= countPlanned; seq++)
           source.replay.append({
             event: { type: "output", run: subscription.run, seq },
             bytes: new Uint8Array(payloadBytes).fill(65),
           });
         const command = rig.command("subscribe", subscription, { atSeq: 1 });
         const outcome = await rig.recovery.open(command, source);
+        capture("accepted-open-before-marker", { command, outcome });
         rig.recovery.markerEnqueued(command, outcome.result);
         const firstTurn = [];
-        setImmediate(() => firstTurn.push(...rig.sink.frames));
+        let samplerOrdinal;
+        setImmediate(() => {
+          firstTurn.push(...rig.sink.frames);
+          samplerOrdinal = capture("original-setImmediate-sampler", {
+            frames: firstTurn.map((frame) => ({
+              event: frame.event,
+              encodedBytes: frame.encodedBytes,
+              rawHex: frame.rawHex,
+            })),
+          }).ordinal;
+        });
         await turns(1);
         const bytes = firstTurn.reduce((sum, frame) => sum + frame.encodedBytes, 0);
+        capture("first-boundary-before-assertions", {
+          samplerOrdinal,
+          firstTurnFrames: firstTurn.length,
+          bytes,
+          handoffs,
+          acknowledgments,
+          independentlyExpected:
+            payloadBytes === 1
+              ? { frames: 32, bytes: 18168, nextCost: 568 }
+              : { frames: 3, bytes: 198306, nextCost: 66102, crossingCost: 264408 },
+          creditEligibility: {
+            maximumLagCharge: 132206,
+            credit: 262144,
+            qualification:
+              "source-bound inference from prior successful decoded handoff/accepted lag ACK and immutable commit seam; no direct logicalDebt or turn-branch trace",
+          },
+        });
         assert(firstTurn.length > 0);
         assert(firstTurn.length <= 32);
         assert(bytes <= 262144);
@@ -1422,20 +1576,70 @@ describe("W2 current recovery", () => {
           },
           new Uint8Array(payloadBytes),
         ).length;
+        capture("complete-next-frame-before-assertions", {
+          samplerOrdinal,
+          bytes,
+          nextCost,
+          handoffs,
+          acknowledgments,
+        });
         assert(firstTurn.length === 32 || bytes + nextCost > 262144);
+        assert.deepEqual(
+          firstTurn.map((frame) => frame.event.terminal.seq),
+          Array.from({ length: firstTurn.length }, (_, index) => index + 2),
+        );
+        if (payloadBytes === 1) {
+          assert.equal(firstTurn.length, 32);
+          assert.equal(bytes, 18168);
+          assert.equal(nextCost, 568);
+        } else {
+          assert.equal(firstTurn.length, 3);
+          assert.equal(bytes, 198306);
+          assert.equal(nextCost, 66102);
+          assert.equal(bytes + nextCost, 264408);
+        }
+        assert(handoffs.every((handoff) => handoff.charge > 0));
+        assert(!rig.ledger.events.some((event) => event.phase === "denied"));
+        assert(rig.ledger.account.availableOrdinaryBytes() > 0);
         const count = rig.sink.frames.length;
         await turns(2);
+        capture("original-later-turns-before-assertion", {
+          originalTurns: 2,
+          firstBoundaryCount: count,
+          laterFrames: rig.sink.frames.map((frame) => ({
+            event: frame.event,
+            encodedBytes: frame.encodedBytes,
+            rawHex: frame.rawHex,
+          })),
+          handoffs,
+          acknowledgments,
+        });
         assert(rig.sink.frames.length > count);
         record("W2C-R11", {
-          semanticVariant: payloadBytes === 1 ? "frame-cap" : "byte-cap",
+          semanticVariant,
           firstTurnFrames: firstTurn.length,
           bytes,
           nextCost,
           laterFrames: rig.sink.frames.length,
+          samplerOrdinal,
+          attribution: "source-bound inference, not direct internal branch trace",
+          handoffs,
+          acknowledgments,
+          state: state(),
         });
+      } catch (error) {
+        bodyFailure = { name: error.name, message: error.message, stack: error.stack };
+        capture("body-failure", { bodyFailure });
+        throw error;
       } finally {
-        source.replay.clear();
-        rig.close();
+        rig.sink.enqueue = originalEnqueue;
+        capture("cleanup-before", { bodyFailure });
+        try {
+          source.replay.clear();
+          rig.close();
+        } finally {
+          capture("cleanup-after", { bodyFailure });
+        }
       }
     }
   });
