@@ -102,3 +102,43 @@ failure, then run changed compiled source through normal pinned worker/engine
 build and13 affected pure files. Record actual declarations/runtime names,
 counts/exits/env/timestamps/minimal diff/cleanH/T and release all source/index/
 Git/output leases for independent QA. Historical limits remain unchanged.
+
+## C02 stale-event admission correction plan
+
+Fresh sole source owner /root/m0_w2_practical_composition_impl, GPT-6.1 Sol/high,
+root GO a60ebdf390b5d75b8df95412c9e39cbda813f95562fa03f00cd9bbc3529e2662.
+Base91a94a1b70c757d9d4e8569ab1e7af95d29b73c8/tree80de05d48eb66d0668a2d377b0046d8f8f158921,
+same existing checkout and branch. Prior production2041dd2 and all atoms/refs
+remain retained. Independent45/46 source finding is adopted; it does not confer
+new-head success. QA/validator leases are released; independent38/new2/helpers/
+other source/tests remain read-only.
+
+Only writable paths: apps/server/src/terminal/terminal-subscriptions.ts,
+apps/server/tests/author/terminal-subscriptions.test.mjs and these existing
+composition plan/results docs. Record controlled author evidence off-tree in
+m0-w2-practical-c02-stale-event-source-correction-r1; task-owned cache only.
+
+Before source edit, build the original exact subject with normal pinned
+server/worker/engine/client Project References and add two direct controls using
+the existing compiled byte fixture and actual public onWrite recover seam.
+Preserve the expected stale-event baseline failure and raw pre-assert route/
+credit/internal/public IDs/reply/order/physical/account receipts. Preserve an
+independent still-current refusal contrast under the supported itemLimit5
+fixture, and callback/close/late once release with true finally cleanup.
+
+Minimal production correction: event captures its DeliveryFence before admit,
+passes that exact object, and retires failed delivery only if the same captured
+fence remains current. Do not reconstruct after reentry or remove genuine
+current RESYNC_REQUIRED/firstcause/once unsubscribe. Preserve ordered marker,
+credit and held backing. No delivery/client/worker/helper/public wire/default/
+budget/profile/architecture changes.
+
+After the source delta, build fresh pinned compiled graph and run own author
+subscriptions plus necessary terminal-connection-delivery suites; scoped format/
+lint. First unexpected failure is preserved and STOP, no blind retry or extra
+turn/readiness change. No independent38/new2/full/native/pushCI/network/probe/
+profile/pool/newtree/delegation. Commit normally with user identity/hooks, freeze
+clean H/T/parent/allowedpath projections/full exact logs and hashes; release all
+writer/index/Git/compiled/cache/runtime outputs for independent current QA.
+Historical failed91/34PASS1FAIL3NOTRUN/pendingversion4, inferred historical cause,
+I10 same-worker native gap and limited4d02 supplement remain unchanged.
