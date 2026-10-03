@@ -430,6 +430,7 @@ export function executionRig(patch = {}, nativeOptions = {}) {
           value,
           state: execution.snapshot(),
           native: native.snapshot(),
+          nativeReceipts: native.receipts,
           leaseEvents,
           liveLeases: [...liveLeases.values()],
         });
