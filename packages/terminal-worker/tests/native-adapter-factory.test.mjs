@@ -1,12 +1,17 @@
+import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 import { createTerminalModel } from "@cove/terminal-engine";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
   composeSpawnPayload,
+  encodePipeFrame,
   PipeErrorSchema,
   PipeResultSchema,
   validatePipeResultForCommand,
 } from "@cove/protocol/pipe";
+import { validateBaselineTransfer } from "@cove/protocol/terminal";
 import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { createWorkerExecution } from "@cove/terminal-worker/execution";
 import { expect, test, vi } from "vitest";
@@ -106,6 +111,17 @@ async function withPublicSeam(run) {
   }
 }
 
+function recordFactoryFixture(phase, value) {
+  const dir = process.env.COVE_N2_FACTORY_QA_OUTPUT;
+  if (!dir) return;
+  appendFileSync(
+    join(dir, "native-factory-receipts.jsonl"),
+    JSON.stringify({ phase, ...value }, (_key, item) =>
+      typeof item === "function" ? { kind: "actual-function" } : item,
+    ) + "\n",
+  );
+}
+
 function workerCommands(factory) {
   const worker = {
     serverId: "server",
@@ -120,7 +136,41 @@ function workerCommands(factory) {
     viewId: "view",
     subscriptionId: "sub",
   };
-  const execution = createWorkerExecution({ worker, effectiveBudgets: M0_LIMITS, factory });
+  const deliveries = [];
+  const delivery = {
+    enqueue(event, payload, token) {
+      const encoded = encodePipeFrame(3, new TextEncoder().encode(JSON.stringify(event)), payload);
+      const entry = {
+        event: structuredClone(event),
+        payload: Uint8Array.from(payload),
+        token,
+        payloadHex: Buffer.from(payload).toString("hex"),
+        payloadSHA256: createHash("sha256").update(payload).digest("hex"),
+        encodedHex: encoded.ok ? Buffer.from(encoded.value).toString("hex") : undefined,
+        encodedBytes: encoded.ok ? encoded.value.length : undefined,
+      };
+      recordFactoryFixture("actual-delivery-before-guard", entry);
+      expect(encoded.ok).toBe(true);
+      deliveries.push(entry);
+      return encoded.value.length;
+    },
+    cancelUnsent(token) {
+      recordFactoryFixture("actual-cancel-unsent", { token });
+    },
+  };
+  const execution = createWorkerExecution({
+    worker,
+    effectiveBudgets: M0_LIMITS,
+    factory,
+    delivery,
+  });
+  const capture = (phase, value = {}) =>
+    recordFactoryFixture(phase, {
+      ...value,
+      worker: execution.snapshot(),
+      factory: factory.snapshot(),
+      deliveries,
+    });
   let ordinal = 0;
   const command = (type, fields = {}) => ({
     type,
@@ -147,7 +197,94 @@ function workerCommands(factory) {
     ).toBe(true);
     expect(validatePipeResultForCommand(request, result)).toBe(true);
   };
-  return { execution, command, spawn, payload, geometry, holder, run, assertResult };
+  const subscription = { run, ...holder };
+  const completed = async (request) => {
+    capture("installation-command-before", { request });
+    const result = await execution.execute(request);
+    capture("installation-result-before-assert", { request, result });
+    assertResult(request, result);
+    expect(result).toMatchObject({ type: "result", outcome: "accepted", atSeq: 0 });
+    capture("installation-marker-before", { request, result });
+    execution.markerEnqueued(request, result);
+    capture("installation-response-settled-before", { requestId: request.requestId });
+    execution.responseSettled(request.requestId);
+    return result;
+  };
+  const install = async () => {
+    const subscribe = command("subscribe", { subscription, atSeq: 0 });
+    const marker = await completed(subscribe);
+    expect(marker.recoveryMode).toBe("baseline");
+    let parsedOrdinal = -1;
+    let transfer;
+    for (let turn = 0; turn < 64; turn++) {
+      const own = deliveries.filter((item) => {
+        const ref = item.event.subscription;
+        return (
+          ref?.run.serverId === run.serverId &&
+          ref.run.relayInstanceId === run.relayInstanceId &&
+          ref.run.runId === run.runId &&
+          ref.connection.connectionId === holder.connection.connectionId &&
+          ref.connection.generation === holder.connection.generation &&
+          ref.viewId === holder.viewId &&
+          ref.subscriptionId === holder.subscriptionId
+        );
+      });
+      const start = own.find((item) => item.event.terminal.type === "baseline-start");
+      const baselineId = start?.event.terminal.descriptor.baselineId;
+      const chunks = own.filter(
+        (item) =>
+          item.event.terminal.type === "baseline-chunk" &&
+          item.event.terminal.baselineId === baselineId,
+      );
+      for (const chunk of chunks) {
+        if (chunk.event.terminal.ordinal <= parsedOrdinal) continue;
+        await completed(
+          command("baseline-progress", {
+            subscription,
+            baselineId,
+            lastParsedOrdinal: chunk.event.terminal.ordinal,
+          }),
+        );
+        parsedOrdinal = chunk.event.terminal.ordinal;
+      }
+      const end = own.find(
+        (item) =>
+          item.event.terminal.type === "baseline-end" &&
+          item.event.terminal.baselineId === baselineId,
+      );
+      if (start && end) {
+        transfer = { start, chunks, end };
+        break;
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    capture("installation-complete-baseline-before-assert", { subscribe, marker, transfer });
+    expect(transfer, "NOT_EXERCISED: actual current baseline complete transfer").toBeDefined();
+    const { start, chunks, end } = transfer;
+    expect(
+      validateBaselineTransfer(
+        start.event.terminal.descriptor,
+        chunks.map((item) => ({ metadata: item.event.terminal, payload: item.payload })),
+        end.event.terminal,
+      ),
+    ).toBe(true);
+    await completed(command("applied-ack", { subscription, appliedSeq: marker.atSeq }));
+    capture("installation-current-ack-before-assert", { subscription, marker });
+    expect(execution.snapshot().runs[0]).toMatchObject({ receivedSeq: 0, parsedSeq: 0, geometry });
+    return marker;
+  };
+  return {
+    execution,
+    command,
+    spawn,
+    payload,
+    geometry,
+    holder,
+    run,
+    assertResult,
+    install,
+    capture,
+  };
 }
 
 function workerFactoryLimits() {
@@ -529,15 +666,24 @@ test("compiled N2 resize onFault fences W1 transaction without signaling a live 
     const { execution, command, assertResult, geometry, holder } = harness;
     try {
       const spawned = await execution.execute(harness.spawn, harness.payload);
+      harness.capture("spawn-result-before-assert", { request: harness.spawn, result: spawned });
       assertResult(harness.spawn, spawned);
       expect(spawned.type).toBe("result");
+      await harness.install();
       const resize = command("set-control", {
         expectedEpoch: 0,
         nextEpoch: 1,
         holder,
         geometry: { cols: 14, rows: 4 },
       });
+      harness.capture("resize-before", { request: resize });
       const failed = await execution.execute(resize);
+      harness.capture("resize-result-before-assert", {
+        request: resize,
+        result: failed,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
       assertResult(resize, failed);
       expect(failed).toMatchObject({ type: "error", error: { kind: "RESULT_UNKNOWN" } });
       expect(native.terminal.resize).toHaveBeenCalledOnce();
@@ -545,6 +691,7 @@ test("compiled N2 resize onFault fences W1 transaction without signaling a live 
       native.data(Buffer.from("A"));
       const status = command("status");
       const observed = await execution.execute(status);
+      harness.capture("status-result-before-assert", { request: status, result: observed });
       assertResult(status, observed);
       expect(observed.runStatus).toMatchObject({
         status: "live",
@@ -559,13 +706,30 @@ test("compiled N2 resize onFault fences W1 transaction without signaling a live 
       native.exit({ exitCode: 0 });
       native.writer.resolve({ kind: "closed" });
       const stopped = await pendingStop;
+      harness.capture("stop-result-before-assert", { request: stop, result: stopped });
       assertResult(stop, stopped);
       expect(stopped.type).toBe("result");
       expect(factory.snapshot().owners).toBe(0);
+    } catch (error) {
+      harness.capture("first-body-failure", {
+        error: { name: error.name, message: error.message, stack: error.stack },
+      });
+      throw error;
     } finally {
+      harness.capture("finally-before", {
+        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
       native.writer.resolve({ kind: "closed" });
       native.exit({ exitCode: 0 });
-      await execution.shutdown("test");
+      const shutdown = await execution.shutdown("test");
+      harness.capture("finally-after", {
+        shutdown,
+        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
     }
   });
 });
@@ -586,15 +750,56 @@ test("compiled N2 partial write faults before settlement but leaves output and e
     const { execution, command, assertResult, geometry, holder, run } = harness;
     try {
       const spawned = await execution.execute(harness.spawn, harness.payload);
+      harness.capture("spawn-result-before-assert", { request: harness.spawn, result: spawned });
       assertResult(harness.spawn, spawned);
       expect(spawned.type).toBe("result");
+      await harness.install();
       const control = command("set-control", { expectedEpoch: 0, nextEpoch: 1, holder, geometry });
       const controlResult = await execution.execute(control);
+      harness.capture("control-result-before-assert", {
+        request: control,
+        result: controlResult,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+      });
       assertResult(control, controlResult);
+      expect(controlResult).toMatchObject({ type: "result", outcome: "accepted", atSeq: 1 });
+      expect(execution.snapshot().runs[0]).toMatchObject({
+        controlEpoch: 1,
+        controlHolder: holder,
+        geometry,
+      });
+      expect(native.terminal.resize).not.toHaveBeenCalled();
       const input = command("input", { subscription: { run, ...holder }, epoch: 1, inputSeq: 1 });
+      harness.capture("input-before", {
+        request: input,
+        payloadHex: "4142",
+        payloadSHA256: createHash("sha256").update("AB").digest("hex"),
+      });
       const pending = execution.execute(input, Buffer.from("AB"));
+      pending.then(
+        (result) => harness.capture("input-real-result", { request: input, result }),
+        (error) =>
+          harness.capture("input-real-throw", {
+            request: input,
+            error: { name: error.name, message: error.message, stack: error.stack },
+          }),
+      );
       await new Promise((resolve) => setImmediate(resolve));
+      harness.capture("input-callback-before-assert", {
+        request: input,
+        callbackPresent: typeof settle,
+        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
       expect(typeof settle).toBe("function");
+      harness.capture("partial-settlement-before", {
+        ticket: 7,
+        status: "error",
+        originalBytes: 2,
+        writtenBytes: 1,
+        remainingBytes: 1,
+        errorCode: "EIO",
+      });
       settle({
         ticket: 7,
         status: "error",
@@ -604,6 +809,7 @@ test("compiled N2 partial write faults before settlement but leaves output and e
         errorCode: "EIO",
       });
       const failed = await pending;
+      harness.capture("input-result-before-assert", { request: input, result: failed });
       assertResult(input, failed);
       expect(failed).toMatchObject({ type: "error", error: { kind: "RESULT_UNKNOWN" } });
       expect(native.terminal.writeBounded).toHaveBeenCalledOnce();
@@ -611,6 +817,7 @@ test("compiled N2 partial write faults before settlement but leaves output and e
       native.data(Buffer.from("B"));
       const status = command("status");
       const observed = await execution.execute(status);
+      harness.capture("status-result-before-assert", { request: status, result: observed });
       assertResult(status, observed);
       expect(observed.runStatus).toMatchObject({
         status: "live",
@@ -623,13 +830,30 @@ test("compiled N2 partial write faults before settlement but leaves output and e
       native.exit({ exitCode: 0 });
       native.writer.resolve({ kind: "closed" });
       const stopped = await pendingStop;
+      harness.capture("stop-result-before-assert", { request: stop, result: stopped });
       assertResult(stop, stopped);
       expect(stopped.type).toBe("result");
       expect(factory.snapshot().owners).toBe(0);
+    } catch (error) {
+      harness.capture("first-body-failure", {
+        error: { name: error.name, message: error.message, stack: error.stack },
+      });
+      throw error;
     } finally {
+      harness.capture("finally-before", {
+        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
       native.writer.resolve({ kind: "closed" });
       native.exit({ exitCode: 0 });
-      await execution.shutdown("test");
+      const shutdown = await execution.shutdown("test");
+      harness.capture("finally-after", {
+        shutdown,
+        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+        nativeResizeCalls: native.terminal.resize.mock.calls,
+        nativeSignals: native.terminal.signalOwned.mock.calls,
+      });
     }
   });
 });
