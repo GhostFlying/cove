@@ -283,7 +283,7 @@ describe("W2 current engine capture", () => {
           for (const cell of line.cells) {
             assert.equal(cell.width, 1);
             assert.equal(cell.default, true);
-            assert.deepEqual([cell.fgMode, cell.bgMode, cell.fg, cell.bg], [0, 0, 0, 0]);
+            assert.deepEqual([cell.fgMode, cell.bgMode, cell.fg, cell.bg], [0, 0, -1, -1]);
             assert.deepEqual(cell.styles, [0, 0, 0, 0, 0, 0, 0, 0, 0]);
           }
         }
