@@ -1306,7 +1306,50 @@ describe("W2 current retention and input", () => {
     const targets = [run("run-80"), run("run-80-second")];
     const routes = [ref("80", targets[0]), ref("80-second", targets[1])];
     let first;
+    let capture;
     try {
+      let ordinal = 0;
+      capture = (phase, value = {}) => {
+        const receipt = structuredClone({
+          ordinal: ++ordinal,
+          phase,
+          ...value,
+          effectiveBudgets: rig.effective,
+          targets,
+          routes,
+          execution: rig.execution.snapshot(),
+          liveLeases: liveSet(rig),
+          leaseEvents: rig.leaseEvents,
+          native: rig.native.snapshot(),
+          nativeReceipts: rig.native.receipts,
+          nativeOwners: rig.native.owners.map((owner) => ({
+            snapshot: owner.adapter.snapshot(),
+            controller: owner.controller.snapshot(),
+            tasks: owner.tasks.map((task) => ({
+              ticket: task.ticket,
+              settled: task.settled,
+              bytes: task.raw?.length ?? task.byteLength,
+              sha256: task.sha256,
+              rawHex: task.raw && Buffer.from(task.raw).toString("hex"),
+            })),
+          })),
+          physicalOwners: rig.sink.ledger.snapshot(),
+          physical: rig.sink.physical.map((frame, index) => ({
+            index,
+            token: frame.token,
+            event: frame.event,
+            rawHex: frame.rawHex,
+            encodedBytes: frame.encodedBytes,
+            settled: frame.settled,
+          })),
+        });
+        record("W2C-I10-actual-boundary", receipt);
+        return receipt;
+      };
+      const sameRun = (actual, expected) =>
+        actual?.serverId === expected.serverId &&
+        actual?.relayInstanceId === expected.relayInstanceId &&
+        actual?.runId === expected.runId;
       for (let index = 0; index < 2; index++) {
         await rig.spawn(targets[index]);
         await rig.install(routes[index]);
@@ -1316,47 +1359,146 @@ describe("W2 current retention and input", () => {
         rig.native.owners[index].emit(new Uint8Array(5000).fill(65 + index));
         await turns();
       }
-      for (let index = 0; index < 2; index++)
-        assert.equal(
-          (
-            await rig.execute(
-              rig.command("applied-ack", targets[index], {
-                subscription: routes[index],
-                appliedSeq: 1,
-              }),
-            )
-          ).outcome,
-          "accepted",
-        );
+      for (let index = 0; index < 2; index++) {
+        const command = rig.command("status", targets[index]);
+        const before = capture("ordinary-status-before-guards", { index, command });
+        const status = before.execution.runs.find((entry) => sameRun(entry.run, targets[index]));
+        const session = before.execution.sessions.find((entry) =>
+          sameRun(entry.run, targets[index]),
+        ).snapshot;
+        assert.equal(before.execution.ordinaryPendingCommands, 0);
+        assert.equal(before.execution.pendingCommands, 0);
+        assert.equal(before.execution.reservedStatusPending, false);
+        assert.equal(before.execution.shuttingDown, false);
+        assert.equal(status.status, "live");
+        assert.equal(session.faulted, false);
+        assert.equal(session.disposed, false);
+        assert.equal(session.consumerFenced, false);
+        assert(session.queuedItems < 256, "fixed run-session ordinary status queue cap");
+        const eventStart = rig.leaseEvents.length;
+        const result = await rig.execute(command);
+        capture("ordinary-status-result-before-assertions", {
+          index,
+          command,
+          result,
+          eventStart,
+          eventEnd: rig.leaseEvents.length,
+        });
+        assert.equal(result.type, "result");
+        assert.equal(result.outcome, "accepted");
+        assert.equal(result.requestId, command.requestId);
+        assert.deepEqual(result.worker, worker);
+        assert.deepEqual(result.run, targets[index]);
+        assert.equal(result.runStatus.status, "live");
+        assert.equal(result.runStatus.receivedSeq, 2);
+        assert.equal(result.runStatus.parsedSeq, 2);
+        assert.equal(result.runStatus.controlEpoch, 1);
+        assert.deepEqual(result.runStatus.controlHolder, status.controlHolder);
+      }
+      for (let index = 0; index < 2; index++) {
+        const command = rig.command("applied-ack", targets[index], {
+          subscription: routes[index],
+          appliedSeq: 1,
+        });
+        const eventStart = rig.leaseEvents.length;
+        capture("original-ACK1-before", { index, command, eventStart });
+        const result = await rig.execute(command);
+        capture("original-ACK1-result-before-assertions", {
+          index,
+          command,
+          result,
+          eventStart,
+          eventEnd: rig.leaseEvents.length,
+        });
+        assert.equal(result.outcome, "accepted");
+      }
+      capture("before-original-sink-close-after-both-ACK1");
       rig.sink.close();
       const before = rig.execution.snapshot();
+      capture("physical-tail-before-original-strict-assertion", {
+        before,
+        configuredTailCap: rig.effective.baselineTailBytes,
+      });
       assert(
         before.sessions.every(
           (entry) => entry.snapshot.settledState.resources.tailAllocatedBytes === 65536,
         ),
       );
-      first = rig.execution.execute(
-        rig.command("input", targets[0], { subscription: routes[0], epoch: 1, inputSeq: 1 }),
-        new Uint8Array(20000),
-      );
+      const firstCommand = rig.command("input", targets[0], {
+        subscription: routes[0],
+        epoch: 1,
+        inputSeq: 1,
+      });
+      const firstPayload = new Uint8Array(20000);
+      const firstEventStart = rig.leaseEvents.length;
+      capture("original-first-input-before", {
+        command: firstCommand,
+        payload: {
+          bytes: firstPayload.length,
+          rawHex: Buffer.from(firstPayload).toString("hex"),
+          sha256: createHash("sha256").update(firstPayload).digest("hex"),
+        },
+        eventStart: firstEventStart,
+      });
+      first = rig.execution.execute(firstCommand, firstPayload);
+      capture("original-first-input-after-call", {
+        command: firstCommand,
+        eventStart: firstEventStart,
+        eventEnd: rig.leaseEvents.length,
+      });
       await turns();
       const held = rig.execution.snapshot();
+      capture("original-held-input-before-assertions", {
+        command: firstCommand,
+        held,
+        eventStart: firstEventStart,
+        eventEnd: rig.leaseEvents.length,
+      });
       assert.equal(held.retainedBreakdown.nativeInputBytes, 40768);
       assert.equal(rig.native.shared.snapshot().allocatedBytes, 20000);
       assert.equal(rig.native.shared.snapshot().tasks, 1);
-      const second = await rig.execute(
-        rig.command("input", targets[1], { subscription: routes[1], epoch: 1, inputSeq: 1 }),
-        new Uint8Array(20000),
-      );
+      const secondCommand = rig.command("input", targets[1], {
+        subscription: routes[1],
+        epoch: 1,
+        inputSeq: 1,
+      });
+      const secondPayload = new Uint8Array(20000);
+      const secondEventStart = rig.leaseEvents.length;
+      capture("original-second-input-before", {
+        command: secondCommand,
+        payload: {
+          bytes: secondPayload.length,
+          rawHex: Buffer.from(secondPayload).toString("hex"),
+          sha256: createHash("sha256").update(secondPayload).digest("hex"),
+        },
+        eventStart: secondEventStart,
+      });
+      const second = await rig.execute(secondCommand, secondPayload);
+      capture("original-second-input-result-before-assertions", {
+        command: secondCommand,
+        result: second,
+        eventStart: secondEventStart,
+        eventEnd: rig.leaseEvents.length,
+      });
       assert.equal(second.error.kind, "BUSY");
       assert.deepEqual(
         rig.native.owners.map((owner) => owner.tasks.length),
         [1, 0],
       );
-      await rig.execution.shutdown("fixed-pressure-shutdown");
-      await first;
+      capture("before-original-pressure-shutdown", { firstCommand, secondCommand });
+      const shutdownResult = await rig.execution.shutdown("fixed-pressure-shutdown");
+      capture("after-original-pressure-shutdown", { shutdownResult, firstCommand, secondCommand });
+      const firstResult = await first;
+      capture("original-first-promise-result", {
+        command: firstCommand,
+        result: firstResult,
+        eventStart: firstEventStart,
+        eventEnd: rig.leaseEvents.length,
+      });
+      capture("before-original-post-shutdown-sink-close");
       rig.sink.close();
       const after = rig.execution.snapshot();
+      capture("original-after-shutdown-before-scalar-assertions", { after });
       const owned = after.retainedBreakdown;
       assert.equal(owned.workerBytes, 12816);
       assert.equal(owned.reservedControlBytes, 4112);
@@ -1390,8 +1532,18 @@ describe("W2 current retention and input", () => {
         leases: rig.leaseEvents,
         native: rig.native.receipts,
       });
+    } catch (error) {
+      try {
+        capture?.("first-failure-before-cleanup", {
+          error: { name: error.name, message: error.message, stack: error.stack },
+        });
+      } catch {
+        /* Preserve the primary failure if persistence fails. */
+      }
+      throw error;
     } finally {
       await rig.close();
+      capture?.("original-finally-close-completed");
       if (first) await first;
     }
   });
