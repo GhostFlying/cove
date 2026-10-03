@@ -336,9 +336,75 @@ describe("W2 current recovery", () => {
         createHash("sha256").update(raw).digest("hex"),
         "841f67104be23c0133e148e3430ba2bc22c9a5f41afd8eca43ea98c861a6eb51",
       );
+      const settledEmission = async (payload, ordinal, offset) => {
+        const before = rig.execution.snapshot();
+        const beforeSession = before.sessions.find(
+          (value) => value.run.runId === target.runId,
+        ).snapshot;
+        record("W2C-R01-before-emission", { ordinal, offset, before, beforeSession });
+        assert.equal(before.ordinaryPendingCommands, 0);
+        assert.equal(before.pendingCommands, 0);
+        assert.equal(before.reservedStatusPending, false);
+        assert.equal(beforeSession.receivedSeq, ordinal - 1);
+        assert.equal(beforeSession.parsedSeq, ordinal - 1);
+        assert.equal(beforeSession.faulted, false);
+        assert.equal(beforeSession.disposed, false);
+        assert.equal(beforeSession.consumerFenced, false);
+        assert.equal(beforeSession.exited, false);
+        rig.native.owners[0].emit(payload);
+        const command = rig.command("status", target);
+        const request = rig.execution.snapshot();
+        const session = request.sessions.find((value) => value.run.runId === target.runId).snapshot;
+        const bytes = {
+          length: payload.length,
+          sha256: createHash("sha256").update(payload).digest("hex"),
+        };
+        record("W2C-R01-settlement-request", { ordinal, offset, bytes, command, request, session });
+        assert.equal(request.ordinaryPendingCommands, 0);
+        assert.equal(request.pendingCommands, 0);
+        assert.equal(request.reservedStatusPending, false);
+        assert(session.queuedItems <= 1, "noncached FIFO status admission below item cap");
+        assert.equal(session.faulted, false);
+        assert.equal(session.disposed, false);
+        assert.equal(session.consumerFenced, false);
+        assert.equal(session.exited, false);
+        assert.equal(session.receivedSeq, ordinal);
+        const result = await rig.execute(command);
+        const after = rig.execution.snapshot();
+        const afterSession = after.sessions.find(
+          (value) => value.run.runId === target.runId,
+        ).snapshot;
+        record("W2C-R01-settlement-result", {
+          ordinal,
+          offset,
+          bytes,
+          command,
+          result,
+          after,
+          afterSession,
+          facts: rig.facts,
+        });
+        assert.equal(result.requestId, command.requestId);
+        assert.equal(result.outcome, "accepted");
+        assert.deepEqual(result.run, target);
+        assert.equal(result.runStatus.status, "live");
+        assert.equal(result.runStatus.receivedSeq, ordinal);
+        assert.equal(result.runStatus.parsedSeq, ordinal);
+        assert.deepEqual(
+          rig.facts.map((fact) => fact.event.seq),
+          Array.from({ length: ordinal }, (_, index) => index + 1),
+        );
+        assert(rig.facts.every((fact) => fact.event.type === "output"));
+        assert.equal(rig.facts.at(-1).hex, Buffer.from(payload).toString("hex"));
+        assert.equal(
+          createHash("sha256")
+            .update(Buffer.from(rig.facts.at(-1).hex, "hex"))
+            .digest("hex"),
+          bytes.sha256,
+        );
+      };
       for (let offset = 0; offset < raw.length; offset += 65536) {
-        rig.native.owners[0].emit(raw.subarray(offset, offset + 65536));
-        await turns();
+        await settledEmission(raw.subarray(offset, offset + 65536), offset / 65536 + 1, offset);
       }
       assert.deepEqual(
         rig.facts.map((fact) => fact.event.seq),
@@ -402,7 +468,7 @@ describe("W2 current recovery", () => {
           .outcome,
         "accepted",
       );
-      rig.native.owners[0].emit(utf8("|W2-R01-SUFFIX|"));
+      await settledEmission(utf8("|W2-R01-SUFFIX|"), 10, raw.length);
       await turns();
       const suffix = rig.sink.frames.filter(
         (frame) => frame.event.terminal.type === "output" && frame.event.terminal.seq === 10,
