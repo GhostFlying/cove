@@ -109,13 +109,19 @@ export class LocalRuntime implements RuntimeTerminalPort {
     };
   }
 
-  private async request(command: PipeCommand, payload?: Uint8Array): Promise<RuntimeResult> {
+  private async request(
+    command: PipeCommand,
+    payload?: Uint8Array,
+    waitForProgress = false,
+  ): Promise<RuntimeResult> {
     const placement = this.pool.get(command.run);
     if (this.disposed || !placement || !sameWorkerRef(command.worker, placement.worker))
       return this.unavailable(command);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
     if (command.type === "spawn") this.registry.markDispatched(command.run, command.worker);
-    const result = await placement.session.request(command, payload, this.resultHandoff);
+    const result = await (waitForProgress && command.type === "unsubscribe"
+      ? placement.session.requestUnsubscribe(command)
+      : placement.session.request(command, payload, this.resultHandoff));
     if (result.type === "result" && result.runStatus)
       this.registry.observe(placement.worker, result.runStatus);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
@@ -168,7 +174,7 @@ export class LocalRuntime implements RuntimeTerminalPort {
   closeSubscription(
     input: Parameters<RuntimeTerminalPort["closeSubscription"]>[0],
   ): Promise<RuntimeResult> {
-    return this.request(input);
+    return this.request(input, undefined, true);
   }
   ackApplied(input: Parameters<RuntimeTerminalPort["ackApplied"]>[0]): Promise<RuntimeResult> {
     return this.request(input);

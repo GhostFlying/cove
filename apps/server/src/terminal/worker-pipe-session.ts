@@ -44,6 +44,7 @@ type Pending = {
   resolve: (result: RuntimeResult) => void;
   handoff: ResultHandoff | undefined;
   sent: boolean;
+  admitted: boolean;
 };
 type Outgoing = {
   bytes: Uint8Array;
@@ -63,6 +64,7 @@ export class WorkerPipeSession {
   private readonly identities = new Map<string, ByteReservation>();
   private readonly pending = new Map<string, Pending>();
   private readonly queue: Outgoing[] = [];
+  private readonly waitingProgress: Outgoing[] = [];
   private readonly handed = new Set<Outgoing>();
   private readonly runs = new Map<string, RunRef>();
   private readonly routes: Route[] = [];
@@ -224,6 +226,36 @@ export class WorkerPipeSession {
     payload: Uint8Array = new Uint8Array(),
     handoff?: ResultHandoff,
   ): Promise<RuntimeResult> {
+    return this.admit(command, payload, handoff, false);
+  }
+
+  requestUnsubscribe(
+    command: Extract<PipeCommand, { type: "unsubscribe" }>,
+  ): Promise<RuntimeResult> {
+    return this.admit(command, new Uint8Array(), undefined, true);
+  }
+
+  private progressCount(): number {
+    return [...this.pending.values()].filter((entry) => entry.role === "progress" && entry.admitted)
+      .length;
+  }
+
+  private promoteProgress(): void {
+    if (this.closed) return;
+    while (this.waitingProgress.length && this.progressCount() < 4) {
+      const item = this.waitingProgress.shift()!;
+      item.request!.admitted = true;
+      this.queue.push(item);
+    }
+    if (!this.receiving) this.flush();
+  }
+
+  private admit(
+    command: PipeCommand,
+    payload: Uint8Array,
+    handoff: ResultHandoff | undefined,
+    waitForProgress: boolean,
+  ): Promise<RuntimeResult> {
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
       return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
     if (
@@ -231,17 +263,21 @@ export class WorkerPipeSession {
       !sameRunRef(this.runs.get(command.run.runId)!, command.run)
     )
       return Promise.resolve(this.error(command, "RUN_NOT_FOUND"));
+    const role = this.role(command);
+    if (role === "progress") this.promoteProgress();
+    if (!this.ready) return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
     if (this.identities.has(command.requestId))
       return Promise.resolve(this.error(command, "COUNTER_EXHAUSTED"));
-    const role = this.role(command);
-    const count = [...this.pending.values()].filter((entry) => entry.role === role).length;
+    const count = [...this.pending.values()].filter(
+      (entry) => entry.role === role && entry.admitted,
+    ).length;
     const cap =
       role === "ordinary"
         ? this.composition.budgets.pendingWorkerCommands
         : role === "progress"
           ? 4
           : 1;
-    if (count >= cap || this.identities.size >= this.options.identityLimit)
+    if ((!waitForProgress && count >= cap) || this.identities.size >= this.options.identityLimit)
       return Promise.resolve(this.error(command, "BUSY"));
     if ((command.type === "subscribe" || command.type === "recover") && !handoff)
       return Promise.resolve(this.error(command, "BUSY"));
@@ -268,6 +304,17 @@ export class WorkerPipeSession {
     const snapshot = JSON.parse(
       this.options.codec.decode(bytes.subarray(16, bytes.byteLength - payload.byteLength)),
     ) as PipeCommand;
+    const deadline = this.now() + this.options.timeoutMs;
+    // Encoding and clock suppliers can reenter; validate admission again before ownership.
+    if (!this.ready) return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
+    if (this.identities.has(snapshot.requestId))
+      return Promise.resolve(this.error(command, "COUNTER_EXHAUSTED"));
+    const currentCount = [...this.pending.values()].filter(
+      (entry) => entry.role === role && entry.admitted,
+    ).length;
+    const waiting = waitForProgress && currentCount >= cap;
+    if ((!waiting && currentCount >= cap) || this.identities.size >= this.options.identityLimit)
+      return Promise.resolve(this.error(command, "BUSY"));
     const identityLease = this.composition.bytes.reserve(
       6 * MAX_METADATA_BYTES + 2048,
       role !== "ordinary",
@@ -295,13 +342,20 @@ export class WorkerPipeSession {
         newRoute = true;
       }
     }
-    const deadline = this.now() + this.options.timeoutMs;
     let resolve!: (result: RuntimeResult) => void;
     const promise = new Promise<RuntimeResult>((done) => {
       resolve = done;
     });
-    const pending: Pending = { command: snapshot, role, deadline, resolve, handoff, sent: false };
-    if (!this.enqueue(bytes, role, pending)) {
+    const pending: Pending = {
+      command: snapshot,
+      role,
+      deadline,
+      resolve,
+      handoff,
+      sent: false,
+      admitted: !waiting,
+    };
+    if (!this.enqueue(bytes, role, pending, waiting)) {
       if (newRoute && route) {
         this.routes.splice(this.routes.indexOf(route), 1);
         route.lease.release();
@@ -322,7 +376,12 @@ export class WorkerPipeSession {
     return promise;
   }
 
-  private enqueue(bytes: Uint8Array, role: Role, request: Pending | undefined): boolean {
+  private enqueue(
+    bytes: Uint8Array,
+    role: Role,
+    request: Pending | undefined,
+    waiting = false,
+  ): boolean {
     const control = role !== "ordinary";
     const size = bytes.buffer.byteLength;
     if (
@@ -338,7 +397,14 @@ export class WorkerPipeSession {
     if (!lease) return false;
     this.queuedBytes += size;
     if (!control) this.ordinaryBytes += size;
-    this.queue.push({ bytes, lease, role, request, owned: true });
+    // Waiting unsubscribe backing uses the same byte budget, but owns no progress slot yet.
+    (waiting ? this.waitingProgress : this.queue).push({
+      bytes,
+      lease,
+      role,
+      request,
+      owned: true,
+    });
     return true;
   }
 
@@ -477,6 +543,8 @@ export class WorkerPipeSession {
       this.loseContact();
     } finally {
       this.receiving = false;
+      // Release shared slots before promise consumers can admit more progress work.
+      this.promoteProgress();
       this.releaseClosedRecords();
     }
     return consumed;
@@ -511,7 +579,7 @@ export class WorkerPipeSession {
     if (this.closed) return;
     this.state = "closed";
     this.decoder.finish();
-    for (const item of this.queue.splice(0)) {
+    for (const item of [...this.queue.splice(0), ...this.waitingProgress.splice(0)]) {
       this.queuedBytes -= item.bytes.buffer.byteLength;
       if (item.role === "ordinary") this.ordinaryBytes -= item.bytes.buffer.byteLength;
       item.owned = false;
