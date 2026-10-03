@@ -1066,7 +1066,7 @@ test("compiled terminal adapter suites are all mandatory", async () => {
     ["engine-recovery", 9],
     ["engine-parser", 9],
     ["engine-query", 11],
-    ["engine-preview", 6],
+    ["engine-preview", 11],
   ]) {
     const suite = requiredSuites.find(
       ({ file }) => file === `packages/terminal-engine/tests/${name}.test.mjs`,
@@ -1119,9 +1119,9 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     ["native-adapter-input", 14],
     ["native-adapter-real", 6],
     ["run-session", 36],
-    ["worker-execution", 30],
+    ["worker-execution", 35],
     ["run-session-real", 1],
-    ["pipe-endpoint", 32],
+    ["pipe-endpoint", 34],
     ["main-shutdown", 1],
   ]) {
     const file = `packages/terminal-worker/tests/${name}.test.mjs`;
@@ -1400,4 +1400,55 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
     "tests/tooling/excluded.spec.ts",
     "tests/tooling/registered.test.ts",
   ]);
+});
+
+test("W2 retained and current suites reject missing, short, duplicate and unknown discovery", async () => {
+  for (const [project, file, minimumTests] of [
+    ["terminal-engine", "packages/terminal-engine/tests/engine-preview.test.mjs", 11],
+    ["terminal-worker", "packages/terminal-worker/tests/pipe-endpoint.test.mjs", 34],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-execution.test.mjs", 35],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-flow.test.mjs", 16],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-preview.test.mjs", 5],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-recovery-clock.test.mjs", 3],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-recovery-reservations.test.mjs", 5],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-recovery.test.mjs", 8],
+    ["terminal-worker", "packages/terminal-worker/tests/independent/current-recovery.test.mjs", 13],
+    ["terminal-worker", "packages/terminal-worker/tests/independent/current-preview.test.mjs", 7],
+    [
+      "terminal-worker",
+      "packages/terminal-worker/tests/independent/current-retention-input.test.mjs",
+      10,
+    ],
+    ["terminal-engine", "packages/terminal-engine/tests/independent/current-capture.test.mjs", 4],
+    ["server", "apps/server/tests/independent/current-worker-consumer.test.mjs", 5],
+    [
+      "terminal-worker",
+      "packages/terminal-worker/tests/independent/current-shared-native-input.test.mjs",
+      2,
+    ],
+  ]) {
+    const suite = requiredSuites.find((item) => item.file === file);
+    expect(suite).toMatchObject({ project, minimumTests });
+    expect(await readVitestOwnedTestFiles()).toContain(file);
+    const cases = Array.from({ length: minimumTests }, (_, index) => ({
+      projectName: project,
+      file: resolve(root, file),
+      name: `case ${index}`,
+    }));
+    expect(() => verifyDiscovery([], [file], [suite])).toThrow(/discovered 0 tests/);
+    expect(() => verifyDiscovery(cases.slice(0, -1), [file], [suite])).toThrow(/needs/);
+    expect(verifyDiscovery(cases, [file], [suite]).found.get(`${project}:${file}`)).toBe(
+      minimumTests,
+    );
+    expect(() => verifyDiscovery([...cases, cases[0]], [file], [suite])).toThrow(
+      /Duplicate discovered identity/,
+    );
+    expect(() =>
+      verifyDiscovery(
+        [...cases, { ...cases[0], name: "unknown", file: resolve(root, "other.test.mjs") }],
+        [file],
+        [suite],
+      ),
+    ).toThrow(/Unregistered Vitest suite/);
+  }
 });

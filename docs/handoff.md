@@ -494,3 +494,46 @@ its disjoint source allocation; shared registration and downstream release remai
 serialized by root. Do not repeat the accepted old finite driver or consumed
 browser-close/devbox probes. Full P2/W2/P3/H1/C3 and M0 exit remain open; M1 entry
 requires user review and permission.
+
+## W2 practical registration — current bounded intake
+
+This append supersedes the earlier practical integration next-step status while
+preserving its historical records. Accepted practical final-main slices are
+PR #58 `082ae77` (private runtime composition, 801 tests / 68 files), PR #59
+`5ac9e808` (public client state, 812 / 69), PR #60 `c77697d8` (private
+subscription and delivery, 886 / 73), PR #61 `b5715e61` (control/input,
+959 / 76), and PR #62 `95f2d3c6` (preview/cache, 1005 / 79). Their independent
+source/runtime and actual final-main acceptance is bounded to those slices.
+None closes full P2, W2 or M0.
+
+W2 registration is composed from frozen `ce178f14366bfc1d28acebd6a2d1a3cd7af5f02d`
+/tree `fb6893d1b32295564d0a099bbb77a928bad32b9e`, with production
+`0f44d403b5121b06aa07d5abae87365d31205ea2`. Root accepted the independently
+reviewed source, oracle and bounded runtime after the R2 reviewer exited 0 and
+released its processes. Sealed current coverage is 39 cases plus 628 affected
+pure cases. A separate owner sealed N01/N02 (two tests with four interior
+controls) and 64 overlapping regressions. The 64 are not additive to the 628;
+43 semantic expectation rows and four interior controls are not extra tests.
+
+The ordinary registry now includes the retained worker recovery/preview suites
+and six independent current suites with floors 13/7/10/4/5/2. Author declaration
+floors distinguish pipe-endpoint 34 from its 38 runtime cases, execution 35 from
+42, and recovery clock/reservations/recovery 3/5/8 from 4/6/9. Exact pressure-six
+and three two-row finite identities are registered; inherited discovery,
+scanner, failure, skip and whole-total guards remain unchanged. See
+[W2 practical integration](tasks/m0-worker-practical-main-integration.md).
+A separate validator must run the ordinary full gate on the new clean registered
+candidate; its full, hosted and actual-main gates remain pending. No unexecuted
+full total is claimed here.
+
+Historical author 200 and R04 208 results remain attached to their older source.
+Old failed current runs, C02 BUSY and missing correlation evidence, 28/43
+NOT_RUN, EPERM UNKNOWN, and R5/R6 limits remain historical evidence. The later
+same-hint fixture clock/correlation corrections do not establish a cause for
+old BUSY. I10's same-worker native-counter gap remains PENDING; distinct-worker
+N01/N02 does not close it. Historical C supplement SR02 CLI1 and its unexecuted
+held-debt tail remain, as do absent build/version timestamps and unavailable
+direct hosted compiled/native byte inspection. Browser cleanup inventory is
+25 records: 24 named records / 22 unique executed names (V1-L6 three times),
+and one null name. Existing producer bytes are unchanged. Native/RSS,
+real-agent, devbox, D, full P2/W2/H1/C3 and M0 exit/M1 entry limits remain open.

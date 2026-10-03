@@ -306,7 +306,7 @@ export const requiredSuites = [
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/engine-preview.test.mjs",
-    minimumTests: 6,
+    minimumTests: 11,
   },
   {
     project: "terminal-engine-probes",
@@ -421,7 +421,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/worker-execution.test.mjs",
-    minimumTests: 30,
+    minimumTests: 35,
   },
   {
     project: "terminal-worker",
@@ -431,7 +431,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
-    minimumTests: 32,
+    minimumTests: 34,
   },
   {
     project: "terminal-worker",
@@ -522,6 +522,61 @@ export const requiredSuites = [
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
     minimumTests: 10,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-flow.test.mjs",
+    minimumTests: 16,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-preview.test.mjs",
+    minimumTests: 5,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery-clock.test.mjs",
+    minimumTests: 3,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery-reservations.test.mjs",
+    minimumTests: 5,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery.test.mjs",
+    minimumTests: 8,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/independent/current-recovery.test.mjs",
+    minimumTests: 13,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/independent/current-preview.test.mjs",
+    minimumTests: 7,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/independent/current-retention-input.test.mjs",
+    minimumTests: 10,
+  },
+  {
+    project: "terminal-engine",
+    file: "packages/terminal-engine/tests/independent/current-capture.test.mjs",
+    minimumTests: 4,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/current-worker-consumer.test.mjs",
+    minimumTests: 5,
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/independent/current-shared-native-input.test.mjs",
+    minimumTests: 2,
   },
 ];
 
@@ -839,6 +894,49 @@ export const finiteRuntimeExpansions = [
       "worker ingress returns to its baseline after one chunk",
       "worker ingress returns to its baseline after separate callbacks",
       "worker ingress returns to its baseline after one split callback",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-execution.test.mjs",
+    template: "W2 pressure rejects $name without evicting either run or changing replay mode",
+    names: [
+      "W2 pressure rejects stale epoch without evicting either run or changing replay mode",
+      "W2 pressure rejects wrong installed holder without evicting either run or changing replay mode",
+      "W2 pressure rejects duplicate sequence without evicting either run or changing replay mode",
+      "W2 pressure rejects lower sequence without evicting either run or changing replay mode",
+      "W2 pressure rejects exhausted sequence without evicting either run or changing replay mode",
+      "W2 pressure rejects identity cap without evicting either run or changing replay mode",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery-clock.test.mjs",
+    template:
+      "W2 old preparing deadline and late %s preserve replacement and allocated capture debt",
+    names: [
+      "W2 old preparing deadline and late completion preserve replacement and allocated capture debt",
+      "W2 old preparing deadline and late throw preserve replacement and allocated capture debt",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery-reservations.test.mjs",
+    template:
+      "W2 preparing recover at detached reserve fences old %s without allocating or failing replacement",
+    names: [
+      "W2 preparing recover at detached reserve fences old completion without allocating or failing replacement",
+      "W2 preparing recover at detached reserve fences old throw without allocating or failing replacement",
+    ],
+  },
+  {
+    project: "terminal-worker",
+    file: "packages/terminal-worker/tests/worker-recovery.test.mjs",
+    template:
+      "W2 actual engine detached callback %s refuses old allocation and preserves legal fresh admission",
+    names: [
+      "W2 actual engine detached callback unsubscribe refuses old allocation and preserves legal fresh admission",
+      "W2 actual engine detached callback recover refuses old allocation and preserves legal fresh admission",
     ],
   },
 ];
