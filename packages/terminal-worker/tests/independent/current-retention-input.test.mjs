@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, it } from "vitest";
 import { TerminalModel } from "@cove/terminal-engine";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
+import { createPipeDecoder, validatePipeFrame } from "@cove/protocol/pipe";
 import { PreviewService } from "../../dist/src/preview-service.js";
 import { ReplayWindow } from "../../dist/src/replay-window.js";
 import { PtyInputController, SharedNativeInputBudget } from "../../dist/src/pty-input.js";
@@ -18,6 +19,7 @@ import {
   ref,
   run,
   turns,
+  untilTurn,
   utf8,
   worker,
 } from "./current-recovery-ports.mjs";
@@ -49,33 +51,197 @@ async function pressureRig(patch = {}, native = {}) {
   const rig = executionRig({ workerBytes: 262144, reservedControlBytes: 4112, ...patch }, native);
   const targets = [run("pressure-one"), run("pressure-two")];
   const routes = targets.map((target, index) => ref(`pressure-${index}`, target));
+  const sameRun = (actual, expected) =>
+    actual?.serverId === expected.serverId &&
+    actual?.relayInstanceId === expected.relayInstanceId &&
+    actual?.runId === expected.runId;
+  const snapshot = () => ({
+    execution: rig.execution.snapshot(),
+    native: rig.native.snapshot(),
+    nativeReceipts: rig.native.receipts,
+    liveLeases: liveSet(rig),
+    leaseEvents: rig.leaseEvents,
+    sinkOwners: rig.sink.ledger.snapshot(),
+    physical: rig.sink.physical.map((frame, index) => ({
+      index,
+      token: frame.token,
+      encodedBytes: frame.encodedBytes,
+      settled: frame.settled,
+      event: frame.event,
+      rawHex: frame.rawHex,
+    })),
+  });
+  let observerOrdinal = 0;
+  const capture = (phase, value = {}) => {
+    const event = {
+      ordinal: ++observerOrdinal,
+      phase,
+      targets,
+      routes,
+      effectiveBudgets: rig.effective,
+      ...value,
+      state: snapshot(),
+    };
+    record("W2C-pressure-seed-setup", event);
+    return event;
+  };
   try {
     for (let index = 0; index < 2; index++) {
-      await rig.spawn(targets[index]);
-      await rig.install(routes[index]);
-      await rig.grant(routes[index]);
+      capture("before-original-spawn", { index });
+      const spawned = await rig.spawn(targets[index]);
+      capture("after-original-spawn", { index, spawned });
+      const installed = await rig.install(routes[index]);
+      capture("after-original-install", { index, installed });
+      const granted = await rig.grant(routes[index]);
+      capture("after-original-grant", { index, granted });
     }
     for (let index = 0; index < 2; index++) {
-      rig.native.owners[index].emit(new Uint8Array(5000).fill(65 + index));
-      await turns();
-    }
-    for (let index = 0; index < 2; index++) {
+      const raw = new Uint8Array(5000).fill(65 + index);
+      const rawSHA256 = createHash("sha256").update(raw).digest("hex");
+      rig.native.owners[index].emit(raw);
+      const command = rig.command("status", targets[index]);
+      const before = capture("status-command-before", {
+        index,
+        command,
+        seed: { bytes: raw.length, rawSHA256, rawHex: Buffer.from(raw).toString("hex") },
+      });
+      const execution = before.state.execution;
+      const session = execution.sessions.find((entry) =>
+        sameRun(entry.run, targets[index]),
+      ).snapshot;
+      assert.equal(execution.ordinaryPendingCommands, 0);
+      assert.equal(execution.pendingCommands, 0);
+      assert.equal(execution.reservedStatusPending, false);
+      assert.equal(execution.shuttingDown, false);
       assert.equal(
-        (
-          await rig.execute(
-            rig.command("applied-ack", targets[index], {
-              subscription: routes[index],
-              appliedSeq: 2,
-            }),
-          )
-        ).outcome,
-        "accepted",
+        execution.runs.find((entry) => sameRun(entry.run, targets[index])).status,
+        "live",
+      );
+      assert.equal(session.faulted, false);
+      assert.equal(session.disposed, false);
+      assert.equal(session.consumerFenced, false);
+      assert(session.queuedItems < 256, "fixed run-session ordinary status queue cap");
+      const result = await rig.execute(command);
+      capture("status-command-result", { index, command, result });
+      assert.equal(result.type, "result");
+      assert.equal(result.outcome, "accepted");
+      assert.equal(result.requestId, command.requestId);
+      assert.deepEqual(result.worker, worker);
+      assert.deepEqual(result.run, targets[index]);
+      assert.equal(result.runStatus.status, "live");
+      assert.equal(result.runStatus.receivedSeq, 2);
+      assert.equal(result.runStatus.parsedSeq, 2);
+    }
+    for (let index = 0; index < 2; index++) {
+      let observation;
+      await untilTurn(() => {
+        const frame = rig.sink.physical.find(
+          (entry) =>
+            entry.event.terminal?.type === "output" &&
+            entry.event.terminal.seq === 2 &&
+            sameRun(entry.event.run, targets[index]) &&
+            sameRun(entry.event.terminal.run, targets[index]) &&
+            sameRun(entry.event.subscription?.run, routes[index].run) &&
+            entry.event.subscription.connection.connectionId ===
+              routes[index].connection.connectionId &&
+            entry.event.subscription.connection.generation ===
+              routes[index].connection.generation &&
+            entry.event.subscription.viewId === routes[index].viewId &&
+            entry.event.subscription.subscriptionId === routes[index].subscriptionId &&
+            entry.rawHex,
+        );
+        capture("publication-predicate-observed", { index, framePresent: Boolean(frame) });
+        if (!frame) return false;
+        const raw = Buffer.from(frame.rawHex, "hex");
+        const decoded = createPipeDecoder().read(raw);
+        const metadata =
+          decoded.frames[0] && JSON.parse(Buffer.from(decoded.frames[0].metadata).toString());
+        const validation = decoded.frames[0] && validatePipeFrame(decoded.frames[0], metadata);
+        const payload = decoded.frames[0]?.payload;
+        observation = {
+          index,
+          rawHex: frame.rawHex,
+          rawBytes: raw.length,
+          metadataBytes: raw.readUInt32BE(8),
+          payloadBytes: raw.readUInt32BE(12),
+          rawSHA256: createHash("sha256").update(raw).digest("hex"),
+          payloadSHA256: payload && createHash("sha256").update(payload).digest("hex"),
+          decodedStatus: decoded.status,
+          decodedFrames: decoded.frames.length,
+          metadata,
+          validation,
+          settled: frame.settled,
+        };
+        capture("publication-ready-before-assertions", observation);
+        assert.equal(frame.settled, false);
+        assert.notEqual(decoded.status, "error");
+        assert.equal(decoded.frames.length, 1);
+        assert(validation.ok);
+        assert.deepEqual(metadata.worker, worker);
+        assert.deepEqual(metadata.run, targets[index]);
+        assert.deepEqual(metadata.subscription, routes[index]);
+        assert.equal(metadata.terminal.type, "output");
+        assert.equal(metadata.terminal.seq, 2);
+        assert.equal(payload.length, 5000);
+        assert.deepEqual(payload, new Uint8Array(5000).fill(65 + index));
+        return true;
+      }, `fixed pressure seed ${index} actual route output2`);
+      const command = rig.command("applied-ack", targets[index], {
+        subscription: routes[index],
+        appliedSeq: 2,
+      });
+      const physicalIds = rig.sink.physical.map((frame, index) => ({
+        index,
+        encodedBytes: frame.encodedBytes,
+        settled: frame.settled,
+      }));
+      const physicalOwnerIds = [...rig.sink.ledger.live.values()]
+        .filter((owner) => owner.owner === "physical-delivery")
+        .map((owner) => owner.id);
+      capture("original-ACK2-before", {
+        index,
+        command,
+        observation,
+        physicalIds,
+        physicalOwnerIds,
+      });
+      const result = await rig.execute(command);
+      capture("original-ACK2-result", {
+        index,
+        command,
+        result,
+        observation,
+        physicalIds,
+        physicalOwnerIds,
+      });
+      assert.equal(result.outcome, "accepted");
+      assert.equal(result.requestId, command.requestId);
+      assert.deepEqual(result.worker, worker);
+      assert.deepEqual(result.run, targets[index]);
+      assert(
+        physicalOwnerIds.every((id) => rig.sink.ledger.live.has(id)),
+        "logical ACK cannot release physical delivery leases",
+      );
+      assert(
+        physicalIds.every((entry) => rig.sink.physical[entry.index].settled === entry.settled),
+        "logical ACK does not settle physical delivery",
       );
     }
+    capture("before-original-sink-close");
     rig.sink.close();
+    capture("after-original-sink-close");
     return { ...rig, targets, routes };
   } catch (error) {
+    capture("setup-failure-before-close", {
+      error: { name: error.name, message: error.message, stack: error.stack },
+    });
     await rig.close();
+    record("W2C-pressure-seed-setup-failure-closed", {
+      targets,
+      routes,
+      error: { name: error.name, message: error.message },
+      state: snapshot(),
+    });
     throw error;
   }
 }
