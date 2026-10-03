@@ -266,11 +266,85 @@ async function captureSchedule(seed, injected, action = "keep") {
 }
 
 async function combinedEndpointSchedule() {
-  const rig = endpointRig({
-    pendingWorkerCommands: 1,
-    reservedControlBytes: 4112,
-    pipeQueuedBytes: 69648,
-  });
+  let rig;
+  let ordinal = 0;
+  let nextWrite = 0;
+  const executionEvents = [];
+  const physicalEvents = [];
+  const capture = (phase, value = {}) =>
+    record("W2C-R08-prospective", {
+      ordinal: ++ordinal,
+      phase,
+      ...value,
+      pipe: rig?.pipe.snapshot(),
+      worker: rig?.execution?.snapshot(),
+      native: rig?.native.snapshot(),
+      nativeReceipts: rig?.native.receipts,
+      callbacksHeld: rig?.callbacks.length,
+      output: rig && {
+        writableLength: rig.output.writableLength,
+        writableNeedDrain: rig.output.writableNeedDrain,
+        closed: rig.output.closed,
+      },
+      executionEvents,
+      physicalEvents,
+      frames: rig?.frames,
+      directExecuteTrace: "UNAVAILABLE_IN_ORIGINAL_UNGATED_R08_FIXTURE",
+    });
+  rig = endpointRig(
+    {
+      pendingWorkerCommands: 1,
+      reservedControlBytes: 4112,
+      pipeQueuedBytes: 69648,
+    },
+    {
+      executionObserver(event) {
+        executionEvents.push(event);
+        capture("actual-execution-marker-settlement", { event });
+      },
+    },
+  );
+  const originalWrite = rig.output.write;
+  const originalEmit = rig.output.emit;
+  rig.output.write = function (...args) {
+    const ticket = ++nextWrite;
+    const raw = args[0];
+    const entry = {
+      ticket,
+      bytes: raw.byteLength,
+      rawHex: Buffer.from(raw).toString("hex"),
+      sha256: createHash("sha256").update(raw).digest("hex"),
+      callbackEnters: 0,
+      callbackReturns: 0,
+    };
+    physicalEvents.push(entry);
+    const index = args.length - 1;
+    const completion = args[index];
+    if (typeof completion === "function")
+      args[index] = function (...values) {
+        entry.callbackEnters++;
+        capture("actual-callback-before", { ticket, args: values });
+        try {
+          return completion.apply(this, values);
+        } finally {
+          entry.callbackReturns++;
+          capture("actual-callback-after", { ticket });
+        }
+      };
+    const accepted = originalWrite.apply(this, args);
+    entry.writeAccepted = accepted;
+    capture("actual-write-return", { ticket, accepted });
+    return accepted;
+  };
+  rig.output.emit = function (type, ...args) {
+    if (type === "drain" || type === "close") capture("actual-event-before", { type, args });
+    try {
+      return originalEmit.call(this, type, ...args);
+    } finally {
+      if (type === "drain" || type === "close") capture("actual-event-after", { type, args });
+    }
+  };
+  rig.output.once("close", () => capture("actual-output-close"));
   const target = run("combined");
   const subscription = ref("combined", target);
   try {
@@ -285,12 +359,30 @@ async function combinedEndpointSchedule() {
       pipeCommand("applied-ack", target, { subscription, appliedSeq: installed.result.atSeq }),
       pipeCommand("applied-ack", target, { subscription, appliedSeq: installed.result.atSeq }),
     ];
-    rig.input.write(
-      Buffer.concat(commands.map((command) => Buffer.from(encoded(command, undefined, 1)))),
-    );
+    const ingress = commands.map((command) => ({
+      command,
+      raw: Buffer.from(encoded(command, undefined, 1)),
+    }));
+    const batch = Buffer.concat(ingress.map((item) => item.raw));
+    capture("fixed-input-before", {
+      inputs: ingress.map(({ command, raw }) => ({
+        command,
+        rawHex: raw.toString("hex"),
+        bytes: raw.length,
+        sha256: createHash("sha256").update(raw).digest("hex"),
+      })),
+      batchRawHex: batch.toString("hex"),
+      batchBytes: batch.length,
+      batchSHA256: createHash("sha256").update(batch).digest("hex"),
+    });
+    rig.input.write(batch);
+    capture("fixed-input-after");
     await untilTurn(() => rig.callbacks.length === 1, "combined physical callback");
     const first = rig.pipe.snapshot();
-    assert.equal(first.outstandingRequests, 4);
+    capture("first-before-assert", { first, commands });
+    assert.equal(first.parkedRequests, 1);
+    assert.equal(first.outstandingRequests - first.parkedRequests, 4);
+    assert.equal(first.outstandingRequests, 5);
     assert.equal(first.responseItems, 1);
     assert(first.ingressBytes > 0);
     assert(first.ordinaryAccountedBytes <= 69648 - 4112);
@@ -302,7 +394,10 @@ async function combinedEndpointSchedule() {
     );
     observations.push(rig.pipe.snapshot());
     for (const snapshot of observations) {
-      assert(snapshot.outstandingRequests <= 4);
+      capture("observation-before-guard", { snapshot, commands });
+      assert(snapshot.parkedRequests >= 0 && snapshot.parkedRequests <= 1);
+      assert(snapshot.outstandingRequests - snapshot.parkedRequests <= 4);
+      assert(snapshot.outstandingRequests <= 4 + snapshot.parkedRequests);
       assert(snapshot.ordinaryAccountedBytes <= 65536);
       assert(snapshot.transportBytes + snapshot.queuedBytes <= 69648);
     }
@@ -310,10 +405,23 @@ async function combinedEndpointSchedule() {
       (command) =>
         rig.frames.find((frame) => frame.metadata.requestId === command.requestId).metadata,
     );
+    capture("replies-before-assert", { commands, replies });
     assert.equal(new Set(replies.map((reply) => reply.requestId)).size, 5);
     return { commands, first, observations, replies, frames: rig.frames };
+  } catch (error) {
+    capture("first-body-failure", {
+      error: { name: error.name, message: error.message, stack: error.stack },
+    });
+    throw error;
   } finally {
-    await rig.close();
+    capture("finally-before-close");
+    try {
+      await rig.close();
+      capture("finally-after-close");
+    } finally {
+      rig.output.write = originalWrite;
+      rig.output.emit = originalEmit;
+    }
   }
 }
 
