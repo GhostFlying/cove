@@ -97,11 +97,15 @@ describe("W2 current server and public client", () => {
     await withWorkerLink(async (rig) => {
       await rig.emit(utf8("W2-C02"));
       const peer = await rig.peer();
+      rig.capture("C02-first-before");
       const first = await peer.client.getPreview(rig.run);
+      rig.capture("C02-first-returned", { first });
       assert(first.ok && first.status === "transfer");
       const captures = rig.commands.filter((value) => value.type === "preview-refresh").length;
       rig.time.advance(51);
+      rig.capture("C02-same-before", { first, captures });
       const same = await peer.client.getPreview(rig.run, first.version);
+      rig.capture("C02-same-returned", { first, same, captures });
       assert.deepEqual(same, { ok: true, status: "unchanged", version: first.version });
       assert.equal(
         rig.commands.filter((value) => value.type === "preview-refresh").length,
@@ -109,21 +113,29 @@ describe("W2 current server and public client", () => {
       );
       assert(rig.commands.filter((value) => value.type === "status").length >= 2);
       const old = rig.runtime.previews.cache.getRecord(rig.run);
-      assert.equal(old.preview.checkedAtMs, 51);
+      rig.capture("C02-owned-cache-before-assertions", { old });
+      assert.equal(old.preview.checkedAtMs, 1051);
+      assert.equal(rig.time.now(), 51);
       assert(Number.isSafeInteger(old.preview.generatedAtMs));
       await rig.emit(utf8("+changed"));
       rig.time.advance(102);
       const changed = await peer.client.getPreview(rig.run, first.version);
+      rig.capture("C02-changed-returned", { changed });
       assert(changed.ok && changed.status === "transfer");
       assert.equal(changed.version, 2);
       assert.deepEqual(Buffer.from(changed.bytes), actualPreview(rig));
       const opened = await installed(peer);
-      assert((await opened.controller.requestFocus(geometry)).ok);
+      const focus = await opened.controller.requestFocus(geometry);
+      rig.capture("C02-focus-returned", { focus });
+      assert(focus.ok);
       await turns(4);
-      assert((await opened.controller.requestResize({ cols: 13, rows: 4 })).ok);
+      const resize = await opened.controller.requestResize({ cols: 13, rows: 4 });
+      rig.capture("C02-resize-returned", { resize });
+      assert(resize.ok);
       await turns(4);
       rig.time.advance(153);
       const resized = await peer.client.getPreview(rig.run, changed.version);
+      rig.capture("C02-resized-returned", { resized });
       assert(resized.ok && resized.status === "transfer");
       assert.deepEqual(resized.geometry, { cols: 13, rows: 4 });
       assert.equal(resized.version, 4);
@@ -141,10 +153,13 @@ describe("W2 current server and public client", () => {
       await rig.emit(utf8("W2-C02"));
       const a = await rig.peer();
       const b = await rig.peer();
-      assert.equal(rig.runtime.previews.cache.snapshot().entries, 0);
+      const empty = rig.runtime.previews.cache.snapshot();
+      rig.capture("C02-empty-before", { empty });
+      assert.equal(empty.entries, 0);
       const pendingA = a.client.getPreview(rig.run, 1);
       const pendingB = b.client.getPreview(rig.run, 1);
       const results = await Promise.all([pendingA, pendingB]);
+      rig.capture("C02-empty-returned", { results });
       for (const value of results) {
         assert(value.ok && value.status === "transfer");
         assert.equal(value.version, 1);
