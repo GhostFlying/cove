@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -441,6 +442,130 @@ export function executionRig(patch = {}, nativeOptions = {}) {
     },
   };
 }
+function observeEndpointCallbacks(output, pipe, callbacks, variant) {
+  const originalWrite = output.write;
+  const originalEmit = output.emit;
+  const tickets = [];
+  const awaitingWrite = [];
+  const heldTickets = new WeakMap();
+  const drains = [];
+  const events = [];
+  let ordinal = 0;
+  let nextDrain = 0;
+  let delivered = 0;
+  let closes = 0;
+  const snapshot = () => ({
+    pipe: pipe.snapshot(),
+    writableLength: output.writableLength,
+    writableNeedDrain: output.writableNeedDrain,
+    writableClosed: output.closed,
+    heldCallbacks: callbacks.map((callback) => heldTickets.get(callback)?.id ?? null),
+    pendingDrains: drains.map((event) => ({ id: event.id, args: event.args })),
+    emittedDrains: nextDrain,
+    deliveredDrains: delivered,
+    realCloses: closes,
+    tickets: tickets.map((ticket) => ({ ...ticket })),
+  });
+  const capture = (phase, value = {}) => {
+    const event = { ordinal: ++ordinal, variant, phase, ...value, snapshot: snapshot() };
+    events.push(event);
+    record("W2C-R07-port-event", event);
+    return event;
+  };
+  const emitOriginal = (type, args, origin, id) => {
+    capture(`${type}-delivery-enter`, { origin, id, args });
+    const result = originalEmit.call(output, type, ...args);
+    if (type === "drain") delivered++;
+    if (type === "close") {
+      closes++;
+      for (const ticket of tickets) ticket.observedRetirementBoundary ??= "close";
+    }
+    capture(`${type}-delivery-return`, { origin, id, args, result });
+    return result;
+  };
+  output.emit = function (type, ...args) {
+    if (type === "drain") {
+      const event = { id: ++nextDrain, args };
+      drains.push(event);
+      capture("genuine-drain-emitted", { id: event.id, args });
+      return output.listenerCount(type) > 0;
+    }
+    if (type === "close") return emitOriginal(type, args, "actual-stream-close");
+    return originalEmit.call(this, type, ...args);
+  };
+  output.write = function (...args) {
+    const raw = args[0];
+    const ticket = {
+      id: tickets.length + 1,
+      bytes: raw.byteLength,
+      sha256: createHash("sha256").update(raw).digest("hex"),
+      outerCallbackEnters: 0,
+      outerCallbackReturns: 0,
+    };
+    tickets.push(ticket);
+    awaitingWrite.push(ticket);
+    const index = args.length - 1;
+    const completion = args[index];
+    capture("write-handoff", { ticket: ticket.id, rawHex: Buffer.from(raw).toString("hex") });
+    if (typeof completion === "function")
+      args[index] = function (...values) {
+        ticket.outerCallbackEnters++;
+        capture("outer-callback-enter", { ticket: ticket.id, error: values[0]?.message });
+        const result = completion.apply(this, values);
+        ticket.outerCallbackReturns++;
+        ticket.observedRetirementBoundary ??= "callback";
+        capture("outer-callback-return", { ticket: ticket.id });
+        return result;
+      };
+    const accepted = originalWrite.apply(this, args);
+    ticket.writeAccepted = accepted;
+    capture("write-return", { ticket: ticket.id, accepted });
+    return accepted;
+  };
+  capture("observer-installed");
+  return {
+    events,
+    tickets,
+    capture,
+    snapshot,
+    reader(raw, metadata) {
+      const ticket = awaitingWrite.shift();
+      if (ticket) ticket.readerMetadata = structuredClone(metadata);
+      capture("reader-observed", {
+        ticket: ticket?.id,
+        bytes: raw.byteLength,
+        sha256: createHash("sha256").update(raw).digest("hex"),
+        metadata,
+      });
+      return ticket;
+    },
+    held(callback, ticket) {
+      heldTickets.set(callback, ticket);
+      capture("internal-callback-held", { ticket: ticket?.id });
+    },
+    internal(ticket, callback) {
+      capture("internal-callback-invoke", { ticket: ticket?.id });
+      const result = callback();
+      capture("internal-callback-return", { ticket: ticket?.id });
+      return result;
+    },
+    deliverDrain() {
+      capture("before-genuine-drain-delivery");
+      const event = drains.shift();
+      assert(event, "NOT_EXERCISED: no actually emitted drain to deliver");
+      return emitOriginal("drain", event.args, "captured-genuine-drain", event.id);
+    },
+    lateCapacity() {
+      return emitOriginal("drain", [], "explicit-controlled-late-capacity");
+    },
+    restore() {
+      capture("observer-restore");
+      output.write = originalWrite;
+      output.emit = originalEmit;
+    },
+  };
+}
+
 export function endpointRig(patch = {}, options = {}) {
   const effective = budgets(patch);
   const native = currentByteFactory(options.native);
@@ -452,6 +577,7 @@ export function endpointRig(patch = {}, options = {}) {
   let held = false;
   let reader;
   let rawReader;
+  let callbackObserver;
   const output = new Writable({
     highWaterMark: 1,
     write(raw, _encoding, callback) {
@@ -459,8 +585,10 @@ export function endpointRig(patch = {}, options = {}) {
       rawReader?.(raw);
       const result = decoder.read(raw);
       assert.notEqual(result.status, "error");
+      let ticket;
       for (const frame of result.frames) {
         const metadata = JSON.parse(Buffer.from(frame.metadata).toString());
+        ticket = callbackObserver?.reader(raw, metadata);
         assert(validatePipeFrame(frame, metadata).ok);
         frames.push({
           metadata,
@@ -469,8 +597,13 @@ export function endpointRig(patch = {}, options = {}) {
         });
         reader?.(metadata);
       }
-      if (held) callbacks.push(callback);
-      else callback();
+      const completion = callbackObserver
+        ? () => callbackObserver.internal(ticket, callback)
+        : callback;
+      if (held) {
+        callbacks.push(completion);
+        callbackObserver?.held(completion, ticket);
+      } else completion();
     },
   });
   const pipe = runWorkerPipe(input, output, {
@@ -501,6 +634,11 @@ export function endpointRig(patch = {}, options = {}) {
       return execution;
     },
     send,
+    observeCallbacks(variant) {
+      assert.equal(callbackObserver, undefined);
+      callbackObserver = observeEndpointCallbacks(output, pipe, callbacks, variant);
+      return callbackObserver;
+    },
     hold(value = true) {
       held = value;
     },
@@ -516,17 +654,23 @@ export function endpointRig(patch = {}, options = {}) {
       callback();
     },
     async close() {
-      held = false;
-      while (callbacks.length) callbacks.shift()();
-      input.end();
-      await pipe.closed;
-      output.destroy();
-      record("endpoint-cleanup", {
-        pipe: pipe.snapshot(),
-        worker: execution?.snapshot(),
-        native: native.snapshot(),
-        nativeReceipts: native.receipts,
-      });
+      try {
+        held = false;
+        while (callbacks.length) callbacks.shift()();
+        input.end();
+        await pipe.closed;
+        output.destroy();
+        if (callbackObserver) await turns(1);
+        record("endpoint-cleanup", {
+          pipe: pipe.snapshot(),
+          worker: execution?.snapshot(),
+          native: native.snapshot(),
+          nativeReceipts: native.receipts,
+          ...(callbackObserver ? { callbackObserver: callbackObserver.snapshot() } : {}),
+        });
+      } finally {
+        callbackObserver?.restore();
+      }
     },
   };
 }
