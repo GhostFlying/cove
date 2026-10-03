@@ -233,6 +233,147 @@ describe("bounded server preview cache", () => {
     await cleaned(f);
   });
 
+  it("author preview equal deadline result-first seals before later tick", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const pending = f.runtime.previews.refresh(run);
+    const { command } = await f.toPreview(pending, 2);
+    const t = f.transfer(command, new Uint8Array([66]), 2);
+    f.clock(50);
+    f.session.receive(coalesce(t.start, t.chunk, t.end, t.result));
+    expect(f.runtime.previews.cache.getRecord(run).preview.version).toBe(2);
+    f.runtime.tickPreviews();
+    expect(await pending).toEqual({ ok: true });
+    expect(f.runtime.previews.cache.getRecord(run).preview.stale).toBe(false);
+    await cleaned(f);
+  });
+
+  it("author preview equal deadline tick-first preserves expiry and old bytes", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const pending = f.runtime.previews.refresh(run);
+    const { command } = await f.toPreview(pending, 2);
+    const t = f.transfer(command, new Uint8Array([66]), 2);
+    f.session.receive(coalesce(t.start, t.chunk, t.end));
+    f.clock(50);
+    f.runtime.tickPreviews();
+    expect((await pending).error.kind).toBe("RECOVERY_EXPIRED");
+    expect((await f.runtime.previews.refresh(run)).error.kind).toBe("BUSY");
+    f.session.receive(t.result);
+    await pump();
+    expect(f.runtime.previews.snapshot().active).toBe(0);
+    expect(f.runtime.previews.cache.getRecord(run).preview.version).toBe(1);
+    expect(f.runtime.previews.cache.getRecord(run).preview.stale).toBe(true);
+    await cleaned(f);
+  });
+
+  it("author preview strictly late result refuses without an expiry tick", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const pending = f.runtime.previews.refresh(run);
+    const { command } = await f.toPreview(pending, 2);
+    const t = f.transfer(command, new Uint8Array([66]), 2);
+    f.clock(51);
+    f.session.receive(coalesce(t.start, t.chunk, t.end, t.result));
+    expect((await pending).error.kind).toBe("RECOVERY_EXPIRED");
+    expect(f.runtime.previews.cache.getRecord(run).preview.version).toBe(1);
+    expect(f.runtime.previews.cache.getRecord(run).preview.stale).toBe(true);
+    await cleaned(f);
+  });
+
+  it("author preview cached post-status seal succeeds at equality before tick", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const before = f.runtime.previews.cache.acquire(run);
+    const pending = f.runtime.previews.refresh(run);
+    await pump();
+    f.clock(50);
+    f.wall(600);
+    f.session.receive(f.reply(f.latest(), { runStatus: f.status(1) }));
+    await pump();
+    f.runtime.tickPreviews();
+    expect(await pending).toEqual({ ok: true });
+    const after = f.runtime.previews.cache.acquire(run);
+    expect(after.picture.vt).toBe(before.picture.vt);
+    expect(after.picture.generatedAtMs).toBe(before.picture.generatedAtMs);
+    expect(after.picture.checkedAtMs).toBe(600);
+    expect(after.picture.stale).toBe(false);
+    expect(f.commands().filter((c) => c.type === "preview-refresh")).toHaveLength(1);
+    before.release();
+    after.release();
+    await cleaned(f);
+  });
+
+  it("author preview cached expiry tick wins between status ingress and async seal", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const pending = f.runtime.previews.refresh(run);
+    await pump();
+    f.clock(50);
+    f.session.receive(f.reply(f.latest(), { runStatus: f.status(1) }));
+    f.runtime.tickPreviews();
+    expect((await pending).error.kind).toBe("RECOVERY_EXPIRED");
+    await pump();
+    const reader = f.runtime.previews.cache.acquire(run);
+    expect(reader.picture.checkedAtMs).toBe(100);
+    expect(reader.picture.stale).toBe(true);
+    expect(f.commands().filter((c) => c.type === "preview-refresh")).toHaveLength(1);
+    reader.release();
+    await cleaned(f);
+  });
+
+  it("author preview cached strictly late status refuses without a tick", async () => {
+    const f = fixture({}, { expiryMs: 50 });
+    await f.capture();
+    const pending = f.runtime.previews.refresh(run);
+    await pump();
+    f.clock(51);
+    f.session.receive(f.reply(f.latest(), { runStatus: f.status(1) }));
+    expect((await pending).error.kind).toBe("RECOVERY_EXPIRED");
+    expect(f.runtime.previews.cache.getRecord(run).preview.stale).toBe(true);
+    expect(f.commands().filter((c) => c.type === "preview-refresh")).toHaveLength(1);
+    await cleaned(f);
+  });
+
+  it("author preview empty admission hint still publishes complete new picture", async () => {
+    const f = fixture();
+    const c = f.connect();
+    const pending = c.preview("fresh-hint", 7);
+    const { command } = await f.toPreview(pending, 7);
+    expect(command.knownVersion).toBeUndefined();
+    const t = f.transfer(command, new Uint8Array([65, 66]), 7);
+    f.session.receive(coalesce(t.start, t.chunk, t.end, t.result));
+    expect((await pending).status).toBe("transfer");
+    expect(c.events().map((e) => e.metadata.type)).toEqual([
+      "preview-start",
+      "preview-chunk",
+      "preview-end",
+      "preview-result",
+    ]);
+    expect([...c.events()[1].payload]).toEqual([65, 66]);
+    expect(c.service.snapshot().routes).toBe(0);
+    await cleaned(f);
+  });
+
+  it("author preview concurrent empty admissions transfer then owned admission reuses", async () => {
+    const f = fixture();
+    const c = f.connect();
+    const first = c.preview("empty-one", 7);
+    const second = c.preview("empty-two", 7);
+    const { command } = await f.toPreview(first, 7);
+    const t = f.transfer(command, new Uint8Array([65]), 7);
+    f.session.receive(coalesce(t.start, t.chunk, t.end, t.result));
+    expect((await first).status).toBe("transfer");
+    expect((await second).status).toBe("transfer");
+    expect(c.events()[0].metadata.previewId).not.toBe(c.events()[4].metadata.previewId);
+    const later = c.preview("owned-three", 7);
+    await f.toPreview(later, 7);
+    expect((await later).status).toBe("unchanged");
+    expect(c.events().filter((e) => e.metadata.type === "preview-start")).toHaveLength(2);
+    expect(f.commands().filter((c) => c.type === "preview-refresh")).toHaveLength(1);
+    await cleaned(f);
+  });
+
   it("author preview publishes FIFO bytes with fresh transfer identities", async () => {
     const f = fixture();
     await f.capture();

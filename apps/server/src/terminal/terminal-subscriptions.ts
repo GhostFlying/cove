@@ -29,6 +29,7 @@ import { TerminalDeliveryCredit } from "./terminal-delivery-credit.js";
 import type { ResultHandoff } from "./worker-pipe-session.js";
 import { ControlArbiter, type ControlCommand, type ControlJob } from "./control-arbiter.js";
 import { publishPreview } from "./preview-transfer.js";
+import type { PreviewPicture } from "./preview-cache.js";
 
 type Supported =
   | Extract<
@@ -402,6 +403,21 @@ export class TerminalSubscriptions {
     if (!this.runtime.registry.get(command.run)) return this.reject(command, "RUN_NOT_FOUND");
     const lease = this.composition.bytes.reserve(6 * 4096 + 2048);
     if (!lease) return this.reject(command, "BUSY");
+    // Capture ownership before ID/clock suppliers can reenter and create a picture.
+    let unchanged: Pick<PreviewPicture, "version" | "worker" | "geometry"> | undefined;
+    try {
+      const admitted = this.runtime.previews.cache.acquire(command.run);
+      if (admitted && admitted.picture.version === command.knownVersion)
+        unchanged = {
+          version: admitted.picture.version,
+          worker: admitted.picture.worker,
+          geometry: admitted.picture.geometry,
+        };
+      admitted?.release();
+    } catch {
+      lease.release();
+      return this.reject(command, "BUSY");
+    }
     const previewId = this.id("p");
     if (
       !previewId ||
@@ -445,7 +461,12 @@ export class TerminalSubscriptions {
           this.delivery,
           reader,
           command.requestId,
-          command.knownVersion,
+          unchanged &&
+            sameWorkerRef(unchanged.worker, reader.picture.worker) &&
+            unchanged.geometry.cols === reader.picture.geometry.cols &&
+            unchanged.geometry.rows === reader.picture.geometry.rows
+            ? unchanged.version
+            : undefined,
           previewId,
           attempt.fence,
         );
