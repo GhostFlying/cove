@@ -5,19 +5,23 @@ import { TerminalModel } from "@cove/terminal-engine";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { record } from "../../../terminal-worker/tests/independent/current-recovery-ports.mjs";
+import { WorkerRetainedBytes } from "../../../terminal-worker/dist/src/worker-retained-bytes.js";
+import { createHash } from "node:crypto";
 
 const { Terminal } = createRequire(import.meta.url)("@xterm/headless");
 const run = { serverId: "w2-server", relayInstanceId: "w2-relay", runId: "engine" };
 const utf8 = (text) => new TextEncoder().encode(text);
 const geometry = { cols: 12, rows: 4 };
 function engineAccount(limit = 262144) {
+  const backing = new WorkerRetainedBytes(limit, 0);
   let used = 0;
   let serial = 0;
   const live = new Map();
   const events = [];
   const reserve = (bytes) => {
     events.push({ phase: "request", bytes, used });
-    if (bytes > limit - used) return;
+    const actual = backing.reserve("engine", bytes);
+    if (!actual) return;
     const id = ++serial;
     used += bytes;
     live.set(id, bytes);
@@ -27,11 +31,20 @@ function engineAccount(limit = 262144) {
         assert(live.has(id));
         used -= live.get(id);
         live.delete(id);
+        actual.release();
+        assert.equal(backing.snapshot().engineBytes, used);
         events.push({ phase: "release", id, bytes, used });
       },
     };
   };
-  return { reserve, events, live, available: () => limit - used, used: () => used };
+  return {
+    reserve,
+    events,
+    live,
+    available: () => backing.availableOrdinaryBytes(),
+    used: () => backing.snapshot().engineBytes,
+    peak: () => backing.snapshot().peakAccountedBytes,
+  };
 }
 function model(account, reserve = account.reserve) {
   return new TerminalModel({
@@ -100,47 +113,164 @@ describe("W2 current engine capture", () => {
     }
   });
   it("W2C-E02 bounded preview scratch reserves before construction and releases on every exit", async () => {
-    const account = engineAccount();
-    let deny = false;
-    const scratch = M0_LIMITS.previewBytesPerRun + 512 * 12 * 4 + 256;
-    const engine = model(account, (bytes) =>
-      deny && bytes === scratch ? undefined : account.reserve(bytes),
+    const scratch = 90368;
+    const expected = utf8(
+      "\x1b[0m\x1b[H\x1b[0mPREVIEW     \r\n\x1b[0m            \r\n\x1b[0m            \r\n\x1b[0m            \x1b[1;8H",
     );
-    try {
-      assert((await apply(engine, 1, utf8("PREVIEW"))).ok);
-      const before = account.used();
-      const start = account.events.length;
-      const preview = await engine.capturePreview();
-      assert.equal(preview.status, "ready");
-      const trace = account.events.slice(start);
-      const allocation = trace.find(
-        (event) => event.phase === "acquire" && event.bytes === scratch,
-      );
-      assert(allocation);
-      assert(trace.some((event) => event.phase === "release" && event.id === allocation.id));
-      assert.equal(account.used(), before);
-      deny = true;
-      assert.equal((await engine.capturePreview()).status, "unavailable");
-      assert.equal(account.used(), before);
-      record("W2C-E02", { scratch, trace });
-    } finally {
-      engine.dispose();
-      assert.equal(account.used(), 0);
+    for (const variant of [
+      "exact-bytes",
+      "denial",
+      "huge-cell-overflow",
+      "construction-throw",
+      "inflight-dispose",
+    ]) {
+      const account = engineAccount();
+      let active = false;
+      let engine;
+      let detached;
+      const original = Object.getOwnPropertyDescriptor(Terminal.prototype, "buffer");
+      const reserve = (bytes) => {
+        if (active && bytes === scratch && variant === "denial") return undefined;
+        const lease = account.reserve(bytes);
+        if (active && bytes === scratch && variant === "inflight-dispose") engine.dispose();
+        return lease;
+      };
+      engine = model(account, reserve);
+      try {
+        assert((await apply(engine, 1, utf8("PREVIEW"))).ok);
+        if (variant === "exact-bytes") {
+          detached = account.reserve(65536);
+          assert(detached);
+        }
+        const ownerIdsBefore = [...account.live.keys()];
+        const usedBefore = account.used();
+        const eventStart = account.events.length;
+        if (variant === "construction-throw" || variant === "huge-cell-overflow") {
+          assert(original?.get, "bounded public buffer getter injection required");
+          Object.defineProperty(Terminal.prototype, "buffer", {
+            ...original,
+            get() {
+              const buffers = original.get.call(this);
+              return new Proxy(buffers, {
+                get(target, key) {
+                  if (key !== "active") return Reflect.get(target, key);
+                  if (variant === "construction-throw")
+                    throw Error("controlled preview construction throw");
+                  const buffer = target.active;
+                  return new Proxy(buffer, {
+                    get(value, field) {
+                      if (field !== "getLine") return Reflect.get(value, field);
+                      return (lineIndex) => {
+                        const line = value.getLine(lineIndex);
+                        return new Proxy(line, {
+                          get(row, rowField) {
+                            if (rowField !== "getCell") {
+                              const entry = Reflect.get(row, rowField);
+                              return typeof entry === "function" ? entry.bind(row) : entry;
+                            }
+                            return (column) => {
+                              const cell = row.getCell(column);
+                              return new Proxy(cell, {
+                                get(item, itemField) {
+                                  if (itemField === "getChars")
+                                    return () => "A" + "\u0301".repeat(40000);
+                                  const entry = Reflect.get(item, itemField);
+                                  return typeof entry === "function" ? entry.bind(item) : entry;
+                                },
+                              });
+                            };
+                          },
+                        });
+                      };
+                    },
+                  });
+                },
+              });
+            },
+          });
+        }
+        active = true;
+        const result = await engine.capturePreview();
+        await new Promise((resolve) => setImmediate(resolve));
+        const trace = account.events.slice(eventStart);
+        const owner = trace.find((event) => event.phase === "acquire" && event.bytes === scratch);
+        if (variant === "denial") assert.equal(owner, undefined);
+        else {
+          assert(owner);
+          assert(trace.some((event) => event.phase === "release" && event.id === owner.id));
+        }
+        if (variant === "exact-bytes") {
+          assert.equal(result.status, "ready");
+          assert.deepEqual(result.preview.vt, expected);
+          assert.equal(account.used(), usedBefore);
+          assert.deepEqual([...account.live.keys()], ownerIdsBefore);
+          engine.dispose();
+          assert.equal(account.used(), 65536);
+          assert.deepEqual(result.preview.vt, expected);
+          result.preview.vt.fill(0);
+          detached.release();
+          detached = undefined;
+          assert.equal(account.used(), 0);
+        } else if (variant === "inflight-dispose") {
+          assert.equal(result.status, "disposed");
+          assert.equal(account.used(), 0);
+        } else {
+          assert.equal(result.status, "unavailable");
+          assert.equal(account.used(), usedBefore);
+          assert.deepEqual([...account.live.keys()], ownerIdsBefore);
+        }
+        if (variant === "huge-cell-overflow") assert.match(result.reason, /exceeds byte cap/);
+        if (variant === "construction-throw")
+          assert.equal(result.reason, "controlled preview construction throw");
+        record("W2C-E02", {
+          semanticVariant: variant,
+          scratch,
+          expectedHex: Buffer.from(expected).toString("hex"),
+          result: { status: result.status, reason: result.reason },
+          ownerIdsBefore,
+          ownerIdsAfter: [...account.live.keys()],
+          trace,
+          peak: account.peak(),
+        });
+      } finally {
+        active = false;
+        if (original) Object.defineProperty(Terminal.prototype, "buffer", original);
+        engine.dispose();
+        detached?.release();
+        assert.equal(account.used(), 0);
+      }
+      assert.equal((await engine.capturePreview()).status, "disposed");
     }
-    assert.equal((await engine.capturePreview()).status, "disposed");
   });
   it("W2C-E03 real checkpoint scratch uses exact independently frozen arithmetic", async () => {
     const account = engineAccount();
     const availableAfterSetters = 262144 - 16512;
     const gridCap = Math.min(
-      M0_LIMITS.baselineVtBytes,
-      Math.floor((availableAfterSetters - 512) / 7),
+      M0_LIMITS.baselineVtBytes - 76,
+      Math.floor((availableAfterSetters - 512 - 3 * 76) / 7),
     );
-    const scratch = 6 * gridCap + 256;
+    const scratch = 6 * gridCap + 2 * 76 + 256;
+    const setters = Buffer.from(
+      "1b5d31303b7267623a666666662f666666662f666666661b5c1b5d31313b7267623a303030302f303030302f303030301b5c1b5d343b313b7267623a636363632f303030302f303030301b5c",
+      "hex",
+    );
+    assert.equal(setters.length, 76);
+    assert.equal(
+      createHash("sha256").update(setters).digest("hex"),
+      "729ee81f4b053d9a5f3185866583665bd9f65703565d1888d942da5ab000022c",
+    );
+    assert.equal(gridCap, 34984);
+    assert.equal(scratch, 210312);
     record("W2C-E03-pre-execution", {
       limit: 262144,
       settersBytes: 16512,
-      settersLength: 0,
+      settersLength: 76,
+      literalSettersHex: setters.toString("hex"),
+      literalSettersSha256: "729ee81f4b053d9a5f3185866583665bd9f65703565d1888d942da5ab000022c",
+      totalVtUpperBound: 35060,
+      candidateOwnerUpperBound: 35316,
+      peakUpperBound: 262140,
+      headroom: 4,
       availableAfterSetters,
       gridCap,
       scratch,
@@ -152,6 +282,10 @@ describe("W2 current engine capture", () => {
       const acquisitions = account.events.filter((event) => event.phase === "acquire");
       assert.equal(acquisitions[0].bytes, 16512);
       assert.equal(acquisitions[1].bytes, scratch);
+      const scratchRequest = account.events.find(
+        (event) => event.phase === "request" && event.bytes === scratch,
+      );
+      assert.equal(262144 - scratchRequest.used, 245632);
       assert(
         account.events.some(
           (event) => event.phase === "release" && event.id === acquisitions[1].id,
@@ -159,11 +293,75 @@ describe("W2 current engine capture", () => {
       );
       const captured = await engine.captureBaseline();
       assert.equal(captured.status, "ready");
-      assert(captured.baseline.vt.length <= gridCap);
+      assert.deepEqual(captured.baseline.vt.subarray(0, 76), setters);
+      assert(captured.baseline.vt.length - 76 <= gridCap);
+      assert(captured.baseline.vt.length <= 35060);
+      assert.equal(acquisitions[2].bytes, captured.baseline.vt.length + 256);
+      assert(acquisitions[2].bytes <= 35316);
+      assert(account.peak() <= 262140);
       record("W2C-E03", account.events);
     } finally {
       engine.dispose();
       assert.equal(account.used(), 0);
+    }
+    for (const variant of ["scratch-denial", "construction-throw", "detached-dispose"]) {
+      const owned = engineAccount();
+      const bufferGetter = Object.getOwnPropertyDescriptor(Terminal.prototype, "buffer");
+      let subject;
+      let detached;
+      try {
+        if (variant === "construction-throw") {
+          assert(bufferGetter?.get);
+          Object.defineProperty(Terminal.prototype, "buffer", {
+            ...bufferGetter,
+            get() {
+              throw Error("controlled checkpoint construction throw");
+            },
+          });
+        }
+        if (variant === "scratch-denial" || variant === "construction-throw") {
+          assert.throws(() =>
+            model(owned, (bytes) =>
+              variant === "scratch-denial" && bytes === scratch ? undefined : owned.reserve(bytes),
+            ),
+          );
+          assert.equal(owned.used(), 0);
+        } else {
+          subject = model(owned);
+          const captured = await subject.captureBaseline((bytes) => {
+            detached = owned.reserve(bytes);
+            assert(detached);
+            subject.dispose();
+            return true;
+          });
+          assert.equal(captured.status, "disposed");
+          assert.equal(owned.live.size, 1);
+          detached.release();
+          detached = undefined;
+          assert.equal(owned.used(), 0);
+        }
+        const scratchLease = owned.events.find(
+          (event) => event.phase === "acquire" && event.bytes === scratch,
+        );
+        if (variant === "scratch-denial") assert.equal(scratchLease, undefined);
+        else {
+          assert(scratchLease);
+          assert(
+            owned.events.some((event) => event.phase === "release" && event.id === scratchLease.id),
+          );
+        }
+        record("W2C-E03", {
+          semanticVariant: variant,
+          events: owned.events,
+          peak: owned.peak(),
+          finalOwners: [...owned.live.keys()],
+        });
+      } finally {
+        if (bufferGetter) Object.defineProperty(Terminal.prototype, "buffer", bufferGetter);
+        subject?.dispose();
+        detached?.release();
+        assert.equal(owned.used(), 0);
+      }
     }
   });
   it("W2C-E04 finite normal alternate and partial-grammar captures continue exact suffix", async () => {
