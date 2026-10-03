@@ -1043,9 +1043,114 @@ describe("W2 current recovery", () => {
     });
   });
   it("W2C-R10 129 controlled chunks and each isolated descriptor violation reach producer", async () => {
+    const failureReceipt = (error) =>
+      error && { name: error.name, message: error.message, stack: error.stack };
+    const cleanup = (fixture, source, semanticVariant, bodyFailure) => {
+      const receipt = () => {
+        const events = structuredClone(fixture.ledger.events);
+        const physicalOwners = events.filter(
+          (event) => event.phase === "acquire" && event.owner === "physical-delivery",
+        );
+        return {
+          semanticVariant,
+          effectiveBudgets: fixture.effective,
+          ledger: fixture.ledger.snapshot(),
+          events,
+          availableOrdinaryBytes: fixture.ledger.account.availableOrdinaryBytes(),
+          physical: fixture.sink.physical.map((frame, index) => ({
+            index,
+            ownerId: physicalOwners[index]?.id,
+            token: frame.token,
+            encodedBytes: frame.encodedBytes,
+            settled: frame.settled,
+            payloadBytes: frame.payload.length,
+            event: frame.event,
+            rawSHA256: createHash("sha256").update(Buffer.from(frame.rawHex, "hex")).digest("hex"),
+          })),
+          bodyFailure: failureReceipt(bodyFailure),
+        };
+      };
+      const before = receipt();
+      record("W2C-R10-cleanup-before", before);
+      let cleanupOperationFailure;
+      try {
+        source?.replay.clear();
+        fixture.close();
+      } catch (error) {
+        cleanupOperationFailure = error;
+      }
+      const after = receipt();
+      record("W2C-R10-cleanup-after", {
+        ...after,
+        cleanupOperationFailure: failureReceipt(cleanupOperationFailure),
+      });
+      try {
+        if (cleanupOperationFailure) throw cleanupOperationFailure;
+        assert.equal(fixture.effective.workerBytes, 67108864);
+        assert.equal(fixture.effective.reservedControlBytes, 65536);
+        assert.deepEqual(after.ledger.owners, []);
+        assert.equal(fixture.ledger.live.size, 0);
+        assert.equal(after.ledger.account.reservedControlBytes, 65536);
+        assert.equal(after.ledger.account.workerBytes, 0);
+        assert.equal(after.ledger.account.engineBytes, 0);
+        assert.equal(after.ledger.account.nativeInputBytes, 0);
+        assert.equal(after.ledger.account.nativeOutputBytes, 0);
+        assert.equal(after.ledger.account.accountedBytes, 65536);
+        assert.equal(after.availableOrdinaryBytes, 67043328);
+        if (!bodyFailure && ["default129", "derived-count-valid"].includes(semanticVariant)) {
+          assert(before.physical.length > 0, "logical final ACK leaves handed physical ownership");
+          for (const frame of before.physical) {
+            assert.equal(frame.settled, false);
+            assert(frame.payloadBytes > 0);
+            assert(
+              before.ledger.owners.some(
+                (owner) =>
+                  owner.id === frame.ownerId &&
+                  owner.owner === "physical-delivery" &&
+                  owner.bytes === frame.encodedBytes,
+              ),
+            );
+          }
+        }
+        const acquisitions = after.events.filter((event) => event.phase === "acquire");
+        const releases = after.events.filter((event) => event.phase === "release");
+        assert.equal(new Set(acquisitions.map((event) => event.id)).size, acquisitions.length);
+        assert.equal(releases.length, acquisitions.length);
+        for (const owner of acquisitions) {
+          const matching = releases.filter((event) => event.id === owner.id);
+          assert.equal(matching.length, 1, `owner ${owner.id} released exactly once`);
+          assert.equal(matching[0].owner, owner.owner);
+          assert.equal(matching[0].category, owner.category);
+        }
+        const physicalOwners = acquisitions.filter((event) => event.owner === "physical-delivery");
+        assert.equal(after.physical.length, physicalOwners.length);
+        for (const frame of after.physical) {
+          const owner = physicalOwners.find((event) => event.id === frame.ownerId);
+          assert(owner);
+          assert.equal(owner.bytes, frame.encodedBytes);
+          assert.equal(frame.settled, true, "real sink settlement retires physical backing");
+          assert.equal(frame.payloadBytes, 0);
+        }
+        record("W2C-R10-cleanup-verified", {
+          semanticVariant,
+          acquiredOwnerIds: acquisitions.map((owner) => owner.id),
+          after,
+        });
+      } catch (error) {
+        record("W2C-R10-cleanup-failure", {
+          semanticVariant,
+          bodyFailure: failureReceipt(bodyFailure),
+          cleanupFailure: failureReceipt(error),
+          before,
+          after,
+        });
+        if (!bodyFailure) throw error;
+      }
+    };
     const rig = recoveryRig();
     const subscription = ref("max");
     const source = rig.source(subscription.run, { vtBytes: 8388608, tailBytes: 65536 });
+    let defaultBodyFailure;
     try {
       const command = rig.command("subscribe", subscription, { atSeq: 0 });
       const outcome = await rig.recovery.open(command, source);
@@ -1077,9 +1182,15 @@ describe("W2 current recovery", () => {
           rawHex: frame.rawHex,
         })),
       });
+    } catch (error) {
+      defaultBodyFailure = error;
+      record("W2C-R10-body-failure", {
+        semanticVariant: "default129",
+        failure: failureReceipt(error),
+      });
+      throw error;
     } finally {
-      source.replay.clear();
-      rig.close();
+      cleanup(rig, source, "default129", defaultBodyFailure);
     }
     for (const variant of ["derived-count-fault", "derived-count-valid"]) {
       const small = recoveryRig({
@@ -1114,6 +1225,7 @@ describe("W2 current recovery", () => {
         phases.push({ phase: "globally-leaf-valid", descriptor });
         return { status: "ready", baseline };
       };
+      let negotiatedBodyFailure;
       try {
         const command = small.command("subscribe", route, { atSeq: 0 });
         const outcome = await small.recovery.open(command, sourceSmall);
@@ -1191,20 +1303,26 @@ describe("W2 current recovery", () => {
             rawHex: frame.rawHex,
           })),
         });
+      } catch (error) {
+        negotiatedBodyFailure = error;
+        record("W2C-R10-body-failure", {
+          semanticVariant: variant,
+          failure: failureReceipt(error),
+        });
+        throw error;
       } finally {
-        sourceSmall.replay.clear();
-        small.close();
-        assert.equal(small.ledger.live.size, 0);
-        assert.equal(small.ledger.account.snapshot().accountedBytes, 4112);
+        cleanup(small, sourceSmall, variant, negotiatedBodyFailure);
       }
     }
     for (const variant of ["descriptor-field", "VT", "tail", "total"]) {
       const bad = recoveryRig();
       const route = ref(`bad-${variant}`);
+      let sourceBad;
+      let negativeBodyFailure;
       try {
         const vtBytes = variant === "VT" ? 8388609 : variant === "total" ? 8388608 : 1;
         const tailBytes = variant === "tail" || variant === "total" ? 65537 : 0;
-        const sourceBad = bad.source(route.run, {
+        sourceBad = bad.source(route.run, {
           vtBytes,
           tailBytes,
           mutate(baseline) {
@@ -1236,8 +1354,15 @@ describe("W2 current recovery", () => {
           outcome,
           events: bad.ledger.events,
         });
+      } catch (error) {
+        negativeBodyFailure = error;
+        record("W2C-R10-body-failure", {
+          semanticVariant: variant,
+          failure: failureReceipt(error),
+        });
+        throw error;
       } finally {
-        bad.close();
+        cleanup(bad, sourceBad, variant, negativeBodyFailure);
       }
     }
     const identity = "x".repeat(1024);
