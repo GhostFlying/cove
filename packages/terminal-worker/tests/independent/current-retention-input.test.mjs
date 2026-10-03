@@ -601,57 +601,265 @@ describe("W2 current retention and input", () => {
       "identity-cap",
     ]) {
       const rig = await pressureRig(variant === "identity-cap" ? { pendingWorkerCommands: 1 } : {});
+      let ordinal = 0;
+      const capture = (phase, value = {}) => {
+        const receipt = structuredClone({
+          ordinal: ++ordinal,
+          semanticVariant: variant,
+          phase,
+          ...value,
+          effectiveBudgets: rig.effective,
+          pressureState: pressureState(rig),
+          execution: rig.execution.snapshot(),
+          native: rig.native.snapshot(),
+          nativeReceipts: rig.native.receipts,
+          leaseEvents: rig.leaseEvents,
+          physicalOwners: rig.sink.ledger.snapshot(),
+          physical: rig.sink.physical.map((frame, index) => ({
+            index,
+            token: frame.token,
+            event: frame.event,
+            rawHex: frame.rawHex,
+            encodedBytes: frame.encodedBytes,
+            settled: frame.settled,
+          })),
+        });
+        record("W2C-I07-admission", receipt);
+        return receipt;
+      };
+      const originalExecute = rig.execution.execute;
+      const originalSettled = rig.execution.responseSettled;
+      const settlements = [];
+      // Observe the real public seams without supplying authority or settlement.
+      rig.execution.execute = async (command, payload) => {
+        const start = rig.leaseEvents.length;
+        capture("public-command-before", {
+          command,
+          payload: payload && {
+            bytes: payload.length,
+            rawHex: Buffer.from(payload).toString("hex"),
+            sha256: createHash("sha256").update(payload).digest("hex"),
+          },
+          eventStart: start,
+        });
+        const pending = originalExecute(command, payload);
+        capture("public-command-after-call", { command, eventStart: start });
+        const result = await pending;
+        capture("public-command-result", {
+          command,
+          result,
+          eventStart: start,
+          eventEnd: rig.leaseEvents.length,
+        });
+        return result;
+      };
+      rig.execution.responseSettled = (requestId) => {
+        const start = rig.leaseEvents.length;
+        capture("public-responseSettled-before", { requestId, eventStart: start });
+        const result = originalSettled(requestId);
+        const receipt = capture("public-responseSettled-after", {
+          requestId,
+          eventStart: start,
+          eventEnd: rig.leaseEvents.length,
+        });
+        settlements.push(receipt);
+        return result;
+      };
+      const correlated = (command, result) => {
+        assert.equal(result.requestId, command.requestId);
+        assert.deepEqual(result.worker, worker);
+        assert.deepEqual(result.run, command.run);
+      };
+      const commandQ = (command, payload) =>
+        128 + Buffer.byteLength(JSON.stringify(command)) + payload.length;
       try {
         const target = rig.targets[0];
         const installed = rig.routes[0];
-        const other = ref("other-holder", target);
-        await rig.install(other);
+        const originalOther = ref("other-holder", target);
+        await rig.install(originalOther);
+        capture("original-other-installed-before-physical-close", { originalOther });
         rig.sink.close();
+        const earlyCommand = rig.command("input", target, {
+          subscription: installed,
+          epoch: 2,
+          inputSeq: 1,
+        });
+        const earlyPayload = new Uint8Array(50000);
+        const earlyQ = commandQ(earlyCommand, earlyPayload);
+        const earlyBefore = pressureState(rig);
+        const earlyStart = rig.leaseEvents.length;
+        capture("early-copy-BUSY-control-before", { command: earlyCommand, Q: earlyQ });
+        const earlyResult = await rig.execute(earlyCommand, earlyPayload);
+        capture("early-copy-BUSY-control-result-before-assertions", {
+          command: earlyCommand,
+          result: earlyResult,
+          Q: earlyQ,
+          before: earlyBefore,
+          eventStart: earlyStart,
+          eventEnd: rig.leaseEvents.length,
+          orderedLogicalKindCredit: 0,
+        });
+        assert(rig.effective.workerBytes - earlyBefore.retained.accountedBytes < earlyQ);
+        correlated(earlyCommand, earlyResult);
+        assert.equal(earlyResult.type, "error");
+        assert.equal(earlyResult.error.kind, "BUSY");
+        assert.deepEqual(rig.leaseEvents.slice(earlyStart), [
+          { phase: "denied", category: "worker", bytes: earlyQ },
+        ]);
+        assert.deepEqual(pressureState(rig), earlyBefore, "early-copy resource control");
+        const preserved = pressureState(rig);
+        for (const route of [originalOther, rig.routes[1]]) {
+          const command = rig.command("unsubscribe", route.run, { subscription: route });
+          const before = capture("logical-route-retirement-before", { command });
+          const result = await rig.execute(command);
+          const after = capture("logical-route-retirement-result-before-assertions", {
+            command,
+            result,
+          });
+          correlated(command, result);
+          assert.equal(result.outcome, "accepted");
+          const actual = settlements.filter((entry) => entry.requestId === command.requestId);
+          assert.equal(actual.length, 1);
+          const released = rig.leaseEvents.slice(actual[0].eventStart, actual[0].eventEnd);
+          assert.equal(
+            released.filter(
+              (entry) =>
+                entry.phase === "release" && entry.category === "worker" && entry.bytes === 8320,
+            ).length,
+            2,
+          );
+          for (const entry of released.filter((event) => event.phase === "release"))
+            assert.equal(
+              rig.leaseEvents.filter((event) => event.phase === "release" && event.id === entry.id)
+                .length,
+              1,
+            );
+          assert.deepEqual(after.pressureState.replay, before.pressureState.replay);
+          assert.deepEqual(after.pressureState.tasks, before.pressureState.tasks);
+          assert.equal(after.pressureState.factsSha256, before.pressureState.factsSha256);
+          assert.equal(
+            after.execution.retainedBreakdown.engineBytes,
+            before.execution.retainedBreakdown.engineBytes,
+          );
+          assert.deepEqual(after.physicalOwners, before.physicalOwners);
+          assert(after.execution.runs.every((entry) => entry.status === "live"));
+          assert.equal(after.native.activeOwners, 2);
+        }
+        const other = { ...originalOther, connection: installed.connection };
+        const counterpartStart = rig.leaseEvents.length;
+        const counterpartInstalled = await rig.install(other);
+        capture("shared-connection-counterpart-installed-before-close", {
+          other,
+          result: counterpartInstalled,
+          eventStart: counterpartStart,
+          eventEnd: rig.leaseEvents.length,
+        });
+        const records = rig.leaseEvents
+          .slice(counterpartStart)
+          .filter(
+            (entry) =>
+              entry.phase === "acquire" && entry.category === "worker" && entry.bytes === 8320,
+          );
+        assert.equal(records.length, 1, "counterpart borrows the existing connection record");
+        rig.sink.close();
+        const retained = capture("counterpart-ready-after-real-physical-close", { other });
+        assert.deepEqual(retained.pressureState.replay, preserved.replay);
+        assert.deepEqual(retained.pressureState.tasks, preserved.tasks);
+        assert.equal(retained.pressureState.factsSha256, preserved.factsSha256);
+        assert(retained.execution.runs.every((entry) => entry.status === "live"));
+        assert.equal(retained.native.activeOwners, 2);
+        assert.equal(
+          retained.pressureState.liveSet.filter(
+            (entry) => entry.category === "engine" && entry.bytes === 65536,
+          ).length,
+          2,
+        );
         let inputSeq = 1;
         if (["duplicate", "lower", "exhausted", "identity-cap"].includes(variant)) {
           const seedSeq = variant === "exhausted" ? Number.MAX_SAFE_INTEGER : 2;
-          assert.equal(
-            (
-              await rig.execute(
-                rig.command("input", target, {
-                  subscription: installed,
-                  epoch: 1,
-                  inputSeq: seedSeq,
-                }),
-                new Uint8Array(1),
-              )
-            ).outcome,
-            "accepted",
-          );
+          const command = rig.command("input", target, {
+            subscription: installed,
+            epoch: 1,
+            inputSeq: seedSeq,
+          });
+          const result = await rig.execute(command, new Uint8Array(1));
+          capture("original-one-byte-seed-result-before-assertions", { command, result });
+          correlated(command, result);
+          assert.equal(result.outcome, "accepted");
           inputSeq =
             variant === "exhausted" ? Number.MAX_SAFE_INTEGER : variant === "lower" ? 1 : 2;
         }
-        if (variant === "identity-cap")
-          assert.equal(
-            (
-              await rig.execute(
-                rig.command("set-control", target, {
-                  expectedEpoch: 1,
-                  nextEpoch: 2,
-                  holder: {
-                    connection: other.connection,
-                    viewId: other.viewId,
-                    subscriptionId: other.subscriptionId,
-                  },
-                  geometry: { cols: 12, rows: 4 },
-                }),
-              )
-            ).outcome,
-            "accepted",
-          );
+        if (variant === "identity-cap") {
+          const command = rig.command("set-control", target, {
+            expectedEpoch: 1,
+            nextEpoch: 2,
+            holder: {
+              connection: other.connection,
+              viewId: other.viewId,
+              subscriptionId: other.subscriptionId,
+            },
+            geometry: { cols: 12, rows: 4 },
+          });
+          const result = await rig.execute(command);
+          capture("original-identity-cap-control-result-before-assertions", { command, result });
+          correlated(command, result);
+          assert.equal(result.outcome, "accepted");
+        }
         await turns();
         rig.sink.close();
         const before = pressureState(rig);
         const subscription = ["wrong-holder", "identity-cap"].includes(variant) ? other : installed;
         const epoch = variant === "stale" ? 2 : variant === "identity-cap" ? 2 : 1;
-        const result = await rig.execute(
-          rig.command("input", target, { subscription, epoch, inputSeq }),
-          new Uint8Array(50000),
+        const command = rig.command("input", target, { subscription, epoch, inputSeq });
+        const payload = new Uint8Array(50000);
+        const Q = commandQ(command, payload);
+        const start = rig.leaseEvents.length;
+        capture("logical-input-before-copy-eligibility-assertions", {
+          command,
+          Q,
+          before,
+          available: rig.effective.workerBytes - before.retained.accountedBytes,
+        });
+        assert(
+          rig.effective.workerBytes - before.retained.accountedBytes >= Q,
+          "NOT_EXERCISED: fixed logical input command copy headroom",
+        );
+        if (variant === "identity-cap") {
+          assert.equal(before.inputIdentities, 1);
+          const status = rig.execution
+            .snapshot()
+            .runs.find((entry) => entry.run.runId === target.runId);
+          assert.equal(status.controlEpoch, 2);
+          assert.deepEqual(status.controlHolder, {
+            connection: other.connection,
+            viewId: other.viewId,
+            subscriptionId: other.subscriptionId,
+          });
+        }
+        const result = await rig.execute(command, payload);
+        const after = pressureState(rig);
+        capture("logical-input-result-before-all-assertions", {
+          command,
+          result,
+          Q,
+          before,
+          after,
+          eventStart: start,
+          eventEnd: rig.leaseEvents.length,
+        });
+        correlated(command, result);
+        const copies = rig.leaseEvents
+          .slice(start)
+          .filter(
+            (entry) =>
+              entry.phase === "acquire" && entry.category === "worker" && entry.bytes === Q,
+          );
+        assert.equal(copies.length, 1, "NOT_EXERCISED: actual command copy reservation");
+        assert.equal(
+          rig.leaseEvents
+            .slice(start)
+            .filter((entry) => entry.phase === "release" && entry.id === copies[0].id).length,
+          1,
         );
         assert.equal(result.type, "error");
         assert.equal(
@@ -668,15 +876,30 @@ describe("W2 current retention and input", () => {
         );
         assert.deepEqual(pressureState(rig), before, variant);
         if (["stale", "wrong-holder"].includes(variant)) {
-          const valid = await rig.execute(
-            rig.command("input", target, { subscription: installed, epoch: 1, inputSeq: 1 }),
-            new Uint8Array(20000),
-          );
+          const command = rig.command("input", target, {
+            subscription: installed,
+            epoch: 1,
+            inputSeq: 1,
+          });
+          capture("original-valid-20000-before", { command });
+          const valid = await rig.execute(command, new Uint8Array(20000));
+          capture("original-valid-20000-result-before-assertions", { command, result: valid });
+          correlated(command, valid);
           assert.equal(valid.outcome, "accepted");
         }
         record("W2C-I07", { semanticVariant: variant, before, result, after: pressureState(rig) });
+      } catch (error) {
+        capture("first-failure-before-cleanup", {
+          error: { name: error.name, message: error.message, stack: error.stack },
+        });
+        throw error;
       } finally {
-        await rig.close();
+        try {
+          await rig.close();
+        } finally {
+          rig.execution.execute = originalExecute;
+          rig.execution.responseSettled = originalSettled;
+        }
       }
     }
   });
