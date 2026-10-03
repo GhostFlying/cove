@@ -36,6 +36,9 @@ export class TerminalCommandService {
   get closed() {
     return this.subscriptions.closed;
   }
+  get previewCache() {
+    return this.subscriptions.runtime.previews.cache;
+  }
   close(): void {
     this.subscriptions.close();
   }

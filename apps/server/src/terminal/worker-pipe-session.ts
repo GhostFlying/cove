@@ -36,6 +36,7 @@ export interface PipeCodec {
   decode(bytes: Uint8Array): string;
 }
 export type ResultHandoff = (result: RuntimeResult) => boolean;
+export type PreviewResultSeal = (result: RuntimeResult) => void;
 type Role = "ordinary" | "status" | "stop" | "progress";
 type Pending = {
   command: PipeCommand;
@@ -43,6 +44,7 @@ type Pending = {
   deadline: number;
   resolve: (result: RuntimeResult) => void;
   handoff: ResultHandoff | undefined;
+  previewSeal?: PreviewResultSeal;
   sent: boolean;
   admitted: boolean;
 };
@@ -235,6 +237,13 @@ export class WorkerPipeSession {
     return this.admit(command, new Uint8Array(), undefined, true);
   }
 
+  requestPreview(
+    command: Extract<PipeCommand, { type: "preview-refresh" }>,
+    seal: PreviewResultSeal,
+  ): Promise<RuntimeResult> {
+    return this.admit(command, new Uint8Array(), undefined, false, seal);
+  }
+
   private progressCount(): number {
     return [...this.pending.values()].filter((entry) => entry.role === "progress" && entry.admitted)
       .length;
@@ -255,6 +264,7 @@ export class WorkerPipeSession {
     payload: Uint8Array,
     handoff: ResultHandoff | undefined,
     waitForProgress: boolean,
+    previewSeal?: PreviewResultSeal,
   ): Promise<RuntimeResult> {
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
       return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
@@ -352,6 +362,7 @@ export class WorkerPipeSession {
       deadline,
       resolve,
       handoff,
+      ...(previewSeal ? { previewSeal } : {}),
       sent: false,
       admitted: !waiting,
     };
@@ -496,6 +507,8 @@ export class WorkerPipeSession {
             break;
           }
           const command = pending.command;
+          if (command.type === "preview-refresh") pending.previewSeal?.(structuredClone(value));
+          if (this.closed || !this.pending.has(value.requestId)) break;
           if (
             (command.type === "subscribe" || command.type === "recover") &&
             value.type === "result" &&
@@ -524,6 +537,7 @@ export class WorkerPipeSession {
           }
           if (
             value.subscription &&
+            !value.terminal.type.startsWith("preview-") &&
             !this.routes.some(
               (entry) => entry.active && sameSubscriptionRef(entry.ref, value.subscription!),
             )

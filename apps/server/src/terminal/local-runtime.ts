@@ -7,6 +7,8 @@ import { WorkerPool } from "./worker-pool.js";
 import { RunRegistry } from "./run-registry.js";
 import { WorkerPipeSession, type ResultHandoff } from "./worker-pipe-session.js";
 import type { ByteReservation } from "./runtime-retained-bytes.js";
+import { PreviewRefresh, type PreviewPolicy } from "./preview-refresh.js";
+import type { PreviewResultSeal } from "./worker-pipe-session.js";
 
 export class LocalRuntime implements RuntimeTerminalPort {
   private readonly listeners = new Map<
@@ -15,11 +17,13 @@ export class LocalRuntime implements RuntimeTerminalPort {
   >();
   private readonly workerListeners: { dispose(): void }[] = [];
   private disposed = false;
+  private previewOwner: PreviewRefresh | undefined;
   constructor(
     readonly pool: WorkerPool,
     readonly registry: RunRegistry,
     private readonly encodeUtf8: (text: string) => Uint8Array,
     private readonly resultHandoff?: ResultHandoff,
+    private readonly previewPolicy: Partial<PreviewPolicy> = {},
   ) {
     if (registry.composition !== pool.composition || registry.maxRuns > pool.budgets.maxRuns)
       throw new Error("Runtime budget mismatch");
@@ -193,6 +197,31 @@ export class LocalRuntime implements RuntimeTerminalPort {
     return this.request(input);
   }
 
+  get previews(): PreviewRefresh {
+    if (this.disposed) throw new Error("Runtime disposed");
+    return (this.previewOwner ??= new PreviewRefresh(this, this.previewPolicy));
+  }
+  tickPreviews(): void {
+    this.previews.tick();
+  }
+  async requestPreviewSealed(
+    input: Extract<PipeCommand, { type: "preview-refresh" }>,
+    seal: PreviewResultSeal,
+  ): Promise<RuntimeResult> {
+    const placement = this.pool.get(input.run);
+    if (this.disposed || !placement || !sameWorkerRef(input.worker, placement.worker))
+      return this.unavailable(input);
+    const result = await placement.session.requestPreview(input, (result) => {
+      if (result.type === "result" && result.runStatus)
+        this.registry.observe(placement.worker, result.runStatus);
+      seal(result);
+    });
+    if (result.type === "result" && result.runStatus)
+      this.registry.observe(placement.worker, result.runStatus);
+    if (!placement.session.ready) this.registry.contactLost(placement.worker);
+    return result;
+  }
+
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void } {
     if (this.disposed || this.listeners.size >= 32 || this.listeners.has(listener))
       throw new Error("Event listener capacity unavailable");
@@ -211,6 +240,7 @@ export class LocalRuntime implements RuntimeTerminalPort {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.previewOwner?.dispose();
     for (const listener of this.workerListeners) listener.dispose();
     this.workerListeners.length = 0;
     for (const session of this.pool.sessions()) session.loseContact();

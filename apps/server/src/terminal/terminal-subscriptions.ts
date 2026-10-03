@@ -28,6 +28,7 @@ import { TerminalConnectionDelivery, type DeliveryFence } from "./terminal-conne
 import { TerminalDeliveryCredit } from "./terminal-delivery-credit.js";
 import type { ResultHandoff } from "./worker-pipe-session.js";
 import { ControlArbiter, type ControlCommand, type ControlJob } from "./control-arbiter.js";
+import { publishPreview } from "./preview-transfer.js";
 
 type Supported =
   | Extract<
@@ -81,6 +82,11 @@ export class TerminalSubscriptions {
   private backgroundTeardownActive = false;
   private progressInFlight = 0;
   private readonly externalIds = new Set<string>();
+  private readonly previewAttempts = new Set<{
+    current: boolean;
+    cancel(): void;
+    fence: DeliveryFence;
+  }>();
   private readonly requestLeases: ByteReservation[] = [];
   private readonly listener: { dispose(): void };
   private readonly arena: ByteReservation;
@@ -228,6 +234,7 @@ export class TerminalSubscriptions {
       command.type !== "detach" &&
       command.type !== "applied-ack" &&
       command.type !== "baseline-progress" &&
+      command.type !== "preview" &&
       (!this.options.arbiter || !this.isDomain(command))
     )
       return this.reject(command, "CAPABILITY_UNAVAILABLE");
@@ -244,6 +251,7 @@ export class TerminalSubscriptions {
         : this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands)
     )
       return this.reject(command, "BUSY");
+    if (command.type === "preview") return this.preview(command);
     let route: Route | undefined;
     if (command.type === "attach") {
       if (!sameConnectionRef(command.connection, this.delivery.connection))
@@ -388,6 +396,73 @@ export class TerminalSubscriptions {
       command.type === "appearance" ||
       command.type === "input"
     );
+  }
+
+  private async preview(command: Extract<TerminalCommand, { type: "preview" }>): Promise<Reply> {
+    if (!this.runtime.registry.get(command.run)) return this.reject(command, "RUN_NOT_FOUND");
+    const lease = this.composition.bytes.reserve(6 * 4096 + 2048);
+    if (!lease) return this.reject(command, "BUSY");
+    const previewId = this.id("p");
+    if (
+      !previewId ||
+      this.closed ||
+      this.delivery.closed ||
+      this.externalIds.has(command.requestId) ||
+      this.externalIds.size >= this.options.requestLimit ||
+      this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands
+    ) {
+      lease.release();
+      return this.reject(command, "COUNTER_EXHAUSTED");
+    }
+    this.externalIds.add(command.requestId);
+    this.requestLeases.push(lease);
+    this.ordinaryPending++;
+    this.inFlight++;
+    const attempt = {
+      current: true,
+      cancel: () => {},
+      fence: undefined as unknown as DeliveryFence,
+    };
+    const current = () => attempt.current && !this.closed && !this.delivery.closed;
+    attempt.fence = { route: "preview." + previewId, attempt: 1, current };
+    this.previewAttempts.add(attempt);
+    try {
+      const waiter = this.runtime.previews.request(command.run);
+      attempt.cancel = waiter.cancel;
+      if (!current()) waiter.cancel();
+      const outcome = await waiter.promise;
+      if (!current()) return this.error(command, "STALE_CONNECTION");
+      if (!outcome.ok) return this.reject(command, outcome.error);
+      const cache = this.runtime.previews.cache;
+      if (cache.getRecord(command.run)?.preview.stale)
+        return this.reject(command, "RECOVERY_UNAVAILABLE");
+      const reader = cache.acquire(command.run);
+      if (!reader) return this.reject(command, "BUSY");
+      try {
+        if (command.knownVersion !== undefined && command.knownVersion > reader.picture.version)
+          return this.reject(command, "RESYNC_REQUIRED");
+        const reply = publishPreview(
+          this.delivery,
+          reader,
+          command.requestId,
+          command.knownVersion,
+          previewId,
+          attempt.fence,
+        );
+        if (reply) return reply;
+        attempt.current = false;
+        this.delivery.cancel(attempt.fence);
+        return this.reject(command, domainError("RESULT_UNKNOWN", "unknown"));
+      } finally {
+        reader.release();
+      }
+    } catch {
+      return this.reject(command, "BUSY");
+    } finally {
+      this.ordinaryPending--;
+      this.inFlight--;
+      this.releaseClosedRecords();
+    }
   }
 
   private fence(route: Route, attempt = route.attempt): DeliveryFence {
@@ -769,6 +844,11 @@ export class TerminalSubscriptions {
   close(): void {
     if (this.closed) return;
     this.closedState = true;
+    for (const attempt of this.previewAttempts) {
+      attempt.current = false;
+      attempt.cancel();
+      this.delivery.cancel(attempt.fence);
+    }
     this.listener.dispose();
     this.delivery.close();
     for (const route of this.routes.values()) {
@@ -791,6 +871,7 @@ export class TerminalSubscriptions {
     for (const lease of this.requestLeases) lease.release();
     this.requestLeases.length = 0;
     this.externalIds.clear();
+    this.previewAttempts.clear();
     this.arena.release();
   }
   snapshot(subscriptionId?: string) {
