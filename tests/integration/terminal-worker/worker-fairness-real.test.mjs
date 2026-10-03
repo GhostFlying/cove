@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { installPublicSubscription } from "./worker-subscription-installation.mjs";
 import { createHash } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -50,6 +51,7 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
   const egress = new PassThrough();
   const decoder = createPipeDecoder();
   const messages = [];
+  let collectInstallationBytes = true;
   const facts = [];
   const faults = [];
   const flow = [];
@@ -207,7 +209,13 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       for (const item of read.frames) {
         const metadata = JSON.parse(Buffer.from(item.metadata).toString("utf8"));
         if (!validatePipeFrame(item, metadata).ok) throw Error("fairness frame metadata invalid");
-        messages.push({ metadata, payloadHex: Buffer.from(item.payload).toString("hex") });
+        messages.push({
+          metadata,
+          payloadHex: Buffer.from(item.payload).toString("hex"),
+          ...(collectInstallationBytes && metadata.terminal?.type === "baseline-chunk"
+            ? { payload: Uint8Array.from(item.payload) }
+            : {}),
+        });
       }
     }
   });
@@ -371,6 +379,29 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
     expect(interactiveStart.nonce).toBe(interactiveNonce);
     expect(interactiveIdentity).toContain(interactiveNonce);
     const holder = subscription(interactiveRun);
+    const installation = await installPublicSubscription({
+      subscription: holder,
+      command,
+      frames: messages,
+      send,
+    }).finally(() => {
+      collectInstallationBytes = false;
+      for (const frame of messages) delete frame.payload;
+    });
+    expect(installation.marker.atSeq).toBe(installation.descriptor.atSeq);
+    expect(installation.ack.outcome).toBe("accepted");
+    const markerIndex = messages.findIndex(
+      (frame) =>
+        frame.metadata.type === "result" &&
+        frame.metadata.requestId === installation.marker.requestId,
+    );
+    const startIndex = messages.findIndex(
+      (frame) =>
+        frame.metadata.terminal?.type === "baseline-start" &&
+        frame.metadata.terminal.descriptor.baselineId === installation.descriptor.baselineId,
+    );
+    expect(markerIndex).toBeGreaterThanOrEqual(0);
+    expect(startIndex).toBeGreaterThan(markerIndex);
     const control = command("set-control", interactiveRun, {
       expectedEpoch: 0,
       nextEpoch: 1,
@@ -476,6 +507,8 @@ test("two real PTYs retain bounded bulk progress while interactive query and con
       expect(item.snapshot.peakQueuedBytes).toBeLessThanOrEqual(budgets.parseHardBytes);
     metrics.rssEnd = process.memoryUsage().rss;
     metrics.interactiveLatencyMs = interactiveLatencyMs;
+    metrics.interactiveLatencyAttribution =
+      "interactive spawn-to-finish receipt including legal subscription installation";
     metrics.bulkParsedBytes = bulkOutput.reduce((sum, fact) => sum + fact.bytes, 0);
     metrics.duringStall = duringStall;
     metrics.bounded = bounded;
