@@ -2064,7 +2064,14 @@ describe("W2 current recovery", () => {
         () => rig.pipe.snapshot().responseItems === 2,
         "R13 two real response items within control budget",
       );
-      capture("conflict-enqueued-before-assert", { blockerFrame, blockerTicket });
+      const ownership = rig.pipe.snapshot();
+      const unsettledWrites = writeEvents.filter((event) => callbackCounts.get(event.ticket) === 0);
+      capture("conflict-enqueued-before-assert", {
+        blockerFrame,
+        blockerTicket,
+        ownership,
+        unsettledWrites,
+      });
       assert.equal(rig.callbacks.length, 1);
       assert.equal(rig.callbacks[0], blockerCallback);
       assert.equal(rig.pipe.snapshot().pendingCommands, 0);
@@ -2072,10 +2079,26 @@ describe("W2 current recovery", () => {
       assert.equal(rig.pipe.snapshot().outstandingRequests, 2);
       assert.equal(rig.pipe.snapshot().state, "ready");
       assert.equal(rig.pipe.snapshot().blocked, false);
-      assert.equal(rig.pipe.snapshot().transportBytes, 336);
-      assert.equal(rig.pipe.snapshot().queuedBytes, 444);
-      assert.equal(rig.pipe.snapshot().ordinaryAccountedBytes, 780);
-      assert(rig.pipe.snapshot().ordinaryAccountedBytes <= rig.effective.reservedControlBytes);
+      assert.equal(ownership.transportBytes + ownership.queuedBytes, 780);
+      assert(
+        ownership.transportBytes + ownership.queuedBytes <= rig.effective.reservedControlBytes,
+      );
+      assert.equal(ownership.ordinaryAccountedBytes, 0);
+      assert(
+        ownership.ordinaryAccountedBytes <=
+          rig.effective.pipeQueuedBytes - rig.effective.reservedControlBytes,
+      );
+      assert.equal(unsettledWrites.length, 2);
+      assert.equal(unsettledWrites[0], blockerTicket);
+      assert.deepEqual(
+        unsettledWrites.map((event) => event.bytes),
+        [336, 444],
+      );
+      assert(unsettledWrites.every((event) => event.accepted === true));
+      assert.equal(
+        unsettledWrites.reduce((sum, event) => sum + event.bytes, 0),
+        780,
+      );
       capture("blocker-release-before", { ticket: blockerTicket.ticket });
       rig.release();
       capture("blocker-release-after", { ticket: blockerTicket.ticket });
