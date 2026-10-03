@@ -1,9 +1,12 @@
 import { expect, test } from "vitest";
+import { mkdir, writeFile } from "node:fs/promises";
 import { PassThrough, Writable } from "node:stream";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError } from "@cove/protocol/errors";
 import {
   PIPE_VERSION,
+  HEADER_BYTES,
+  MAX_METADATA_BYTES,
   MAX_FRAME_BYTES,
   composeSpawnPayload,
   createPipeDecoder,
@@ -917,7 +920,7 @@ test("W2 O recover leaves X available and parks one next X until the prior write
   h.input.write(encode(progress));
   await tick();
   expect(h.calls).toHaveLength(2);
-  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 1 });
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 2 });
   callbacks.shift()();
   await tick();
   expect(h.calls.map(({ command }) => command.requestId)).toEqual([
@@ -1461,4 +1464,295 @@ test("synchronous close during write(false) cannot restore blocked transport", a
   await tick();
   expect(h.pipe.snapshot()).toMatchObject({ transportBytes: 0, blocked: false });
   expect(writes).toBe(1);
+});
+
+test("parked route request ID rejects an ordinary collision and preserves its first response", async () => {
+  const callbacks = [];
+  const writes = [];
+  const writeReturns = [];
+  const calls = [];
+  const realResults = [];
+  const trace = [];
+  const blockerGate = Promise.withResolvers();
+  const duplicateGate = Promise.withResolvers();
+  const probeGate = Promise.withResolvers();
+  const native = createSeamNativeFactory();
+  let holdCallbacks = false;
+  let execution;
+  let h;
+  const record = (label) => {
+    if (!h) return;
+    trace.push({
+      label,
+      snapshot: h.pipe.snapshot(),
+      execution: execution.snapshot(),
+      calls: structuredClone(calls),
+      realResults: structuredClone(realResults),
+      replies: decodeWrites(),
+      writes: writes.map((bytes) => [...bytes]),
+      writeReturns: [...writeReturns],
+      heldCallbacks: callbacks.length,
+    });
+  };
+  const output = new Writable({
+    highWaterMark: 1024 * 1024,
+    write(chunk, _encoding, callback) {
+      writes.push(Buffer.from(chunk));
+      if (holdCallbacks) callbacks.push(callback);
+      else callback();
+    },
+  });
+  const originalWrite = output.write;
+  output.write = function (...args) {
+    const accepted = originalWrite.apply(this, args);
+    writeReturns.push(accepted);
+    record("actual-write-return");
+    return accepted;
+  };
+  h = createHarness({
+    runPipe: runPublicWorkerPipe,
+    output,
+    createExecution(options) {
+      execution = createWorkerExecution({ ...options, factory: native.factory });
+      return {
+        ...execution,
+        async execute(command, payload) {
+          calls.push({ command: structuredClone(command), payload: payload && [...payload] });
+          record("actual-execute-entry");
+          const result = await execution.execute(command, payload);
+          realResults.push({ command: structuredClone(command), result: structuredClone(result) });
+          record("actual-business-result-before-return-gate");
+          if (command.requestId === "held-route") await blockerGate.promise;
+          if (command.requestId === "parked-id" && command.type === "preview-refresh")
+            await duplicateGate.promise;
+          if (command.requestId.startsWith("debt-probe-")) await probeGate.promise;
+          return result;
+        },
+      };
+    },
+  });
+  function decodeWrites() {
+    const wire = createPipeDecoder();
+    return writes.flatMap((bytes) =>
+      wire.read(bytes).frames.map((frame) => ({
+        kind: frame.kind,
+        metadata: JSON.parse(decoder.decode(frame.metadata)),
+        payload: [...frame.payload],
+      })),
+    );
+  }
+  const drain = async () => {
+    for (let turn = 0; turn < 30; turn++) {
+      callbacks.shift()?.();
+      await tick();
+    }
+  };
+  const send = async (command, payload) => {
+    h.input.write(encode(command, payload));
+    for (let turn = 0; turn < 30; turn++) {
+      const reply = decodeWrites().find(({ metadata }) => metadata.requestId === command.requestId);
+      if (reply) return reply.metadata;
+      await tick();
+    }
+    throw new Error(`No actual setup reply for ${command.requestId}`);
+  };
+  const blocker = {
+    type: "applied-ack",
+    worker,
+    run,
+    subscription,
+    requestId: "held-route",
+    appliedSeq: 0,
+  };
+  const parked = { type: "unsubscribe", worker, run, subscription, requestId: "parked-id" };
+  const duplicate = {
+    type: "preview-refresh",
+    worker,
+    run,
+    requestId: "parked-id",
+    knownVersion: 0,
+  };
+  const probes = [
+    { ...duplicate, requestId: "debt-probe-preview-1" },
+    { ...duplicate, requestId: "debt-probe-preview-2" },
+    { type: "status", worker, run, requestId: "debt-probe-status" },
+  ];
+  trace.push({
+    label: "fixed-stimuli",
+    commands: [blocker, parked, duplicate, ...probes],
+    ingress: [blocker, parked, duplicate, ...probes].map((command) => [...encode(command)]),
+  });
+  try {
+    h.input.write(encode(hello));
+    await tick();
+    const spawn = seamSpawn("parked-control-spawn");
+    expect(await send(spawn.command, spawn.payload)).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    expect(
+      await send({
+        type: "subscribe",
+        worker,
+        run,
+        subscription,
+        requestId: "parked-control-subscribe",
+        atSeq: 0,
+      }),
+    ).toMatchObject({ type: "result", recoveryMode: "baseline", atSeq: 0 });
+    for (
+      let turn = 0;
+      turn < 30 &&
+      !decodeWrites().some(({ metadata }) => metadata.terminal?.type === "baseline-end");
+      turn++
+    )
+      await tick();
+    const start = decodeWrites().find(
+      ({ metadata }) => metadata.terminal?.type === "baseline-start",
+    );
+    const chunks = decodeWrites().filter(
+      ({ metadata }) => metadata.terminal?.type === "baseline-chunk",
+    );
+    expect(start).toBeDefined();
+    expect(
+      decodeWrites().filter(({ metadata }) => metadata.terminal?.type === "baseline-end"),
+    ).toHaveLength(1);
+    for (let index = 0; index < chunks.length; index++)
+      expect(
+        await send({
+          type: "baseline-progress",
+          worker,
+          run,
+          subscription,
+          requestId: `parked-control-progress-${index}`,
+          baselineId: start.metadata.terminal.descriptor.baselineId,
+          lastParsedOrdinal: index,
+        }),
+      ).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(await send({ ...blocker, requestId: "parked-control-installed-ack" })).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    await tick();
+    record("real-route-installed-and-physical-setup-settled");
+    holdCallbacks = true;
+    h.input.write(encode(blocker));
+    await tick();
+    record("real-route-result-held-before-endpoint-completion");
+    expect(
+      realResults.find(({ command }) => command.requestId === blocker.requestId)?.result,
+    ).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(h.pipe.snapshot()).toMatchObject({
+      state: "ready",
+      pendingCommands: 1,
+      outstandingRequests: 1,
+      blocked: false,
+    });
+    h.input.write(encode(parked));
+    await tick();
+    record("first-id-parked-with-flowing-ingress");
+    expect(
+      calls.some(
+        ({ command }) => command.type === parked.type && command.requestId === parked.requestId,
+      ),
+    ).toBe(false);
+    expect(h.pipe.snapshot().ingressBytes).toBeGreaterThan(0);
+    h.input.write(encode(duplicate));
+    await tick();
+    record("ordinary-same-id-actually-processed-before-route-release");
+    blockerGate.resolve();
+    await tick();
+    record("blocker-response-held-by-real-writable-callback");
+    await drain();
+    record("parked-admission-and-physical-original-response-settled");
+    duplicateGate.resolve();
+    await tick();
+    await drain();
+    record("actual-late-duplicate-result-returned-after-parked-admission");
+    for (const command of probes) h.input.write(encode(command));
+    await tick();
+    record("distinct-real-return-gates-reply-debt-conservation");
+    probeGate.resolve();
+    await tick();
+    await drain();
+    record("all-response-callbacks-settled");
+    const replies = decodeWrites().map(({ metadata }) => metadata);
+    expect(
+      calls
+        .filter(({ command }) => command.requestId === parked.requestId)
+        .map(({ command }) => command.type),
+    ).toEqual([parked.type]);
+    expect(
+      trace.find(({ label }) => label === "first-id-parked-with-flowing-ingress").snapshot,
+    ).toMatchObject({ state: "ready", outstandingRequests: 2, pendingCommands: 1, blocked: false });
+    expect(
+      trace.find(
+        ({ label }) => label === "ordinary-same-id-actually-processed-before-route-release",
+      ).snapshot,
+    ).toMatchObject({ state: "ready", outstandingRequests: 2, pendingCommands: 1, blocked: false });
+    expect(replies.filter((reply) => reply.requestId === parked.requestId)).toEqual([
+      {
+        type: "error",
+        worker,
+        run,
+        requestId: duplicate.requestId,
+        commandType: duplicate.type,
+        error: domainError("OPERATION_ID_CONFLICT"),
+      },
+      {
+        type: "result",
+        worker,
+        run,
+        requestId: parked.requestId,
+        commandType: parked.type,
+        outcome: "accepted",
+      },
+    ]);
+    expect(writeReturns.every(Boolean)).toBe(true);
+    const legalPeak = Math.max(
+      ...trace
+        .filter(({ snapshot }) => snapshot)
+        .map(
+          ({ snapshot }) =>
+            snapshot.pendingCommands * (HEADER_BYTES + MAX_METADATA_BYTES) +
+            snapshot.queuedBytes +
+            snapshot.transportBytes,
+        ),
+    );
+    expect(h.pipe.snapshot().peakAccountedBytes).toBeLessThanOrEqual(legalPeak);
+    expect(h.pipe.snapshot()).toMatchObject({
+      state: "ready",
+      outstandingRequests: 0,
+      pendingCommands: 0,
+      responseItems: 0,
+      queuedBytes: 0,
+      transportBytes: 0,
+      ordinaryAccountedBytes: 0,
+      ingressBytes: 0,
+      blocked: false,
+    });
+  } finally {
+    blockerGate.resolve();
+    duplicateGate.resolve();
+    probeGate.resolve();
+    const closed = await h.pipe.shutdown("parked-id-author-cleanup");
+    trace.push({ label: "real-shutdown-receipt", closed });
+    output.destroy();
+    h.input.destroy();
+    await drain();
+    record("physical-close-finally-cleanup");
+    const dir = new URL("../../../.cache/author-parked-request-id-r2/", import.meta.url);
+    await mkdir(dir, { recursive: true });
+    await writeFile(new URL("receipts.json", dir), JSON.stringify(trace, null, 2) + "\n");
+  }
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "closed",
+    outstandingRequests: 0,
+    responseItems: 0,
+    queuedBytes: 0,
+    transportBytes: 0,
+    ordinaryAccountedBytes: 0,
+    ingressBytes: 0,
+    blocked: false,
+  });
 });
