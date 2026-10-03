@@ -1709,4 +1709,289 @@ describe("W2 current recovery", () => {
       ],
     });
   });
+  it("W2C-R13 parked route request ID conflicts before ordinary admission and once settlement", async () => {
+    const target = run("parked-id-conflict");
+    const subscription = ref("parked-id-conflict", target);
+    const blockerId = "w2c-r13-blocker";
+    const parkedId = "w2c-r13-X";
+    const validId = "w2c-r13-valid";
+    const gate = deferred();
+    const executionEvents = [];
+    const writeEvents = [];
+    const callbackCounts = new Map();
+    let ordinal = 0;
+    let nextWriteTicket = 0;
+    let realCloses = 0;
+    let rig;
+    const capture = (phase, value = {}) =>
+      record("W2C-R13", {
+        ordinal: ++ordinal,
+        phase,
+        ...value,
+        pipe: rig?.pipe.snapshot(),
+        worker: rig?.execution?.snapshot(),
+        native: rig?.native.snapshot(),
+        nativeReceipts: rig?.native.receipts,
+        callbacksHeld: rig?.callbacks.length,
+        realCloses,
+        output: rig && {
+          writableLength: rig.output.writableLength,
+          writableNeedDrain: rig.output.writableNeedDrain,
+          closed: rig.output.closed,
+        },
+        resizeCalls: rig?.native.owners.map((owner) => owner.resizeCalls),
+        executionEvents,
+        writeEvents,
+        callbackCounts: [...callbackCounts],
+        frames: rig?.frames,
+      });
+    rig = endpointRig(
+      { pendingWorkerCommands: 1, reservedControlBytes: 4112, pipeQueuedBytes: 69648 },
+      {
+        outputHighWaterMark: 69648,
+        executeReturnGate: { requestId: blockerId, promise: gate.promise },
+        executionObserver(event) {
+          executionEvents.push(event);
+          capture("actual-execution-event", { event });
+        },
+      },
+    );
+    rig.output.on("close", () => {
+      realCloses++;
+      capture("actual-output-close");
+    });
+    const originalWrite = rig.output.write;
+    rig.output.write = function (raw, callback) {
+      const ticket = ++nextWriteTicket;
+      callbackCounts.set(ticket, 0);
+      const observed = (...args) => {
+        callbackCounts.set(ticket, callbackCounts.get(ticket) + 1);
+        capture("actual-write-callback-before", { ticket, args });
+        try {
+          return callback(...args);
+        } finally {
+          capture("actual-write-callback-after", { ticket });
+        }
+      };
+      const accepted = originalWrite.call(this, raw, observed);
+      writeEvents.push({
+        ticket,
+        accepted,
+        rawHex: Buffer.from(raw).toString("hex"),
+        bytes: raw.byteLength,
+      });
+      capture("actual-write-return", { ticket, accepted });
+      return accepted;
+    };
+    const send = (command) => {
+      const raw = encoded(command, undefined, 1);
+      capture("input-before", {
+        command,
+        rawHex: Buffer.from(raw).toString("hex"),
+        bytes: raw.length,
+      });
+      rig.input.write(raw);
+      capture("input-after", { command });
+    };
+    const calls = (command) =>
+      executionEvents.filter(
+        (event) =>
+          event.method === "execute" &&
+          event.phase === "before" &&
+          event.args[0].requestId === command.requestId &&
+          event.args[0].type === command.type,
+      );
+    try {
+      await pipeSpawn(rig, target);
+      const installed = await pipeInstall(rig, subscription);
+      capture("installed-before-assert", { installed });
+      assert.equal(installed.result.atSeq, 0, "fixed empty-seed installation sequence");
+      await untilTurn(
+        () =>
+          rig.pipe.snapshot().outstandingRequests === 0 &&
+          rig.pipe.snapshot().responseItems === 0 &&
+          !rig.pipe.snapshot().blocked,
+        "R13 setup physical completion",
+      );
+      const blocker = {
+        type: "applied-ack",
+        worker,
+        run: target,
+        requestId: blockerId,
+        subscription,
+        appliedSeq: 0,
+      };
+      const parked = { ...blocker, requestId: parkedId };
+      const ordinary = {
+        type: "set-control",
+        worker,
+        run: target,
+        requestId: parkedId,
+        expectedEpoch: 0,
+        nextEpoch: 1,
+        holder: {
+          connection: subscription.connection,
+          viewId: subscription.viewId,
+          subscriptionId: subscription.subscriptionId,
+        },
+        geometry: { cols: 13, rows: 4 },
+      };
+      const valid = { ...ordinary, requestId: validId };
+      rig.hold();
+      send(blocker);
+      await untilTurn(
+        () =>
+          executionEvents.some(
+            (event) => event.phase === "gate-enter" && event.args[0].requestId === blockerId,
+          ),
+        "R13 genuine route execute-return hold",
+      );
+      capture("blocker-held-before-assert", { blocker });
+      assert.equal(calls(blocker).length, 1);
+      assert.equal(
+        executionEvents.find(
+          (event) => event.phase === "gate-enter" && event.args[0].requestId === blockerId,
+        ).result.outcome,
+        "accepted",
+      );
+      assert.equal(rig.frames.filter((frame) => frame.metadata.requestId === blockerId).length, 0);
+      assert.equal(rig.pipe.snapshot().pendingCommands, 1);
+      send(parked);
+      await untilTurn(
+        () =>
+          rig.input.writableLength === 0 &&
+          rig.pipe.snapshot().ingressBytes > 0 &&
+          !rig.pipe.snapshot().blocked,
+        "R13 consumed complete parked route bytes",
+      );
+      capture("parked-before-assert", { parked });
+      assert.equal(calls(parked).length, 0);
+      assert.equal(rig.frames.filter((frame) => frame.metadata.requestId === parkedId).length, 0);
+      send(ordinary);
+      await untilTurn(
+        () =>
+          rig.frames.some(
+            (frame) => frame.metadata.requestId === parkedId && frame.metadata.type === "error",
+          ),
+        "R13 actual duplicate conflict reply",
+      );
+      capture("duplicate-before-assert", { ordinary });
+      const duplicate = rig.frames.filter(
+        (frame) => frame.metadata.requestId === parkedId && frame.metadata.type === "error",
+      );
+      assert.equal(duplicate.length, 1);
+      assert.deepEqual(duplicate[0].metadata, {
+        type: "error",
+        worker,
+        run: target,
+        requestId: parkedId,
+        commandType: "set-control",
+        error: {
+          kind: "OPERATION_ID_CONFLICT",
+          code: 1015,
+          message: "OPERATION ID CONFLICT",
+          acceptance: "not-accepted",
+          nextAction: "query-operation",
+        },
+      });
+      assert.equal(calls(ordinary).length, 0);
+      assert.deepEqual(rig.native.owners[0].resizeCalls, []);
+      assert.equal(rig.pipe.snapshot().state, "ready");
+      assert.equal(rig.pipe.snapshot().blocked, false);
+      assert.equal(rig.output.writableNeedDrain, false);
+      assert.equal(rig.callbacks.length, 1);
+      assert(writeEvents.every((event) => event.accepted === true));
+      assert(rig.pipe.snapshot().transportBytes > 0);
+      send(valid);
+      await untilTurn(
+        () =>
+          executionEvents.some(
+            (event) =>
+              event.method === "execute" &&
+              event.phase === "returned" &&
+              event.args[0].requestId === validId,
+          ),
+        "R13 distinct ID ordinary actual execution",
+      );
+      capture("valid-counterpart-before-assert", { valid });
+      const validReturn = executionEvents.find(
+        (event) =>
+          event.method === "execute" &&
+          event.phase === "returned" &&
+          event.args[0].requestId === validId,
+      );
+      assert.equal(calls(valid).length, 1);
+      assert.equal(validReturn.result.outcome, "accepted");
+      assert.deepEqual(rig.native.owners[0].resizeCalls, [{ cols: 13, rows: 4 }]);
+      gate.resolve();
+      rig.hold(false);
+      rig.release();
+      await untilTurn(
+        () =>
+          rig.pipe.snapshot().outstandingRequests === 0 &&
+          rig.pipe.snapshot().pendingCommands === 0 &&
+          rig.pipe.snapshot().responseItems === 0 &&
+          rig.callbacks.length === 0 &&
+          rig.pipe.snapshot().transportBytes === 0 &&
+          rig.pipe.snapshot().queuedBytes === 0 &&
+          rig.pipe.snapshot().ingressBytes === 0,
+        "R13 genuine callbacks and endpoint retirement",
+      );
+      capture("settled-before-assert", { blocker, parked, ordinary, valid });
+      for (const command of [blocker, parked, valid]) {
+        const replies = rig.frames.filter(
+          (frame) =>
+            frame.metadata.requestId === command.requestId && frame.metadata.type === "result",
+        );
+        assert.equal(replies.length, 1);
+        assert.equal(replies[0].metadata.commandType, command.type);
+        assert.equal(replies[0].metadata.outcome, "accepted");
+        assert.deepEqual(replies[0].metadata.worker, worker);
+        assert.deepEqual(replies[0].metadata.run, target);
+        assert.equal(calls(command).length, 1);
+        assert.equal(
+          executionEvents.filter(
+            (event) =>
+              event.method === "markerEnqueued" &&
+              event.phase === "before" &&
+              event.args[0].requestId === command.requestId,
+          ).length,
+          1,
+        );
+        assert.equal(
+          executionEvents.filter(
+            (event) =>
+              event.method === "responseSettled" &&
+              event.phase === "before" &&
+              event.args[0] === command.requestId,
+          ).length,
+          1,
+        );
+      }
+      assert.equal(calls(ordinary).length, 0);
+      assert.equal(rig.frames.filter((frame) => frame.metadata.requestId === parkedId).length, 2);
+      assert.equal(
+        rig.pipe.snapshot().ordinaryAccountedBytes,
+        0,
+        "no reserved reply-byte leak before shutdown",
+      );
+      assert(rig.pipe.snapshot().peakAccountedBytes <= 69648);
+      assert([...callbackCounts.values()].every((count) => count === 1));
+    } catch (error) {
+      capture("first-body-failure", {
+        error: { name: error.name, message: error.message, stack: error.stack },
+      });
+      throw error;
+    } finally {
+      gate.resolve();
+      capture("finally-before-close");
+      try {
+        await rig.close();
+        await untilTurn(() => realCloses === 1, "R13 genuine physical close");
+        capture("finally-after-close");
+      } finally {
+        rig.output.write = originalWrite;
+      }
+    }
+  });
 });
