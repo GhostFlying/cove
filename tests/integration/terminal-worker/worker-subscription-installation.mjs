@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { Writable } from "node:stream";
 import { performance } from "node:perf_hooks";
-import { createPipeDecoder, encodePipeFrame, validatePipeFrame } from "@cove/protocol/pipe";
-import { validateBaselineTransfer } from "@cove/protocol/terminal";
+import {
+  createPipeDecoder,
+  encodePipeFrame,
+  validatePipeFrame,
+} from "../../../packages/protocol/dist/pipe.js";
+import { validateBaselineTransfer } from "../../../packages/protocol/dist/terminal.js";
 import { WorkerRetainedBytes } from "../../../packages/terminal-worker/dist/src/worker-retained-bytes.js";
 
 const utf8 = (text) => new TextEncoder().encode(text);
