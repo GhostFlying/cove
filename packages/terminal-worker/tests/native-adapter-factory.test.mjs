@@ -656,6 +656,10 @@ test("compiled N2 resize onFault fences W1 transaction without signaling a live 
   await withPublicSeam(async (seam) => {
     seam.preflight({ supported: true, contractVersion: 3 });
     const native = fakePty();
+    const originalWriteBounded = native.terminal.writeBounded;
+    native.terminal.writeBounded = vi.fn(function (...args) {
+      return Reflect.apply(originalWriteBounded, this, args);
+    });
     native.terminal.resize = vi.fn(() => {
       throw new Error("resize failed");
     });
@@ -716,20 +720,23 @@ test("compiled N2 resize onFault fences W1 transaction without signaling a live 
       });
       throw error;
     } finally {
-      harness.capture("finally-before", {
-        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
-        nativeResizeCalls: native.terminal.resize.mock.calls,
-        nativeSignals: native.terminal.signalOwned.mock.calls,
-      });
-      native.writer.resolve({ kind: "closed" });
-      native.exit({ exitCode: 0 });
-      const shutdown = await execution.shutdown("test");
-      harness.capture("finally-after", {
-        shutdown,
-        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
-        nativeResizeCalls: native.terminal.resize.mock.calls,
-        nativeSignals: native.terminal.signalOwned.mock.calls,
-      });
+      try {
+        harness.capture("finally-before", {
+          nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+          nativeResizeCalls: native.terminal.resize.mock.calls,
+          nativeSignals: native.terminal.signalOwned.mock.calls,
+        });
+      } finally {
+        native.writer.resolve({ kind: "closed" });
+        native.exit({ exitCode: 0 });
+        const shutdown = await execution.shutdown("test");
+        harness.capture("finally-after", {
+          shutdown,
+          nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+          nativeResizeCalls: native.terminal.resize.mock.calls,
+          nativeSignals: native.terminal.signalOwned.mock.calls,
+        });
+      }
     }
   });
 });
@@ -840,20 +847,23 @@ test("compiled N2 partial write faults before settlement but leaves output and e
       });
       throw error;
     } finally {
-      harness.capture("finally-before", {
-        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
-        nativeResizeCalls: native.terminal.resize.mock.calls,
-        nativeSignals: native.terminal.signalOwned.mock.calls,
-      });
-      native.writer.resolve({ kind: "closed" });
-      native.exit({ exitCode: 0 });
-      const shutdown = await execution.shutdown("test");
-      harness.capture("finally-after", {
-        shutdown,
-        nativeWriteCalls: native.terminal.writeBounded.mock.calls,
-        nativeResizeCalls: native.terminal.resize.mock.calls,
-        nativeSignals: native.terminal.signalOwned.mock.calls,
-      });
+      try {
+        harness.capture("finally-before", {
+          nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+          nativeResizeCalls: native.terminal.resize.mock.calls,
+          nativeSignals: native.terminal.signalOwned.mock.calls,
+        });
+      } finally {
+        native.writer.resolve({ kind: "closed" });
+        native.exit({ exitCode: 0 });
+        const shutdown = await execution.shutdown("test");
+        harness.capture("finally-after", {
+          shutdown,
+          nativeWriteCalls: native.terminal.writeBounded.mock.calls,
+          nativeResizeCalls: native.terminal.resize.mock.calls,
+          nativeSignals: native.terminal.signalOwned.mock.calls,
+        });
+      }
     }
   });
 });
