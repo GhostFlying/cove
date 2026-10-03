@@ -176,6 +176,12 @@ export function delivery(ledger = receipts()) {
       };
       frames.push(frame);
       physical.push(frame);
+      record("actual-delivery-frame", {
+        event: frame.event,
+        rawHex: frame.rawHex,
+        token,
+        owners: ledger.snapshot(),
+      });
       return raw.length;
     },
     cancelUnsent(token) {
@@ -448,6 +454,7 @@ export function endpointRig(patch = {}, options = {}) {
   const output = new Writable({
     highWaterMark: 1,
     write(raw, _encoding, callback) {
+      record("actual-pipe-output", { rawHex: Buffer.from(raw).toString("hex") });
       rawReader?.(raw);
       const result = decoder.read(raw);
       assert.notEqual(result.status, "error");
@@ -513,7 +520,12 @@ export function endpointRig(patch = {}, options = {}) {
       input.end();
       await pipe.closed;
       output.destroy();
-      record("endpoint-cleanup", pipe.snapshot());
+      record("endpoint-cleanup", {
+        pipe: pipe.snapshot(),
+        worker: execution?.snapshot(),
+        native: native.snapshot(),
+        nativeReceipts: native.receipts,
+      });
     },
   };
 }
