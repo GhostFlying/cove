@@ -10,6 +10,82 @@ Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic
 
 ## Current state and dispatch
 
+Accepted actual main is `b5715e615ed7cc4a72aed4654e06a3af4a603e5b`, tree
+`0059b56a1fe7e22387454f63311756dd4aa5585b`, after protected rebase of
+[B2 PR #61](https://github.com/GhostFlying/cove/pull/61), retaining all eight
+atomic source/fix/oracle/registration commits. Independent final-main projection
+and ordinary [run37087997930](https://github.com/GhostFlying/cove/actions/runs/37087997930),
+attempt1, passed959/959 identities in76 files per OS. Root's
+[bounded actual-main acceptance](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p2-control-input-final-main-acceptance-r1.json)
+accepts shared control/input only. ZIP byte hashes and412 extracted files were
+independently verified; direct hosted compiled/native bytes were unavailable.
+B1 PR60/mainc776/dualOS886/73, P3e PR59/main5ac9/812/69 and P2 PR58/main082/801/68
+bounded acceptance remain valid. W1/P3a-d acceptance persists; full P2/P3 and
+Issues #18/#19 remain open.
+
+C preview candidate `d409d0aa584bd392e13a0c6c23643971bca8a426`, tree
+`6ad0053d22c2baf24c2c1337b63fee11e8b857b0`, is frozen above this accepted main.
+The source correction has author202/202 (27 preview+175 inherited) scoped evidence.
+Independent unchanged R2 oracle passed19 Vitest declarations containing136 unique
+semantic rows:107 production core,19 compiled-public-client,10 separately labelled
+negative-control rows. The nine inherited files passed175/175. These are separate
+scoped producers, not a full registered gate.
+Initial source6de author194 PASS and independent QA133/136 rows,16/19 declarations
+with three boundary failures remain sealed. Corrected equal-deadline ingress/tick
+ordering and admission-time cache ownership are now observed by unchanged QA;
+its R2 report explicitly did not isolate strict-late no-tick ingress or concurrent
+empty-cache same-version-hint requests.
+
+The separate off-tree boundary supplement is not a tracked ordinary test suite.
+Its first import-adapter SyntaxError EXIT1 is preserved. Root subsequently reported
+SR01 two PASS and SR02 two actual transfers/bytes/geometry/version observations
+before a wrong expected public status='complete' assertion caused EXIT1 (actual
+status='transfer'). Driver lines101-126 did not execute, including the later
+combined held-debt/correlation/no-effects assertions. Admissible pre-failure
+observations include two distinct transfer IDs and exact22-byte VT/geometry/
+version/atSeq, plus held physicalBytes962/handed4 and final fixture-ledger zero.
+This partial supplement remains CLI1, not an overall PASS or product finding.
+Independent review jointly assessed unchanged136, SR01, emitted SR02 facts,
+existing reader/callback/close cases and source inspection, without same-head retry.
+Root accepted APPROVED_SOURCE / APPROVED_INDEPENDENT_ORACLE /
+APPROVED_CURRENT_SCOPED_RUNTIME on exact d409/tree6ad in
+[intake](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p2-preview-cache-source-runtime-intake-r1.json),
+SHA256a6c5b6a5fe96573c162441f9d36a572efcbe051cf2a6ee8add9c6f0d7f606fe8.
+Actual independent TraeX session3201 CLI0 completed05:35:27Z, closed/reaped and
+all review leases released. The registrar records that verdict, not a new one.
+Build/version records retain numeric exits/argv/cwd/PATH but lack timestamps;
+this absence is not repaired or promoted to timestamped evidence.
+
+[Preview registration composition](tasks/m0-server-preview-cache-main-integration.md)
+is applied under exact four-path writer-r1 GO. Actual tracked declaration floors27/15/4
+match27 author,15 independent core/NC and4 independent client runtime identities.
+The136 semantic rows execute within those19 declarations, not test.each templates:
+ZERO new finiteRuntimeExpansions. Supplemental/author scoped evidence is not added
+as fabricated ordinary registry identities. All inherited floors/finite entries,
+scanner and generic missing/short/duplicate/unknown/failure/skip guards are retained.
+Comparison959+27+19=1005/79 is NOT_RUN; fresh registered-candidate full/review,
+ordinary dualOS artifacts/protected mapping/actual-main gates remain required.
+
+Ordinary pinned Node26.10.0/pnpm12.6.0 engineering remains authorized. Historical
+R5/R6/P9 machinery is archived, not a routine prerequisite. Current owned cleanup
+is bounded: fixture retained-zero is not real process/RSS proof; initial groups
+verifiedfalse and controlled shim/launcher/FIFO/browser uncertainty remain.
+Browser25 final records mean24 named/22 unique,V1-L6three,one standalone
+testName:null, not nullJSON. Historical W2 EPERM/failed EOF causes are unknown;
+consumed browser diagnostic and devbox100-real-PTY hold are unchanged. C compiled
+core tick/fixture tests do not prove the primary installed worker producer (which
+still reports CAPABILITY_UNAVAILABLE), W2/real PTY, D timer/entry, real journeys,
+fullP2/W2/P3/H1/C3/M0 exit or M1. Accepted C review is bounded source/oracle/
+current scoped evidence only; new-head ordinary registered full validation,
+independent delta/runtime review and hosted/main gates remain pending. This role
+owns only registration/docs/index and targeted tooling until clean candidate release.
+
+### Superseded B2/B1 composition checkpoints
+
+The following original paragraphs preserve previous candidates, failures and
+pending gates as history. Accepted bounded PR58–61 actual-main receipts above
+supersede their temporal pending wording; immutable producer records stay intact.
+
 Accepted actual main is `c77697d8560bd30fa62de1cece2aa21a6fefd944`, tree
 `a8aecd911ae005d47b7c1cb96556d1fa890431b8`, after protected rebase of
 [B1 PR #60](https://github.com/GhostFlying/cove/pull/60). Seven original,

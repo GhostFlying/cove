@@ -264,6 +264,21 @@ export const requiredSuites = [
     file: "apps/server/tests/independent/terminal-control-client.test.mjs",
     minimumTests: 7,
   },
+  {
+    project: "server",
+    file: "apps/server/tests/author/preview-cache.test.mjs",
+    minimumTests: 27,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/preview-contract.test.mjs",
+    minimumTests: 15,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/preview-client.test.mjs",
+    minimumTests: 4,
+  },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },

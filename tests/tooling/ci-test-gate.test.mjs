@@ -140,6 +140,9 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "terminal-control", 14],
     ["independent", "terminal-control-contract", 34],
     ["independent", "terminal-control-client", 7],
+    ["author", "preview-cache", 27],
+    ["independent", "preview-contract", 15],
+    ["independent", "preview-client", 4],
   ].map(([directory, name, minimumTests]) => {
     const file = `apps/server/tests/${directory}/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
