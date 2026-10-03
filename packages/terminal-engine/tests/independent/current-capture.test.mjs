@@ -57,7 +57,10 @@ function model(account, reserve = account.reserve) {
     availableRetainedBytes: account.available,
   });
 }
-const apply = (engine, seq, bytes) => engine.apply({ type: "output", run, seq }, bytes);
+const apply = (engine, seq, bytes) => {
+  record("engine-input", { seq, rawHex: Buffer.from(bytes).toString("hex") });
+  return engine.apply({ type: "output", run, seq }, bytes);
+};
 const write = (terminal, bytes) => new Promise((resolve) => terminal.write(bytes, resolve));
 function visible(terminal) {
   const active = terminal.buffer.active;
@@ -82,6 +85,13 @@ describe("W2 current engine capture", () => {
       const denied = await engine.captureBaseline((bytes) => {
         reserved = bytes;
         return false;
+      });
+      record("E01-denied-capture", {
+        before,
+        after: engine.currentState(),
+        denied,
+        reserved,
+        events: account.events,
       });
       assert.equal(denied.status, "unavailable");
       assert(reserved > 4096);

@@ -34,7 +34,12 @@ export function currentByteFactory(options = {}) {
           assert(tasks.length < 256, "bounded native receipt arena");
           const task = { ticket: ++ticket, raw, callback, settled: false };
           tasks.push(task);
-          receipts.push({ phase: "writer-admitted", ticket: task.ticket, bytes: raw.length });
+          receipts.push({
+            phase: "writer-admitted",
+            ticket: task.ticket,
+            bytes: raw.length,
+            rawHex: Buffer.from(raw).toString("hex"),
+          });
           options.onWrite?.(owner, task);
           if (!options.hold) queueMicrotask(() => owner.settle(task));
           return { accepted: true, ticket: task.ticket, byteLength: raw.length };
@@ -82,7 +87,10 @@ export function currentByteFactory(options = {}) {
           shared: shared.snapshot(),
         });
       };
-      owner.emit = (raw) => observer.onData(Buffer.from(raw));
+      owner.emit = (raw) => {
+        receipts.push({ phase: "native-source", rawHex: Buffer.from(raw).toString("hex") });
+        observer.onData(Buffer.from(raw));
+      };
       owner.exit = (exitCode = 0) => {
         exited = true;
         observer.onExit({ exitCode });
