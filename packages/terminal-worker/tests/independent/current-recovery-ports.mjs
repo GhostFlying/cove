@@ -579,7 +579,7 @@ export function endpointRig(patch = {}, options = {}) {
   let rawReader;
   let callbackObserver;
   const output = new Writable({
-    highWaterMark: 1,
+    highWaterMark: options.outputHighWaterMark ?? 1,
     write(raw, _encoding, callback) {
       record("actual-pipe-output", { rawHex: Buffer.from(raw).toString("hex") });
       rawReader?.(raw);
@@ -610,12 +610,17 @@ export function endpointRig(patch = {}, options = {}) {
     buildVersion: "current-QA",
     createExecution(opts) {
       execution = createWorkerExecution({ ...opts, factory: native });
-      if (!options.executionObserver) return execution;
+      if (!options.executionObserver && !options.executeReturnGate) return execution;
       const observe = (method, args) => {
-        options.executionObserver({ phase: "before", method, args, worker: execution.snapshot() });
+        options.executionObserver?.({
+          phase: "before",
+          method,
+          args,
+          worker: execution.snapshot(),
+        });
         try {
           const result = execution[method].apply(execution, args);
-          options.executionObserver({
+          options.executionObserver?.({
             phase: "returned",
             method,
             args,
@@ -624,7 +629,7 @@ export function endpointRig(patch = {}, options = {}) {
           });
           return result;
         } catch (error) {
-          options.executionObserver({
+          options.executionObserver?.({
             phase: "threw",
             method,
             args,
@@ -636,6 +641,78 @@ export function endpointRig(patch = {}, options = {}) {
       };
       return Object.freeze({
         ...execution,
+        ...(options.executeReturnGate
+          ? {
+              execute(command, payload) {
+                const args = [command, payload];
+                options.executionObserver?.({
+                  phase: "before",
+                  method: "execute",
+                  args,
+                  worker: execution.snapshot(),
+                });
+                let actual;
+                try {
+                  actual = execution.execute.call(execution, command, payload);
+                } catch (error) {
+                  options.executionObserver?.({
+                    phase: "threw",
+                    method: "execute",
+                    args,
+                    error,
+                    worker: execution.snapshot(),
+                  });
+                  throw error;
+                }
+                return actual.then(
+                  async (result) => {
+                    options.executionObserver?.({
+                      phase: "resolved",
+                      method: "execute",
+                      args,
+                      result,
+                      worker: execution.snapshot(),
+                    });
+                    if (options.executeReturnGate?.requestId === command.requestId) {
+                      options.executionObserver?.({
+                        phase: "gate-enter",
+                        method: "execute",
+                        args,
+                        result,
+                        worker: execution.snapshot(),
+                      });
+                      await options.executeReturnGate.promise;
+                      options.executionObserver?.({
+                        phase: "gate-leave",
+                        method: "execute",
+                        args,
+                        result,
+                        worker: execution.snapshot(),
+                      });
+                    }
+                    options.executionObserver?.({
+                      phase: "returned",
+                      method: "execute",
+                      args,
+                      result,
+                      worker: execution.snapshot(),
+                    });
+                    return result;
+                  },
+                  (error) => {
+                    options.executionObserver?.({
+                      phase: "rejected",
+                      method: "execute",
+                      args,
+                      error,
+                      worker: execution.snapshot(),
+                    });
+                    throw error;
+                  },
+                );
+              },
+            }
+          : {}),
         markerEnqueued: (...args) => observe("markerEnqueued", args),
         responseSettled: (...args) => observe("responseSettled", args),
       });
