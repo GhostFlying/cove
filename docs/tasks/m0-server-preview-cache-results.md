@@ -127,3 +127,50 @@ unproved. Independent C QA/review and registrar/final ordinary full/CI/main gate
 must bind this frozen subject. No independent or final-main approval is claimed.
 The off-tree handoff binds the actual clean commit/tree, compiled payload hashes,
 check identities and source/Git/output lease release after the normal user commit.
+
+## Boundary correction on independent QA atom
+
+Correction base is QA's clean `86f231d2545a88df1495ebba2ea65cde01f73164`, tree
+`0d56593adb83bc65513a6698baeba01b523c50f7`, parent source6de. Its unchanged
+independent three-file test atom and frozen136-row oracle remain intact. QA R1
+actually recorded133/136 semantic rows and16/19 declarations passing, with
+C-11/M3, C-06/V1 and CC-02/M2 failing. Those historical boundary conflicts and
+raw failures remain sealed; a real complete worker capture/commit succeeded in
+the knownVersion cases. This correction does not describe those as empty or
+fabricated-picture failures, or rewrite original author194 evidence.
+
+Only `preview-refresh.ts` and `terminal-subscriptions.ts` changed in production.
+Result ingress and accepted post-status continuation now refuse strictly after
+the numerical deadline. At equality a valid first seal may succeed; tick still
+expires at `>=`, and an earlier terminal outcome remains immutable. Current
+incarnation, correlation, invalid clock, status proof, collector and physical
+retirement guards retain their behavior.
+
+External unchanged eligibility snapshots an owned matching picture before ID or
+clock suppliers and before any await. A temporary ordinary reader/backing ref is
+charged through the common retained account and released immediately. Only small
+version/worker/geometry metadata remains under the existing request lease. Final
+publication requires the same worker/geometry and fresh status support; missing
+admission ownership forces the existing full FIFO transfer, even when a new
+capture happens to match the hint. The original hint still rejects impossible
+future versions. Wire/private signatures, budgets, policy defaults and shared
+request-ID authority did not change; the passive author peer is unchanged.
+
+Pinned Node26.10.0/pnpm12.6.0 build-r1, lint-r1, scoped format and whitespace all
+exited0. Compiled `affected-r1` actually passed **202/202 in ten files**:27 author
+preview declarations plus175 inherited B1/B2/pipe/admission/delivery/client cases.
+All eight new explicit author regressions passed: equal result-first, equal
+tick-first preserving old bytes, strict-late result without a tick, cached
+post-status equality, tick between status ingress and asynchronous cache seal,
+strict-late cached proof, empty-admission matching hint full bytes, and concurrent
+empty admissions followed by valid owned unchanged. Every author fixture asserts
+zero retained total after its owned transport/session/runtime release receipts.
+There were no failed, pending, skipped or todo cases in this correction run.
+
+These are source-author results. This author did not execute the new independent
+C tests; their unchanged oracle rerun, independent review/registration and final
+ordinary full/CI/main gates remain pending. No installed producer/real-process,
+W2, D timer/entry, fullP2/M0 or historical EPERM conclusion is added. Separate
+`cove-evidence/p2-preview-cache-boundary-source-correction-r1` evidence binds the
+normal atomic correction commit, clean H/T,11 original source/task/author paths,
+the unchanged independent atom, exact compiled payloads and released leases.

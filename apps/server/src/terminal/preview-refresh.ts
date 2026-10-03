@@ -258,7 +258,7 @@ export class PreviewRefresh {
         this.finish(job, this.failure(domainError("WORKER_UNAVAILABLE")));
         return;
       }
-      if (this.now() >= job.deadline) {
+      if (this.now() > job.deadline) {
         this.finish(job, this.failure(domainError("RECOVERY_EXPIRED", "unknown")));
         return;
       }
@@ -303,7 +303,8 @@ export class PreviewRefresh {
         (result) => {
           const now = this.now();
           const wall = this.wall();
-          if (!this.current(job) || now >= job.deadline) {
+          // At equality a prior tick still wins through current(job)'s outcome guard.
+          if (!this.current(job) || now > job.deadline) {
             this.finish(job, this.failure(domainError("RECOVERY_EXPIRED", "unknown")));
             return;
           }

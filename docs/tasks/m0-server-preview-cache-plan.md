@@ -95,3 +95,41 @@ Primary worker still returns CAPABILITY_UNAVAILABLE. This implements determinist
 C core only; real W2 producer, installed pipes/PTYs, D, full P2/M0, historical 28/43
 qualification and EPERM cause remain unproved. Ordinary atomic Conventional user
 commits/hook execution precede exact clean H/T and compiled evidence handoff.
+
+## Boundary correction pre-code plan
+
+Owner remains `/root/p2_preview_cache_impl`, native GPT-6.1 Sol/high. Allocation
+`cove-evidence/p2-preview-cache-boundary-source-correction-r1/allocation.json`
+grants the sole source/test/docs/index/scoped-output lease in the same checkout.
+Verified clean base `86f231d2545a88df1495ebba2ea65cde01f73164`, tree
+`0d56593adb83bc65513a6698baeba01b523c50f7`; the independent QA atom and its three
+file hashes are intact. Read-only triage is separately sealed in
+`p2-preview-cache-expiry-boundary-triage-r1/{findings,handoff,manifest}-r2`.
+The original QA 133/136 rows and 16/19 declarations remain failed-subject evidence.
+
+1. In `preview-refresh.ts`, refuse result ingress and accepted post-status proof
+   only strictly after the numerical deadline. At equality the actual first
+   valid seal wins; tick still expires at `>=`. Preserve first outcome, current
+   incarnation, correlation, invalid clocks, retirement barriers and typed errors.
+2. In `terminal-subscriptions.ts`, synchronously snapshot complete owned cache
+   metadata and worker before calling the ID/refresh clock suppliers or awaiting.
+   A matching admission version may authorize unchanged only if the final reader
+   still matches that worker and geometry, with the existing fresh status checks.
+   No admission picture means the newly captured bytes require full publication.
+   Preserve the original hint for the future-version refusal. Metadata proof fits
+   the existing request lease; no backing is held while awaiting and no public
+   signature, default, budget or wire change is needed.
+3. Add direct author regressions for equal result-first and tick-first, strict late
+   without a tick, cached post-status equality/tick-first/strict-late, empty and
+   concurrent pre-picture admission full transfer, and later owned unchanged.
+   Retain no-frame refusal, FIFO IDs and physical callback cleanup counterparts.
+4. Run pinned scoped server/client tsc, changed-file format/lint/whitespace and
+   compiled author plus affected inherited B1/B2/pipe/admission suites. Record raw
+   numeric results separately; normal atomic user/hook commit and exact clean
+   source/compiled/test bindings precede lease release and independent QA rerun.
+
+Only those two production files, author preview suite/passive peer if necessary,
+and the existing two task documents are writable. The independent three files and
+136-row oracle are read-only; this author does not execute new independent C tests.
+Original 6de author194 results remain historical. No full/CI/push, native producer,
+entry timer, browser, device, probe, profile or new worktree work is allocated.
