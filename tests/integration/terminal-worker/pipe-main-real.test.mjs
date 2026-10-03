@@ -12,6 +12,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DEFAULT_APPEARANCE } from "../../../packages/protocol/dist/profile.js";
+import { installPublicSubscription } from "./worker-subscription-installation.mjs";
 import {
   childPipe,
   command,
@@ -186,6 +187,15 @@ test("compiled public main correlates real PTY bytes, query reply, control, inpu
       hex: "410080ffe282ac",
     });
 
+    await installPublicSubscription({
+      subscription: subscription(target),
+      command,
+      frames: h.frames,
+      send: async (metadata) => {
+        h.send(metadata);
+        return (await response(h, metadata)).metadata;
+      },
+    });
     const control = command("set-control", target, {
       expectedEpoch: 0,
       nextEpoch: 1,

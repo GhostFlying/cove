@@ -38,6 +38,10 @@ import { nearestRank, summarizeTimingTrace } from "./worker-timing-trace.mjs";
 import { createDrainEpochTracker } from "./worker-timing-drain.mjs";
 import { publishTimingReceipt } from "./fixtures/timing-receipt-publication.mjs";
 import { createObservedShutdown, createObservedSubmit } from "./worker-timing-ownership.mjs";
+import {
+  createInstallationDelivery,
+  installPublicSubscription,
+} from "./worker-subscription-installation.mjs";
 import { finalizeTimingCycle, finalizeTimingRun } from "./worker-timing-finalizers.mjs";
 import {
   FIFO_REQUESTS_PER_CYCLE,
@@ -799,10 +803,12 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
           return { kind: "created", pty };
         },
       };
+      const installationDelivery = createInstallationDelivery(budgets);
       const execution = createWorkerExecution({
         worker,
         effectiveBudgets: budgets,
         factory,
+        delivery: installationDelivery,
         onFault: (fault) => faults.push(fault),
         onFact: (fact) => {
           const factTick = process.hrtime.bigint();
@@ -821,6 +827,7 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
           }
         },
       });
+      installationDelivery.bind(execution);
       const stopSampleId = `${target.runId}:stop`;
       let stopStart;
       const observedShutdown = createObservedShutdown({
@@ -861,6 +868,12 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         start = await receipt(join(dir, "start.json"), "timing child start");
         expect(start).toMatchObject({ nonce });
         expect(psIdentity(start.pid)).toContain(nonce);
+        await installPublicSubscription({
+          subscription: subscription(target),
+          command,
+          execution,
+          delivery: installationDelivery,
+        });
         const control = command("set-control", target, {
           expectedEpoch: 0,
           nextEpoch: 1,
@@ -971,6 +984,11 @@ test("four sequential owned PTYs measure native delivery, user settlement and cl
         }
         try {
           await ownedAbsent(start, nonce);
+        } catch (error) {
+          cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
+        }
+        try {
+          await installationDelivery.close();
         } catch (error) {
           cycleError = new AggregateError([...(cycleError ? [cycleError] : []), error]);
         }

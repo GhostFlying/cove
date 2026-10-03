@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { queryBytes, expectedLiveReplies } from "../../fixtures/terminal/engine/recovery-cases.mjs";
 import {
+  createInstallationDelivery,
+  installPublicSubscription,
+} from "./worker-subscription-installation.mjs";
+import {
   budgets,
   command,
   installedBin,
@@ -239,10 +243,12 @@ test("real PTY distinguishes worker automatic query reply from reply-shaped user
       return { kind: "created", pty: adapter };
     },
   };
+  const installationDelivery = createInstallationDelivery(budgets);
   const execution = createWorkerExecution({
     worker,
     effectiveBudgets: budgets,
     factory,
+    delivery: installationDelivery,
     onFact: (fact) =>
       facts.push({
         type: fact.event.type,
@@ -251,6 +257,7 @@ test("real PTY distinguishes worker automatic query reply from reply-shaped user
       }),
     onFault: (fault) => faults.push(fault),
   });
+  installationDelivery.bind(execution);
   const target = run(`paste-${nonce}`);
   const spawn = spawnCommand(target, process.execPath, [childEntry, nonce, temp], repo);
   let start;
@@ -272,6 +279,12 @@ test("real PTY distinguishes worker automatic query reply from reply-shaped user
       { origin: "automatic", kind: "query", hex: reply.toString("hex") },
     ]);
     expect(origins[0].atSeq).toBeGreaterThan(0);
+    await installPublicSubscription({
+      subscription: subscription(target),
+      command,
+      execution,
+      delivery: installationDelivery,
+    });
     const control = command("set-control", target, {
       expectedEpoch: 0,
       nextEpoch: 1,
@@ -321,6 +334,7 @@ test("real PTY distinguishes worker automatic query reply from reply-shaped user
   } finally {
     try {
       shutdown = await execution.shutdown("query-paste-finally");
+      await installationDelivery.close();
     } catch (error) {
       primary = new AggregateError([...(primary ? [primary] : []), error], "shutdown failed");
     }
