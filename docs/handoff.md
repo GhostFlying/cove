@@ -10,6 +10,79 @@ Planning PR [#27](https://github.com/GhostFlying/cove/pull/27) merged six atomic
 
 ## Current state and dispatch
 
+Accepted actual main is `c77697d8560bd30fa62de1cece2aa21a6fefd944`, tree
+`a8aecd911ae005d47b7c1cb96556d1fa890431b8`, after protected rebase of
+[B1 PR #60](https://github.com/GhostFlying/cove/pull/60). Seven original,
+candidate and main atomic patches/messages/user authors match; candidate/main
+trees match. Root accepted bounded private B1 subscription/FIFO/attempt/parsed
+credit after independent final-main projection and ordinary
+[run37069757228](https://github.com/GhostFlying/cove/actions/runs/37069757228),
+attempt1, dualOS886/886 identities in73 inventory files per OS. The
+[actual-main receipt](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p2-b1-practical-final-main-acceptance-r1.json)
+binds this accepted base. P3e public execution/applied state remains accepted
+from PR59/main5ac9e808/ordinary mainrun37061794296 dualOS812/69; P2 private
+registration/control remains accepted from PR58/main082ae77/ordinary mainrun
+37053733893 dualOS801/68. Accepted W1/P3a-d slices remain; full P2/P3 and
+Issues #18/#19 are open.
+
+B2 corrected sourceaa302e321 and exact ownership-oracle test atomfa6cdce00 are
+frozen in primary `p/luchengxuan/m0-18-control-input-practical`, tree9d01bcf5.
+The current independently authored eight-file scoped run passed158/158 with
+74 inherited B1,14 authorB2,59 independentB2 and11 existing WorkerPipe cases.
+Its59 B2 independent cases include5 controls,2 held-result F1 and2 concrete
+shared-progress contrasts. JSON/JUnit identities agree; four raw traces show
+fixture-owned carriers/retained-account cleanup. This is scoped evidence, not
+registered full acceptance or blanket process cleanup.
+
+R1 source/oracle review returned CHANGES_REQUIRED: service-wide inFlight delayed
+owned unsubscribe until a held B2 result; the oracle omitted the before-result
+boundary. R2 returned CHANGES_REQUIRED for cross-connection shared-worker
+progress-cap admission and its oracle gap; its temporal runtimePENDING is
+preserved. The source author's real157/158 failure remains sealed. The separate
+minimal causal oracle correction now accepts exact A+Bpeer3 owned refs/IDs after
+actual receipts instead of a global count1, preserving original A-first-before-
+result, shared four-slot cap/typed BUSY, no foreign teardown, no retry and final
+zero retained ownership assertions. It adds no declaration/finite row. The
+corrected source/test and sealed158 evidence received independent R3
+APPROVED_SOURCE / APPROVED_ORACLE / ADMISSIBLE_SCOPED_RUNTIME. Actual session6712
+closed CLI0 at 00:42:00Z and all recorded owned processes were reaped. Root
+accepted the exact fa6cdce00/tree9d01bcf5 subject in
+[intake R3](/Users/luchengxuan/WORKSPACE/cove-evidence/w1-completion/p2-control-input-source-intake-r3.json),
+SHA256258c651c57c4fbd22eda25be65f90b7060cbe28fd87213e907c3a14a747ed2f4.
+This is narrow source/oracle/scoped acceptance; fresh full/hosted/main gates remain
+pending. The registrar records this independent/root verdict, not a new verdict.
+
+[Refreshed B2 registration preparation](tasks/m0-server-control-input-main-integration.md)
+is applied under writer-r2 ROOT GO: declaration floors14/34/7, exact scoped
+runtime14/51/8 and11 genuine
+B2 finite expansion rows. The two shared-cap tests are concrete; WorkerPipe11
+is already registered, so it is not added again. All inherited B1/P2/P3e/tooling
+rows and generic failure/discovery/scanner guards remain intact. Comparison
+886+14+59=959/76 is expected only. Old955/76 and intermediate957 projections
+are historical for their old bytes. Fresh registered-candidate full validation,
+review, ordinary required dualOS artifacts, protected mapping and actual-main
+independent acceptance remain separate future gates.
+
+Pinned Node26.10.0/pnpm12.6.0 ordinary engineering remains authorized. Archived
+P9/R5/R6 exact-environment/one-use machinery is not a routine prerequisite.
+Artifacts prove extracted-byte identity only; archive digest/size remains API
+metadata. Browser25 schema1 records per OS distinguish24 named/22 unique names,
+V1-L6 three times and one standalone testName:null association. Initial process-
+group verification false, FIFO identity drift, stale shim/launcher uncertainty
+and controlled browser primary rejections remain; no blanket helper/descendant
+absence is claimed. W2 EPERM/failed Ubuntu EOF causality remains uncertain.
+Consumed browser diagnostics/devbox holds are not renewed. Full P2/W2/P3/H1/C3,
+real adapters/agent journeys, devbox100-real-PTY and M0 exit remain open; M1
+requires user review/permission. Root dispatches independent owners; this role
+owns only the four-path registration/document delta and index until clean
+candidate release; a separate owner must perform the fresh registered full gate.
+
+### Superseded B1/P3e composition checkpoints
+
+The following paragraphs preserve prior candidate identities, pending statements
+and failures. Their pending B1/P3e state is historical after the exact accepted
+main receipts above; immutable reports retain their original temporal verdicts.
+
 Accepted actual main is `5ac9e8089b20c62518d139a10c4a453f1bfd60ab`, tree
 `68569b0a416b4a2dd6d406debe3f0f5e2114d74f`, after protected rebase of
 [P3e PR #59](https://github.com/GhostFlying/cove/pull/59), retaining all five atomic

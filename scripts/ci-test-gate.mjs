@@ -249,6 +249,21 @@ export const requiredSuites = [
     file: "apps/server/tests/independent/subscription-client.test.mjs",
     minimumTests: 5,
   },
+  {
+    project: "server",
+    file: "apps/server/tests/author/terminal-control.test.mjs",
+    minimumTests: 14,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    minimumTests: 34,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-client.test.mjs",
+    minimumTests: 7,
+  },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
@@ -496,6 +511,134 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-client.test.mjs",
+    template:
+      "P2-B2 independent actual compiled public consumer > B2-08 actual server written receipt %s produces exact public partition and notice",
+    names: [
+      "P2-B2 independent actual compiled public consumer > B2-08 actual server written receipt 9 produces exact public partition and notice",
+      "P2-B2 independent actual compiled public consumer > B2-08 actual server written receipt 4 produces exact public partition and notice",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field %s has no business effect",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field serverId has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field relayInstanceId has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field runId has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field connectionId has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field generation has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field viewId has no business effect",
+      "P2-B2 independent actual compiled control contracts > B2-01 each stale complete subscription field subscriptionId has no business effect",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-01 foreign worker result %s cannot grant",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-01 foreign worker result workerId cannot grant",
+      "P2-B2 independent actual compiled control contracts > B2-01 foreign worker result workerIncarnationId cannot grant",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-02 accepted focus order reversed=%s controls epoch and full holder",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-02 accepted focus order reversed=false controls epoch and full holder",
+      "P2-B2 independent actual compiled control contracts > B2-02 accepted focus order reversed=true controls epoch and full holder",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-02 %s control outcome cannot publish grant",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-02 rejected control outcome cannot publish grant",
+      "P2-B2 independent actual compiled control contracts > B2-02 unknown control outcome cannot publish grant",
+      "P2-B2 independent actual compiled control contracts > B2-02 missing-atSeq control outcome cannot publish grant",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-03 close pending focus with queued newer holder=%s",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-03 close pending focus with queued newer holder=false",
+      "P2-B2 independent actual compiled control contracts > B2-03 close pending focus with queued newer holder=true",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-05 own versus watcher %s keeps PTY and no election",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-05 own versus watcher detach keeps PTY and no election",
+      "P2-B2 independent actual compiled control contracts > B2-05 own versus watcher close keeps PTY and no election",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-08 binary once preserves writtenBytes=%s bounds",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-08 binary once preserves writtenBytes=9 bounds",
+      "P2-B2 independent actual compiled control contracts > B2-08 binary once preserves writtenBytes=4 bounds",
+      "P2-B2 independent actual compiled control contracts > B2-08 binary once preserves writtenBytes=10 bounds",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent actual compiled control contracts > B2-08 %s after handoff is unknown and never resent",
+    names: [
+      "P2-B2 independent actual compiled control contracts > B2-08 timeout after handoff is unknown and never resent",
+      "P2-B2 independent actual compiled control contracts > B2-08 contact-loss after handoff is unknown and never resent",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent finite boundary contrasts > B2-07 valid current appearance %s keeps typed failure without success",
+    names: [
+      "P2-B2 independent finite boundary contrasts > B2-07 valid current appearance rejected keeps typed failure without success",
+      "P2-B2 independent finite boundary contrasts > B2-07 valid current appearance unknown keeps typed failure without success",
+    ],
+    reporterIdentity: "ancestry",
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/independent/terminal-control-contract.test.mjs",
+    template:
+      "P2-B2 independent F1 held-result close unsubscribe > F1 owned unsubscribe precedes held %s result settlement",
+    names: [
+      "P2-B2 independent F1 held-result close unsubscribe > F1 owned unsubscribe precedes held focus result settlement",
+      "P2-B2 independent F1 held-result close unsubscribe > F1 owned unsubscribe precedes held input result settlement",
+    ],
+    reporterIdentity: "ancestry",
+  },
   {
     project: "server",
     file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
