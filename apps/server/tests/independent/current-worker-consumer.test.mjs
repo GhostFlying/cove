@@ -97,10 +97,51 @@ describe("W2 current server and public client", () => {
     await withWorkerLink(async (rig) => {
       await rig.emit(utf8("W2-C02"));
       const peer = await rig.peer();
+      const firstPendingIndex = peer.pending.length;
+      const firstUplinkIndex = peer.uplink.length;
       rig.capture("C02-first-before");
       const first = await peer.client.getPreview(rig.run);
       rig.capture("C02-first-returned", { first });
       assert(first.ok && first.status === "transfer");
+      const firstRequests = peer.uplink.slice(firstUplinkIndex).map((value) => value.metadata);
+      const firstHandles = peer.pending.slice(firstPendingIndex);
+      const firstServiceResult = await peer.pending[firstPendingIndex];
+      rig.capture("C02-first-service-handle-settled", {
+        first,
+        firstRequests,
+        firstHandleCount: firstHandles.length,
+        firstServiceResult,
+      });
+      assert.equal(firstRequests.length, 1);
+      assert.equal(firstHandles.length, 1);
+      assert.equal(firstRequests[0].type, "preview");
+      assert.deepEqual(firstRequests[0].run, rig.run);
+      assert.deepEqual(firstServiceResult, {
+        type: "preview-result",
+        requestId: firstRequests[0].requestId,
+        run: rig.run,
+        status: "transfer",
+        version: first.version,
+      });
+      try {
+        await untilTurn(
+          () => rig.runtime.previews.snapshot().active === 0,
+          "C02 real completed refresh retirement",
+        );
+      } catch (error) {
+        rig.capture("C02-first-refresh-retirement-not-exercised", {
+          first,
+          firstRequests,
+          firstServiceResult,
+          error: { name: error.name, message: error.message },
+        });
+        throw error;
+      }
+      rig.capture("C02-first-refresh-retired-before-same-hint", {
+        first,
+        firstRequests,
+        firstServiceResult,
+      });
       const captures = rig.commands.filter((value) => value.type === "preview-refresh").length;
       rig.time.advance(51);
       rig.capture("C02-same-before", { first, captures });
