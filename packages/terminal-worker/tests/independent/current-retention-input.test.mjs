@@ -1040,23 +1040,190 @@ describe("W2 current retention and input", () => {
   it("W2C-I09 valid input rotates minimal whole facts and unreclaimable attempt stays consumed", async () => {
     const rig = await pressureRig({}, { hold: true });
     try {
+      let ordinal = 0;
+      const capture = (phase, value = {}) => {
+        const receipt = structuredClone({
+          ordinal: ++ordinal,
+          phase,
+          ...value,
+          effectiveBudgets: rig.effective,
+          execution: rig.execution.snapshot(),
+          native: rig.native.snapshot(),
+          nativeReceipts: rig.native.receipts,
+          leaseEvents: rig.leaseEvents,
+          liveLeases: liveSet(rig),
+          physicalOwners: rig.sink.ledger.snapshot(),
+          physical: rig.sink.physical.map((frame, index) => ({
+            index,
+            token: frame.token,
+            event: frame.event,
+            encodedBytes: frame.encodedBytes,
+            rawHex: frame.rawHex,
+            settled: frame.settled,
+          })),
+        });
+        record("W2C-I09-seq3-setup", receipt);
+        return receipt;
+      };
+      const sameRun = (actual, expected) =>
+        actual?.serverId === expected.serverId &&
+        actual?.relayInstanceId === expected.relayInstanceId &&
+        actual?.runId === expected.runId;
       for (let index = 0; index < 2; index++) {
         rig.native.owners[index].emit(new Uint8Array(10000).fill(67 + index));
         await turns();
       }
-      for (let index = 0; index < 2; index++)
-        assert.equal(
-          (
-            await rig.execute(
-              rig.command("applied-ack", rig.targets[index], {
-                subscription: rig.routes[index],
-                appliedSeq: 3,
-              }),
-            )
-          ).outcome,
-          "accepted",
+      for (let index = 0; index < 2; index++) {
+        const command = rig.command("status", rig.targets[index]);
+        const before = capture("ordinary-status-before-guards", { index, command });
+        const session = before.execution.sessions.find((entry) =>
+          sameRun(entry.run, rig.targets[index]),
+        ).snapshot;
+        const runStatus = before.execution.runs.find((entry) =>
+          sameRun(entry.run, rig.targets[index]),
         );
+        assert.equal(before.execution.ordinaryPendingCommands, 0);
+        assert.equal(before.execution.pendingCommands, 0);
+        assert.equal(before.execution.reservedStatusPending, false);
+        assert.equal(before.execution.shuttingDown, false);
+        assert.equal(runStatus.status, "live");
+        assert.equal(session.disposed, false);
+        assert.equal(session.faulted, false);
+        assert.equal(session.consumerFenced, false);
+        assert(session.queuedItems < 256, "fixed run-session ordinary status queue cap");
+        const eventStart = rig.leaseEvents.length;
+        const result = await rig.execute(command);
+        capture("ordinary-status-result-before-assertions", {
+          index,
+          command,
+          result,
+          eventStart,
+          eventEnd: rig.leaseEvents.length,
+        });
+        assert.equal(result.type, "result");
+        assert.equal(result.outcome, "accepted");
+        assert.equal(result.requestId, command.requestId);
+        assert.deepEqual(result.worker, worker);
+        assert.deepEqual(result.run, rig.targets[index]);
+        assert.equal(result.runStatus.status, "live");
+        assert.equal(result.runStatus.receivedSeq, 3);
+        assert.equal(result.runStatus.parsedSeq, 3);
+        assert.equal(result.runStatus.controlEpoch, 1);
+        assert.deepEqual(result.runStatus.controlHolder, runStatus.controlHolder);
+      }
+      for (let index = 0; index < 2; index++) {
+        let observation;
+        await untilTurn(() => {
+          const frame = rig.sink.physical.find(
+            (entry) =>
+              entry.event.terminal?.type === "output" &&
+              entry.event.terminal.seq === 3 &&
+              sameRun(entry.event.run, rig.targets[index]) &&
+              sameRun(entry.event.terminal.run, rig.targets[index]) &&
+              sameRun(entry.event.subscription?.run, rig.routes[index].run) &&
+              entry.event.subscription.connection.connectionId ===
+                rig.routes[index].connection.connectionId &&
+              entry.event.subscription.connection.generation ===
+                rig.routes[index].connection.generation &&
+              entry.event.subscription.viewId === rig.routes[index].viewId &&
+              entry.event.subscription.subscriptionId === rig.routes[index].subscriptionId &&
+              entry.rawHex,
+          );
+          capture("publication-predicate-observed", { index, framePresent: Boolean(frame) });
+          if (!frame) return false;
+          const raw = Buffer.from(frame.rawHex, "hex");
+          const decoded = createPipeDecoder().read(raw);
+          const metadata =
+            decoded.frames[0] && JSON.parse(Buffer.from(decoded.frames[0].metadata).toString());
+          const validation = decoded.frames[0] && validatePipeFrame(decoded.frames[0], metadata);
+          const payload = decoded.frames[0]?.payload;
+          observation = {
+            index,
+            rawHex: frame.rawHex,
+            rawBytes: raw.length,
+            metadataBytes: raw.readUInt32BE(8),
+            payloadBytes: raw.readUInt32BE(12),
+            rawSHA256: createHash("sha256").update(raw).digest("hex"),
+            payloadSHA256: payload && createHash("sha256").update(payload).digest("hex"),
+            decodedStatus: decoded.status,
+            decodedFrames: decoded.frames.length,
+            metadata,
+            validation,
+            settled: frame.settled,
+          };
+          capture("publication-ready-before-assertions", observation);
+          assert.equal(raw.length, 16 + raw.readUInt32BE(8) + raw.readUInt32BE(12));
+          assert.equal(raw.length, frame.encodedBytes);
+          assert.equal(frame.settled, false);
+          assert.notEqual(decoded.status, "error");
+          assert.equal(decoded.frames.length, 1);
+          assert(validation.ok);
+          assert.deepEqual(metadata.worker, worker);
+          assert.deepEqual(metadata.run, rig.targets[index]);
+          assert.deepEqual(metadata.subscription, rig.routes[index]);
+          assert.equal(metadata.terminal.type, "output");
+          assert.equal(metadata.terminal.seq, 3);
+          assert.equal(payload.length, 10000);
+          assert.deepEqual(payload, new Uint8Array(10000).fill(67 + index));
+          assert.equal(
+            observation.payloadSHA256,
+            [
+              "cdc2cdefd474d525462f60edfe48d4c1117af64dc9d91f567bf51e264ab79769",
+              "27b4a9f24cdf8b6aca655971f4d42b0a34b7ed6cd3e2fd69439e6fa6145bc3fd",
+            ][index],
+          );
+          return true;
+        }, `fixed I09 seed ${index} actual route output3`);
+        const command = rig.command("applied-ack", rig.targets[index], {
+          subscription: rig.routes[index],
+          appliedSeq: 3,
+        });
+        const physicalIds = rig.sink.physical.map((frame, index) => ({
+          index,
+          token: frame.token,
+          encodedBytes: frame.encodedBytes,
+          settled: frame.settled,
+        }));
+        const physicalOwnerIds = [...rig.sink.ledger.live.values()]
+          .filter((owner) => owner.owner === "physical-delivery")
+          .map((owner) => owner.id);
+        const eventStart = rig.leaseEvents.length;
+        capture("original-ACK3-before", {
+          index,
+          command,
+          observation,
+          physicalIds,
+          physicalOwnerIds,
+          eventStart,
+        });
+        const result = await rig.execute(command);
+        capture("original-ACK3-result-before-assertions", {
+          index,
+          command,
+          result,
+          observation,
+          physicalIds,
+          physicalOwnerIds,
+          eventStart,
+          eventEnd: rig.leaseEvents.length,
+        });
+        assert.equal(result.type, "result");
+        assert.equal(result.requestId, command.requestId);
+        assert.deepEqual(result.worker, worker);
+        assert.deepEqual(result.run, rig.targets[index]);
+        assert.equal(result.outcome, "accepted");
+        assert(
+          physicalOwnerIds.every((id) => rig.sink.ledger.live.has(id)),
+          "logical ACK cannot release physical delivery leases",
+        );
+        assert(
+          physicalIds.every((entry) => rig.sink.physical[entry.index].settled === entry.settled),
+          "logical ACK does not settle physical delivery",
+        );
+      }
+      capture("before-original-sink-close-after-both-ACK3");
       rig.sink.close();
+      capture("after-original-sink-close-after-both-ACK3");
       const before = rig.execution.snapshot();
       const ownersBefore = liveSet(rig);
       const eventsBefore = rig.leaseEvents.length;
