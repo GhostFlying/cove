@@ -1,4 +1,8 @@
 import { expect, test } from "vitest";
+import { createTerminalModel } from "@cove/terminal-engine";
+import { RecoverySubscriptions } from "../dist/src/recovery-subscription.js";
+import { ReplayWindow } from "../dist/src/replay-window.js";
+import { WorkerRetainedBytes } from "../dist/src/worker-retained-bytes.js";
 import { PassThrough, Writable } from "node:stream";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
@@ -658,3 +662,191 @@ test("W2 old transport-owned bytes precede same-ref recovery marker and new prod
     output.destroy();
   }
 });
+
+test("W2 uncancelled capture and installed recover preserve validation, tokens and retiring refusal", async () => {
+  const account = new WorkerRetainedBytes(M0_LIMITS.workerBytes, M0_LIMITS.reservedControlBytes);
+  const reserve = (bytes) => account.reserve("worker", bytes);
+  const engine = createTerminalModel({
+    run,
+    geometry: { cols: 12, rows: 4 },
+    onAutomaticOutput() {},
+  });
+  const replay = new ReplayWindow(4096, 4, reserve);
+  const emitted = [];
+  const recovery = new RecoverySubscriptions(worker, M0_LIMITS, reserve, {
+    enqueue(event, payload, token) {
+      emitted.push({ event, token });
+      return 16 + utf8(JSON.stringify(event)).byteLength + payload.length;
+    },
+    cancelUnsent() {},
+  });
+  const source = {
+    run,
+    replay,
+    captureBaseline: (reserveDetached) => engine.captureBaseline(reserveDetached),
+  };
+  const routeCommand = (type, fields = {}) => command(type, { subscription, ...fields });
+  async function install(openCommand, opened) {
+    expect(opened.result.recoveryMode).toBe("baseline");
+    const first = emitted.length;
+    recovery.markerEnqueued(openCommand, opened.result);
+    await tick();
+    expect(emitted.slice(first).map(({ event }) => event.terminal.type)).toEqual([
+      "baseline-start",
+      "baseline-chunk",
+      "baseline-end",
+    ]);
+    const baselineId = emitted[first].event.terminal.descriptor.baselineId;
+    expect(
+      recovery.command(routeCommand("baseline-progress", { baselineId, lastParsedOrdinal: 0 }))
+        .result.outcome,
+    ).toBe("accepted");
+    expect(recovery.command(routeCommand("applied-ack", { appliedSeq: 0 })).result.outcome).toBe(
+      "accepted",
+    );
+    expect(recovery.installed(subscription)).toBe(true);
+  }
+  try {
+    const subscribe = routeCommand("subscribe", { atSeq: 0 });
+    await install(subscribe, await recovery.open(subscribe, source));
+    expect((await recovery.open(routeCommand("subscribe", { atSeq: 0 }), source)).failure).toBe(
+      "OPERATION_ID_CONFLICT",
+    );
+    expect((await recovery.open(routeCommand("recover", { appliedSeq: 1 }), source)).failure).toBe(
+      "RESYNC_REQUIRED",
+    );
+    expect(recovery.installed(subscription)).toBe(true);
+    const recover = routeCommand("recover", { appliedSeq: 0 });
+    await install(recover, await recovery.open(recover, source));
+    expect(emitted[0].token).not.toBe(emitted[3].token);
+    const unsubscribe = routeCommand("unsubscribe");
+    expect(recovery.command(unsubscribe).result.outcome).toBe("accepted");
+    expect((await recovery.open(routeCommand("recover", { appliedSeq: 0 }), source)).failure).toBe(
+      "BUSY",
+    );
+    expect((await recovery.open(routeCommand("subscribe", { atSeq: 0 }), source)).failure).toBe(
+      "OPERATION_ID_CONFLICT",
+    );
+    recovery.responseSettled(unsubscribe.requestId);
+    expect(recovery.routeCount).toBe(0);
+    expect(account.snapshot().workerBytes).toBe(0);
+  } finally {
+    recovery.shutdown();
+    replay.clear();
+    engine.dispose();
+  }
+});
+
+test.each(["unsubscribe", "recover"])(
+  "W2 actual engine detached callback %s refuses old allocation and preserves legal fresh admission",
+  async (action) => {
+    const account = new WorkerRetainedBytes(M0_LIMITS.workerBytes, M0_LIMITS.reservedControlBytes);
+    const engine = createTerminalModel({
+      run,
+      geometry: { cols: 12, rows: 4 },
+      onAutomaticOutput() {},
+    });
+    const emitted = [];
+    const admissions = [];
+    const leases = [];
+    const interrupt = command(action, {
+      subscription,
+      ...(action === "recover" && { appliedSeq: 0 }),
+    });
+    let recovery;
+    let replacement;
+    let interruptionOutcome;
+    let fired = false;
+    const reserve = (bytes, owner) => {
+      const lease = account.reserve("worker", bytes);
+      if (!lease) return undefined;
+      const record = { owner, held: bytes, releases: 0 };
+      leases.push(record);
+      const owned = {
+        release() {
+          expect(++record.releases).toBe(1);
+          record.held = 0;
+          lease.release();
+        },
+        shrinkTo(next) {
+          record.held = next;
+          lease.shrinkTo(next);
+        },
+      };
+      if (owner === "recovery-baseline" && !fired) {
+        fired = true;
+        if (action === "recover") replacement = recovery.open(interrupt, source);
+        else interruptionOutcome = recovery.command(interrupt);
+      }
+      return owned;
+    };
+    const replay = new ReplayWindow(4096, 4, reserve);
+    recovery = new RecoverySubscriptions(worker, M0_LIMITS, reserve, {
+      enqueue(event, payload) {
+        emitted.push(event);
+        return 16 + utf8(JSON.stringify(event)).byteLength + payload.length;
+      },
+      cancelUnsent() {},
+    });
+    const source = {
+      run,
+      replay,
+      captureBaseline: (reserveDetached) =>
+        engine.captureBaseline((bytes) => {
+          const accepted = reserveDetached(bytes);
+          admissions.push(accepted);
+          return accepted;
+        }),
+    };
+    try {
+      const subscribe = command("subscribe", { subscription, atSeq: 0 });
+      expect((await recovery.open(subscribe, source)).failure).toBe("RESYNC_REQUIRED");
+      expect(admissions[0]).toBe(false);
+      expect(interruptionOutcome?.result.outcome).toBe(
+        action === "unsubscribe" ? "accepted" : undefined,
+      );
+      expect(emitted).toEqual([]);
+      expect(leases.find((lease) => lease.owner === "recovery-baseline")).toMatchObject({
+        held: 0,
+        releases: 1,
+      });
+      recovery.markerEnqueued(subscribe, { outcome: "accepted" });
+      await tick();
+      expect(emitted).toEqual([]);
+      let fresh;
+      let opened;
+      let retiringFailure;
+      let retiredBytes;
+      if (action === "unsubscribe") {
+        retiringFailure = (
+          await recovery.open(command("recover", { subscription, appliedSeq: 0 }), source)
+        ).failure;
+        recovery.responseSettled(interrupt.requestId);
+        retiredBytes = account.snapshot().workerBytes;
+        fresh = command("subscribe", { subscription, atSeq: 0 });
+        opened = await recovery.open(fresh, source);
+      } else {
+        fresh = interrupt;
+        opened = await replacement;
+      }
+      expect([retiringFailure, retiredBytes]).toEqual(
+        action === "unsubscribe" ? ["BUSY", 0] : [undefined, undefined],
+      );
+      expect(opened.result.recoveryMode).toBe("baseline");
+      expect(admissions).toEqual([false, true]);
+      recovery.markerEnqueued(fresh, opened.result);
+      await tick();
+      expect(emitted.map((event) => event.terminal.type)).toEqual([
+        "baseline-start",
+        "baseline-chunk",
+        "baseline-end",
+      ]);
+    } finally {
+      recovery.shutdown();
+      replay.clear();
+      engine.dispose();
+    }
+    expect(account.snapshot().workerBytes).toBe(0);
+    expect(leases.every((lease) => lease.releases === 1)).toBe(true);
+  },
+);

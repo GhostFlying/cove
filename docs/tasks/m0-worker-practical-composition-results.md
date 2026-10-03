@@ -80,3 +80,58 @@ All source/index/affected compiled-output writes stop at the frozen author hando
 Root can allocate independent current QA against the exact final subject;
 outside-lease QA/four W1 migrations/gate/shared handoff/server/client/protocol/
 configuration/lock/exports/GitHub paths were not edited by this author.
+
+## R04 preparing-attempt correction results
+
+Source correction owner GPT-6.1 Sol/high, same checkout/branch. Base:
+12433ab8bfff8c12c6b2b45077f51df5754b9051/tree1a71cdf146dcaef4f8355c99e648be203d91445f.
+This append-only correction and its evidence supersede the earlier author freeze;
+prior six atoms and independent QA custody remain unchanged. Independent QA38
+and its three W1 migrations were read-only and were not executed by this author.
+
+Legal preparing same-ref recover now fences the old attempt and obtains a fresh
+token through existing scheduler/budget admission. A private capture-attempt
+owns its detached reservation until both source work and opener references have
+settled. Reentry refusal releases only the returned old lease; allocated pending
+old bytes remain charged through replacement, deadline and shutdown. Current
+validated capture transfers its lease to route baseline ownership. Old throw,
+undefined/deadline and completion check retirement/token/state before failure;
+frame reservation reentry checks identity before constructing frame views.
+Retiring BUSY, duplicate subscribe, installed-ref recover, range/counter/capacity
+and tombstone checks remain. No public wire/port/export/cap/profile/default change.
+
+Eight new author runtime cases (five literal/parameterized declarations) cover:
+callback replacement followed by old completion/throw with no old construction;
+allocated old capture retention until settlement and shutdown; old deadline plus
+late completion/throw with live replacement preserved; uncancelled real-engine
+capture/current installed recover/duplicate subscribe/range/retiring controls;
+actual-engine callback unsubscribe and recover with refused old allocation and
+legal fresh admission. Once-only reservation releases and bounded ledger-zero
+cleanup are explicitly asserted; these are controlled fixture resource claims.
+
+The first targeted pre-fix run on the unchanged compiled baseline returned
+EXIT1: three new actual failures, three older cases intentionally excluded by
+the name filter. Its raw JSON/log are retained; it is not a full suite pass.
+After source changes, worker/engine tsc build EXIT0 and the original13 affected
+pure files passed207/207. Adding the actual-engine recover counterpart produced
+208/208. Scoped lint then found three conditional-expect test violations EXIT1.
+These were corrected by recording branch observations and asserting outcomes
+unconditionally. The first textual repair asserted before writing due formatted
+line wrapping; its shell continued and repeated unchanged lint once. This
+orchestration mistake is preserved separately and provides no new evidence.
+Direct patch plus sequential fail-fast scoped lint returned EXIT0; the final
+changed-test13-file run passed208/208, zero failures/skips/pending/todo. No
+source change followed the successful build. No blind product-failure retry
+was performed. Exact argv/cwd/PATH/version/OS/arch/exits/timestamps and all
+original failure records are retained in commands and raw reports.
+
+Node26.10.0/pnpm12.6.0/exec runtime remained pinned; existing user identity/hooks
+were retained. Results documentation and exact final discovery/format records,
+current source/compiled/declaration bindings, raw/minimal whitespace-insensitive
+diff and clean corrective atom H/T are sealed in
+/Users/luchengxuan/WORKSPACE/cove-evidence/m0-w2-practical-r04-source-correction-r1.
+
+AUTHOR_FROZEN / RELEASED_STOP releases all source/index/Git/affected PURE outputs
+after the corrective atom. Independent QA38 execution and normal later review,
+registration/full/CI/integration gates remain separate. Historical28/43 NOT_RUN,
+EPERM UNKNOWN and R5R6/browser/devbox holds remain; full W2/P2/M0 is not accepted.

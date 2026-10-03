@@ -1,4 +1,5 @@
 import { expect, test } from "vitest";
+import { createTerminalModel } from "@cove/terminal-engine";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { PreviewService } from "../dist/src/preview-service.js";
 import { RecoverySubscriptions } from "../dist/src/recovery-subscription.js";
@@ -145,3 +146,137 @@ test("W2 preview uses the injected clock for capture and partial-delivery expiry
   expect(clock.pending).toBe(0);
   expect(account.snapshot().workerBytes).toBe(0);
 });
+
+test.each(["completion", "throw"])(
+  "W2 old preparing deadline and late %s preserve replacement and allocated capture debt",
+  async (settlement) => {
+    const clock = manualClock();
+    const budgets = { ...M0_LIMITS, recoveryDeadlineMs: 20 };
+    const account = new WorkerRetainedBytes(budgets.workerBytes, budgets.reservedControlBytes);
+    const engine = createTerminalModel({
+      run,
+      geometry: { cols: 12, rows: 4 },
+      onAutomaticOutput() {},
+    });
+    const emitted = [];
+    const leases = [];
+    const reserve = (bytes, owner) => {
+      const lease = account.reserve("worker", bytes);
+      if (!lease) return undefined;
+      const record = { bytes, owner, held: bytes, releases: 0 };
+      leases.push(record);
+      return {
+        release() {
+          expect(++record.releases).toBe(1);
+          record.held = 0;
+          lease.release();
+        },
+        shrinkTo(next) {
+          record.held = next;
+          lease.shrinkTo(next);
+        },
+      };
+    };
+    const replay = new ReplayWindow(4096, 4, reserve);
+    const recovery = new RecoverySubscriptions(
+      worker,
+      budgets,
+      reserve,
+      {
+        enqueue(event, payload, token) {
+          emitted.push({ event, token });
+          return 16 + new TextEncoder().encode(JSON.stringify(event)).byteLength + payload.length;
+        },
+        cancelUnsent() {},
+      },
+      clock,
+    );
+    let settleOld;
+    let captures = 0;
+    const source = {
+      run,
+      replay,
+      async captureBaseline(reserveDetached) {
+        const attempt = ++captures;
+        const captured = await engine.captureBaseline(reserveDetached);
+        if (attempt === 1) {
+          await new Promise((resolve) => {
+            settleOld = resolve;
+          });
+          if (settlement === "throw") throw new Error("old capture failed after its deadline");
+        }
+        return captured;
+      },
+    };
+    try {
+      const first = recovery.open(
+        { type: "subscribe", worker, run, requestId: "deadline-old", subscription: ref, atSeq: 0 },
+        source,
+      );
+      await tick();
+      const oldLease = leases.find((lease) => lease.owner === "recovery-baseline");
+      expect(oldLease.held).toBeGreaterThan(4096);
+      clock.advance(5);
+      const recover = {
+        type: "recover",
+        worker,
+        run,
+        requestId: "deadline-new",
+        subscription: ref,
+        appliedSeq: 0,
+      };
+      const opened = await recovery.open(recover, source);
+      expect(opened.result.recoveryMode).toBe("baseline");
+      recovery.markerEnqueued(recover, opened.result);
+      await tick();
+      const token = emitted[0].token;
+      const count = emitted.length;
+      clock.advance(15);
+      expect((await first).failure).toBe("RESYNC_REQUIRED");
+      expect(oldLease.releases).toBe(0);
+      const baselineId = emitted[0].event.terminal.descriptor.baselineId;
+      expect(
+        recovery.command({
+          type: "baseline-progress",
+          worker,
+          run,
+          requestId: "deadline-progress",
+          subscription: ref,
+          baselineId,
+          lastParsedOrdinal: 0,
+        }).result.outcome,
+      ).toBe("accepted");
+      expect(
+        recovery.command({
+          type: "applied-ack",
+          worker,
+          run,
+          requestId: "deadline-ack",
+          subscription: ref,
+          appliedSeq: 0,
+        }).result.outcome,
+      ).toBe("accepted");
+      expect(recovery.installed(ref)).toBe(true);
+      expect(account.snapshot().workerBytes).toBe(16640 + oldLease.held);
+      settleOld();
+      await tick();
+      expect(oldLease.releases).toBe(1);
+      expect(recovery.installed(ref)).toBe(true);
+      expect(emitted).toHaveLength(count);
+      expect(emitted.every((item) => item.token === token)).toBe(true);
+      recovery.onFact(run, { event: { type: "output", run, seq: 1 }, bytes: Uint8Array.of(66) });
+      await tick();
+      expect(emitted.at(-1).event.terminal.seq).toBe(1);
+      expect(clock.pending).toBe(0);
+    } finally {
+      settleOld?.();
+      await tick();
+      recovery.shutdown();
+      replay.clear();
+      engine.dispose();
+    }
+    expect(account.snapshot().workerBytes).toBe(0);
+    expect(leases.every((lease) => lease.releases === 1)).toBe(true);
+    expect(clock.pending).toBe(0);
+  },
+);

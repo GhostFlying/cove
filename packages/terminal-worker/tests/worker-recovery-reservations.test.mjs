@@ -221,3 +221,210 @@ test("W2 preview transfer tag follows the existing lease lifetime", async () => 
   observed.check();
   expect(account.snapshot().workerBytes).toBe(0);
 });
+
+function captureReservations(account, onReserve = () => {}) {
+  const receipts = [];
+  return {
+    receipts,
+    reserve(bytes, owner) {
+      const lease = account.reserve("worker", bytes);
+      if (!lease) return undefined;
+      const receipt = { bytes, owner, held: bytes, releases: 0 };
+      receipts.push(receipt);
+      const owned = {
+        release() {
+          receipt.releases++;
+          expect(receipt.releases).toBe(1);
+          receipt.held = 0;
+          lease.release();
+        },
+        shrinkTo(next) {
+          lease.shrinkTo(next);
+          receipt.held = next;
+        },
+      };
+      onReserve(receipt);
+      return owned;
+    },
+    check() {
+      expect(receipts.reduce((sum, receipt) => sum + receipt.held, 0)).toBe(
+        account.snapshot().workerBytes,
+      );
+    },
+  };
+}
+
+test.each(["completion", "throw"])(
+  "W2 preparing recover at detached reserve fences old %s without allocating or failing replacement",
+  async (settlement) => {
+    const account = new WorkerRetainedBytes(M0_LIMITS.workerBytes, M0_LIMITS.reservedControlBytes);
+    const emitted = [];
+    const canceled = [];
+    let recovery;
+    let replacement;
+    let source;
+    let captures = 0;
+    let oldConstructed = false;
+    const recover = {
+      type: "recover",
+      worker,
+      run,
+      requestId: "reserve-replacement",
+      subscription: ref,
+      appliedSeq: 0,
+    };
+    const observed = captureReservations(account, (receipt) => {
+      if (receipt.owner === "recovery-baseline" && captures === 1)
+        replacement = recovery.open(recover, source);
+    });
+    const replay = new ReplayWindow(4096, 4, observed.reserve);
+    recovery = new RecoverySubscriptions(worker, M0_LIMITS, observed.reserve, {
+      enqueue(event, payload, token) {
+        emitted.push({ event, payload: payload.slice(), token });
+        return 16 + new TextEncoder().encode(JSON.stringify(event)).byteLength + payload.length;
+      },
+      cancelUnsent: (token) => canceled.push(token),
+    });
+    source = {
+      run,
+      replay,
+      async captureBaseline(reserveDetached) {
+        const attempt = ++captures;
+        const accepted = reserveDetached(attempt === 1 ? 8192 : 4097);
+        if (attempt === 1) {
+          oldConstructed = accepted;
+          if (settlement === "throw") throw new Error("old capture rejected after replacement");
+          if (!accepted) return { status: "unavailable", reason: "old callback refused" };
+        }
+        expect(accepted).toBe(true);
+        return baseline();
+      },
+    };
+    try {
+      const subscribe = {
+        type: "subscribe",
+        worker,
+        run,
+        requestId: "old-reserve",
+        subscription: ref,
+        atSeq: 0,
+      };
+      expect((await recovery.open(subscribe, source)).failure).toBe("RESYNC_REQUIRED");
+      const opened = await replacement;
+      expect(opened.result).toMatchObject({ commandType: "recover", recoveryMode: "baseline" });
+      expect(oldConstructed).toBe(false);
+      expect(captures).toBe(2);
+      const leases = observed.receipts.filter((receipt) => receipt.owner === "recovery-baseline");
+      expect(leases).toMatchObject([
+        { held: 0, releases: 1 },
+        { held: 4097, releases: 0 },
+      ]);
+      observed.check();
+      recovery.markerEnqueued(subscribe, { outcome: "accepted" });
+      await tick();
+      expect(emitted).toEqual([]);
+      recovery.markerEnqueued(recover, opened.result);
+      await tick();
+      expect(emitted.map(({ event }) => event.terminal.type)).toEqual([
+        "baseline-start",
+        "baseline-chunk",
+        "baseline-end",
+      ]);
+      expect(new Set(emitted.map(({ token }) => token)).size).toBe(1);
+      expect(canceled).toContain(1);
+      const baselineId = emitted[0].event.terminal.descriptor.baselineId;
+      expect(
+        recovery.command({
+          type: "baseline-progress",
+          worker,
+          run,
+          requestId: "new-progress",
+          subscription: ref,
+          baselineId,
+          lastParsedOrdinal: 0,
+        }).result.outcome,
+      ).toBe("accepted");
+      expect(
+        recovery.command({
+          type: "applied-ack",
+          worker,
+          run,
+          requestId: "new-ack",
+          subscription: ref,
+          appliedSeq: 0,
+        }).result.outcome,
+      ).toBe("accepted");
+      expect(recovery.installed(ref)).toBe(true);
+      observed.check();
+    } finally {
+      recovery.shutdown();
+      replay.clear();
+    }
+    observed.check();
+    expect(account.snapshot().workerBytes).toBe(0);
+    expect(observed.receipts.every((receipt) => receipt.releases === 1)).toBe(true);
+  },
+);
+
+test("W2 preparing replacement retains already allocated old capture until actual settlement", async () => {
+  const account = new WorkerRetainedBytes(M0_LIMITS.workerBytes, M0_LIMITS.reservedControlBytes);
+  const observed = captureReservations(account);
+  const replay = new ReplayWindow(4096, 4, observed.reserve);
+  const emitted = [];
+  const recovery = new RecoverySubscriptions(worker, M0_LIMITS, observed.reserve, {
+    enqueue(event) {
+      emitted.push(event);
+      return 512;
+    },
+    cancelUnsent() {},
+  });
+  let settleOld;
+  let captures = 0;
+  const oldBytes = baseline();
+  const source = {
+    run,
+    replay,
+    captureBaseline(reserveDetached) {
+      const attempt = ++captures;
+      expect(reserveDetached(attempt === 1 ? 8192 : 4097)).toBe(true);
+      return attempt === 1
+        ? new Promise((resolve) => {
+            settleOld = resolve;
+          })
+        : Promise.resolve(baseline());
+    },
+  };
+  try {
+    const first = recovery.open(
+      { type: "subscribe", worker, run, requestId: "held-old", subscription: ref, atSeq: 0 },
+      source,
+    );
+    await tick();
+    const opened = await recovery.open(
+      { type: "recover", worker, run, requestId: "held-new", subscription: ref, appliedSeq: 0 },
+      source,
+    );
+    expect(opened.result.recoveryMode).toBe("baseline");
+    expect(
+      observed.receipts.filter((receipt) => receipt.owner === "recovery-baseline"),
+    ).toMatchObject([
+      { held: 8192, releases: 0 },
+      { held: 4097, releases: 0 },
+    ]);
+    recovery.shutdown();
+    observed.check();
+    expect(account.snapshot().workerBytes).toBe(8192);
+    settleOld(oldBytes);
+    expect((await first).failure).toBe("RESYNC_REQUIRED");
+    await tick();
+    expect(emitted).toEqual([]);
+  } finally {
+    settleOld?.(oldBytes);
+    await tick();
+    recovery.shutdown();
+    replay.clear();
+  }
+  observed.check();
+  expect(account.snapshot().workerBytes).toBe(0);
+  expect(observed.receipts.every((receipt) => receipt.releases === 1)).toBe(true);
+});
