@@ -543,6 +543,7 @@ test("real execution still rejects missing spawn and empty input directly", asyn
 async function ready(harness, greeting = hello) {
   harness.input.write(encode(greeting));
   await tick();
+  expect(harness.pipe.snapshot()).toMatchObject({ parkedRequests: 0, outstandingRequests: 0 });
   expect(harness.frames()[0]).toMatchObject({
     type: "ready",
     worker,
@@ -851,7 +852,11 @@ test("reserved status and stop execute while the one ordinary slot is held", asy
   expect(replies.find((reply) => reply.requestId === "overflow")?.error.kind).toBe("BUSY");
   expect(replies.find((reply) => reply.requestId === "status")?.runStatus).toEqual(status);
   expect(replies.find((reply) => reply.requestId === "stop")?.outcome).toBe("accepted");
-  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", pendingCommands: 1 });
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    pendingCommands: 1,
+    parkedRequests: 0,
+  });
   settleOrdinary({
     type: "error",
     worker,
@@ -908,7 +913,7 @@ test("W2 O recover leaves X available and parks one next X until the prior write
   h.input.write(encode(recover));
   await tick();
   expect(h.calls.map(({ command }) => command.requestId)).toEqual(["recover-o"]);
-  expect(h.pipe.snapshot().outstandingRequests).toBe(1);
+  expect(h.pipe.snapshot()).toMatchObject({ outstandingRequests: 1, parkedRequests: 0 });
   h.input.write(encode(ack));
   await tick();
   expect(h.calls.map(({ command }) => command.requestId)).toEqual(["recover-o", "ack-x"]);
@@ -920,7 +925,11 @@ test("W2 O recover leaves X available and parks one next X until the prior write
   h.input.write(encode(progress));
   await tick();
   expect(h.calls).toHaveLength(2);
-  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 2 });
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    outstandingRequests: 2,
+    parkedRequests: 1,
+  });
   callbacks.shift()();
   await tick();
   expect(h.calls.map(({ command }) => command.requestId)).toEqual([
@@ -931,7 +940,11 @@ test("W2 O recover leaves X available and parks one next X until the prior write
   expect(writes).toHaveLength(4);
   callbacks.shift()();
   await tick();
-  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 0 });
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    outstandingRequests: 0,
+    parkedRequests: 0,
+  });
   await h.pipe.shutdown("test-complete");
 });
 
@@ -1646,6 +1659,7 @@ test("parked route request ID rejects an ordinary collision and preserves its fi
       state: "ready",
       pendingCommands: 1,
       outstandingRequests: 1,
+      parkedRequests: 0,
       blocked: false,
     });
     h.input.write(encode(parked));
@@ -1684,12 +1698,49 @@ test("parked route request ID rejects an ordinary collision and preserves its fi
     ).toEqual([parked.type]);
     expect(
       trace.find(({ label }) => label === "first-id-parked-with-flowing-ingress").snapshot,
-    ).toMatchObject({ state: "ready", outstandingRequests: 2, pendingCommands: 1, blocked: false });
+    ).toMatchObject({
+      state: "ready",
+      outstandingRequests: 2,
+      parkedRequests: 1,
+      pendingCommands: 1,
+      blocked: false,
+    });
     expect(
       trace.find(
         ({ label }) => label === "ordinary-same-id-actually-processed-before-route-release",
       ).snapshot,
-    ).toMatchObject({ state: "ready", outstandingRequests: 2, pendingCommands: 1, blocked: false });
+    ).toMatchObject({
+      state: "ready",
+      outstandingRequests: 2,
+      parkedRequests: 1,
+      pendingCommands: 1,
+      blocked: false,
+    });
+    for (const label of [
+      "first-id-parked-with-flowing-ingress",
+      "ordinary-same-id-actually-processed-before-route-release",
+    ]) {
+      const snapshot = trace.find((row) => row.label === label).snapshot;
+      expect(snapshot.outstandingRequests - snapshot.parkedRequests).toBe(1);
+    }
+    expect(
+      trace.find(({ label }) => label === "blocker-response-held-by-real-writable-callback")
+        .snapshot,
+    ).toMatchObject({
+      parkedRequests: 1,
+      outstandingRequests: 2,
+      responseItems: 2,
+      transportBytes: 713,
+    });
+    expect(
+      trace.find(({ label }) => label === "parked-admission-and-physical-original-response-settled")
+        .snapshot,
+    ).toMatchObject({
+      parkedRequests: 0,
+      outstandingRequests: 0,
+      responseItems: 0,
+      transportBytes: 0,
+    });
     expect(replies.filter((reply) => reply.requestId === parked.requestId)).toEqual([
       {
         type: "error",
@@ -1720,9 +1771,11 @@ test("parked route request ID rejects an ordinary collision and preserves its fi
         ),
     );
     expect(h.pipe.snapshot().peakAccountedBytes).toBeLessThanOrEqual(legalPeak);
+    expect(h.pipe.snapshot().peakAccountedBytes).toBe(12_336);
     expect(h.pipe.snapshot()).toMatchObject({
       state: "ready",
       outstandingRequests: 0,
+      parkedRequests: 0,
       pendingCommands: 0,
       responseItems: 0,
       queuedBytes: 0,
@@ -1748,6 +1801,7 @@ test("parked route request ID rejects an ordinary collision and preserves its fi
   expect(h.pipe.snapshot()).toMatchObject({
     state: "closed",
     outstandingRequests: 0,
+    parkedRequests: 0,
     responseItems: 0,
     queuedBytes: 0,
     transportBytes: 0,

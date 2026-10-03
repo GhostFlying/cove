@@ -49,6 +49,7 @@ export interface WorkerPipeSnapshot {
   readonly state: "awaiting-hello" | "ready" | "closing" | "closed";
   readonly pendingCommands: number;
   readonly outstandingRequests: number;
+  readonly parkedRequests: number;
   readonly responseItems: number;
   readonly ingressBytes: number;
   readonly peakDecodeSliceBytes: number;
@@ -165,6 +166,8 @@ class WorkerPipeCore {
       pendingCommands: [...this.#pending.values()].filter((record) => record.phase === "executing")
         .length,
       outstandingRequests: this.#pending.size,
+      parkedRequests: [...this.#pending.values()].filter((record) => record.phase === "parked")
+        .length,
       responseItems: this.#unsettledFrames.size,
       // The backing buffer stays live until the complete chunk is released.
       ingressBytes:
