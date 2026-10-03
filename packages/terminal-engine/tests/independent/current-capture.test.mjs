@@ -18,14 +18,16 @@ function engineAccount(limit = 262144) {
   let serial = 0;
   const live = new Map();
   const events = [];
+  const event = (value) =>
+    events.push({ ...value, account: backing.snapshot(), owners: [...live] });
   const reserve = (bytes) => {
-    events.push({ phase: "request", bytes, used });
+    event({ phase: "request", bytes, used });
     const actual = backing.reserve("engine", bytes);
     if (!actual) return;
     const id = ++serial;
     used += bytes;
     live.set(id, bytes);
-    events.push({ phase: "acquire", id, bytes, used });
+    event({ phase: "acquire", id, bytes, used });
     return {
       release() {
         assert(live.has(id));
@@ -33,7 +35,7 @@ function engineAccount(limit = 262144) {
         live.delete(id);
         actual.release();
         assert.equal(backing.snapshot().engineBytes, used);
-        events.push({ phase: "release", id, bytes, used });
+        event({ phase: "release", id, bytes, used });
       },
     };
   };
@@ -44,6 +46,7 @@ function engineAccount(limit = 262144) {
     available: () => backing.availableOrdinaryBytes(),
     used: () => backing.snapshot().engineBytes,
     peak: () => backing.snapshot().peakAccountedBytes,
+    snapshot: () => backing.snapshot(),
   };
 }
 function model(account, reserve = account.reserve) {
@@ -78,48 +81,476 @@ describe("W2 current engine capture", () => {
   it("W2C-E01 detached baseline reserve precedes copies and refusal preserves authority", async () => {
     const account = engineAccount();
     const engine = model(account);
+    const callerOwners = [];
+    const terminals = [];
+    const fixedInput = {
+      run,
+      seq: 1,
+      rawHex: "42415345",
+      bytes: 4,
+      sha256: "cbf36a964ba8c0894fcc9ec491b4d1dd94d221a7dc88308e9c6b892445a8574b",
+    };
+    const authority = {
+      receivedSeq: 1,
+      parsedSeq: 1,
+      geometry,
+      appearance: DEFAULT_APPEARANCE,
+      appearanceEpoch: 1,
+      supportedQueryIds: [
+        "dsr-status",
+        "cpr",
+        "dec-cpr",
+        "da-primary",
+        "da-secondary",
+        "mode-report",
+        "color-fg",
+        "color-bg",
+        "color-palette",
+      ],
+      knownPaletteIndices: [1],
+      activeBuffer: "normal",
+      focusReportMode: false,
+      recovery: { state: "ready" },
+    };
+    const resources = {
+      queuedBytes: 0,
+      pendingOperations: 0,
+      checkpointBytes: 322,
+      tailBytes: 0,
+      tailAllocatedBytes: 0,
+      peakAccountedBytes: 67045,
+    };
+    const staticVT = Buffer.from(
+      "1b5d31303b7267623a666666662f666666662f666666661b5c1b5d31313b7267623a303030302f303030302f303030301b5c1b5d343b313b7267623a636363632f303030302f303030301b5c1b5b306d4241534520202020202020200d0a0d0a0d0a1b5b3f366c1b5b313b34721b5b33671b5b313b31481b481b5b313b39481b481b5b313b31481b5b306d1b28420f1b371b28421b29420f1b5b313b35481b5b306d1b5b3f3437681b5b481b5b3f366c1b5b313b34721b5b33671b5b313b31481b481b5b313b39481b481b5b313b31481b5b306d1b28420f1b371b28421b29420f1b5b313b31481b5b306d1b5b3f34376c1b5b3f366c1b5b313b34721b5b33671b5b313b31481b481b5b313b39481b481b5b313b31481b5b306d1b28420f1b371b28421b29420f1b5b313b35481b5b306d1b5b313b34481b5b31581b5b313b344845",
+      "hex",
+    );
+    let disposed = false;
+    let before;
+    let lastLiveState;
+    let receiptOrdinal = 0;
+    const capture = (phase, value = {}, eventStart = 0) => {
+      if (!disposed) lastLiveState = engine.currentState();
+      const receipt = structuredClone({
+        ordinal: ++receiptOrdinal,
+        phase,
+        fixedInput,
+        ...value,
+        disposedObserved: disposed,
+        lastLiveState,
+        currentState: !disposed ? engine.currentState() : undefined,
+        account: account.snapshot(),
+        ordinaryAvailable: account.available(),
+        owners: [...account.live],
+        callerOwners: callerOwners.map((owner) => ({
+          id: owner.id,
+          bytes: owner.bytes,
+          released: owner.released,
+        })),
+        eventStart,
+        eventEnd: account.events.length,
+        events: account.events.slice(eventStart),
+      });
+      record("W2C-E01-complete-boundary", receipt);
+      return receipt;
+    };
+    const assertAuthority = (state) => {
+      assert.deepEqual(Object.keys(state).sort(), [...Object.keys(authority), "resources"].sort());
+      for (const [key, expected] of Object.entries(authority)) {
+        assert.deepEqual(state[key], expected, key);
+        assert.deepEqual(state[key], before[key], key);
+      }
+    };
+    const assertAccount = (used, peak = 236853) => {
+      assert.deepEqual(account.snapshot(), {
+        accountedBytes: used,
+        peakAccountedBytes: peak,
+        reservedControlBytes: 0,
+        workerBytes: 0,
+        engineBytes: used,
+        nativeInputBytes: 0,
+        nativeOutputBytes: 0,
+      });
+      assert.equal(account.available(), 262144 - used);
+      assert.equal(
+        [...account.live.values()].reduce((sum, bytes) => sum + bytes, 0),
+        used,
+      );
+      for (const event of account.events) {
+        assert.equal(event.account.engineBytes, event.used);
+        assert.equal(event.account.accountedBytes, event.used);
+        assert.equal(
+          event.owners.reduce((sum, [, bytes]) => sum + bytes, 0),
+          event.used,
+        );
+      }
+    };
+    const callerReserve = (bytes) => {
+      const lease = account.reserve(bytes);
+      const acquired = account.events.at(-1);
+      const owner = {
+        id: acquired?.phase === "acquire" ? acquired.id : undefined,
+        bytes,
+        lease,
+        released: false,
+      };
+      if (lease) callerOwners.push(owner);
+      return owner;
+    };
+    const releaseCaller = (owner) => {
+      capture("caller-release-before", { id: owner.id });
+      owner.lease.release();
+      owner.released = true;
+      capture("caller-release-after", { id: owner.id });
+    };
+    const terminalContent = (terminal) => {
+      const buffer = (kind) => {
+        const actual = terminal.buffer[kind];
+        return {
+          x: actual.cursorX,
+          y: actual.cursorY,
+          lines: Array.from({ length: actual.length }, (_, row) => {
+            const line = actual.getLine(row);
+            return {
+              text: line.translateToString(false),
+              cells: Array.from({ length: 12 }, (_, column) => {
+                const cell = line.getCell(column);
+                return {
+                  chars: cell.getChars() || " ",
+                  width: cell.getWidth(),
+                  fgMode: cell.getFgColorMode(),
+                  bgMode: cell.getBgColorMode(),
+                  fg: cell.getFgColor(),
+                  bg: cell.getBgColor(),
+                  default: cell.isAttributeDefault(),
+                  styles: [
+                    cell.isBold(),
+                    cell.isItalic(),
+                    cell.isDim(),
+                    cell.isUnderline(),
+                    cell.isBlink(),
+                    cell.isInverse(),
+                    cell.isInvisible(),
+                    cell.isStrikethrough(),
+                    cell.isOverline(),
+                  ],
+                };
+              }),
+            };
+          }),
+        };
+      };
+      return {
+        active: terminal.buffer.active === terminal.buffer.normal ? "normal" : "alternate",
+        normal: buffer("normal"),
+        alternate: buffer("alternate"),
+        modes: { ...terminal.modes },
+      };
+    };
+    const assertContent = async (baseline, label) => {
+      const reference = new Terminal({ ...geometry, scrollback: 10, allowProposedApi: true });
+      terminals.push(reference);
+      const restored = new Terminal({ ...geometry, scrollback: 10, allowProposedApi: true });
+      terminals.push(restored);
+      await write(reference, utf8("BASE"));
+      await write(restored, baseline.vt);
+      if (baseline.tail.length) await write(restored, baseline.tail);
+      const expected = terminalContent(reference);
+      const actual = terminalContent(restored);
+      capture("independent-content-before-assertions", { label, actual, reference: expected });
+      const rows = ["BASE        ", "            ", "            ", "            "];
+      const modes = {
+        applicationCursorKeysMode: false,
+        applicationKeypadMode: false,
+        bracketedPasteMode: false,
+        insertMode: false,
+        mouseTrackingMode: "none",
+        originMode: false,
+        reverseWraparoundMode: false,
+        sendFocusMode: false,
+        synchronizedOutputMode: false,
+        wraparoundMode: true,
+      };
+      for (const content of [expected, actual]) {
+        assert.equal(content.active, "normal");
+        assert.equal(content.normal.x, 4);
+        assert.equal(content.normal.y, 0);
+        assert.deepEqual(
+          content.normal.lines.map((line) => line.text),
+          rows,
+        );
+        assert.deepEqual(content.modes, modes);
+        for (const line of [...content.normal.lines, ...content.alternate.lines]) {
+          for (const cell of line.cells) {
+            assert.equal(cell.width, 1);
+            assert.equal(cell.default, true);
+            assert.deepEqual([cell.fgMode, cell.bgMode, cell.fg, cell.bg], [0, 0, 0, 0]);
+            assert.deepEqual(cell.styles, [0, 0, 0, 0, 0, 0, 0, 0, 0]);
+          }
+        }
+        assert([0, 4].includes(content.alternate.lines.length));
+        assert(content.alternate.lines.every((line) => line.text === "            "));
+      }
+      assert.deepEqual(actual.normal, expected.normal);
+      // An unused alternate buffer may be absent or four default empty rows.
+      if (actual.alternate.lines.length && expected.alternate.lines.length)
+        assert.deepEqual(actual.alternate.lines, expected.alternate.lines);
+      assert.deepEqual(actual.modes, expected.modes);
+      assert.deepEqual(baseline, {
+        profile: "pragmatic-logical-grid-v1",
+        encoding: "vt-checkpoint-tail-v1",
+        checkpointSeq: 1,
+        atSeq: 1,
+        captureGeometry: geometry,
+        currentGeometry: geometry,
+        coverage: {
+          normal: {
+            historyLines: 0,
+            includedHistoryLines: 0,
+            trimmedBefore: false,
+            resizeContext: "requires-baseline",
+          },
+          alternate: { included: true, resizeContext: "requires-baseline" },
+        },
+        appearance: DEFAULT_APPEARANCE,
+        vt: baseline.vt,
+        tail: baseline.tail,
+      });
+      assert.equal(baseline.tail.length, 0);
+      assert.equal(baseline.vt.length, 322);
+      assert.equal(
+        createHash("sha256").update(baseline.vt).digest("hex"),
+        "d2231cc0852784da9542da0e7ad9176ba6488cfe5ef3d87c75fb9dc30d2c1d92",
+      );
+      assert.deepEqual(Buffer.from(baseline.vt), staticVT);
+    };
+    let primaryError;
     try {
-      assert((await apply(engine, 1, utf8("BASE"))).ok);
-      const before = engine.currentState();
-      let reserved;
+      capture("before-original-apply");
+      const applied = await apply(engine, 1, utf8("BASE"));
+      const completed = capture("completed-apply-before-refusal", { applied });
+      assert(applied.ok);
+      before = completed.currentState;
+      assertAuthority(before);
+      assert.deepEqual(before.resources, {
+        queuedBytes: 0,
+        pendingOperations: 0,
+        checkpointBytes: 289,
+        tailBytes: 4,
+        tailAllocatedBytes: 65536,
+        peakAccountedBytes: 1080,
+      });
+      assertAccount(66081, 227369);
+      assert.deepEqual(
+        [...account.live.values()].sort((a, b) => a - b),
+        [545, 65536],
+      );
+      const oldCheckpoint = [...account.live].find(([, bytes]) => bytes === 545)[0];
+      const oldTail = [...account.live].find(([, bytes]) => bytes === 65536)[0];
+      const refusalStart = account.events.length;
+      let refusalCalls = 0;
+      let refusalCallback;
       const denied = await engine.captureBaseline((bytes) => {
-        reserved = bytes;
+        refusalCalls++;
+        refusalCallback = capture(
+          "inside-refusal-callback-before-return",
+          { bytes, returned: false },
+          refusalStart,
+        );
         return false;
       });
-      record("E01-denied-capture", {
-        before,
-        after: engine.currentState(),
-        denied,
-        reserved,
-        events: account.events,
+      capture(
+        "resolved-refusal-before-assertions",
+        { denied, refusalCalls, refusalCallback },
+        refusalStart,
+      );
+      assert.deepEqual(denied, {
+        status: "unavailable",
+        reason: "Detached baseline exceeds worker retention capacity",
       });
-      assert.equal(denied.status, "unavailable");
-      assert(reserved > 4096);
-      assert.deepEqual(engine.currentState(), before);
-      const thrown = await engine.captureBaseline(() => {
-        throw Error("controlled reserve refusal");
+      assert.equal(refusalCalls, 1);
+      assert.equal(refusalCallback.bytes, 4418);
+      assert.equal(refusalCallback.account.engineBytes, 642);
+      assert.equal(refusalCallback.owners.length, 2);
+      assert.deepEqual(
+        refusalCallback.owners.map(([, bytes]) => bytes).sort((a, b) => a - b),
+        [64, 578],
+      );
+      assertAuthority(engine.currentState());
+      assert.deepEqual(engine.currentState().resources, resources);
+      assertAccount(578);
+      const trace = account.events.slice(refusalStart);
+      const acquired = trace.filter((event) => event.phase === "acquire");
+      assert.deepEqual(
+        acquired.map((event) => event.bytes),
+        [64, 16512, 153618, 578],
+      );
+      const [operation, setters, scratch, candidate] = acquired;
+      const index = (phase, id) =>
+        trace.findIndex((event) => event.phase === phase && event.id === id);
+      assert(index("acquire", candidate.id) < index("release", oldCheckpoint));
+      assert(index("release", scratch.id) < index("release", oldCheckpoint));
+      assert(index("release", oldCheckpoint) < index("release", oldTail));
+      assert(index("release", oldTail) < index("release", setters.id));
+      assert(index("release", setters.id) < index("release", operation.id));
+      assert.deepEqual([...account.live], [[candidate.id, 578]]);
+      const throwStart = account.events.length;
+      const controlledError = Error("controlled reserve refusal");
+      let throwCalls = 0;
+      const thrown = await engine.captureBaseline((bytes) => {
+        throwCalls++;
+        capture(
+          "inside-throwing-callback",
+          { bytes, throwing: controlledError.message },
+          throwStart,
+        );
+        throw controlledError;
       });
-      assert.equal(thrown.status, "unavailable");
-      let lease;
-      let observed;
+      capture("throw-result-before-assertions", { thrown, throwCalls }, throwStart);
+      assert.deepEqual(thrown, {
+        status: "unavailable",
+        reason: "Detached baseline reservation failed",
+      });
+      assert.equal(throwCalls, 1);
+      assertAuthority(engine.currentState());
+      assert.deepEqual(engine.currentState().resources, resources);
+      assertAccount(578);
+      assert.deepEqual(
+        account.events
+          .slice(throwStart)
+          .filter((event) => event.phase === "acquire")
+          .map((event) => event.bytes),
+        [64],
+      );
+      const validStart = account.events.length;
+      let firstOwner;
+      let firstInside;
       const captured = await engine.captureBaseline((bytes) => {
-        lease = account.reserve(bytes);
-        assert(lease);
-        observed = engine.currentState();
-        return true;
+        firstOwner = callerReserve(bytes);
+        firstInside = capture(
+          "first-real-caller-reserve-before-return",
+          { bytes, returned: Boolean(firstOwner.lease) },
+          validStart,
+        );
+        return Boolean(firstOwner.lease);
       });
+      capture("first-ready-before-assertions", { captured, firstInside }, validStart);
       assert.equal(captured.status, "ready");
-      assert.equal(observed.parsedSeq, 1);
-      assert.equal(reserved, captured.baseline.vt.length + captured.baseline.tail.length + 4096);
+      assert.equal(firstInside.bytes, 4418);
+      assert.equal(firstInside.account.engineBytes, 5060);
+      assert.equal(firstInside.currentState.parsedSeq, 1);
+      assertAccount(4996);
+      await assertContent(captured.baseline, "first-copy");
+      capture("before-detached-first-copy-mutation", { baseline: captured.baseline });
       captured.baseline.vt.fill(88);
-      const again = await engine.captureBaseline();
+      capture("after-detached-first-copy-mutation", { baseline: captured.baseline });
+      const secondStart = account.events.length;
+      let secondOwner;
+      let secondInside;
+      const again = await engine.captureBaseline((bytes) => {
+        secondOwner = callerReserve(bytes);
+        secondInside = capture(
+          "second-real-caller-reserve-before-return",
+          { bytes, returned: Boolean(secondOwner.lease) },
+          secondStart,
+        );
+        return Boolean(secondOwner.lease);
+      });
+      capture(
+        "second-ready-before-assertions",
+        { again, secondInside, mutatedFirst: captured.baseline },
+        secondStart,
+      );
       assert.equal(again.status, "ready");
+      assert.equal(secondInside.bytes, 4418);
+      assert.equal(secondInside.account.engineBytes, 9478);
+      assertAccount(9414);
+      await assertContent(again.baseline, "second-copy-after-detached-mutation");
       assert.notDeepEqual(captured.baseline.vt, again.baseline.vt);
-      lease.release();
-      record("W2C-E01", { reserved, before, events: account.events });
-    } finally {
+      assert.notEqual(captured.baseline.vt, again.baseline.vt);
+      assert.notEqual(captured.baseline.appearance, again.baseline.appearance);
+      assertAuthority(engine.currentState());
+      assert.deepEqual(engine.currentState().resources, resources);
+      releaseCaller(firstOwner);
+      releaseCaller(secondOwner);
+      capture("after-both-caller-releases-before-assertions");
+      assertAccount(578);
+      const disposeStart = account.events.length;
+      let disposeOwner;
+      let disposeCalls = 0;
+      const disposedResult = await engine.captureBaseline((bytes) => {
+        disposeCalls++;
+        disposeOwner = callerReserve(bytes);
+        capture(
+          "dispose-in-reserve-before-model-dispose",
+          { bytes, returned: Boolean(disposeOwner.lease) },
+          disposeStart,
+        );
+        engine.dispose();
+        disposed = true;
+        capture(
+          "dispose-in-reserve-after-model-dispose",
+          { bytes, returned: Boolean(disposeOwner.lease) },
+          disposeStart,
+        );
+        return Boolean(disposeOwner.lease);
+      });
+      capture(
+        "dispose-in-reserve-result-before-assertions",
+        { disposedResult, disposeCalls },
+        disposeStart,
+      );
+      assert.deepEqual(disposedResult, { status: "disposed", reason: "Terminal model disposed" });
+      assert.equal(disposeCalls, 1);
+      assert.equal(disposeOwner.bytes, 4418);
+      assertAccount(4418);
+      assert.deepEqual([...account.live], [[disposeOwner.id, 4418]]);
+      releaseCaller(disposeOwner);
+      capture("after-dispose-caller-release-before-assertions");
+      assertAccount(0);
+      const repeatStart = account.events.length;
       engine.dispose();
+      capture("idempotent-dispose-before-assertions", {}, repeatStart);
+      assert.equal(account.events.length, repeatStart);
+    } catch (error) {
+      primaryError = error;
+      capture("first-body-failure", { error: String(error), stack: error.stack });
+      throw error;
+    } finally {
+      capture("finally-before-actual-model-dispose", {
+        primaryError: primaryError && String(primaryError),
+      });
+      engine.dispose();
+      disposed = true;
+      const cleanupErrors = [];
+      for (const owner of callerOwners)
+        if (!owner.released) {
+          try {
+            releaseCaller(owner);
+          } catch (error) {
+            cleanupErrors.push(error);
+          }
+        }
+      for (const terminal of terminals) {
+        try {
+          terminal.dispose();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      capture("finally-after-actual-dispose-before-ownership-assertions", {
+        cleanupErrors: cleanupErrors.map(String),
+      });
+      assert.equal(cleanupErrors.length, 0, "E01 actual cleanup failed; see complete receipt");
       assert.equal(account.used(), 0);
+      assert.equal(account.live.size, 0);
+      assert.equal(account.snapshot().engineBytes, 0);
+      for (const acquired of account.events.filter((event) => event.phase === "acquire")) {
+        assert.equal(
+          account.events.filter((event) => event.phase === "release" && event.id === acquired.id)
+            .length,
+          1,
+        );
+      }
     }
   });
   it("W2C-E02 bounded preview scratch reserves before construction and releases on every exit", async () => {
