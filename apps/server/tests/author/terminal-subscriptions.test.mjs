@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
 const clientManifestUrl = new URL("../../../../packages/client/package.json", import.meta.url);
 const clientManifest = JSON.parse(await readFile(clientManifestUrl, "utf8"));
 const { createClient } = await import(
@@ -617,6 +617,223 @@ describe("private terminal subscription delivery", () => {
       expect(f.runtime.registry.get(run).capacityOwned).toBe(true);
     } finally {
       await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+});
+
+function c02Receipt(f, a, ref, label) {
+  return {
+    label,
+    subscription: ref,
+    route: a.service.snapshot(ref.subscriptionId),
+    serviceClosed: a.service.closed,
+    delivery: a.delivery.snapshot(),
+    account: f.bytes.snapshot(),
+    workerCommands: f.pipeWrites.map((item) => decode(item.data, true).metadata),
+    written: a.writes.map((item) => {
+      const decoded = decode(item.data);
+      return {
+        metadata: decoded.metadata,
+        payload: Array.from(decoded.payload),
+        encoded: Array.from(item.data),
+      };
+    }),
+  };
+}
+
+async function saveC02Trace(name, trace) {
+  const directory = new URL("../../../../.cache/author-terminal-subscriptions/", import.meta.url);
+  await mkdir(directory, { recursive: true });
+  await writeFile(new URL(name + ".json", directory), JSON.stringify(trace, null, 2) + "\n");
+}
+
+describe("C02 event admission ownership", () => {
+  it("preserves public onWrite recover after the old event admission loses its captured owner", async () => {
+    const f = fixture();
+    const a = f.connect();
+    const trace = [];
+    let fired = false;
+    let recovering;
+    let publicRecover;
+    let ref;
+    try {
+      ref = (await f.attach(a)).subscription;
+      a.writes[0].settled();
+      trace.push(c02Receipt(f, a, ref, "attached-marker-settled"));
+      a.onWrite((data) => {
+        const metadata = decode(data).metadata;
+        if (fired || metadata.type !== "run-event" || metadata.event.seq !== 1) return;
+        fired = true;
+        trace.push(c02Receipt(f, a, ref, "old-event-public-write-before-recover"));
+        publicRecover = command("recover", ref, "onwrite-recover", {
+          reason: "gap",
+          resume: { appliedSeq: 0, profile, encoding, geometry },
+        });
+        recovering = a.service.handle(publicRecover);
+        trace.push({ publicRecover, ...c02Receipt(f, a, ref, "public-recover-dispatched") });
+      });
+      f.session.receive(f.output(ref, 1));
+      const oldBacking = a.writes[1];
+      const afterReentry = c02Receipt(f, a, ref, "old-admission-returned");
+      trace.push(afterReentry);
+      await saveC02Trace("stale-event-public-recover", trace);
+      expect(fired).toBe(true);
+      expect(afterReentry.workerCommands.filter((value) => value.type === "unsubscribe")).toEqual(
+        [],
+      );
+      expect(afterReentry.route.route).toMatchObject({
+        attempt: 2,
+        phase: "opening",
+        subscription: ref,
+      });
+      expect(afterReentry.route.route.failure).toBeUndefined();
+      expect(afterReentry.delivery.physicalBytes).toBeGreaterThan(0);
+      const sent = f.latest();
+      expect(sent).toMatchObject({ type: "recover", subscription: ref, appliedSeq: 0 });
+      const reply = f.reply(sent, { recoveryMode: "replay", atSeq: 0 });
+      trace.push({
+        label: "matched-worker-reply",
+        workerCommand: sent,
+        decodedReply: decode(reply, true),
+      });
+      f.session.receive(coalesce(reply, f.output(ref, 1)));
+      const result = await recovering;
+      const accepted = c02Receipt(f, a, ref, "replacement-result-and-event");
+      trace.push({ publicResult: result, ...accepted });
+      await saveC02Trace("stale-event-public-recover", trace);
+      expect(result).toMatchObject({
+        type: "recover-result",
+        requestId: publicRecover.requestId,
+        subscription: ref,
+        mode: "replay",
+        atSeq: 0,
+      });
+      expect(accepted.written.map((item) => item.metadata.type)).toEqual([
+        "attach-result",
+        "run-event",
+        "recover-result",
+        "run-event",
+      ]);
+      expect(accepted.route.route).toMatchObject({
+        attempt: 2,
+        phase: "active",
+        subscription: ref,
+      });
+      const newDebt = accepted.route.route.credit.debtBytes;
+      const beforeCallback = accepted.delivery.physicalBytes;
+      oldBacking.settled();
+      const afterCallback = c02Receipt(f, a, ref, "old-backing-real-callback");
+      trace.push(afterCallback);
+      oldBacking.settled(new Error("late old callback"));
+      const afterLate = c02Receipt(f, a, ref, "old-backing-duplicate-late-error");
+      trace.push(afterLate);
+      await saveC02Trace("stale-event-public-recover", trace);
+      expect(afterCallback.delivery.physicalBytes).toBe(
+        beforeCallback - oldBacking.data.byteLength,
+      );
+      expect(afterCallback.route.route.credit.debtBytes).toBe(newDebt);
+      expect(afterLate.account).toEqual(afterCallback.account);
+      expect(afterLate.delivery).toEqual(afterCallback.delivery);
+      expect(afterLate.serviceClosed).toBe(false);
+      expect(afterLate.route.route.failure).toBeUndefined();
+      a.service.close();
+      const afterClose = c02Receipt(f, a, ref, "close-keeps-new-handed-backing");
+      trace.push(afterClose);
+      await saveC02Trace("stale-event-public-recover", trace);
+      expect(afterClose.delivery.physicalBytes).toBeGreaterThan(0);
+      a.delivery.transportReleased();
+      const afterReleased = c02Receipt(f, a, ref, "definitive-transport-release");
+      trace.push(afterReleased);
+      expect(afterReleased.delivery.physicalBytes).toBe(0);
+      a.writes[2].settled();
+      a.writes[3].settled(new Error("after definitive release"));
+      trace.push(c02Receipt(f, a, ref, "late-callbacks-after-close-release"));
+    } finally {
+      await f.dispose();
+      trace.push({
+        label: "finally-owned-cleanup",
+        account: f.bytes.snapshot(),
+        delivery: a.delivery.snapshot(),
+        serviceClosed: a.service.closed,
+      });
+      await saveC02Trace("stale-event-public-recover", trace);
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("retires still-current cap refusal with first RESYNC_REQUIRED and once owned unsubscribe", async () => {
+    const f = fixture();
+    const a = f.connect("tight", { itemLimit: 5 });
+    const trace = [];
+    let ref;
+    try {
+      ref = (await f.attach(a)).subscription;
+      a.writes[0].settled();
+      f.session.receive(f.output(ref, 1));
+      const held = a.writes[1];
+      const beforeRefusal = c02Receipt(f, a, ref, "current-first-event-handed");
+      trace.push(beforeRefusal);
+      f.session.receive(f.output(ref, 2));
+      const afterRefusal = c02Receipt(f, a, ref, "current-second-event-refused");
+      trace.push(afterRefusal);
+      await saveC02Trace("current-event-cap-refusal", trace);
+      expect(afterRefusal.route.route).toMatchObject({
+        attempt: 1,
+        phase: "retired",
+        failure: { kind: "RESYNC_REQUIRED" },
+      });
+      expect(afterRefusal.delivery.physicalBytes).toBe(beforeRefusal.delivery.physicalBytes);
+      expect(afterRefusal.delivery.physicalBytes).toBeGreaterThan(0);
+      const failed = await a.service.handle(
+        command("recover", ref, "after-current-refusal", { reason: "gap" }),
+      );
+      trace.push({ publicResult: failed, ...c02Receipt(f, a, ref, "first-error-correlated") });
+      await saveC02Trace("current-event-cap-refusal", trace);
+      expect(failed).toMatchObject({
+        type: "error",
+        requestId: "after-current-refusal",
+        error: { kind: "RESYNC_REQUIRED" },
+      });
+      const teardown = f.pipeWrites
+        .map((item) => decode(item.data, true).metadata)
+        .filter((value) => value.type === "unsubscribe");
+      expect(teardown).toHaveLength(1);
+      expect(teardown[0].subscription).toEqual(ref);
+      f.session.receive(f.reply(teardown[0]));
+      a.service.close();
+      const closed = c02Receipt(f, a, ref, "closed-old-backing-still-held");
+      trace.push(closed);
+      await saveC02Trace("current-event-cap-refusal", trace);
+      expect(closed.delivery.physicalBytes).toBeGreaterThan(0);
+      held.settled();
+      const callback = c02Receipt(f, a, ref, "current-old-backing-callback-after-close");
+      trace.push(callback);
+      held.settled(new Error("late current-refusal callback"));
+      const late = c02Receipt(f, a, ref, "duplicate-callback-after-close");
+      trace.push(late);
+      expect(callback.delivery.physicalBytes).toBe(
+        closed.delivery.physicalBytes - held.data.byteLength,
+      );
+      expect(late.account).toEqual(callback.account);
+      expect(late.delivery).toEqual(callback.delivery);
+      expect(
+        f.pipeWrites
+          .map((item) => decode(item.data, true).metadata)
+          .filter((value) => value.type === "unsubscribe"),
+      ).toHaveLength(1);
+      a.delivery.transportReleased();
+      trace.push(c02Receipt(f, a, ref, "current-definitive-release"));
+      expect(a.delivery.snapshot().physicalBytes).toBe(0);
+    } finally {
+      await f.dispose();
+      trace.push({
+        label: "finally-owned-cleanup",
+        account: f.bytes.snapshot(),
+        delivery: a.delivery.snapshot(),
+        serviceClosed: a.service.closed,
+      });
+      await saveC02Trace("current-event-cap-refusal", trace);
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });

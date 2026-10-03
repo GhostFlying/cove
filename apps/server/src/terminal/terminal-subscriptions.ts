@@ -739,9 +739,10 @@ export class TerminalSubscriptions {
       return;
     }
     const credit = route.credit!;
+    const fence = this.fence(route);
     const accepted = this.delivery.admit(external, bytes, {
       control: false,
-      fence: this.fence(route),
+      fence,
       prepare: (encodedBytes) => {
         const record = credit.record(external, encodedBytes, bytes.byteLength);
         return record
@@ -749,7 +750,7 @@ export class TerminalSubscriptions {
           : null;
       },
     });
-    if (!accepted) this.retire(route, domainError("RESYNC_REQUIRED"));
+    if (!accepted && fence.current()) this.retire(route, domainError("RESYNC_REQUIRED"));
   }
 
   private retire(route: Route, error?: DomainError): void {

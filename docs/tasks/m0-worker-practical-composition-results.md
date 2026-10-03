@@ -135,3 +135,58 @@ AUTHOR_FROZEN / RELEASED_STOP releases all source/index/Git/affected PURE output
 after the corrective atom. Independent QA38 execution and normal later review,
 registration/full/CI/integration gates remain separate. Historical28/43 NOT_RUN,
 EPERM UNKNOWN and R5R6/browser/devbox holds remain; full W2/P2/M0 is not accepted.
+
+## C02 stale-event admission correction results
+
+Fresh source-owner allocation GPT-6.1 Sol/high on exact
+91a94a1b70c757d9d4e8569ab1e7af95d29b73c8/tree80de05d48eb66d0668a2d377b0046d8f8f158921,
+same existing branch/checkout. Prior production2041dd2 and all previous atoms/
+refs remain retained. Root adopted the distinct C02 stale-event source finding.
+
+The event path now captures its DeliveryFence before delivery admission,
+passes the same object, and retires a false return only while that captured
+fence remains current. Public onWrite recover can replace the old token while
+admission flushes; the old return cannot retire the new route. Genuine current
+refusal still retains original RESYNC_REQUIRED/first cause and once owned
+unsubscribe. The production delta is exactly three added/two replaced lines in
+terminal-subscriptions.ts. No worker/client/delivery/helper/wire/default/cap change.
+
+Before that delta, a fresh pinned original-source server/worker/engine/client
+build passed EXIT0. One focused public onWrite control reproduced the expected
+premature unsubscribe/retired replacement failure EXIT1, with21 other cases
+excluded by the name filter. Pre-assert complete public/internal IDs, decoded
+frames/raw encoded bytes, route/credit, physical/account and true finally
+cleanup receipts were saved. This proves a controlled current source branch;
+historical original C02 causality remains inferred, not a recreated old trace.
+
+After the source delta, a fresh pinned build returned EXIT0. Entire author
+terminal-subscriptions22 and necessary terminal-connection-delivery7 suites
+passed29/29 actual runtime identities, zero failed/skipped/pending/todo. Discovery
+returned23 literal/parameterized declarations with real expansions.
+Two new direct runtime controls cover actual public onWrite same-ref recover
+plus still-current itemLimit5 refusal, complete matched result-before-event
+order, stable ref, current route/credit, first cause and once owned teardown.
+Old handed backing stays positive across token replacement/refusal/close until
+real callback or definitive release; duplicate/late callbacks cannot mint new
+credit, fail the new route or release twice. Raw receipts are saved before
+assertions and finally-owned account returns to zero.
+
+Pinned Node26.10.0/pnpm12.6.0 paths and exec runtime were verified. Existing
+checkout-local supported installation needed no install. Scoped format/lint
+returned EXIT0. No unexpected failure occurred; no old R04/composition runtime
+PASS was reused. Exact corrected H/T/parent, four allowed paths, production/
+compiled/config/lock projections, commands/exits/timestamps,29 full identities,
+first expected failure and full raw receipts are sealed in
+/Users/luchengxuan/WORKSPACE/cove-evidence/m0-w2-practical-c02-stale-event-source-correction-r1.
+
+AUTHOR_FROZEN / RELEASED_STOP releases all source/index/Git/compiled/cache/runtime
+outputs after this normal hooked corrective atom. Independent original38/new2/
+helpers and inherited tests remain read-only and were not run by this author.
+Root can allocate independent QA against the exact new head; normal subsequent
+review/registration/full/CI/integration gates remain required.
+
+Original failed91/34PASS1FAIL3NOTRUN/pending resize previewversion4, limited4d02
+supplement and I10 same-worker nativecounter twoPENDING remain unchanged. No
+full/native/probe/browser/devbox/network/pushCI/profile/pool/newtree/delegation
+operation occurred. Historical28/43 NOT_RUN/EPERM UNKNOWN and prior holds remain;
+fullW2/P2/M0/DQ/H1C3/M0exit/M1 acceptance is not expanded by author29PASS.
