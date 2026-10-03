@@ -1849,6 +1849,7 @@ describe("W2 current recovery", () => {
     let nextWriteTicket = 0;
     let realCloses = 0;
     let rig;
+    let closedReceipt;
     const capture = (phase, value = {}) =>
       record("W2C-R13", {
         ordinal: ++ordinal,
@@ -1860,6 +1861,7 @@ describe("W2 current recovery", () => {
         nativeReceipts: rig?.native.receipts,
         callbacksHeld: rig?.callbacks.length,
         realCloses,
+        closedReceipt,
         output: rig && {
           writableLength: rig.output.writableLength,
           writableNeedDrain: rig.output.writableNeedDrain,
@@ -1886,6 +1888,39 @@ describe("W2 current recovery", () => {
       realCloses++;
       capture("actual-output-close");
     });
+    rig.pipe.closed.then((value) => {
+      closedReceipt = value;
+      capture("actual-pipe-closed", { value });
+    });
+    const originalIngressWrite = rig.input.write;
+    rig.input.write = function (...args) {
+      const raw = args[0];
+      const input = {
+        rawHex: Buffer.from(raw).toString("hex"),
+        bytes: raw.byteLength,
+        sha256: createHash("sha256").update(raw).digest("hex"),
+        args: args.map((arg) =>
+          typeof arg === "function"
+            ? { kind: "actual-callback" }
+            : ArrayBuffer.isView(arg)
+              ? { rawHex: Buffer.from(arg).toString("hex") }
+              : arg,
+        ),
+        sameReceiver: this === rig.input,
+      };
+      capture("actual-ingress-write-before", input);
+      try {
+        const accepted = originalIngressWrite.apply(this, args);
+        capture("actual-ingress-write-return", { ...input, accepted });
+        return accepted;
+      } catch (error) {
+        capture("actual-ingress-write-throw", {
+          ...input,
+          error: { name: error.name, message: error.message, stack: error.stack },
+        });
+        throw error;
+      }
+    };
     const originalWrite = rig.output.write;
     rig.output.write = function (raw, callback) {
       const ticket = ++nextWriteTicket;
@@ -1993,7 +2028,58 @@ describe("W2 current recovery", () => {
       capture("parked-before-assert", { parked });
       assert.equal(calls(parked).length, 0);
       assert.equal(rig.frames.filter((frame) => frame.metadata.requestId === parkedId).length, 0);
+      assert.equal(rig.pipe.snapshot().parkedRequests, 1);
+      assert.equal(rig.pipe.snapshot().outstandingRequests, 2);
+      assert.equal(rig.pipe.snapshot().pendingCommands, 1);
+      assert.equal(calls(ordinary).length, 0);
+      gate.resolve();
+      await untilTurn(
+        () =>
+          rig.frames.some((frame) => frame.metadata.requestId === blockerId) &&
+          rig.callbacks.length === 1 &&
+          rig.pipe.snapshot().pendingCommands === 0 &&
+          rig.pipe.snapshot().parkedRequests === 1 &&
+          rig.pipe.snapshot().outstandingRequests === 2 &&
+          rig.pipe.snapshot().responseItems === 1 &&
+          !rig.pipe.snapshot().blocked &&
+          !rig.output.writableNeedDrain,
+        "R13 real blocker handoff with physical callback held",
+      );
+      const blockerFrame = rig.frames.find((frame) => frame.metadata.requestId === blockerId);
+      const blockerTicket = writeEvents.find((event) => event.rawHex === blockerFrame.rawHex);
+      const blockerCallback = rig.callbacks[0];
+      capture("blocker-handoff-before-assert", { blockerFrame, blockerTicket });
+      assert.deepEqual(
+        blockerFrame.metadata,
+        executionEvents.find(
+          (event) => event.phase === "gate-enter" && event.args[0].requestId === blockerId,
+        ).result,
+      );
+      assert.equal(Buffer.from(blockerFrame.rawHex, "hex").length, 336);
+      assert.equal(blockerTicket.bytes, 336);
+      assert.equal(callbackCounts.get(blockerTicket.ticket), 0);
+      assert.equal(rig.pipe.snapshot().transportBytes, 336);
       send(ordinary);
+      await untilTurn(
+        () => rig.pipe.snapshot().responseItems === 2,
+        "R13 two real response items within control budget",
+      );
+      capture("conflict-enqueued-before-assert", { blockerFrame, blockerTicket });
+      assert.equal(rig.callbacks.length, 1);
+      assert.equal(rig.callbacks[0], blockerCallback);
+      assert.equal(rig.pipe.snapshot().pendingCommands, 0);
+      assert.equal(rig.pipe.snapshot().parkedRequests, 1);
+      assert.equal(rig.pipe.snapshot().outstandingRequests, 2);
+      assert.equal(rig.pipe.snapshot().state, "ready");
+      assert.equal(rig.pipe.snapshot().blocked, false);
+      assert.equal(rig.pipe.snapshot().transportBytes, 336);
+      assert.equal(rig.pipe.snapshot().queuedBytes, 444);
+      assert.equal(rig.pipe.snapshot().ordinaryAccountedBytes, 780);
+      assert(rig.pipe.snapshot().ordinaryAccountedBytes <= rig.effective.reservedControlBytes);
+      capture("blocker-release-before", { ticket: blockerTicket.ticket });
+      rig.release();
+      capture("blocker-release-after", { ticket: blockerTicket.ticket });
+
       await untilTurn(
         () =>
           rig.frames.some(
@@ -2049,7 +2135,6 @@ describe("W2 current recovery", () => {
       assert.equal(calls(valid).length, 1);
       assert.equal(validReturn.result.outcome, "accepted");
       assert.deepEqual(rig.native.owners[0].resizeCalls, [{ cols: 13, rows: 4 }]);
-      gate.resolve();
       rig.hold(false);
       rig.release();
       await untilTurn(
@@ -2116,6 +2201,7 @@ describe("W2 current recovery", () => {
         await untilTurn(() => realCloses === 1, "R13 genuine physical close");
         capture("finally-after-close");
       } finally {
+        rig.input.write = originalIngressWrite;
         rig.output.write = originalWrite;
       }
     }
