@@ -1764,7 +1764,9 @@ describe("W2 current recovery", () => {
           ["exit", 5],
         ],
       );
-      assert.equal(trace.occupancy.outstandingRequests, 4);
+      assert.equal(trace.occupancy.parkedRequests, 1);
+      assert.equal(trace.occupancy.outstandingRequests - trace.occupancy.parkedRequests, 4);
+      assert.equal(trace.occupancy.outstandingRequests, 5);
       assert(trace.laterReplies.length === 5);
       assert.equal(trace.failure.failure, "RECOVERY_UNAVAILABLE");
       assert.equal(trace.tableAcquisitions, 0);
@@ -1794,18 +1796,34 @@ describe("W2 current recovery", () => {
         (event) => event.phase === "acquire" && event.owner === "recovery-transfer-frames",
       ).length,
     };
+    record("W2C-R12-before-check", { label: "untouched", trace: untouched });
     check(untouched);
+    record("W2C-R12-check-passed", { label: "untouched" });
     const duplicate = structuredClone(untouched);
     duplicate.suffix.push(duplicate.suffix[0]);
+    record("W2C-R12-before-check", { label: "duplicate suffix", trace: duplicate });
     assert.throws(() => check(duplicate));
+    record("W2C-R12-check-passed", { label: "duplicate suffix rejected" });
     const reordered = structuredClone(untouched);
     reordered.suffix.reverse();
+    record("W2C-R12-before-check", { label: "reordered suffix", trace: reordered });
     assert.throws(() => check(reordered));
-    assert.throws(() =>
-      check({ ...untouched, occupancy: { ...untouched.occupancy, outstandingRequests: 5 } }),
-    );
-    assert.throws(() => check({ ...untouched, laterReplies: [] }));
-    assert.throws(() => check({ ...untouched, failure: { failure: "INPUT_REJECTED" } }));
+    record("W2C-R12-check-passed", { label: "reordered suffix rejected" });
+    const fifthAdmitted = {
+      ...untouched,
+      occupancy: { ...untouched.occupancy, outstandingRequests: 6 },
+    };
+    record("W2C-R12-before-check", { label: "fifth admitted record", trace: fifthAdmitted });
+    assert.throws(() => check(fifthAdmitted));
+    record("W2C-R12-check-passed", { label: "fifth admitted record rejected" });
+    const missingProgress = { ...untouched, laterReplies: [] };
+    record("W2C-R12-before-check", { label: "missing later progress", trace: missingProgress });
+    assert.throws(() => check(missingProgress));
+    record("W2C-R12-check-passed", { label: "missing later progress rejected" });
+    const wrongBoundary = { ...untouched, failure: { failure: "INPUT_REJECTED" } };
+    record("W2C-R12-before-check", { label: "wrong boundary", trace: wrongBoundary });
+    assert.throws(() => check(wrongBoundary));
+    record("W2C-R12-check-passed", { label: "wrong boundary rejected" });
     record("W2C-R12", {
       untouched,
       mutationsRejected: [
