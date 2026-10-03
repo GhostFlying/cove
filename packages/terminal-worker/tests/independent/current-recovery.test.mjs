@@ -725,77 +725,280 @@ describe("W2 current recovery", () => {
     }
   });
   it("W2C-R07 reader-before-callback reentry preserves marker FIFO and callback debt", async () => {
-    const rig = endpointRig();
-    const target = run("reader-reentry");
-    const subscription = ref("reader", target);
-    const reentry = [];
-    try {
-      await pipeSpawn(rig, target);
-      rig.hold();
-      rig.reader((metadata) => {
-        if (metadata.terminal?.type === "baseline-chunk") {
-          assert(rig.pipe.snapshot().transportBytes > 0);
-          const progress = pipeCommand("baseline-progress", target, {
-            subscription,
-            baselineId: metadata.terminal.baselineId,
-            lastParsedOrdinal: metadata.terminal.ordinal,
-          });
-          reentry.push(progress.requestId);
-          rig.send(progress);
+    const labels = [
+      "sync progress",
+      "sync ACK",
+      "sync recover",
+      "sync unsubscribe",
+      "sync shutdown",
+      "late capacity",
+      "close before callback",
+    ];
+    for (const label of labels) {
+      const rig = endpointRig();
+      const target = run("reader-reentry");
+      const subscription = ref("reader", target);
+      const reentry = [];
+      let observer;
+      let firstEnd;
+      let variantCommand;
+      let shutdown;
+      const capture = (phase, value) => observer.capture(phase, { label, ...value });
+      const checkBounds = () => {
+        const event = capture("bounded-step");
+        assert(rig.callbacks.length <= 1, "one physical callback per controlled turn");
+        assert(event.snapshot.pendingDrains.length <= 1, "one genuine drain per controlled turn");
+      };
+      const advance = async (predicate, deliver = true) => {
+        for (let step = 0; step < 64; step++) {
+          capture("advance-before-predicate", { step });
+          if (predicate()) return;
+          if (rig.callbacks.length) {
+            capture("advance-before-real-callback", { step });
+            rig.release();
+          }
+          await turns(1);
+          checkBounds();
+          if (deliver && observer.snapshot().pendingDrains.length) observer.deliverDrain();
+          await turns(1);
+          checkBounds();
         }
-        if (metadata.terminal?.type === "baseline-end") {
-          const ack = pipeCommand("applied-ack", target, {
-            subscription,
-            appliedSeq: metadata.terminal.atSeq,
+        capture("advance-bound-exhausted");
+        assert(predicate(), "NOT_EXERCISED: R07 genuine callback/drain progress");
+      };
+      const sendInReader = (command, ticket) => {
+        capture("sync-reentry-before", { command, ticket: ticket.id });
+        assert.equal(ticket.outerCallbackReturns, 0);
+        assert.equal(ticket.observedRetirementBoundary, undefined);
+        rig.send(command);
+        capture("sync-reentry-after", { command, ticket: ticket.id });
+        assert.equal(
+          ticket.outerCallbackReturns,
+          0,
+          "logical reentry cannot settle actual physical callback",
+        );
+        assert.equal(ticket.observedRetirementBoundary, undefined);
+        reentry.push(command);
+      };
+      try {
+        await pipeSpawn(rig, target);
+        observer = rig.observeCallbacks(label);
+        rig.hold();
+        rig.reader((metadata) => {
+          const ticket = observer.tickets.findLast((item) =>
+            item.readerMetadata === undefined
+              ? false
+              : JSON.stringify(item.readerMetadata) === JSON.stringify(metadata),
+          );
+          const observed = capture("reader-before-callback", { metadata, ticket: ticket?.id });
+          assert(ticket, "actual reader frame has a real write ticket");
+          assert.equal(ticket.outerCallbackReturns, 0);
+          assert.equal(ticket.observedRetirementBoundary, undefined);
+          assert(observed.snapshot.pipe.transportBytes >= ticket.bytes);
+          if (metadata.terminal?.type === "baseline-chunk") {
+            sendInReader(
+              pipeCommand("baseline-progress", target, {
+                subscription,
+                baselineId: metadata.terminal.baselineId,
+                lastParsedOrdinal: metadata.terminal.ordinal,
+              }),
+              ticket,
+            );
+          }
+          if (metadata.terminal?.type !== "baseline-end") return;
+          if (!firstEnd) {
+            firstEnd = ticket;
+            if (label === "sync recover" || label === "sync unsubscribe") {
+              variantCommand = pipeCommand(
+                label === "sync recover" ? "recover" : "unsubscribe",
+                target,
+                {
+                  subscription,
+                  ...(label === "sync recover" ? { atSeq: 0 } : {}),
+                },
+              );
+              sendInReader(variantCommand, ticket);
+              return;
+            }
+            if (label === "sync shutdown") {
+              capture("sync-shutdown-before", { ticket: ticket.id });
+              shutdown = rig.pipe.shutdown("R07-sync-shutdown");
+              capture("sync-shutdown-after", { ticket: ticket.id });
+              assert.equal(ticket.outerCallbackReturns, 0);
+              return;
+            }
+            if (label === "close before callback") {
+              capture("real-close-request-before", { ticket: ticket.id });
+              rig.output.destroy();
+              capture("real-close-request-return", { ticket: ticket.id });
+              assert.equal(ticket.outerCallbackReturns, 0);
+              return;
+            }
+          }
+          sendInReader(
+            pipeCommand("applied-ack", target, {
+              subscription,
+              appliedSeq: metadata.terminal.atSeq,
+            }),
+            ticket,
+          );
+        });
+        const command = pipeCommand("subscribe", target, { subscription, atSeq: 0 });
+        capture("subscribe-request", { command });
+        rig.send(command);
+        const closing = label === "sync shutdown" || label === "close before callback";
+        await advance(() =>
+          closing
+            ? Boolean(firstEnd)
+            : Boolean(firstEnd) &&
+              reentry.every((item) =>
+                rig.frames.some((frame) => frame.metadata.requestId === item.requestId),
+              ),
+        );
+        capture("marker-FIFO-before-assert", { frames: rig.frames });
+        const marker = rig.frames.findIndex(
+          (frame) => frame.metadata.requestId === command.requestId,
+        );
+        const start = rig.frames.findIndex(
+          (frame) => frame.metadata.terminal?.type === "baseline-start",
+        );
+        assert(marker >= 0 && marker < start);
+        const initialChunk = rig.frames.find(
+          (frame) => frame.metadata.terminal?.type === "baseline-chunk",
+        );
+        assert.equal(initialChunk.payload.length, 289);
+        if (closing) {
+          capture("closing-before-retirement", { ticket: firstEnd.id });
+          assert.equal(firstEnd.outerCallbackReturns, 0);
+          if (label === "close before callback") {
+            for (let step = 0; step < 64 && !observer.snapshot().realCloses; step++) await turns(1);
+            const closed = capture("real-close-before-late-callback", { ticket: firstEnd.id });
+            assert.equal(closed.snapshot.realCloses, 1);
+            assert.equal(firstEnd.observedRetirementBoundary, "close");
+            assert.equal(firstEnd.outerCallbackReturns, 0);
+            assert.equal(closed.snapshot.pipe.transportBytes, 0);
+          }
+          capture("before-once-late-internal-callback", { ticket: firstEnd.id });
+          assert.equal(rig.callbacks.length, 1);
+          rig.release();
+          for (let step = 0; step < 64 && !firstEnd.outerCallbackReturns; step++) await turns(1);
+          capture("after-once-late-outer-callback", { ticket: firstEnd.id });
+          assert.equal(firstEnd.outerCallbackEnters, 1);
+          assert.equal(firstEnd.outerCallbackReturns, 1);
+          if (shutdown) await shutdown;
+          else await rig.pipe.closed;
+          await turns(1);
+          const retired = capture("closed-before-late-capacity", { frames: rig.frames });
+          const frameCount = rig.frames.length;
+          const ticketCount = observer.tickets.length;
+          assert.equal(retired.snapshot.pipe.state, "closed");
+          assert.equal(retired.snapshot.pipe.transportBytes, 0);
+          observer.lateCapacity();
+          await turns(1);
+          capture("closed-after-late-capacity");
+          assert.equal(rig.frames.length, frameCount);
+          assert.equal(observer.tickets.length, ticketCount);
+          assert.equal(firstEnd.outerCallbackReturns, 1);
+        } else {
+          const before = capture("isolated-before-real-callback");
+          assert.equal(before.snapshot.pipe.state, "ready");
+          assert.equal(before.snapshot.pipe.blocked, true);
+          assert.equal(before.snapshot.heldCallbacks.length, 1);
+          assert.equal(before.snapshot.pendingDrains.length, 0);
+          const ticket = observer.tickets.find(
+            (item) => item.id === before.snapshot.heldCallbacks[0],
+          );
+          assert.equal(ticket.writeAccepted, false);
+          assert.equal(ticket.outerCallbackReturns, 0);
+          rig.release();
+          for (let step = 0; step < 64 && !ticket.outerCallbackReturns; step++) await turns(1);
+          const callbackOnly = capture("isolated-callback-completed-drain-undelivered", {
+            ticket: ticket.id,
           });
-          reentry.push(ack.requestId);
-          rig.send(ack);
+          assert.equal(ticket.outerCallbackEnters, 1);
+          assert.equal(ticket.outerCallbackReturns, 1);
+          assert.equal(ticket.observedRetirementBoundary, "callback");
+          assert.equal(callbackOnly.snapshot.pipe.state, "ready");
+          assert.equal(callbackOnly.snapshot.realCloses, 0);
+          assert.equal(callbackOnly.snapshot.deliveredDrains, before.snapshot.deliveredDrains);
+          assert.equal(callbackOnly.snapshot.pendingDrains.length, 1);
+          assert.equal(callbackOnly.snapshot.pipe.blocked, true);
+          observer.deliverDrain();
+          capture("matched-genuine-drain-control", { ticket: ticket.id });
+          assert.equal(observer.snapshot().deliveredDrains, before.snapshot.deliveredDrains + 1);
+          assert.equal(ticket.outerCallbackReturns, 1);
+          await advance(
+            () => rig.callbacks.length === 0 && observer.snapshot().pendingDrains.length === 0,
+          );
+          capture("reentry-results-before-assert", { reentry, frames: rig.frames });
+          assert(
+            reentry.every((item) =>
+              rig.frames.some(
+                (frame) =>
+                  frame.metadata.requestId === item.requestId &&
+                  frame.metadata.outcome === "accepted",
+              ),
+            ),
+          );
+          if (label === "sync recover") {
+            const recoverMarker = rig.frames.findIndex(
+              (frame) => frame.metadata.requestId === variantCommand.requestId,
+            );
+            const laterStart = rig.frames.findIndex(
+              (frame, index) => index > start && frame.metadata.terminal?.type === "baseline-start",
+            );
+            assert(recoverMarker > start && laterStart > recoverMarker);
+          }
+          if (label !== "sync unsubscribe") {
+            const valid = pipeCommand("applied-ack", target, { subscription, appliedSeq: 0 });
+            capture("valid-ACK-request", { command: valid });
+            rig.send(valid);
+            await advance(() =>
+              rig.frames.some((frame) => frame.metadata.requestId === valid.requestId),
+            );
+            capture("valid-ACK-result-before-assert", { command: valid });
+            assert.equal(
+              rig.frames.find((frame) => frame.metadata.requestId === valid.requestId).metadata
+                .outcome,
+              "accepted",
+            );
+            await advance(
+              () => rig.callbacks.length === 0 && observer.snapshot().pendingDrains.length === 0,
+            );
+            const unsubscribe = pipeCommand("unsubscribe", target, { subscription });
+            capture("valid-unsubscribe-request", { command: unsubscribe });
+            rig.send(unsubscribe);
+            await advance(() =>
+              rig.frames.some((frame) => frame.metadata.requestId === unsubscribe.requestId),
+            );
+            capture("valid-unsubscribe-result-before-assert", { command: unsubscribe });
+            assert.equal(
+              rig.frames.find((frame) => frame.metadata.requestId === unsubscribe.requestId)
+                .metadata.outcome,
+              "accepted",
+            );
+          }
+          await advance(
+            () => rig.callbacks.length === 0 && observer.snapshot().pendingDrains.length === 0,
+          );
+          if (label === "late capacity") {
+            const frames = rig.frames.length;
+            const tickets = observer.tickets.length;
+            capture("unsubscribed-before-late-capacity");
+            observer.lateCapacity();
+            await turns(1);
+            capture("unsubscribed-after-late-capacity");
+            assert.equal(rig.frames.length, frames);
+            assert.equal(observer.tickets.length, tickets);
+          }
         }
-      });
-      const command = pipeCommand("subscribe", target, { subscription, atSeq: 0 });
-      rig.send(command);
-      await drainHeld(
-        rig,
-        () =>
-          reentry.length >= 2 &&
-          reentry.every((id) => rig.frames.some((frame) => frame.metadata.requestId === id)),
-      );
-      const marker = rig.frames.findIndex(
-        (frame) => frame.metadata.requestId === command.requestId,
-      );
-      const start = rig.frames.findIndex(
-        (frame) => frame.metadata.terminal?.type === "baseline-start",
-      );
-      assert(marker < start);
-      const before = rig.pipe.snapshot();
-      assert(before.transportBytes > 0);
-      rig.release();
-      const callbackOnly = rig.pipe.snapshot();
-      assert(callbackOnly.blocked);
-      rig.output.emit("drain");
-      await turns();
-      assert.equal(
-        rig.frames.filter((frame) => frame.metadata.terminal?.type === "baseline-chunk").length,
-        1,
-      );
-      rig.reader(undefined);
-      rig.hold(false);
-      await drainHeld(rig, () => rig.callbacks.length === 0);
-      const valid = await pipeResult(
-        rig,
-        pipeCommand("applied-ack", target, { subscription, appliedSeq: 0 }),
-      );
-      assert.equal(valid.outcome, "accepted");
-      const unsubscribe = await pipeResult(
-        rig,
-        pipeCommand("unsubscribe", target, { subscription }),
-      );
-      assert.equal(unsubscribe.outcome, "accepted");
-      record("W2C-R07", { reentry, before, callbackOnly, frames: rig.frames });
-    } finally {
-      rig.reader(undefined);
-      await rig.close();
+        capture("inner-label-complete", { frames: rig.frames });
+      } finally {
+        rig.reader(undefined);
+        await rig.close();
+      }
     }
+    record("W2C-R07", { completedInnerLabels: labels, dynamicDeclarationCredit: 0 });
   });
   it("W2C-R08 B1 C4112 O S T X records share one reply permit and bounded parked X", async () => {
     const observed = await combinedEndpointSchedule();
