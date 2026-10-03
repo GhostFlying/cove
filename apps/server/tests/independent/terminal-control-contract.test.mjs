@@ -1149,8 +1149,26 @@ describe("P2-B2 independent shared worker progress capacity", () => {
         Array(3).fill("applied-ack-result"),
       );
       await turns();
+      const teardowns = r.commands.filter((x) => x.type === "unsubscribe");
+      expect(teardowns.map((x) => x.subscription)).toEqual([ar, peerRefs[3]]);
+      expect(teardowns[0].requestId).toBe(background.requestId);
+      const peerTeardown = teardowns[1];
+      expect(peerTeardown.worker).toEqual(background.worker);
+      expect(peerTeardown.run).toEqual(run);
+      expect(new Set(teardowns.map((x) => x.requestId)).size).toBe(2);
+      trace.peerTeardown = structuredClone(peerTeardown);
+      record("exact-owned-teardowns-before-peer-receipt");
+      r.accept(peerTeardown);
+      await turns();
       a.service.close();
-      expect(r.count("unsubscribe")).toBe(1);
+      r.advance(0);
+      await turns();
+      const completedTeardowns = r.commands.filter((x) => x.type === "unsubscribe");
+      expect(completedTeardowns.map((x) => x.subscription)).toEqual([ar, peerRefs[3]]);
+      expect(completedTeardowns.map((x) => x.requestId)).toEqual([
+        background.requestId,
+        peerTeardown.requestId,
+      ]);
       expect(r.count("stop")).toBe(0);
       expect(r.count("set-control")).toBe(0);
       record("real-results-settled-without-cap-increase");
