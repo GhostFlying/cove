@@ -790,6 +790,15 @@ describe("W2 current recovery", () => {
       );
       assert.equal(chunks.length, 129);
       assert(chunks.every((frame) => frame.payload.length === 65536));
+      assert(validateBaselineDescriptor(parsed.descriptor));
+      const leafCount130 = { ...parsed.descriptor, chunkCount: 130 };
+      assert.equal(validateBaselineDescriptor(leafCount130), null);
+      record("W2C-R10-leaf-only-count", {
+        validDescriptor: parsed.descriptor,
+        leafCount130,
+        originalProducerExtraField: "NOT_REPRESENTABLE_ON_THIS_PORT",
+        producerFaultCreditFromIgnoredExtraField: 0,
+      });
       record("W2C-R10-valid", {
         descriptor: parsed.descriptor,
         detachedReserve: captureOwner,
@@ -803,7 +812,124 @@ describe("W2 current recovery", () => {
       source.replay.clear();
       rig.close();
     }
-    for (const variant of ["descriptor-field", "VT", "tail", "chunks", "total"]) {
+    for (const variant of ["derived-count-fault", "derived-count-valid"]) {
+      const small = recoveryRig({
+        baselineVtBytes: 65537,
+        baselineTailBytes: 1,
+        baselineChunks: 2,
+      });
+      const route = ref(`negotiated-${variant}`);
+      const fault = variant === "derived-count-fault";
+      const vtBytes = fault ? 65537 : 65536;
+      const detachedCharge = fault ? 69634 : 69633;
+      const sourceSmall = small.source(route.run);
+      const phases = [];
+      sourceSmall.captureBaseline = async (reserveDetached) => {
+        const reserved = reserveDetached(detachedCharge);
+        phases.push({ phase: "reserve-result", reserved, bytes: detachedCharge });
+        if (!reserved) return { status: "unavailable", reason: "denied-detached" };
+        const owner = [...small.ledger.live.values()].find(
+          (value) => value.owner === "recovery-baseline" && value.bytes === detachedCharge,
+        );
+        assert(owner, "real detached owner exists before typed-array allocation");
+        phases.push({ phase: "before-allocation", ownerId: owner.id });
+        const baseline = syntheticBaseline(route.run, vtBytes, 1);
+        phases.push({
+          phase: "after-allocation",
+          vtBytes: baseline.vt.length,
+          tailBytes: baseline.tail.length,
+        });
+        const descriptor = descriptorOf(baseline, route);
+        assert.equal(descriptor.chunkCount, fault ? 3 : 2);
+        assert(validateBaselineDescriptor(descriptor), "small count3 is globally leaf-valid");
+        phases.push({ phase: "globally-leaf-valid", descriptor });
+        return { status: "ready", baseline };
+      };
+      try {
+        const command = small.command("subscribe", route, { atSeq: 0 });
+        const outcome = await small.recovery.open(command, sourceSmall);
+        assert.deepEqual(
+          phases.map((value) => value.phase),
+          ["reserve-result", "before-allocation", "after-allocation", "globally-leaf-valid"],
+        );
+        const detached = small.ledger.events.find(
+          (value) => value.phase === "acquire" && value.owner === "recovery-baseline",
+        );
+        assert.equal(detached.bytes, detachedCharge);
+        if (fault) {
+          assert.equal(outcome.failure, "RECOVERY_UNAVAILABLE");
+          assert.equal(outcome.result, undefined);
+          assert(
+            !small.ledger.events.some(
+              (value) => value.phase === "acquire" && value.owner === "recovery-transfer-frames",
+            ),
+          );
+          assert.equal(small.sink.frames.length, 0);
+          assert(!small.ledger.live.has(detached.id), "fault releases its exact detached owner");
+          assert.equal(small.ledger.live.size, 2);
+          assert(
+            [...small.ledger.live.values()].every((value) =>
+              ["recovery-route", "recovery-connection"].includes(value.owner),
+            ),
+            "only owned route/connection tombstone records remain",
+          );
+        } else {
+          assert.equal(outcome.result.outcome, "accepted");
+          assert.equal(
+            small.sink.frames.length,
+            0,
+            "no baseline publication before accepted marker barrier",
+          );
+          const parsed = await parseBaseline(small, route, { command, result: outcome.result });
+          assert.equal(parsed.descriptor.chunkCount, 2);
+          assert.deepEqual(
+            parsed.frames
+              .filter((frame) => frame.event.terminal.type === "baseline-chunk")
+              .map((frame) => frame.payload.length),
+            [65536, 1],
+          );
+          assert(small.sink.frames[0].event.terminal.type === "baseline-start");
+          assert(small.sink.frames.at(-1).event.terminal.type === "baseline-end");
+          const physicalIds = new Set(
+            [...small.ledger.live.values()]
+              .filter((value) => value.owner === "physical-delivery")
+              .map((value) => value.id),
+          );
+          assert(physicalIds.size > 0, "final logical ACK cannot reclaim handed physical bytes");
+          assert(
+            !small.ledger.live.has(detached.id),
+            "parsed final ACK releases exact logical detached owner",
+          );
+          assert(
+            [...small.ledger.live.values()].every(
+              (value) =>
+                physicalIds.has(value.id) ||
+                ["recovery-route", "recovery-connection"].includes(value.owner),
+            ),
+            "physical callbacks and persistent route records keep their own owners",
+          );
+        }
+        record("W2C-R10-negotiated-count", {
+          semanticVariant: variant,
+          effectiveBudgets: small.effective,
+          phases,
+          outcome,
+          events: small.ledger.events,
+          liveOwners: [...small.ledger.live.values()],
+          publishedFrames: small.sink.frames.map((frame) => ({
+            event: frame.event,
+            bytes: frame.payload.length,
+            rawHex: frame.rawHex,
+          })),
+        });
+      } finally {
+        sourceSmall.replay.clear();
+        small.close();
+        assert.equal(small.ledger.live.size, 0);
+        assert.equal(small.ledger.account.snapshot().accountedBytes, 4112);
+      }
+    }
+    for (const variant of ["descriptor-field", "VT", "tail", "total"]) {
       const bad = recoveryRig();
       const route = ref(`bad-${variant}`);
       try {
@@ -814,13 +940,11 @@ describe("W2 current recovery", () => {
           tailBytes,
           mutate(baseline) {
             if (variant === "descriptor-field") baseline.captureGeometry.cols = 121;
-            if (variant === "chunks") baseline.chunkCount = 130;
           },
         });
         const sample = syntheticBaseline(route.run, vtBytes, tailBytes);
         if (variant === "descriptor-field") sample.captureGeometry.cols = 121;
         const descriptor = descriptorOf(sample, route);
-        if (variant === "chunks") descriptor.chunkCount = 130;
         assert.equal(validateBaselineDescriptor(descriptor), null, variant);
         const outcome = await bad.recovery.open(
           bad.command("subscribe", route, { atSeq: 0 }),
