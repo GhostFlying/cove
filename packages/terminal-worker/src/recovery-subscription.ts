@@ -58,6 +58,13 @@ interface TransferFrame {
   readonly charge: number;
 }
 
+interface CaptureAttempt {
+  lease?: RetainedLease | undefined;
+  retired: boolean;
+  workSettled: boolean;
+  openSettled: boolean;
+}
+
 interface Route {
   readonly key: string;
   readonly ref: SubscriptionRef;
@@ -72,6 +79,7 @@ interface Route {
   appliedSeq: number;
   sentSeq: number;
   replay?: ReplaySlice | undefined;
+  captureAttempt?: CaptureAttempt | undefined;
   baselineLease?: RetainedLease | undefined;
   frameLease?: RetainedLease | undefined;
   baselineId?: string;
@@ -172,8 +180,7 @@ export class RecoverySubscriptions {
       return { failure: "OPERATION_ID_CONFLICT" };
     if (prior && prior.state === "tombstone")
       return { failure: prior.failure ?? "RESYNC_REQUIRED" };
-    if (prior && (prior.state === "preparing" || prior.state === "retiring"))
-      return { failure: "BUSY" };
+    if (prior && prior.state === "retiring") return { failure: "BUSY" };
     if (
       prior &&
       command.type === "recover" &&
@@ -252,135 +259,100 @@ export class RecoverySubscriptions {
       };
     }
     route.mode = "baseline";
-    let captured: EngineBaselineResult | undefined;
-    let wakeDeadline: ReturnType<typeof setTimeout> | undefined;
+    const attempt: CaptureAttempt = { retired: false, workSettled: false, openSettled: false };
+    route.captureAttempt = attempt;
     try {
-      const work = this.capture(source.run.runId, () =>
-        source.captureBaseline((bytes) => {
-          if (route.token !== token || route.state !== "preparing" || route.baselineLease)
-            return false;
-          const lease = this.#reserve(bytes, "recovery-baseline");
-          if (!lease) return false;
-          if (route.token !== token || route.state !== "preparing") {
-            lease.release();
-            return false;
-          }
-          route.baselineLease = lease;
-          return true;
-        }),
-      );
-      const deadline = new Promise<undefined>((resolve) => {
-        wakeDeadline = this.#clock.setTimeout(
-          () => resolve(undefined),
-          Math.max(0, Math.ceil(route.deadlineAt! - this.#clock.now())),
-        );
-      });
-      captured = await Promise.race([work, deadline]);
-    } catch {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "RECOVERY_UNAVAILABLE" };
-    } finally {
-      if (wakeDeadline) this.#clock.clearTimeout(wakeDeadline);
-    }
-    if (!captured) {
-      this.#fail(route, "RECOVERY_EXPIRED");
-      return { failure: "RECOVERY_EXPIRED" };
-    }
-    if (route.token !== token || route.state !== "preparing")
-      return { failure: route.failure ?? "RESYNC_REQUIRED" };
-    if (captured.status !== "ready") {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "RECOVERY_UNAVAILABLE" };
-    }
-    const baseline = captured.baseline;
-    if (this.#nextBaseline === Number.MAX_SAFE_INTEGER) {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "COUNTER_EXHAUSTED" };
-    }
-    const chunkCount =
-      Math.ceil(baseline.vt.byteLength / 65_536) + Math.ceil(baseline.tail.byteLength / 65_536);
-    if (chunkCount < 1 || chunkCount > this.#budgets.baselineChunks) {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "RECOVERY_UNAVAILABLE" };
-    }
-    const baselineId = `b${++this.#nextBaseline}`;
-    const descriptor = {
-      baselineId,
-      run: route.run,
-      subscription: route.ref,
-      profile: baseline.profile,
-      encoding: baseline.encoding,
-      checkpointSeq: baseline.checkpointSeq,
-      atSeq: baseline.atSeq,
-      captureGeometry: baseline.captureGeometry,
-      currentGeometry: baseline.currentGeometry,
-      coverage: baseline.coverage,
-      vtBytes: baseline.vt.byteLength,
-      tailBytes: baseline.tail.byteLength,
-      chunkCount,
-    };
-    if (!validateBaselineDescriptor(descriptor)) {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "RECOVERY_UNAVAILABLE" };
-    }
-    const start: PipeEvent = {
-      type: "terminal-event",
-      worker: this.#worker,
-      run: route.run,
-      subscription: route.ref,
-      terminal: { type: "baseline-start", run: route.run, descriptor },
-    };
-    const lastChunk: PipeEvent = {
-      type: "terminal-event",
-      worker: this.#worker,
-      run: route.run,
-      subscription: route.ref,
-      terminal: {
-        type: "baseline-chunk",
-        run: route.run,
+      let captured: EngineBaselineResult | undefined;
+      let wakeDeadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const work = this.capture(source.run.runId, () => {
+          if (attempt.retired || route.token !== token || route.state !== "preparing")
+            return Promise.resolve(undefined);
+          return source.captureBaseline((bytes) => {
+            if (
+              attempt.retired ||
+              route.token !== token ||
+              route.state !== "preparing" ||
+              attempt.lease
+            )
+              return false;
+            const lease = this.#reserve(bytes, "recovery-baseline");
+            if (!lease) return false;
+            if (attempt.retired || route.token !== token || route.state !== "preparing") {
+              lease.release();
+              return false;
+            }
+            attempt.lease = lease;
+            return true;
+          });
+        }).finally(() => {
+          attempt.workSettled = true;
+          this.#releaseRetiredCapture(attempt);
+        });
+        const deadline = new Promise<undefined>((resolve) => {
+          wakeDeadline = this.#clock.setTimeout(
+            () => resolve(undefined),
+            Math.max(0, Math.ceil(route.deadlineAt! - this.#clock.now())),
+          );
+        });
+        captured = await Promise.race([work, deadline]);
+      } catch {
+        if (attempt.retired || route.token !== token || route.state !== "preparing")
+          return { failure: route.failure ?? "RESYNC_REQUIRED" };
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "RECOVERY_UNAVAILABLE" };
+      } finally {
+        if (wakeDeadline) this.#clock.clearTimeout(wakeDeadline);
+      }
+      if (attempt.retired || route.token !== token || route.state !== "preparing")
+        return { failure: route.failure ?? "RESYNC_REQUIRED" };
+      if (!captured) {
+        this.#fail(route, "RECOVERY_EXPIRED");
+        return { failure: "RECOVERY_EXPIRED" };
+      }
+      if (captured.status !== "ready") {
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "RECOVERY_UNAVAILABLE" };
+      }
+      const baseline = captured.baseline;
+      if (this.#nextBaseline === Number.MAX_SAFE_INTEGER) {
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "COUNTER_EXHAUSTED" };
+      }
+      const chunkCount =
+        Math.ceil(baseline.vt.byteLength / 65_536) + Math.ceil(baseline.tail.byteLength / 65_536);
+      if (chunkCount < 1 || chunkCount > this.#budgets.baselineChunks) {
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "RECOVERY_UNAVAILABLE" };
+      }
+      const baselineId = `b${++this.#nextBaseline}`;
+      const descriptor = {
         baselineId,
-        subscription: route.ref,
-        ordinal: chunkCount - 1,
-      },
-    };
-    const end: PipeEvent = {
-      type: "terminal-event",
-      worker: this.#worker,
-      run: route.run,
-      subscription: route.ref,
-      terminal: {
-        type: "baseline-end",
         run: route.run,
-        baselineId,
         subscription: route.ref,
-        chunkCount,
-        totalBytes: baseline.vt.byteLength + baseline.tail.byteLength,
+        profile: baseline.profile,
+        encoding: baseline.encoding,
+        checkpointSeq: baseline.checkpointSeq,
         atSeq: baseline.atSeq,
-      },
-    };
-    // The maximum ordinal has the longest metadata; no chunk view/table exists yet.
-    const frameLease = this.#reserve(
-      retainedFrameCharge(start) +
-        chunkCount * retainedFrameCharge(lastChunk) +
-        retainedFrameCharge(end),
-      "recovery-transfer-frames",
-    );
-    if (!frameLease) {
-      this.#fail(route, "RESYNC_REQUIRED");
-      return { failure: "RECOVERY_UNAVAILABLE" };
-    }
-    route.frameLease = frameLease;
-    const chunks: Uint8Array[] = [];
-    for (const sourceBytes of [baseline.vt, baseline.tail])
-      for (let offset = 0; offset < sourceBytes.byteLength; offset += 65_536)
-        chunks.push(
-          sourceBytes.subarray(offset, Math.min(sourceBytes.byteLength, offset + 65_536)),
-        );
-    const frames: TransferFrame[] = [
-      { event: start, payload: empty, ordinal: -1, charge: framedBytes(start, empty) },
-    ];
-    for (let ordinal = 0; ordinal < chunks.length; ordinal++) {
-      const event: PipeEvent = {
+        captureGeometry: baseline.captureGeometry,
+        currentGeometry: baseline.currentGeometry,
+        coverage: baseline.coverage,
+        vtBytes: baseline.vt.byteLength,
+        tailBytes: baseline.tail.byteLength,
+        chunkCount,
+      };
+      if (!validateBaselineDescriptor(descriptor)) {
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "RECOVERY_UNAVAILABLE" };
+      }
+      const start: PipeEvent = {
+        type: "terminal-event",
+        worker: this.#worker,
+        run: route.run,
+        subscription: route.ref,
+        terminal: { type: "baseline-start", run: route.run, descriptor },
+      };
+      const lastChunk: PipeEvent = {
         type: "terminal-event",
         worker: this.#worker,
         run: route.run,
@@ -390,34 +362,95 @@ export class RecoverySubscriptions {
           run: route.run,
           baselineId,
           subscription: route.ref,
-          ordinal,
+          ordinal: chunkCount - 1,
         },
       };
+      const end: PipeEvent = {
+        type: "terminal-event",
+        worker: this.#worker,
+        run: route.run,
+        subscription: route.ref,
+        terminal: {
+          type: "baseline-end",
+          run: route.run,
+          baselineId,
+          subscription: route.ref,
+          chunkCount,
+          totalBytes: baseline.vt.byteLength + baseline.tail.byteLength,
+          atSeq: baseline.atSeq,
+        },
+      };
+      // The maximum ordinal has the longest metadata; no chunk view/table exists yet.
+      const frameLease = this.#reserve(
+        retainedFrameCharge(start) +
+          chunkCount * retainedFrameCharge(lastChunk) +
+          retainedFrameCharge(end),
+        "recovery-transfer-frames",
+      );
+      if (attempt.retired || route.token !== token || route.state !== "preparing") {
+        frameLease?.release();
+        return { failure: route.failure ?? "RESYNC_REQUIRED" };
+      }
+      if (!frameLease) {
+        this.#fail(route, "RESYNC_REQUIRED");
+        return { failure: "RECOVERY_UNAVAILABLE" };
+      }
+      route.frameLease = frameLease;
+      const chunks: Uint8Array[] = [];
+      for (const sourceBytes of [baseline.vt, baseline.tail])
+        for (let offset = 0; offset < sourceBytes.byteLength; offset += 65_536)
+          chunks.push(
+            sourceBytes.subarray(offset, Math.min(sourceBytes.byteLength, offset + 65_536)),
+          );
+      const frames: TransferFrame[] = [
+        { event: start, payload: empty, ordinal: -1, charge: framedBytes(start, empty) },
+      ];
+      for (let ordinal = 0; ordinal < chunks.length; ordinal++) {
+        const event: PipeEvent = {
+          type: "terminal-event",
+          worker: this.#worker,
+          run: route.run,
+          subscription: route.ref,
+          terminal: {
+            type: "baseline-chunk",
+            run: route.run,
+            baselineId,
+            subscription: route.ref,
+            ordinal,
+          },
+        };
+        frames.push({
+          event,
+          payload: chunks[ordinal]!,
+          ordinal,
+          charge: framedBytes(event, chunks[ordinal]!),
+        });
+      }
       frames.push({
-        event,
-        payload: chunks[ordinal]!,
-        ordinal,
-        charge: framedBytes(event, chunks[ordinal]!),
+        event: end,
+        payload: empty,
+        ordinal: chunks.length,
+        charge: framedBytes(end, empty),
       });
+      route.baselineLease = attempt.lease;
+      attempt.lease = undefined;
+      route.captureAttempt = undefined;
+      route.baselineLease?.shrinkTo(baseline.vt.byteLength + baseline.tail.byteLength + 4096);
+      route.frames = frames;
+      route.baselineId = baselineId;
+      route.atSeq = baseline.atSeq;
+      route.sentSeq = baseline.atSeq;
+      for (const fact of route.postN.filter((fact) => fact.event.seq <= baseline.atSeq)) {
+        fact.release();
+        route.postNBytes -= fact.charge;
+      }
+      route.postN = route.postN.filter((fact) => fact.event.seq > baseline.atSeq);
+      route.state = "transfer";
+      return { result: this.#marker(command, "baseline", baseline.atSeq) };
+    } finally {
+      attempt.openSettled = true;
+      this.#releaseRetiredCapture(attempt);
     }
-    frames.push({
-      event: end,
-      payload: empty,
-      ordinal: chunks.length,
-      charge: framedBytes(end, empty),
-    });
-    route.baselineLease?.shrinkTo(baseline.vt.byteLength + baseline.tail.byteLength + 4096);
-    route.frames = frames;
-    route.baselineId = baselineId;
-    route.atSeq = baseline.atSeq;
-    route.sentSeq = baseline.atSeq;
-    for (const fact of route.postN.filter((fact) => fact.event.seq <= baseline.atSeq)) {
-      fact.release();
-      route.postNBytes -= fact.charge;
-    }
-    route.postN = route.postN.filter((fact) => fact.event.seq > baseline.atSeq);
-    route.state = "transfer";
-    return { result: this.#marker(command, "baseline", baseline.atSeq) };
   }
 
   command(command: RouteCommand): Outcome {
@@ -708,7 +741,20 @@ export class RecoverySubscriptions {
     };
   }
 
+  #releaseRetiredCapture(attempt: CaptureAttempt): void {
+    if (!attempt.retired || !attempt.workSettled || !attempt.openSettled) return;
+    attempt.lease?.release();
+    attempt.lease = undefined;
+  }
+
   #fence(route: Route): void {
+    const attempt = route.captureAttempt;
+    if (attempt) {
+      route.captureAttempt = undefined;
+      attempt.retired = true;
+      // A deadline or replacement cannot release bytes still owned by pending capture work.
+      this.#releaseRetiredCapture(attempt);
+    }
     this.#delivery.cancelUnsent(route.token);
     route.replay?.release();
     route.replay = undefined;

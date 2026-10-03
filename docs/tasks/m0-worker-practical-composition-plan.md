@@ -70,3 +70,35 @@ Orca comparative evidence is the approved study pinned to stable v1.4.211 553446
 Preserve first actual failure, resolve only semantic conflicts inside lease as append-only corrections with independent review. Outside-path/product/API incompatibilities go to root with precise anchors/options; no entire-side overwrite or old capability preflight. Freeze clean H/T/full diff/six atom map/source-declaration-current compiled bindings/scoped real identities/exits/first failures in task results/report/handoff/manifest, then release all source/index/output as AUTHOR_FROZEN / RELEASED_STOP before independent QA.
 
 No author full check, push/CI, new native PTY/process observer/OS pipe/browser/devbox campaign, old driver/probe, profile/pool/network change, worktree or delegation. Historical28/43 NOT_RUN, EPERM/old physical cleanup UNKNOWN and consumed R5R6/browser/devbox limits remain. Current pure compiled outcomes do not accept full W2/P2/M0, D/Q/H1/C3 or M0 exit/M1 entry.
+
+## R04 preparing-attempt correction plan
+
+Allocated2026-10-03 to the same sole source owner GPT-6.1 Sol/high, root GO
+4d75aceefc147f7fa2cd6f819739b3647c4d95631166c01b7888ea9c962be5e6.
+Base12433ab8bfff8c12c6b2b45077f51df5754b9051/tree1a71cdf146dcaef4f8355c99e648be203d91445f,
+same checkout/branch. Independent QA and its38 cases/three W1 migrations are
+sealed/read-only. Accepted R04 finding df38c328cd296dbc085c33a0cc8f4600e5aab3e1c7bde2ef32df2e9f5b754795
+binds legal same-ref recover inside detached reservation callback.
+
+Write scope: recovery-subscription.ts, original worker-recovery-reservations,
+worker-recovery and worker-recovery-clock tests, this plan and composition results;
+own off-tree m0-w2-practical-r04-source-correction-r1 evidence. No outside source,
+QA/full/native/GitHub/runtime probe/new worktree or delegated worker.
+
+Permit preparing recover after existing validation, retain retiring BUSY and
+duplicate subscribe/tombstone/range/counter/capacity checks. Introduce private
+attempt-local detached lease ownership: old token refusal releases only its
+returned lease; fence detaches the old pending capture, retaining allocated
+bytes until both capture and opener references settle. Transfer ownership only
+after current-token capture validation/frame admission. Recheck token after
+reentrant reservation and before old throw/undefined/deadline failures. Keep
+replacement on the existing scheduler/budget path, once-only release, no wire,
+port/export/cap/profile/default change.
+
+First add meaningful author regressions for callback reentry, held allocated
+debt, valid uncancelled/current installed/retiring controls, old completion/throw
+and deadline, unsubscribe and replacement progress. Preserve the first baseline
+failure, then run changed compiled source through normal pinned worker/engine
+build and13 affected pure files. Record actual declarations/runtime names,
+counts/exits/env/timestamps/minimal diff/cleanH/T and release all source/index/
+Git/output leases for independent QA. Historical limits remain unchanged.
