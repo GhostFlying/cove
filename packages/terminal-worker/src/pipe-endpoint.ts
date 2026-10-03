@@ -77,7 +77,7 @@ interface OutboundFrame {
 interface RequestRecord {
   readonly command: PipeCommand;
   readonly role: "ordinary" | "status" | "stop" | "route" | "rejection";
-  phase: "deferred" | "executing" | "response";
+  phase: "parked" | "deferred" | "executing" | "response";
   readonly frames: Set<OutboundFrame>;
 }
 
@@ -302,7 +302,8 @@ class WorkerPipeCore {
 
   #slotAvailable(role: "ordinary" | "status" | "stop" | "route"): boolean {
     let count = 0;
-    for (const record of this.#pending.values()) if (record.role === role) count++;
+    for (const record of this.#pending.values())
+      if (record.role === role && record.phase !== "parked") count++;
     return role === "ordinary"
       ? count < this.#hello!.effectiveBudgets.pendingWorkerCommands
       : role === "route"
@@ -481,7 +482,11 @@ class WorkerPipeCore {
     const command = metadata as PipeCommand;
     const outstanding = this.#pending.get(command.requestId);
     if (outstanding) {
-      if (!this.#slotAvailable("route")) {
+      const parkedConflictSlot =
+        outstanding.phase === "parked" &&
+        this.#extraResponseItems === 0 &&
+        ![...this.#pending.values()].some((record) => record.role === "rejection");
+      if (!parkedConflictSlot && !this.#slotAvailable("route")) {
         void this.shutdown("duplicate-response-capacity");
         return false;
       }
@@ -510,6 +515,13 @@ class WorkerPipeCore {
         void this.shutdown("route-control-ingress-capacity");
         return false;
       }
+      // Parking owns the ID before any later ordinary command can claim it.
+      this.#pending.set(command.requestId, {
+        command,
+        role,
+        phase: "parked",
+        frames: new Set(),
+      });
       this.#parkedRouteControl = frame.metadata;
       this.#parkedRouteBytes = frame.metadata.buffer.byteLength;
       return true;
@@ -811,13 +823,12 @@ class WorkerPipeCore {
       return;
     }
     const command = checked.value as PipeCommand;
-    const record: RequestRecord = {
-      command,
-      role: "route",
-      phase: "deferred",
-      frames: new Set(),
-    };
-    this.#pending.set(command.requestId, record);
+    const record = this.#pending.get(command.requestId);
+    if (!record || record.phase !== "parked") {
+      void this.shutdown("invalid-parked-route-owner");
+      return;
+    }
+    record.phase = "deferred";
     if (this.#replyCapacity("route")) this.#startExecution(record);
     else this.#deferredControl.push(record);
   }
