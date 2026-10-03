@@ -718,8 +718,49 @@ describe("W2 current engine capture", () => {
       geometry,
       appearance: DEFAULT_APPEARANCE,
     });
-    const engine = model(account);
+    const rawReceipt = (bytes) => ({
+      type: bytes.constructor.name,
+      isBuffer: Buffer.isBuffer(bytes),
+      length: bytes.length,
+      rawHex: Buffer.from(bytes).toString("hex"),
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    let receiptOrdinal = 0;
+    const capture = (phase, owned, subject, disposed, value = {}) => {
+      const result = value.result;
+      const baseline = result?.status === "ready" ? result.baseline : undefined;
+      const receipt = structuredClone({
+        ordinal: ++receiptOrdinal,
+        phase,
+        run,
+        geometry,
+        appearance: DEFAULT_APPEARANCE,
+        effectiveBudgets: { ...M0_LIMITS, historyLines: 10 },
+        ...value,
+        currentState: subject && !disposed ? subject.currentState() : undefined,
+        disposedObservation: disposed,
+        baselineBytes: baseline && {
+          vt: rawReceipt(baseline.vt),
+          tail: rawReceipt(baseline.tail),
+          prefix: rawReceipt(baseline.vt.subarray(0, 76)),
+        },
+        account: owned.snapshot(),
+        owners: [...owned.live],
+        used: owned.used(),
+        available: owned.available(),
+        peak: owned.peak(),
+        eventStart: 0,
+        eventEnd: owned.events.length,
+        events: owned.events.slice(),
+      });
+      record("W2C-E03-complete-boundary", receipt);
+      return receipt;
+    };
+    let engine;
     try {
+      capture("before-original-constructor", account);
+      engine = model(account);
+      capture("after-original-constructor-before-assertions", account, engine, false);
       const acquisitions = account.events.filter((event) => event.phase === "acquire");
       assert.equal(acquisitions[0].bytes, 16512);
       assert.equal(acquisitions[1].bytes, scratch);
@@ -733,8 +774,17 @@ describe("W2 current engine capture", () => {
         ),
       );
       const captured = await engine.captureBaseline();
+      capture("actual-capture-before-status-and-prefix-assertions", account, engine, false, {
+        result: captured,
+      });
       assert.equal(captured.status, "ready");
-      assert.deepEqual(captured.baseline.vt.subarray(0, 76), setters);
+      const prefix = captured.baseline.vt.subarray(0, 76);
+      assert.deepEqual(prefix, Uint8Array.from(setters));
+      assert.equal(prefix.length, 76);
+      assert.equal(
+        createHash("sha256").update(prefix).digest("hex"),
+        "729ee81f4b053d9a5f3185866583665bd9f65703565d1888d942da5ab000022c",
+      );
       assert(captured.baseline.vt.length - 76 <= gridCap);
       assert(captured.baseline.vt.length <= 35060);
       assert.equal(acquisitions[2].bytes, captured.baseline.vt.length + 256);
@@ -742,7 +792,17 @@ describe("W2 current engine capture", () => {
       assert(account.peak() <= 262140);
       record("W2C-E03", account.events);
     } finally {
-      engine.dispose();
+      capture("primary-finally-before-actual-dispose", account, engine, false);
+      try {
+        engine?.dispose();
+      } finally {
+        capture(
+          "primary-finally-after-actual-dispose-before-zero-assertion",
+          account,
+          undefined,
+          true,
+        );
+      }
       assert.equal(account.used(), 0);
     }
     for (const variant of ["scratch-denial", "construction-throw", "detached-dispose"]) {
@@ -750,7 +810,11 @@ describe("W2 current engine capture", () => {
       const bufferGetter = Object.getOwnPropertyDescriptor(Terminal.prototype, "buffer");
       let subject;
       let detached;
+      let variantDisposed = false;
       try {
+        capture("variant-before-original-setup", owned, undefined, false, {
+          semanticVariant: variant,
+        });
         if (variant === "construction-throw") {
           assert(bufferGetter?.get);
           Object.defineProperty(Terminal.prototype, "buffer", {
@@ -761,26 +825,83 @@ describe("W2 current engine capture", () => {
           });
         }
         if (variant === "scratch-denial" || variant === "construction-throw") {
-          assert.throws(() =>
-            model(owned, (bytes) =>
-              variant === "scratch-denial" && bytes === scratch ? undefined : owned.reserve(bytes),
-            ),
-          );
+          assert.throws(() => {
+            capture("variant-before-original-constructor", owned, undefined, false, {
+              semanticVariant: variant,
+            });
+            try {
+              const result = model(owned, (bytes) =>
+                variant === "scratch-denial" && bytes === scratch
+                  ? undefined
+                  : owned.reserve(bytes),
+              );
+              subject = result;
+              capture("variant-constructor-return-before-assertions", owned, undefined, false, {
+                semanticVariant: variant,
+                constructed: true,
+              });
+              return result;
+            } catch (error) {
+              capture("variant-constructor-throw-before-assertions", owned, undefined, false, {
+                semanticVariant: variant,
+                actualThrow: { name: error.name, message: error.message, stack: error.stack },
+              });
+              throw error;
+            }
+          });
           assert.equal(owned.used(), 0);
         } else {
+          capture("variant-before-original-constructor", owned, undefined, false, {
+            semanticVariant: variant,
+          });
           subject = model(owned);
+          capture("variant-after-original-constructor", owned, subject, false, {
+            semanticVariant: variant,
+          });
           const captured = await subject.captureBaseline((bytes) => {
             detached = owned.reserve(bytes);
+            capture("variant-real-caller-reserve-before-assertion", owned, subject, false, {
+              semanticVariant: variant,
+              bytes,
+              acquired: Boolean(detached),
+            });
             assert(detached);
             subject.dispose();
+            variantDisposed = true;
+            capture("variant-actual-dispose-in-reserve", owned, undefined, true, {
+              semanticVariant: variant,
+              bytes,
+              returned: true,
+            });
             return true;
+          });
+          capture("variant-disposed-result-before-assertions", owned, subject, variantDisposed, {
+            semanticVariant: variant,
+            result: captured,
           });
           assert.equal(captured.status, "disposed");
           assert.equal(owned.live.size, 1);
+          capture("variant-caller-release-before", owned, subject, variantDisposed, {
+            semanticVariant: variant,
+          });
           detached.release();
           detached = undefined;
+          capture(
+            "variant-caller-release-after-before-zero-assertion",
+            owned,
+            subject,
+            variantDisposed,
+            { semanticVariant: variant },
+          );
           assert.equal(owned.used(), 0);
         }
+        capture(
+          "variant-before-original-scratch-owner-assertions",
+          owned,
+          subject,
+          variantDisposed,
+          { semanticVariant: variant },
+        );
         const scratchLease = owned.events.find(
           (event) => event.phase === "acquire" && event.bytes === scratch,
         );
@@ -799,8 +920,33 @@ describe("W2 current engine capture", () => {
         });
       } finally {
         if (bufferGetter) Object.defineProperty(Terminal.prototype, "buffer", bufferGetter);
-        subject?.dispose();
-        detached?.release();
+        capture(
+          "variant-finally-after-original-getter-restoration",
+          owned,
+          subject,
+          variantDisposed,
+          {
+            semanticVariant: variant,
+            restoredBufferGetter:
+              Object.getOwnPropertyDescriptor(Terminal.prototype, "buffer")?.get ===
+              bufferGetter?.get,
+          },
+        );
+        try {
+          subject?.dispose();
+        } finally {
+          try {
+            detached?.release();
+          } finally {
+            capture(
+              "variant-finally-after-actual-dispose-and-caller-release-before-zero-assertion",
+              owned,
+              undefined,
+              true,
+              { semanticVariant: variant },
+            );
+          }
+        }
         assert.equal(owned.used(), 0);
       }
     }
