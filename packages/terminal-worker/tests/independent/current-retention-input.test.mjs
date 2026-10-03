@@ -1464,7 +1464,7 @@ describe("W2 current retention and input", () => {
       });
       const secondPayload = new Uint8Array(20000);
       const secondEventStart = rig.leaseEvents.length;
-      capture("original-second-input-before", {
+      const secondBefore = capture("original-second-input-before", {
         command: secondCommand,
         payload: {
           bytes: secondPayload.length,
@@ -1473,13 +1473,41 @@ describe("W2 current retention and input", () => {
         },
         eventStart: secondEventStart,
       });
+      const secondQ = 128 + Buffer.byteLength(JSON.stringify(secondCommand)) + secondPayload.length;
+      capture("COPY_DENIED-before-stage-guard", {
+        command: secondCommand,
+        Q: secondQ,
+        available: rig.effective.workerBytes - secondBefore.execution.accountedBytes,
+        orderedNativeStageCredit: 0,
+      });
+      assert.equal(secondQ, 20640);
+      assert(
+        rig.effective.workerBytes - secondBefore.execution.accountedBytes < secondQ,
+        "NOT_EXERCISED: fixed COPY_DENIED stage",
+      );
       const second = await rig.execute(secondCommand, secondPayload);
-      capture("original-second-input-result-before-assertions", {
+      const secondAfter = capture("original-second-input-result-before-assertions", {
         command: secondCommand,
         result: second,
         eventStart: secondEventStart,
         eventEnd: rig.leaseEvents.length,
       });
+      assert.equal(second.type, "error");
+      assert.equal(second.requestId, secondCommand.requestId);
+      assert.deepEqual(second.worker, worker);
+      assert.deepEqual(second.run, secondCommand.run);
+      assert.equal(second.error.acceptance, "not-accepted");
+      assert.deepEqual(rig.leaseEvents.slice(secondEventStart), [
+        { phase: "denied", category: "worker", bytes: secondQ },
+      ]);
+      assert.equal(secondBefore.execution.inputIdentities, 1);
+      assert.deepEqual(secondAfter.execution, secondBefore.execution);
+      assert.deepEqual(secondAfter.liveLeases, secondBefore.liveLeases);
+      assert.deepEqual(secondAfter.native, secondBefore.native);
+      assert.deepEqual(secondAfter.nativeOwners, secondBefore.nativeOwners);
+      assert.deepEqual(secondAfter.nativeReceipts, secondBefore.nativeReceipts);
+      assert.deepEqual(secondAfter.physicalOwners, secondBefore.physicalOwners);
+      assert.deepEqual(secondAfter.physical, secondBefore.physical);
       assert.equal(second.error.kind, "BUSY");
       assert.deepEqual(
         rig.native.owners.map((owner) => owner.tasks.length),
@@ -1500,14 +1528,14 @@ describe("W2 current retention and input", () => {
       const after = rig.execution.snapshot();
       capture("original-after-shutdown-before-scalar-assertions", { after });
       const owned = after.retainedBreakdown;
-      assert.equal(owned.workerBytes, 12816);
+      assert.equal(owned.workerBytes, 12568);
       assert.equal(owned.reservedControlBytes, 4112);
-      assert.equal(owned.accountedBytes, 16928);
+      assert.equal(owned.accountedBytes, 16680);
       assert.equal(owned.engineBytes, 0);
       assert.equal(owned.nativeInputBytes, 0);
       assert.equal(owned.nativeOutputBytes, 0);
       assert.equal(after.runIds, 2);
-      assert.equal(after.inputIdentities, 2);
+      assert.equal(after.inputIdentities, 1);
       assert.equal(after.sessions.length, 2);
       assert(after.sessions.every((entry) => entry.snapshot.disposed));
       assert(after.replay.every((entry) => entry.events === 0 && entry.bytes === 0));
@@ -1521,14 +1549,54 @@ describe("W2 current retention and input", () => {
         ),
       );
       assert(held.peakAccountedBytes <= 262144);
+      assert.equal(firstResult.requestId, firstCommand.requestId);
+      assert.deepEqual(firstResult.worker, worker);
+      assert.deepEqual(firstResult.run, firstCommand.run);
+      assert.equal(firstResult.type, "error");
+      assert.equal(firstResult.error.kind, "RESULT_UNKNOWN");
+      assert.equal(firstResult.error.acceptance, "unknown");
+      assert.deepEqual(
+        liveSet(rig)
+          .map((entry) => [entry.category, entry.bytes])
+          .sort((a, b) => a[1] - b[1]),
+        [
+          ["worker", 227],
+          ["worker", 6167],
+          ["worker", 6174],
+        ],
+      );
+      const firstQ = 128 + Buffer.byteLength(JSON.stringify(firstCommand)) + firstPayload.length;
+      for (const [category, bytes] of [
+        ["worker", firstQ],
+        ["native-input", 40768],
+      ]) {
+        const acquired = rig.leaseEvents
+          .slice(firstEventStart)
+          .filter(
+            (entry) =>
+              entry.phase === "acquire" && entry.category === category && entry.bytes === bytes,
+          );
+        assert.equal(acquired.length, 1);
+        assert.equal(
+          rig.leaseEvents.filter(
+            (entry) => entry.phase === "release" && entry.id === acquired[0].id,
+          ).length,
+          1,
+        );
+      }
+      assert.equal(rig.sink.ledger.live.size, 0);
+      assert(rig.sink.physical.every((frame) => frame.settled));
+      audit(rig.sink.ledger.events);
       record("W2C-I10", {
         before,
         held,
         second,
         after,
-        worker: 12816,
+        stage: "COPY_DENIED",
+        originalOrderedNativeStage: "NOT_EXERCISED_PENDING",
+        worker: 12568,
         runRecordBytes: 12341,
-        inputIdentityBytes: 475,
+        inputIdentityBytes: 227,
         leases: rig.leaseEvents,
         native: rig.native.receipts,
       });
