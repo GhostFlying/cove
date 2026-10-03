@@ -166,17 +166,63 @@ describe("W2 current server and public client", () => {
       assert.equal(changed.version, 2);
       assert.deepEqual(Buffer.from(changed.bytes), actualPreview(rig));
       const opened = await installed(peer);
+      rig.capture("C02-input-target-before", {
+        controller: opened.controller.snapshot(),
+        targetArguments: { foreground: true, focused: true },
+        viewFacts: opened.controlled.facts,
+      });
+      const target = opened.controller.setInputTarget(true, true);
+      rig.capture("C02-input-target-returned", {
+        target,
+        targetArguments: { foreground: true, focused: true },
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+      });
+      assert(target.ok);
+      const focusUplinkStart = peer.uplink.length;
+      const focusDownlinkStart = peer.downlink.length;
+      rig.capture("C02-focus-before", {
+        geometry,
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+      });
       const focus = await opened.controller.requestFocus(geometry);
-      rig.capture("C02-focus-returned", { focus });
+      rig.capture("C02-focus-returned", {
+        focus,
+        geometry,
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+        uplink: peer.uplink.slice(focusUplinkStart),
+        downlink: peer.downlink.slice(focusDownlinkStart),
+      });
       assert(focus.ok);
       await turns(4);
-      const resize = await opened.controller.requestResize({ cols: 13, rows: 4 });
-      rig.capture("C02-resize-returned", { resize });
+      const resizeGeometry = { cols: 13, rows: 4 };
+      const resizeUplinkStart = peer.uplink.length;
+      const resizeDownlinkStart = peer.downlink.length;
+      rig.capture("C02-resize-before", {
+        geometry: resizeGeometry,
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+      });
+      const resize = await opened.controller.requestResize(resizeGeometry);
+      rig.capture("C02-resize-returned", {
+        resize,
+        geometry: resizeGeometry,
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+        uplink: peer.uplink.slice(resizeUplinkStart),
+        downlink: peer.downlink.slice(resizeDownlinkStart),
+      });
       assert(resize.ok);
       await turns(4);
       rig.time.advance(153);
       const resized = await peer.client.getPreview(rig.run, changed.version);
-      rig.capture("C02-resized-returned", { resized });
+      rig.capture("C02-resized-returned", {
+        resized,
+        controller: opened.controller.snapshot(),
+        viewFacts: opened.controlled.facts,
+      });
       assert(resized.ok && resized.status === "transfer");
       assert.deepEqual(resized.geometry, { cols: 13, rows: 4 });
       assert.equal(resized.version, 4);
