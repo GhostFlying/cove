@@ -1009,3 +1009,157 @@ describe("P2-B2 independent F1 held-result close unsubscribe", () => {
     },
   );
 });
+
+describe("P2-B2 independent shared worker progress capacity", () => {
+  test("R2-F1 freed peer ACK slot dispatches owned teardown before held focus settles", async () => {
+    const r = controlFixture({ pipeHold: true });
+    const trace = { case: "peer-four-slots", steps: [] };
+    const record = (phase) =>
+      trace.steps.push({
+        phase,
+        commands: structuredClone(r.commands),
+        primary: r.primary.service.snapshot(),
+        peer: r.connections[1]?.service.snapshot(),
+        arbiter: state(r),
+        pipe: r.session.snapshot(),
+        retained: r.account.snapshot(),
+      });
+    try {
+      const a = r.primary,
+        ar = await r.attach(a),
+        b = r.addConnection();
+      const focus = r.command("focus", ar, { focusSeq: 1, geometry });
+      const held = a.service.handle(focus);
+      await turns();
+      r.status();
+      await turns();
+      const heldCommand = r.last("set-control");
+      const peerRefs = [];
+      for (let index = 0; index < 4; index++)
+        peerRefs.push(await r.attach(b, { viewId: `r2-peer-${index}` }));
+      const peerReplies = peerRefs.map((ref) =>
+        b.service.handle(r.command("applied-ack", ref, { appliedSeq: 10 })),
+      );
+      await turns();
+      const acknowledgements = r.commands.filter((x) => x.type === "applied-ack");
+      expect(acknowledgements).toHaveLength(4);
+      record("four-peer-ACKs-held");
+      a.service.close();
+      await turns();
+      expect(a.service.snapshot(ar.subscriptionId).route.phase).toBe("retired");
+      expect(r.count("unsubscribe")).toBe(0);
+      const refused = await a.service.handle(
+        r.command("input", ar, { inputSeq: 1, epoch: 6 }),
+        binary,
+      );
+      expect(refused.type).toBe("error");
+      expect(refused.error.acceptance).toBe("not-accepted");
+      expect(r.count("input")).toBe(0);
+      record("closed-under-shared-saturation");
+      r.accept(acknowledgements[0]);
+      expect((await peerReplies[0]).type).toBe("applied-ack-result");
+      await turns();
+      const freedSlotTeardown = structuredClone(r.commands.filter((x) => x.type === "unsubscribe"));
+      trace.afterOneSharedSlotFreed = freedSlotTeardown;
+      record("one-peer-slot-freed-before-focus-result");
+      expect(r.commands.filter((x) => x.type === "set-control" && x.holder === null)).toHaveLength(
+        0,
+      );
+      r.accept(heldCommand, { atSeq: 11 });
+      trace.heldReply = await held;
+      expect(trace.heldReply.type).toBe("error");
+      expect(a.transport.trace().some((x) => x.metadata.type === "focus-result")).toBe(false);
+      await turns();
+      const release = r.last("set-control");
+      releaseOracle({ ...release, owner: holder(ar) }, { holder: holder(ar), epoch: 6, geometry });
+      r.accept(release, { atSeq: 12 });
+      for (const acknowledgement of acknowledgements.slice(1)) r.accept(acknowledgement);
+      const replies = await Promise.all(peerReplies);
+      expect(replies.map((x) => x.type)).toEqual(Array(4).fill("applied-ack-result"));
+      await turns();
+      const actualTeardowns = r.commands.filter((x) => x.type === "unsubscribe");
+      for (const command of actualTeardowns) {
+        expect(command.subscription).toEqual(ar);
+        r.accept(command);
+      }
+      await turns();
+      a.service.close();
+      r.arbiter.retire(ar);
+      r.arbiter.tick();
+      await turns();
+      expect(r.count("unsubscribe")).toBeLessThanOrEqual(1);
+      expect(r.count("stop")).toBe(0);
+      expect(state(r).boundary.holder).toBeNull();
+      for (const ref of peerRefs)
+        expect(b.service.snapshot(ref.subscriptionId).route.phase).toBe("active");
+      record("all-real-results-settled");
+      await r.stop();
+      record("owned-carriers-released");
+      expect(
+        freedSlotTeardown,
+        "pending owned teardown must survive shared BUSY and enter the freed slot",
+      ).toHaveLength(1);
+      expect(freedSlotTeardown[0].subscription).toEqual(ar);
+    } finally {
+      await r.stop();
+      record("finally-owned-cleanup");
+      console.info("SHARED_PROGRESS_TRACE " + JSON.stringify(trace));
+    }
+  });
+
+  test("R2-CAP active background unsubscribe occupies one original shared progress slot", async () => {
+    const r = controlFixture({ pipeHold: true });
+    const trace = { case: "background-one-slot", steps: [] };
+    const record = (phase) =>
+      trace.steps.push({
+        phase,
+        commands: structuredClone(r.commands),
+        primary: r.primary.service.snapshot(),
+        peer: r.connections[1]?.service.snapshot(),
+        pipe: r.session.snapshot(),
+        retained: r.account.snapshot(),
+      });
+    try {
+      const a = r.primary,
+        ar = await r.attach(a),
+        b = r.addConnection();
+      const peerRefs = [];
+      for (let index = 0; index < 4; index++)
+        peerRefs.push(await r.attach(b, { viewId: `r2-cap-peer-${index}` }));
+      a.service.close();
+      await turns();
+      const background = r.last("unsubscribe");
+      expect(background.subscription).toEqual(ar);
+      expect(r.count("unsubscribe")).toBe(1);
+      const replies = peerRefs.map((ref) =>
+        b.service.handle(r.command("applied-ack", ref, { appliedSeq: 10 })),
+      );
+      await turns();
+      const acknowledgements = r.commands.filter((x) => x.type === "applied-ack");
+      expect(acknowledgements).toHaveLength(3);
+      const refused = await replies[3];
+      trace.fourthPeerReply = refused;
+      expect(refused.type).toBe("error");
+      expect(refused.error.kind).toBe("BUSY");
+      expect(refused.error.acceptance).toBe("not-accepted");
+      record("background-plus-three-ACKs-held-fourth-refused");
+      r.accept(background);
+      for (const acknowledgement of acknowledgements) r.accept(acknowledgement);
+      expect((await Promise.all(replies.slice(0, 3))).map((x) => x.type)).toEqual(
+        Array(3).fill("applied-ack-result"),
+      );
+      await turns();
+      a.service.close();
+      expect(r.count("unsubscribe")).toBe(1);
+      expect(r.count("stop")).toBe(0);
+      expect(r.count("set-control")).toBe(0);
+      record("real-results-settled-without-cap-increase");
+      await r.stop();
+      record("owned-carriers-released");
+    } finally {
+      await r.stop();
+      record("finally-owned-cleanup");
+      console.info("SHARED_PROGRESS_TRACE " + JSON.stringify(trace));
+    }
+  });
+});
