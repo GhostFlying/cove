@@ -223,7 +223,11 @@ export class LocalRuntime implements RuntimeTerminalPort {
   }
 
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void } {
-    if (this.disposed || this.listeners.size >= 32 || this.listeners.has(listener))
+    if (
+      this.disposed ||
+      this.listeners.size >= this.composition.budgets.authenticatedSockets + 2 ||
+      this.listeners.has(listener)
+    )
       throw new Error("Event listener capacity unavailable");
     const lease = this.bytes.reserve(512);
     if (!lease) throw new Error("Event listener byte capacity unavailable");
