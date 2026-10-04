@@ -374,6 +374,70 @@ describe("W2 current server and public client", () => {
           };
           try {
             await rig.emit(utf8("W2-C03"));
+            const seedExecution = rig.endpoint.execution.snapshot();
+            const seedSession = seedExecution.sessions.find((entry) => sameRun(entry.run));
+            const seedRun = seedExecution.runs.find((entry) => sameRun(entry.run));
+            capture("seed-status-before-guards", { seedExecution, seedSession, seedRun });
+            assert.deepEqual(seedExecution.worker, rig.worker);
+            assert.equal(seedExecution.ordinaryPendingCommands, 0);
+            assert.equal(seedExecution.pendingCommands, 0);
+            assert.equal(seedExecution.reservedStatusPending, false);
+            assert(seedSession);
+            assert.deepEqual(seedSession.run, rig.run);
+            assert(seedRun);
+            assert.deepEqual(seedRun.run, rig.run);
+            assert.equal(seedRun.status, "live");
+            assert.equal(seedSession.snapshot.receivedSeq, 1);
+            assert(
+              !seedSession.snapshot.faulted &&
+                !seedSession.snapshot.consumerFenced &&
+                !seedSession.snapshot.disposed,
+            );
+            assert(seedSession.snapshot.queuedItems < 256);
+            const seedStatusCommand = {
+              type: "status",
+              worker: rig.worker,
+              run: rig.run,
+              requestId: "consumer-c03-seed-status",
+            };
+            capture("seed-status-before-invoke", { command: seedStatusCommand, seedExecution });
+            let seedStatusResult;
+            try {
+              const seedStatusPromise = rig.runtime.getStatus(seedStatusCommand);
+              capture("seed-status-promise-returned", {
+                command: seedStatusCommand,
+                responseSettled: false,
+              });
+              seedStatusResult = await seedStatusPromise;
+              capture("seed-status-result-before-assert", {
+                command: seedStatusCommand,
+                result: seedStatusResult,
+                responseSettled: true,
+              });
+            } catch (error) {
+              capture("seed-status-rejected-before-assert", {
+                command: seedStatusCommand,
+                error: {
+                  name: error.name,
+                  message: error.message,
+                  stack: error.stack,
+                  code: error.code,
+                  cause: error.cause,
+                },
+              });
+              throw error;
+            }
+            assert.equal(seedStatusResult.type, "result");
+            assert.equal(seedStatusResult.commandType, "status");
+            assert.equal(seedStatusResult.requestId, seedStatusCommand.requestId);
+            assert.deepEqual(seedStatusResult.worker, rig.worker);
+            assert.deepEqual(seedStatusResult.run, rig.run);
+            assert.equal(seedStatusResult.outcome, "accepted");
+            assert.deepEqual(seedStatusResult.runStatus.run, rig.run);
+            assert.equal(seedStatusResult.runStatus.status, "live");
+            assert.deepEqual(seedStatusResult.runStatus.geometry, { cols: 12, rows: 4 });
+            assert.equal(seedStatusResult.runStatus.receivedSeq, 1);
+            assert.equal(seedStatusResult.runStatus.parsedSeq, 1);
             await untilTurn(() => {
               const entry = rig.endpoint.execution
                 .snapshot()
