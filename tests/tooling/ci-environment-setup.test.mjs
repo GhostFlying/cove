@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { fstatSync, readFileSync } from "node:fs";
-import {
+import filesystem, {
   cp,
   link,
   mkdir,
@@ -16,7 +16,7 @@ import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { runRecordedSetup } from "../../scripts/ci-environment-setup.mjs";
 import { prepareNodePty } from "../../scripts/node-pty-install.mjs";
 
@@ -358,6 +358,34 @@ test("outer file-backed check preserves original timeout and absent binary error
     join(directory, "replayed.stderr.bin"),
     join(directory, "check.json"),
   );
+  const expected = Buffer.from([0, 255, 1, 2]);
+  const prefixPath = join(directory, "check.stdout.bin");
+  const actualOpen = filesystem.open;
+  let capturePrefix;
+  const captureOpen = vi.spyOn(filesystem, "open").mockImplementation(async function (...args) {
+    const handle = await Reflect.apply(actualOpen, this, args);
+    if (String(args[0]) !== prefixPath) return handle;
+    try {
+      await handle.writeFile(expected);
+      const bytes = await readFile(prefixPath);
+      capturePrefix = {
+        origin: "fixture-real-descriptor-before-child-timeout",
+        path: prefixPath,
+        fd: handle.fd,
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        raw: Array.from(bytes),
+      };
+      return handle;
+    } catch (error) {
+      try {
+        await handle.close();
+      } catch (closeError) {
+        error.secondaryErrors = [...(error.secondaryErrors ?? []), closeError];
+      }
+      throw error;
+    }
+  });
   let failure;
   try {
     await runRecordedSetup(
@@ -365,7 +393,7 @@ test("outer file-backed check preserves original timeout and absent binary error
       process.execPath,
       [
         "--eval",
-        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));fs.writeSync(1, Buffer.from([0,255,1,2]));setInterval(() => {}, 1000)`,
+        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));setInterval(() => {}, 1000)`,
       ],
       directory,
       directory,
@@ -375,17 +403,21 @@ test("outer file-backed check preserves original timeout and absent binary error
   } catch (error) {
     failure = error;
   } finally {
+    captureOpen.mockRestore();
     await stdout.close();
     await stderr.close();
     await preserveBinaryControl("setup-timeout50", directory, {
       error: { code: failure?.code, message: failure?.message },
+      capturePrefix,
+      stdout: stdout.observations,
+      stderr: stderr.observations,
     });
   }
   expect(failure).toMatchObject({
     code: "ETIMEDOUT",
     ciOutputAttempt: { timedOut: true, timeoutMs: 50 },
   });
-  expect(await readFile(join(directory, "check.log"))).toEqual(Buffer.from([0, 255, 1, 2]));
+  expect(await readFile(join(directory, "check.log"))).toEqual(expected);
   assertCapturedDescriptorsClosed(failure.ciOutputAttempt.outputCapture);
   const absentDirectory = await isolatedDirectory();
   let absent;
