@@ -323,7 +323,7 @@ test("outer check and inner ordinary Vitest preserve four MiB per binary stream 
     binaryControlExpected(4194304),
     binaryControlExpected(4194304, true),
   ]);
-  expect(await readFile(join(directory, "check.log"))).toEqual(expected);
+  expect((await readFile(join(directory, "check.log"))).equals(expected)).toBe(true);
   expect(record.log).toMatchObject({
     bytes: 8388608,
     sha256: createHash("sha256").update(expected).digest("hex"),
@@ -334,9 +334,9 @@ test("outer check and inner ordinary Vitest preserve four MiB per binary stream 
     ["stderr", stderr],
   ]) {
     const bytes = binaryControlExpected(4194304, stream === "stderr");
-    expect(await readFile(join(inner, `vitest.${stream}.bin`))).toEqual(bytes);
-    expect(await readFile(join(directory, `check.${stream}.bin`))).toEqual(bytes);
-    expect(await readFile(join(directory, `replayed.${stream}.bin`))).toEqual(bytes);
+    expect((await readFile(join(inner, `vitest.${stream}.bin`))).equals(bytes)).toBe(true);
+    expect((await readFile(join(directory, `check.${stream}.bin`))).equals(bytes)).toBe(true);
+    expect((await readFile(join(directory, `replayed.${stream}.bin`))).equals(bytes)).toBe(true);
     expect(record.outputCapture[stream]).toMatchObject({
       complete: true,
       bytes: 4194304,
