@@ -1655,6 +1655,34 @@ test("ordinary Vitest preserves timeout and ENOENT with closed binary descriptor
   const directory = dirname(outputFile);
   const stdout = await binaryReplaySink(resolve(directory, "replayed.stdout.bin"), outputFile);
   const stderr = await binaryReplaySink(resolve(directory, "replayed.stderr.bin"), outputFile);
+  const expected = Buffer.from([0, 255, 1, 2]);
+  const prefixPath = resolve(directory, "vitest.stdout.bin");
+  const actualOpen = filesystem.open;
+  let capturePrefix;
+  const captureOpen = vi.spyOn(filesystem, "open").mockImplementation(async function (...args) {
+    const handle = await Reflect.apply(actualOpen, this, args);
+    if (String(args[0]) !== prefixPath) return handle;
+    try {
+      await handle.writeFile(expected);
+      const bytes = await readFile(prefixPath);
+      capturePrefix = {
+        origin: "fixture-real-descriptor-before-child-timeout",
+        path: prefixPath,
+        fd: handle.fd,
+        bytes: bytes.length,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        raw: Array.from(bytes),
+      };
+      return handle;
+    } catch (error) {
+      try {
+        await handle.close();
+      } catch (closeError) {
+        error.secondaryErrors = [...(error.secondaryErrors ?? []), closeError];
+      }
+      throw error;
+    }
+  });
   let failure;
   try {
     await recordedCommand(
@@ -1662,7 +1690,7 @@ test("ordinary Vitest preserves timeout and ENOENT with closed binary descriptor
       process.execPath,
       [
         "--eval",
-        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));fs.writeSync(1, Buffer.from([0,255,1,2]));setInterval(() => {}, 1000)`,
+        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));setInterval(() => {}, 1000)`,
       ],
       outputFile,
       50,
@@ -1671,10 +1699,12 @@ test("ordinary Vitest preserves timeout and ENOENT with closed binary descriptor
   } catch (error) {
     failure = error;
   } finally {
+    captureOpen.mockRestore();
     await stdout.close();
     await stderr.close();
     await preserveBinaryControl("gate-timeout50", directory, {
       error: { code: failure?.code, message: failure?.message },
+      capturePrefix,
       stdout: stdout.observations,
       stderr: stderr.observations,
     });
@@ -1684,9 +1714,7 @@ test("ordinary Vitest preserves timeout and ENOENT with closed binary descriptor
     ciOutputAttempt: { timeoutMs: 50, timedOut: true },
   });
   assertCapturedDescriptorsClosed(failure.ciOutputAttempt.outputCapture);
-  expect(await readFile(resolve(directory, "vitest.stdout.bin"))).toEqual(
-    Buffer.from([0, 255, 1, 2]),
-  );
+  expect(await readFile(resolve(directory, "vitest.stdout.bin"))).toEqual(expected);
   expect(() => process.kill(failure.ciOutputAttempt.childPid, 0)).toThrow(
     expect.objectContaining({ code: "ESRCH" }),
   );
