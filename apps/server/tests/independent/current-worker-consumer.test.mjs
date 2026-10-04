@@ -846,7 +846,27 @@ describe("W2 current server and public client", () => {
         "healthy peer parsed current source after callback",
       );
       capture("healthy-parsed-before-preview");
+      capture("preview-admission-before-wait", { command: statusCommand, result: statusResult });
+      await untilTurn(() => {
+        const actual = rig.endpoint.pipe.snapshot();
+        return (
+          actual.state === "ready" && actual.outstandingRequests === 0 && actual.responseItems === 0
+        );
+      }, "actual worker response retirement before preview");
+      const previewAdmission = rig.endpoint.pipe.snapshot();
+      capture("preview-admission-before-guards", {
+        command: statusCommand,
+        result: statusResult,
+        previewAdmission,
+      });
+      assert.equal(previewAdmission.state, "ready");
+      assert.equal(previewAdmission.outstandingRequests, 0);
+      assert.equal(previewAdmission.responseItems, 0);
+      assert.equal(held.delivery.snapshot().physicalBytes, physical);
+      assert(ownCallbacks.every((item) => held.physical.has(item)));
+      capture("preview-before-invoke");
       const pending = healthy.client.getPreview(rig.run);
+      capture("preview-public-promise-returned");
       const preview = await pending;
       capture("preview-result-before-assert", { preview });
       assert(preview.ok && preview.status === "transfer");
