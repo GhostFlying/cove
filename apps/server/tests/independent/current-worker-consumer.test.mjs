@@ -276,98 +276,285 @@ describe("W2 current server and public client", () => {
   });
 
   it("W2C-C03 actual worker recovery crosses B1 mapper and client parse before ACK", async () => {
-    await withWorkerLink(
-      async (rig) => {
-        await rig.emit(utf8("W2-C03"));
-        const peer = await rig.peer();
-        const view = controlledView();
-        view.controls.chunk = deferred();
-        view.controls.finish = deferred();
-        const { controller } = await peer.terminal(view);
-        const attached = controller.attach();
-        await untilTurn(
-          () => view.facts.some((fact) => fact.type === "chunk"),
-          "actual mapped chunk reaches held public view",
-        );
-        assert.equal(external(peer, "baseline-progress").length, 0);
-        assert.equal(external(peer, "applied-ack").length, 0);
-        const subscription = controller.snapshot().subscription;
-        assert(subscription);
-        assert.equal(
-          peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
-          false,
-        );
-        const subscribe = rig.commands.find((value) => value.type === "subscribe");
-        orderedMarker(rig.received, subscribe.requestId);
-        const realOrder = rig.received.slice();
-        const marker = realOrder.find(
-          (value) =>
-            value.metadata.requestId === subscribe.requestId && value.metadata.type === "result",
-        );
-        assert.throws(() =>
-          orderedMarker(
-            realOrder.filter((value) => value !== marker),
-            subscribe.requestId,
-          ),
-        );
-        const without = realOrder.filter((value) => value !== marker);
-        assert.throws(() => orderedMarker([...without, marker], subscribe.requestId));
-        view.controls.chunk.resolve();
-        await untilTurn(
-          () => view.facts.some((fact) => fact.type === "finish"),
-          "parse reaches final held installation",
-        );
-        assert(external(peer, "baseline-progress").length > 0);
-        assert.equal(external(peer, "applied-ack").length, 0);
-        const oldBaseline = view.facts.find((fact) => fact.type === "begin").descriptor.baselineId;
-        view.controls.finish.resolve();
-        assert((await attached).ok);
-        await untilTurn(
-          () => peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
-          "parsed final ACK installs actual source",
-        );
-        const before = view.facts.filter((fact) => fact.type === "begin").length;
-        assert((await controller.recover("gap")).ok);
-        await untilTurn(
-          () => peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
-          "equal-N new baseline final ACK",
-        );
-        const starts = view.facts.filter((fact) => fact.type === "begin");
-        assert.equal(starts.length, before + 1);
-        assert.equal(starts.at(-1).descriptor.atSeq, starts[0].descriptor.atSeq);
-        assert.notEqual(starts.at(-1).descriptor.baselineId, oldBaseline);
-        assert.deepEqual(controller.snapshot().subscription, subscription);
-        const oldProgress = external(peer, "baseline-progress").find(
-          (value) => value.baselineId === oldBaseline,
-        );
-        assert(oldProgress);
-        const stale = await peer.service.handle({
-          ...oldProgress,
-          requestId: "consumer-stale-baseline-counter",
-        });
-        assert.equal(stale.type, "error");
-        await rig.emit(utf8("suffix"));
-        await untilTurn(
-          () => controller.snapshot().appliedSeq === 2,
-          "live suffix parsed after final ACK",
-        );
-        assert.equal(
-          view.facts.filter((fact) => fact.type === "event" && fact.event.seq === 2).length,
-          1,
-        );
-        assert.equal(rig.endpoint.native.owners[0].tasks.length, 0);
-        assert(!commandTypes(rig).includes("input"));
-        record("W2C-C03", {
-          subscription,
-          view: view.facts,
-          uplink: peer.uplink,
-          workerFrames: rig.received,
-          stale,
-          worker: rig.endpoint.execution.snapshot(),
-        });
-      },
-      { pendingWorkerCommands: 1 },
-    );
+    let capturePositive;
+    try {
+      await withWorkerLink(
+        async (rig) => {
+          let peer;
+          let view;
+          let controller;
+          const handleReceipts = [];
+          const parseReceipts = [];
+          let ordinal = 0;
+          const capture = (phase, value = {}) => {
+            const receipt = {
+              ordinal: ++ordinal,
+              phase,
+              ...value,
+              run: rig.run,
+              worker: rig.worker,
+              execution: rig.endpoint.execution.snapshot(),
+              native: rig.endpoint.native.snapshot(),
+              nativeReceipts: rig.endpoint.native.receipts,
+              pipe: rig.endpoint.pipe.snapshot(),
+              session: rig.session.snapshot(),
+              account: rig.account.snapshot(),
+              owners: [...rig.live.values()],
+              leaseEvents: rig.leaseEvents,
+              workerCommands: rig.commands,
+              workerFrames: rig.received,
+              emittedFrames: rig.endpoint.frames,
+              heldCallbacks: rig.endpoint.callbacks.length,
+              clock: rig.time.snapshot(),
+              controller: controller?.snapshot(),
+              view: view?.facts,
+              parseReceipts,
+              handleReceipts,
+              peer: peer && {
+                connection: peer.connection,
+                uplink: peer.uplink,
+                downlink: peer.downlink,
+                pendingCount: peer.pending.length,
+                service: peer.service.snapshot(),
+                delivery: peer.delivery.snapshot(),
+                physical: [...peer.physical].map((item) => ({
+                  bytes: item.raw.length,
+                  sha256: hash(item.raw),
+                  rawHex: Buffer.from(item.raw).toString("hex"),
+                })),
+              },
+            };
+            record("W2C-C03-public-readiness", receipt);
+            if (!process.env.COVE_W2_CURRENT_QA_OUTPUT)
+              console.log("W2C-C03-public-readiness " + JSON.stringify(receipt));
+          };
+          capturePositive = capture;
+          const sameRun = (actual) =>
+            actual && Object.keys(rig.run).every((key) => actual[key] === rig.run[key]);
+          const acceptedFinalAck = async (label, uplinkStart, subscription) => {
+            const matches = peer.uplink
+              .map((frame, index) => ({ frame, index }))
+              .slice(uplinkStart)
+              .filter(({ frame }) => frame.metadata.type === "applied-ack");
+            capture(label + "-ack-correlation-before", { uplinkStart, matches, subscription });
+            assert.equal(matches.length, 1);
+            const { frame, index } = matches[0];
+            const command = frame.metadata;
+            assert.deepEqual(command.run, rig.run);
+            assert.deepEqual(command.subscription, subscription);
+            assert.equal(command.appliedSeq, 1);
+            const actual = peer.pending[index];
+            assert(actual && typeof actual.then === "function");
+            const observed = { label, index, command, settled: false };
+            handleReceipts.push(observed);
+            actual.then(
+              (result) => {
+                Object.assign(observed, { settled: true, status: "resolved", result });
+                capture(label + "-ack-service-resolved", { observed });
+              },
+              (error) => {
+                Object.assign(observed, {
+                  settled: true,
+                  status: "rejected",
+                  error: { name: error.name, message: error.message },
+                });
+                capture(label + "-ack-service-rejected", { observed });
+              },
+            );
+            await untilTurn(() => observed.settled, label + " actual final ACK handle completion");
+            capture(label + "-ack-result-before-assert", { observed });
+            assert.equal(observed.status, "resolved");
+            assert.deepEqual(observed.result, {
+              type: "applied-ack-result",
+              requestId: command.requestId,
+              run: rig.run,
+              subscription,
+              appliedSeq: 1,
+            });
+          };
+          try {
+            await rig.emit(utf8("W2-C03"));
+            await untilTurn(() => {
+              const entry = rig.endpoint.execution
+                .snapshot()
+                .sessions.find((entry) => sameRun(entry.run));
+              const state = entry?.snapshot;
+              return (
+                state &&
+                state.receivedSeq === 1 &&
+                state.parsedSeq === 1 &&
+                state.queuedBytes === 0 &&
+                !state.faulted &&
+                !state.consumerFenced &&
+                !state.disposed
+              );
+            }, "C03 actual seed received and parsed1 live session");
+            const seed = rig.endpoint.execution
+              .snapshot()
+              .sessions.find((entry) => sameRun(entry.run));
+            capture("seed-ready-before-assert", { seed });
+            assert(seed);
+            assert.deepEqual(seed.run, rig.run);
+            assert.equal(seed.snapshot.receivedSeq, 1);
+            assert.equal(seed.snapshot.parsedSeq, 1);
+            assert.equal(seed.snapshot.queuedBytes, 0);
+            assert(
+              !seed.snapshot.faulted && !seed.snapshot.consumerFenced && !seed.snapshot.disposed,
+            );
+            peer = await rig.peer();
+            view = controlledView();
+            const actualApplyEvent = view.view.applyEvent;
+            view.view.applyEvent = async function (...args) {
+              const observed = { phase: "entry", args };
+              parseReceipts.push(observed);
+              capture("view-apply-event-entry", { observed });
+              try {
+                const result = await Reflect.apply(actualApplyEvent, this, args);
+                parseReceipts.push({ phase: "returned", args, result });
+                capture("view-apply-event-returned", { args, result });
+                return result;
+              } catch (error) {
+                parseReceipts.push({
+                  phase: "threw",
+                  args,
+                  error: { name: error.name, message: error.message },
+                });
+                capture("view-apply-event-threw", {
+                  args,
+                  error: { name: error.name, message: error.message },
+                });
+                throw error;
+              }
+            };
+            view.controls.chunk = deferred();
+            view.controls.finish = deferred();
+            ({ controller } = await peer.terminal(view));
+            const attachUplinkStart = peer.uplink.length;
+            const attached = controller.attach();
+            await untilTurn(
+              () => view.facts.some((fact) => fact.type === "chunk"),
+              "actual mapped chunk reaches held public view",
+            );
+            capture("held-chunk-before-assert");
+            assert.equal(external(peer, "baseline-progress").length, 0);
+            assert.equal(external(peer, "applied-ack").length, 0);
+            const subscription = controller.snapshot().subscription;
+            assert(subscription);
+            assert.equal(
+              peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
+              false,
+            );
+            const subscribe = rig.commands.find((value) => value.type === "subscribe");
+            capture("marker-controls-before-assert", { subscribe });
+            orderedMarker(rig.received, subscribe.requestId);
+            const realOrder = rig.received.slice();
+            const marker = realOrder.find(
+              (value) =>
+                value.metadata.requestId === subscribe.requestId &&
+                value.metadata.type === "result",
+            );
+            assert.throws(() =>
+              orderedMarker(
+                realOrder.filter((value) => value !== marker),
+                subscribe.requestId,
+              ),
+            );
+            const without = realOrder.filter((value) => value !== marker);
+            assert.throws(() => orderedMarker([...without, marker], subscribe.requestId));
+            view.controls.chunk.resolve();
+            await untilTurn(
+              () => view.facts.some((fact) => fact.type === "finish"),
+              "parse reaches final held installation",
+            );
+            capture("held-finish-before-assert");
+            assert(external(peer, "baseline-progress").length > 0);
+            assert.equal(external(peer, "applied-ack").length, 0);
+            const oldBaseline = view.facts.find((fact) => fact.type === "begin").descriptor
+              .baselineId;
+            view.controls.finish.resolve();
+            const attachedOutcome = await attached;
+            capture("attach-returned-before-assert", { attachedOutcome });
+            assert(attachedOutcome.ok);
+            await untilTurn(
+              () => peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
+              "parsed final ACK installs actual source",
+            );
+            await acceptedFinalAck("attach", attachUplinkStart, subscription);
+            const before = view.facts.filter((fact) => fact.type === "begin").length;
+            const recoverUplinkStart = peer.uplink.length;
+            const recoveredOutcome = await controller.recover("gap");
+            capture("recover-returned-before-assert", { recoveredOutcome });
+            assert(recoveredOutcome.ok);
+            await untilTurn(
+              () => peer.service.snapshot(subscription.subscriptionId).route.credit.installed,
+              "equal-N new baseline final ACK",
+            );
+            await acceptedFinalAck("recover", recoverUplinkStart, subscription);
+            const starts = view.facts.filter((fact) => fact.type === "begin");
+            capture("recovery-identity-before-assert", {
+              starts,
+              before,
+              oldBaseline,
+              subscription,
+            });
+            assert.equal(starts.length, before + 1);
+            assert.equal(starts.at(-1).descriptor.atSeq, starts[0].descriptor.atSeq);
+            assert.notEqual(starts.at(-1).descriptor.baselineId, oldBaseline);
+            assert.deepEqual(controller.snapshot().subscription, subscription);
+            const oldProgress = external(peer, "baseline-progress").find(
+              (value) => value.baselineId === oldBaseline,
+            );
+            capture("stale-counter-before-assert", { oldProgress });
+            assert(oldProgress);
+            const stale = await peer.service.handle({
+              ...oldProgress,
+              requestId: "consumer-stale-baseline-counter",
+            });
+            capture("stale-counter-result-before-assert", { stale });
+            assert.equal(stale.type, "error");
+            const suffixIndexes = {
+              received: rig.received.length,
+              uplink: peer.uplink.length,
+              downlink: peer.downlink.length,
+              view: view.facts.length,
+              parse: parseReceipts.length,
+              leases: rig.leaseEvents.length,
+            };
+            capture("suffix-before", { suffixIndexes });
+            await rig.emit(utf8("suffix"));
+            await untilTurn(
+              () => controller.snapshot().appliedSeq === 2,
+              "live suffix parsed after final ACK",
+            );
+            capture("suffix-parsed-before-assert", { suffixIndexes, stale, subscription });
+            assert.equal(
+              view.facts.filter((fact) => fact.type === "event" && fact.event.seq === 2).length,
+              1,
+            );
+            assert.equal(rig.endpoint.native.owners[0].tasks.length, 0);
+            assert(!commandTypes(rig).includes("input"));
+            record("W2C-C03", {
+              subscription,
+              view: view.facts,
+              uplink: peer.uplink,
+              workerFrames: rig.received,
+              stale,
+              worker: rig.endpoint.execution.snapshot(),
+            });
+          } catch (error) {
+            capture("positive-error-before-finally", {
+              error: { name: error.name, message: error.message },
+            });
+            throw error;
+          } finally {
+            capture("positive-before-real-finally");
+          }
+        },
+        { pendingWorkerCommands: 1 },
+      );
+    } finally {
+      capturePositive?.("positive-after-real-finally");
+    }
     for (const mutation of ["marker-removed", "marker-reordered"])
       await withWorkerLink(
         async (rig) => {
