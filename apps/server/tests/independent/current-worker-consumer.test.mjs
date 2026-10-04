@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "vitest";
 import {
   controlledView,
+  currentWorkerLink,
   deferred,
   frames,
   geometry,
@@ -720,17 +721,69 @@ describe("W2 current server and public client", () => {
   });
 
   it("W2C-C04 held connection debt and close isolate peer progress without stopping source", async () => {
-    await withWorkerLink(async (rig) => {
+    let rig;
+    let held;
+    let healthy;
+    let a;
+    let b;
+    let ordinal = 0;
+    const peerReceipt = (peer, opened) =>
+      peer && {
+        connection: peer.connection,
+        uplink: peer.uplink,
+        downlink: peer.downlink,
+        pendingCount: peer.pending.length,
+        service: peer.service.snapshot(),
+        delivery: peer.delivery.snapshot(),
+        controller: opened?.controller.snapshot(),
+        view: opened?.controlled.facts,
+        physical: [...peer.physical].map((item) => ({
+          bytes: item.raw.length,
+          sha256: hash(item.raw),
+          rawHex: Buffer.from(item.raw).toString("hex"),
+        })),
+      };
+    const capture = (phase, value = {}) => {
+      const receipt = {
+        ordinal: ++ordinal,
+        phase,
+        ...value,
+        run: rig.run,
+        worker: rig.worker,
+        execution: rig.endpoint.execution.snapshot(),
+        native: rig.endpoint.native.snapshot(),
+        nativeReceipts: rig.endpoint.native.receipts,
+        pipe: rig.endpoint.pipe.snapshot(),
+        session: rig.session.snapshot(),
+        account: rig.account.snapshot(),
+        owners: [...rig.live.values()],
+        leaseEvents: rig.leaseEvents,
+        workerCommands: rig.commands,
+        workerFrames: rig.received,
+        emittedFrames: rig.endpoint.frames,
+        heldCallbacks: rig.endpoint.callbacks.length,
+        clock: rig.time.snapshot(),
+        held: peerReceipt(held, a),
+        healthy: peerReceipt(healthy, b),
+      };
+      record("W2C-C04-public-readiness", receipt);
+      if (!process.env.COVE_W2_CURRENT_QA_OUTPUT)
+        console.log("W2C-C04-public-readiness " + JSON.stringify(receipt));
+    };
+    rig = await currentWorkerLink();
+    try {
       await rig.emit(utf8("W2-C04"));
-      const held = await rig.peer({ hold: true });
-      const healthy = await rig.peer();
-      const a = await installed(held);
-      const b = await installed(healthy);
+      held = await rig.peer({ hold: true });
+      healthy = await rig.peer();
+      a = await installed(held);
+      b = await installed(healthy);
+      capture("installed-before-assert");
       assert(held.delivery.snapshot().physicalBytes > 0);
       const physical = held.delivery.snapshot().physicalBytes;
       const ownCallbacks = [...held.physical];
       const liveBefore = new Set(rig.live.keys());
       held.close();
+      capture("held-close-before-assert");
       assert.equal(held.delivery.snapshot().physicalBytes, physical);
       assert(ownCallbacks.every((item) => held.physical.has(item)));
       rig.endpoint.hold();
@@ -739,22 +792,71 @@ describe("W2 current server and public client", () => {
         () => rig.endpoint.callbacks.length > 0,
         "actual source physical callback held",
       );
+      capture("source-callback-held-before-assert");
       assert(rig.endpoint.pipe.snapshot().transportBytes > 0);
       const sourceHeld = rig.endpoint.pipe.snapshot();
       rig.endpoint.hold(false);
       while (rig.endpoint.callbacks.length) rig.endpoint.release();
+      const statusExecution = rig.endpoint.execution.snapshot();
+      const sameRun = (actual) =>
+        actual && Object.keys(rig.run).every((key) => actual[key] === rig.run[key]);
+      const statusSession = statusExecution.sessions.find((entry) => sameRun(entry.run));
+      const statusRun = statusExecution.runs.find((entry) => sameRun(entry.run));
+      capture("live-status-before-guards", { statusExecution, statusSession, statusRun });
+      assert.deepEqual(statusExecution.worker, rig.worker);
+      assert.equal(statusExecution.ordinaryPendingCommands, 0);
+      assert.equal(statusExecution.reservedStatusPending, false);
+      assert.equal(statusExecution.shuttingDown, false);
+      assert(statusSession);
+      assert.deepEqual(statusSession.run, rig.run);
+      assert(statusRun);
+      assert.deepEqual(statusRun.run, rig.run);
+      assert.equal(statusRun.status, "live");
+      assert.equal(statusSession.snapshot.receivedSeq, 2);
+      assert(
+        !statusSession.snapshot.faulted &&
+          !statusSession.snapshot.consumerFenced &&
+          !statusSession.snapshot.disposed,
+      );
+      assert(statusSession.snapshot.queuedItems < 256);
+      const statusCommand = {
+        type: "status",
+        worker: rig.worker,
+        run: rig.run,
+        requestId: "consumer-c04-live-status",
+      };
+      capture("live-status-before-invoke", { command: statusCommand });
+      const statusPromise = rig.runtime.getStatus(statusCommand);
+      capture("live-status-promise-returned", { command: statusCommand });
+      const statusResult = await statusPromise;
+      capture("live-status-result-before-assert", { command: statusCommand, result: statusResult });
+      assert.equal(statusResult.type, "result");
+      assert.equal(statusResult.commandType, "status");
+      assert.equal(statusResult.requestId, statusCommand.requestId);
+      assert.deepEqual(statusResult.worker, rig.worker);
+      assert.deepEqual(statusResult.run, rig.run);
+      assert.equal(statusResult.outcome, "accepted");
+      assert.deepEqual(statusResult.runStatus.run, rig.run);
+      assert.equal(statusResult.runStatus.status, "live");
+      assert.deepEqual(statusResult.runStatus.geometry, geometry);
+      assert.equal(statusResult.runStatus.receivedSeq, 2);
+      assert.equal(statusResult.runStatus.parsedSeq, 2);
       await untilTurn(
         () => b.controller.snapshot().appliedSeq === 2,
         "healthy peer parsed current source after callback",
       );
+      capture("healthy-parsed-before-preview");
       const pending = healthy.client.getPreview(rig.run);
       const preview = await pending;
+      capture("preview-result-before-assert", { preview });
       assert(preview.ok && preview.status === "transfer");
       assert.equal(rig.registry.get(rig.run).status.status, "live");
       assert(!commandTypes(rig).includes("stop"));
       assert.equal(held.delivery.snapshot().physicalBytes, physical);
       const leasesBefore = new Set(rig.live.keys());
+      capture("held-before-original-settle");
       held.settle();
+      capture("held-settled-before-assert");
       assert.equal(held.delivery.snapshot().physicalBytes, 0);
       assert([...leasesBefore].some((id) => !rig.live.has(id)));
       assert.equal(held.physical.size, 0);
@@ -770,7 +872,22 @@ describe("W2 current server and public client", () => {
         healthy: b.controller.snapshot(),
         preview: { ...preview, bytes: undefined, sha256: hash(preview.bytes) },
       });
-    });
+    } catch (error) {
+      capture("body-threw-before-finally", {
+        error: { name: error.name, message: error.message, stack: error.stack, code: error.code },
+      });
+      throw error;
+    } finally {
+      try {
+        capture("before-real-close");
+      } finally {
+        try {
+          await rig.close();
+        } finally {
+          capture("after-real-close-attempt");
+        }
+      }
+    }
   });
 
   it("W2C-C05 result-before-end mutation is refused while identical result-last succeeds", async () => {
