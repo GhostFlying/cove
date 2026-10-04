@@ -586,6 +586,67 @@ describe("W2 current server and public client", () => {
             };
             capture("suffix-before", { suffixIndexes });
             await rig.emit(utf8("suffix"));
+            const suffixExecution = rig.endpoint.execution.snapshot();
+            const suffixSession = suffixExecution.sessions.find((entry) => sameRun(entry.run));
+            const suffixRun = suffixExecution.runs.find((entry) => sameRun(entry.run));
+            capture("suffix-status-before-guards", { suffixExecution, suffixSession, suffixRun });
+            assert.deepEqual(suffixExecution.worker, rig.worker);
+            assert.equal(suffixExecution.ordinaryPendingCommands, 0);
+            assert.equal(suffixExecution.pendingCommands, 0);
+            assert.equal(suffixExecution.reservedStatusPending, false);
+            assert.equal(suffixExecution.shuttingDown, false);
+            assert(suffixSession);
+            assert.deepEqual(suffixSession.run, rig.run);
+            assert(suffixRun);
+            assert.deepEqual(suffixRun.run, rig.run);
+            assert.equal(suffixRun.status, "live");
+            assert.equal(suffixSession.snapshot.receivedSeq, 2);
+            assert(
+              !suffixSession.snapshot.faulted &&
+                !suffixSession.snapshot.consumerFenced &&
+                !suffixSession.snapshot.disposed,
+            );
+            assert(suffixSession.snapshot.queuedItems < 256);
+            const suffixStatusCommand = {
+              type: "status",
+              worker: rig.worker,
+              run: rig.run,
+              requestId: "consumer-c03-suffix-status",
+            };
+            capture("suffix-status-before-invoke", { command: suffixStatusCommand });
+            let suffixStatusResult;
+            try {
+              const suffixStatusPromise = rig.runtime.getStatus(suffixStatusCommand);
+              capture("suffix-status-promise-returned", { command: suffixStatusCommand });
+              suffixStatusResult = await suffixStatusPromise;
+              capture("suffix-status-result-before-assert", {
+                command: suffixStatusCommand,
+                result: suffixStatusResult,
+              });
+            } catch (error) {
+              capture("suffix-status-rejected-before-assert", {
+                command: suffixStatusCommand,
+                error: {
+                  name: error.name,
+                  message: error.message,
+                  stack: error.stack,
+                  code: error.code,
+                  cause: error.cause,
+                },
+              });
+              throw error;
+            }
+            assert.equal(suffixStatusResult.type, "result");
+            assert.equal(suffixStatusResult.commandType, "status");
+            assert.equal(suffixStatusResult.requestId, suffixStatusCommand.requestId);
+            assert.deepEqual(suffixStatusResult.worker, rig.worker);
+            assert.deepEqual(suffixStatusResult.run, rig.run);
+            assert.equal(suffixStatusResult.outcome, "accepted");
+            assert.deepEqual(suffixStatusResult.runStatus.run, rig.run);
+            assert.equal(suffixStatusResult.runStatus.status, "live");
+            assert.deepEqual(suffixStatusResult.runStatus.geometry, { cols: 12, rows: 4 });
+            assert.equal(suffixStatusResult.runStatus.receivedSeq, 2);
+            assert.equal(suffixStatusResult.runStatus.parsedSeq, 2);
             await untilTurn(
               () => controller.snapshot().appliedSeq === 2,
               "live suffix parsed after final ACK",
