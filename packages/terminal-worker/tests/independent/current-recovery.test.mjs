@@ -7,6 +7,7 @@ import {
   encodePipeFrame,
   validatePipeFrame,
 } from "@cove/protocol/pipe";
+import { M0_LIMITS } from "@cove/protocol/budgets";
 import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { validateBaselineDescriptor, validateBaselineTransfer } from "@cove/protocol/terminal";
 import {
@@ -141,6 +142,29 @@ async function captureSchedule(seed, injected, action = "keep") {
   const rig = sessionRecoveryRig();
   const holder = ref("holder", rig.target);
   const route = ref("second", rig.target);
+  const capture = (phase, value = {}) =>
+    record("W2C-captureSchedule-settlement", {
+      phase,
+      seed,
+      injected,
+      action,
+      target: rig.target,
+      holder,
+      route,
+      ...value,
+      session: rig.session.snapshot(),
+      owners: rig.ledger.snapshot(),
+      ownerEvents: rig.ledger.events,
+      native: rig.native.snapshot(),
+      nativeReceipts: rig.native.receipts,
+      facts: rig.facts,
+      frames: rig.sink.frames.map(({ event, rawHex, encodedBytes, settled }) => ({
+        event,
+        rawHex,
+        encodedBytes,
+        settled,
+      })),
+    });
   try {
     await rig.install(holder);
     assert.equal(
@@ -230,6 +254,22 @@ async function captureSchedule(seed, injected, action = "keep") {
         .map((frame) => Buffer.from(frame.payload)),
     );
     assert(!raw.includes(Buffer.from("|W2-R03-SUFFIX|")));
+    capture("before-existing-resize-settlement", { command, result: outcome.result });
+    assert.equal(rig.pending.length, 1);
+    const resizeResult = await rig.pending[0];
+    capture("existing-resize-settled", { command, result: outcome.result, resizeResult });
+    assert.equal(resizeResult.kind, "settled");
+    assert.equal(resizeResult.atSeq, 4);
+    const beforeStatus = rig.session.snapshot();
+    capture("before-ordered-status", { beforeStatus });
+    assert.equal(beforeStatus.disposed, false);
+    assert.equal(beforeStatus.faulted, false);
+    assert(beforeStatus.queuedItems < M0_LIMITS.pendingWorkerCommands);
+    const statusOperation = { type: "status", cached: false };
+    const statusResult = await rig.capability.execute(statusOperation);
+    capture("ordered-status-settled", { statusOperation, statusResult });
+    assert.equal(statusResult.kind, "settled");
+    assert.equal(statusResult.atSeq, 5);
     await untilTurn(
       () =>
         rig.sink.frames
@@ -261,7 +301,15 @@ async function captureSchedule(seed, injected, action = "keep") {
     };
   } finally {
     rig.setDetached(undefined);
-    await rig.close();
+    try {
+      capture("before-real-close");
+    } finally {
+      try {
+        await rig.close();
+      } finally {
+        capture("after-real-close-attempt");
+      }
+    }
   }
 }
 
