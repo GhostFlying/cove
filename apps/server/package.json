@@ -9,9 +9,16 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@cove/protocol": "workspace:*"
+    "@cove/protocol": "workspace:*",
+    "@cove/terminal-worker": "workspace:*",
+    "fastify": "5.12.5",
+    "@fastify/websocket": "11.3.3"
   },
   "devDependencies": {
-    "@types/node": "26.6.2"
+    "@types/node": "26.6.2",
+    "@types/ws": "8.18.2"
+  },
+  "bin": {
+    "cove-server": "./dist/entry/main.js"
   }
 }

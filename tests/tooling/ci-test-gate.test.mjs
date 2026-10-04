@@ -134,7 +134,8 @@ test("protocol registration and its actual test root are required", async () => 
 test("server author and independent suites are fail-closed and fully owned by Vitest", async () => {
   const files = await readVitestOwnedTestFiles();
   const registrations = [
-    ["author", "runtime-admission", 17],
+    ["author", "runtime-admission", 21],
+    ["author", "local-entry", 17],
     ["author", "worker-pipe-session", 11],
     ["author", "operation-receipts", 15],
     ["author", "terminal-subscriptions", 14],

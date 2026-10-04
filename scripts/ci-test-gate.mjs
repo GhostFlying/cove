@@ -223,6 +223,11 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/runtime-admission.test.mjs",
+    minimumTests: 21,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/local-entry.test.mjs",
     minimumTests: 17,
   },
   {

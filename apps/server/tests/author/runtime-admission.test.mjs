@@ -7,6 +7,7 @@ import { WorkerPipeSession } from "../../dist/terminal/worker-pipe-session.js";
 import { WorkerPool } from "../../dist/terminal/worker-pool.js";
 import { RunRegistry } from "../../dist/terminal/run-registry.js";
 import { LocalRuntime } from "../../dist/terminal/local-runtime.js";
+import { ControlArbiter } from "../../dist/terminal/control-arbiter.js";
 
 const codec = {
   encode: (text) => new TextEncoder().encode(text),
@@ -70,6 +71,43 @@ function sessionFixture(composition, ref) {
   return { session, writes };
 }
 
+function listenerFixture(authenticatedSockets = M0_LIMITS.authenticatedSockets) {
+  const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+  const composition = compositionFixture(bytes, { ...M0_LIMITS, authenticatedSockets });
+  const runtime = new LocalRuntime(
+    new WorkerPool(composition, 1, 1),
+    new RunRegistry(composition),
+    codec.encode,
+  );
+  return { bytes, runtime };
+}
+
+function connectionListenerCapacity(authenticatedSockets) {
+  const { bytes, runtime } = listenerFixture(authenticatedSockets);
+  const arbiter = new ControlArbiter(runtime);
+  expect(runtime.previews.cache).toBeDefined();
+  const fixed = bytes.snapshot().total;
+  const listeners = [];
+  try {
+    expect(fixed).toBe(4096 + 2 * 512);
+    for (let i = 0; i < authenticatedSockets; i++) listeners.push(runtime.onEvent(() => {}));
+    const full = bytes.snapshot();
+    expect(full.total).toBe(fixed + authenticatedSockets * 512);
+    expect(runtime.composition.budgets.authenticatedSockets).toBe(authenticatedSockets);
+    expect(() => runtime.onEvent(() => {})).toThrow("Event listener capacity unavailable");
+    expect(bytes.snapshot()).toEqual(full);
+    for (const listener of listeners) {
+      listener.dispose();
+      listener.dispose();
+    }
+    expect(bytes.snapshot().total).toBe(fixed);
+  } finally {
+    arbiter.dispose();
+    runtime.dispose();
+  }
+  expect(bytes.snapshot().total).toBe(0);
+}
+
 function rejectReadyWorker(change, foreignBytes = null, foreignBudgets = { ...M0_LIMITS }) {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = compositionFixture(bytes);
@@ -111,6 +149,49 @@ function rejectReadyWorker(change, foreignBytes = null, foreignBudgets = { ...M0
 }
 
 describe("runtime admission ownership", () => {
+  it("admits two singleton owners and all default authenticated connection listener cells", () => {
+    connectionListenerCapacity(M0_LIMITS.authenticatedSockets);
+    expect(M0_LIMITS.authenticatedSockets).toBe(32);
+  });
+
+  it("uses the lower validated authenticated cap without adding public socket capacity", () => {
+    connectionListenerCapacity(2);
+  });
+
+  it("keeps duplicate and disposed listener guards with exactly-once 512-byte release", () => {
+    const { bytes, runtime } = listenerFixture(2);
+    const callback = () => {};
+    const listener = runtime.onEvent(callback);
+    expect(bytes.snapshot().total).toBe(512);
+    expect(() => runtime.onEvent(callback)).toThrow("Event listener capacity unavailable");
+    expect(bytes.snapshot().total).toBe(512);
+    listener.dispose();
+    listener.dispose();
+    expect(bytes.snapshot().total).toBe(0);
+    const second = runtime.onEvent(callback);
+    runtime.dispose();
+    runtime.dispose();
+    second.dispose();
+    expect(bytes.snapshot().total).toBe(0);
+    expect(() => runtime.onEvent(() => {})).toThrow("Event listener capacity unavailable");
+    expect(bytes.snapshot().total).toBe(0);
+  });
+
+  it("refuses aggregate byte exhaustion without owning or releasing another listener lease", () => {
+    const { bytes, runtime } = listenerFixture(2);
+    const held = bytes.reserve(bytes.limit - bytes.controlReserve - 511);
+    expect(held).not.toBeNull();
+    const before = bytes.snapshot();
+    expect(() => runtime.onEvent(() => {})).toThrow("Event listener byte capacity unavailable");
+    expect(bytes.snapshot()).toEqual(before);
+    held.release();
+    const listener = runtime.onEvent(() => {});
+    expect(bytes.snapshot().total).toBe(512);
+    runtime.dispose();
+    listener.dispose();
+    expect(bytes.snapshot().total).toBe(0);
+  });
+
   it("rejects invalid budgets and authority without acquiring bytes", () => {
     const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
     for (const budgets of [
