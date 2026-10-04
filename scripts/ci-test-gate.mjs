@@ -1,4 +1,10 @@
 import { spawnSync } from "node:child_process";
+import {
+  captureOrdinaryCIOutput,
+  ordinaryCIOutputMetadata,
+  replayOrdinaryCIOutput,
+  throwOrdinaryCIOutputFailure,
+} from "./ci-environment-setup.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -1230,7 +1236,66 @@ export function readVitestOwnedTestFiles(checkoutRoot = root) {
   ]).then((groups) => groups.flat().sort());
 }
 
-export async function recordedCommand(stage, binary, args, outputFile, timeoutMs = 120_000) {
+async function fileRecordedVitest(stage, binary, args, outputFile, timeoutMs, outputs) {
+  const { result, failure, capture } = await captureOrdinaryCIOutput(
+    stage,
+    binary,
+    args,
+    dirname(outputFile),
+    root,
+    timeoutMs,
+    512 * 1024,
+  );
+  const attempt = {
+    stage,
+    argv: [binary, ...args],
+    timeoutMs,
+    childPid: result?.pid ?? null,
+    exitCode: result?.status ?? null,
+    signal: result?.signal ?? null,
+    errorCode: failure?.code ?? null,
+    timedOut: failure?.code === "ETIMEDOUT",
+    outputCapture: ordinaryCIOutputMetadata(capture),
+  };
+  let prior;
+  let recorded = false;
+  try {
+    await mkdir(dirname(outputFile), { recursive: true });
+    try {
+      prior = JSON.parse(await readFile(outputFile, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      prior = [];
+    }
+    await writeFile(outputFile, `${JSON.stringify([...prior, attempt], null, 2)}\n`);
+    recorded = true;
+  } catch (error) {
+    capture.errors.push({ phase: "metadata", error });
+  }
+  await replayOrdinaryCIOutput(capture, outputs.stdout, outputs.stderr);
+  attempt.outputCapture = ordinaryCIOutputMetadata(capture);
+  if (recorded && capture.errors.length) {
+    try {
+      await writeFile(outputFile, `${JSON.stringify([...prior, attempt], null, 2)}\n`);
+    } catch (error) {
+      capture.errors.push({ phase: "metadata", error });
+      attempt.outputCapture = ordinaryCIOutputMetadata(capture);
+    }
+  }
+  throwOrdinaryCIOutputFailure(failure, capture, attempt);
+  return Object.assign(result, { outputCapture: capture });
+}
+
+export async function recordedCommand(
+  stage,
+  binary,
+  args,
+  outputFile,
+  timeoutMs = 120_000,
+  outputs = {},
+) {
+  if (outputs.fileCapture)
+    return fileRecordedVitest(stage, binary, args, outputFile, timeoutMs, outputs);
   const attempt = {
     stage,
     argv: [binary, ...args],
@@ -1767,6 +1832,8 @@ async function main() {
       "environment.json",
       "vitest-results.json",
       "vitest-results.xml",
+      "vitest.stdout.bin",
+      "vitest.stderr.bin",
       "execution.json",
       "inventory.json",
       "failure.json",
@@ -1835,9 +1902,8 @@ async function main() {
       runArgs,
       join(evidenceDir, "execution.json"),
       8 * 60_000,
+      { fileCapture: true },
     );
-    process.stdout.write(result.stdout);
-    process.stderr.write(result.stderr);
     if (result.status !== 0) throw new Error(`Vitest exited ${result.status}`);
     stage = "report-validation";
     const report = JSON.parse(await readFile(resultPath, "utf8"));

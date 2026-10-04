@@ -1,7 +1,10 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { fstatSync, readFileSync } from "node:fs";
+import filesystem, { cp, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { Writable } from "node:stream";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   readVitestOwnedTestFiles,
   recordedCommand,
@@ -46,6 +49,7 @@ const discoveredCases = [
 const temporaryDirectories = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
   );
@@ -1451,4 +1455,430 @@ test("W2 retained and current suites reject missing, short, duplicate and unknow
       ),
     ).toThrow(/Unregistered Vitest suite/);
   }
+});
+
+function binaryControlProgram(directory, bytes, exitCode = 0, tail = "") {
+  return `
+    const fs = require('node:fs');
+    fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid: process.pid, startedAt: new Date().toISOString(), argv: process.argv}));
+    const pattern = Buffer.from([0,255,195,169,226,130,172,128,65]);
+    for (const fd of [1,2]) {
+      const data = Buffer.alloc(${bytes});
+      for (let i=0; i<data.length; i++) data[i] = pattern[fd === 1 ? i % pattern.length : pattern.length - 1 - i % pattern.length];
+      let offset = 0;
+      while (offset < data.length) offset += fs.writeSync(fd, data, offset, data.length - offset);
+    }
+    ${tail}
+    process.exit(${exitCode});
+  `;
+}
+
+async function binaryReplaySink(path, metadataFile) {
+  const handle = await open(path, "wx");
+  const observations = {
+    chunks: 0,
+    maxChunk: 0,
+    backpressure: 0,
+    drains: 0,
+    metadataBeforeReplay: null,
+  };
+  const destination = new Writable({
+    highWaterMark: 1024,
+    write(chunk, encoding, callback) {
+      if (observations.metadataBeforeReplay === null && metadataFile) {
+        observations.metadataBeforeReplay = JSON.parse(readFileSync(metadataFile, "utf8"));
+      }
+      observations.chunks++;
+      observations.maxChunk = Math.max(observations.maxChunk, chunk.length);
+      (async () => {
+        let offset = 0;
+        while (offset < chunk.length) {
+          const { bytesWritten } = await handle.write(chunk, offset, chunk.length - offset);
+          if (!bytesWritten) throw new Error("Control replay write made no progress");
+          offset += bytesWritten;
+        }
+      })().then(() => callback(), callback);
+    },
+  });
+  const write = destination.write;
+  destination.write = function (...args) {
+    const accepted = write.apply(this, args);
+    if (!accepted) observations.backpressure++;
+    return accepted;
+  };
+  destination.on("drain", () => observations.drains++);
+  return { destination, observations, close: () => handle.close() };
+}
+
+async function preserveBinaryControl(name, directory, observations) {
+  let record;
+  try {
+    record = JSON.parse(await readFile(resolve(directory, "execution.json"), "utf8"))[0];
+  } catch {
+    try {
+      record = JSON.parse(await readFile(resolve(directory, "check.json"), "utf8"));
+    } catch {
+      record = observations.attempt;
+    }
+  }
+  observations.descriptors = {};
+  for (const stream of ["stdout", "stderr"]) {
+    const fd = record?.outputCapture?.[stream]?.fd;
+    if (fd === null || fd === undefined) continue;
+    try {
+      fstatSync(fd);
+      observations.descriptors[stream] = { fd, state: "OPEN" };
+    } catch (error) {
+      observations.descriptors[stream] = { fd, errorCode: error.code };
+    }
+  }
+  if (record?.childPid > 0) {
+    try {
+      process.kill(record.childPid, 0);
+      observations.child = { pid: record.childPid, state: "LIVE" };
+    } catch (error) {
+      observations.child = { pid: record.childPid, errorCode: error.code };
+    }
+  }
+  await writeFile(
+    resolve(directory, "observations.json"),
+    `${JSON.stringify(observations, null, 2)}\n`,
+  );
+  if (process.env.COVE_CI_CAPTURE_CONTROL_OUTPUT) {
+    const target = resolve(process.env.COVE_CI_CAPTURE_CONTROL_OUTPUT, name);
+    await mkdir(dirname(target), { recursive: true });
+    await cp(directory, target, { recursive: true, errorOnExist: true, force: false });
+  }
+}
+
+function binaryControlExpected(bytes, reverse = false) {
+  const pattern = [0, 255, 195, 169, 226, 130, 172, 128, 65];
+  return Buffer.from(
+    Array.from({ length: bytes }, (_, i) => pattern[reverse ? 8 - (i % 9) : i % 9]),
+  );
+}
+
+function assertCapturedDescriptorsClosed(capture) {
+  for (const stream of ["stdout", "stderr"]) {
+    expect(capture[stream].closed).toBe(true);
+    expect(() => fstatSync(capture[stream].fd)).toThrow(expect.objectContaining({ code: "EBADF" }));
+  }
+}
+
+test("ordinary Vitest preserves large binary streams and durable metadata through real backpressure", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  const stdout = await binaryReplaySink(resolve(directory, "replayed.stdout.bin"), outputFile);
+  const stderr = await binaryReplaySink(resolve(directory, "replayed.stderr.bin"), outputFile);
+  let result;
+  try {
+    result = await recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", binaryControlProgram(directory, 786432)],
+      outputFile,
+      120_000,
+      { fileCapture: true, stdout: stdout.destination, stderr: stderr.destination },
+    );
+  } finally {
+    await stdout.close();
+    await stderr.close();
+    await preserveBinaryControl("gate-large-success", directory, {
+      stdout: stdout.observations,
+      stderr: stderr.observations,
+    });
+  }
+  expect(result.status).toBe(0);
+  expect(result.stdout).toBeNull();
+  expect(result.stderr).toBeNull();
+  const [record] = JSON.parse(await readFile(outputFile, "utf8"));
+  const birth = JSON.parse(await readFile(resolve(directory, "birth.json"), "utf8"));
+  expect(record.childPid).toBe(birth.pid);
+  expect(() => process.kill(birth.pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+  assertCapturedDescriptorsClosed(record.outputCapture);
+  for (const [stream, sink] of [
+    ["stdout", stdout],
+    ["stderr", stderr],
+  ]) {
+    const expected = binaryControlExpected(786432, stream === "stderr");
+    expect(await readFile(resolve(directory, `vitest.${stream}.bin`))).toEqual(expected);
+    expect(await readFile(resolve(directory, `replayed.${stream}.bin`))).toEqual(expected);
+    expect(record.outputCapture[stream]).toMatchObject({
+      bytes: 786432,
+      complete: true,
+      sha256: createHash("sha256").update(expected).digest("hex"),
+    });
+    expect(sink.observations.maxChunk).toBeLessThanOrEqual(65536);
+    expect(sink.observations.backpressure).toBeGreaterThan(0);
+    expect(sink.observations.drains).toBeGreaterThan(0);
+    expect(sink.observations.metadataBeforeReplay[0].outputCapture[stream].bytes).toBe(786432);
+  }
+});
+
+test("ordinary Vitest retains nonzero exit API with complete binary output", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  const stdout = await binaryReplaySink(resolve(directory, "replayed.stdout.bin"), outputFile);
+  const stderr = await binaryReplaySink(resolve(directory, "replayed.stderr.bin"), outputFile);
+  let result;
+  try {
+    result = await recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", binaryControlProgram(directory, 786432, 7)],
+      outputFile,
+      120_000,
+      { fileCapture: true, stdout: stdout.destination, stderr: stderr.destination },
+    );
+  } finally {
+    await stdout.close();
+    await stderr.close();
+    await preserveBinaryControl("gate-large-exit7", directory, {
+      stdout: stdout.observations,
+      stderr: stderr.observations,
+    });
+  }
+  expect(result.status).toBe(7);
+  expect(result.error).toBeUndefined();
+  const [record] = JSON.parse(await readFile(outputFile, "utf8"));
+  expect(record).toMatchObject({ exitCode: 7, errorCode: null, timedOut: false });
+  for (const stream of ["stdout", "stderr"]) {
+    expect(await readFile(resolve(directory, `replayed.${stream}.bin`))).toEqual(
+      binaryControlExpected(786432, stream === "stderr"),
+    );
+    expect(record.outputCapture[stream]).toMatchObject({ complete: true, bytes: 786432 });
+  }
+});
+
+test("ordinary Vitest preserves timeout and ENOENT with closed binary descriptors before throwing", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  const stdout = await binaryReplaySink(resolve(directory, "replayed.stdout.bin"), outputFile);
+  const stderr = await binaryReplaySink(resolve(directory, "replayed.stderr.bin"), outputFile);
+  let failure;
+  try {
+    await recordedCommand(
+      "vitest",
+      process.execPath,
+      [
+        "--eval",
+        `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(resolve(directory, "birth.json"))}, JSON.stringify({pid:process.pid,startedAt:new Date().toISOString()}));fs.writeSync(1, Buffer.from([0,255,1,2]));setInterval(() => {}, 1000)`,
+      ],
+      outputFile,
+      50,
+      { fileCapture: true, stdout: stdout.destination, stderr: stderr.destination },
+    );
+  } catch (error) {
+    failure = error;
+  } finally {
+    await stdout.close();
+    await stderr.close();
+    await preserveBinaryControl("gate-timeout50", directory, {
+      error: { code: failure?.code, message: failure?.message },
+      stdout: stdout.observations,
+      stderr: stderr.observations,
+    });
+  }
+  expect(failure).toMatchObject({
+    code: "ETIMEDOUT",
+    ciOutputAttempt: { timeoutMs: 50, timedOut: true },
+  });
+  assertCapturedDescriptorsClosed(failure.ciOutputAttempt.outputCapture);
+  expect(await readFile(resolve(directory, "vitest.stdout.bin"))).toEqual(
+    Buffer.from([0, 255, 1, 2]),
+  );
+  expect(() => process.kill(failure.ciOutputAttempt.childPid, 0)).toThrow(
+    expect.objectContaining({ code: "ESRCH" }),
+  );
+  const absentFile = await isolatedEvidence();
+  const absentDirectory = dirname(absentFile);
+  let absent;
+  try {
+    await recordedCommand("vitest", resolve(absentDirectory, "absent"), [], absentFile, 50, {
+      fileCapture: true,
+    });
+  } catch (error) {
+    absent = error;
+  }
+  await preserveBinaryControl("gate-enoent", absentDirectory, {
+    error: { code: absent?.code, message: absent?.message },
+  });
+  expect(absent).toMatchObject({
+    code: "ENOENT",
+    ciOutputAttempt: { errorCode: "ENOENT", timedOut: false },
+  });
+  assertCapturedDescriptorsClosed(absent.ciOutputAttempt.outputCapture);
+});
+
+test("ordinary Vitest fails closed before launching when binary custody preparation fails", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  await mkdir(resolve(directory, "vitest.stderr.bin"));
+  let failure;
+  try {
+    await recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", binaryControlProgram(directory, 4)],
+      outputFile,
+      50,
+      { fileCapture: true },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  await preserveBinaryControl("gate-prepare-failure", directory, {
+    error: { code: failure?.code, message: failure?.message },
+  });
+  expect(failure.ciOutputAttempt).toMatchObject({ childPid: null, exitCode: null });
+  expect(failure.custodyErrors).toEqual(
+    expect.arrayContaining([expect.objectContaining({ phase: "prepare" })]),
+  );
+  expect(failure.ciOutputAttempt.outputCapture.stdout.closed).toBe(true);
+  expect(() => readFileSync(resolve(directory, "birth.json"))).toThrow(
+    expect.objectContaining({ code: "ENOENT" }),
+  );
+});
+
+test("ordinary Vitest keeps the original timeout error primary through a real descriptor close failure", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  const actualOpen = filesystem.open.bind(filesystem);
+  let closeCalls = 0;
+  let descriptor;
+  vi.spyOn(filesystem, "open").mockImplementation(async (path, flags) => {
+    const handle = await actualOpen(path, flags);
+    if (String(path).endsWith("vitest.stdout.bin")) {
+      descriptor = handle.fd;
+      const actualClose = handle.close.bind(handle);
+      handle.close = async () => {
+        closeCalls++;
+        await actualClose();
+        throw Object.assign(
+          new Error("Controlled close acknowledgement failure after real close"),
+          { code: "EIO" },
+        );
+      };
+    }
+    return handle;
+  });
+  let failure;
+  try {
+    await recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", "setInterval(() => {}, 1000)"],
+      outputFile,
+      50,
+      { fileCapture: true },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  vi.restoreAllMocks();
+  await preserveBinaryControl("gate-close-failure", directory, {
+    closeCalls,
+    descriptor,
+    error: { code: failure?.code, message: failure?.message },
+    custodyErrors: failure?.custodyErrors,
+  });
+  expect(failure.code).toBe("ETIMEDOUT");
+  expect(closeCalls).toBe(1);
+  expect(() => fstatSync(descriptor)).toThrow(expect.objectContaining({ code: "EBADF" }));
+  expect(failure.custodyErrors).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ phase: "close", code: "EIO", stream: "stdout" }),
+    ]),
+  );
+  expect(failure.ciOutputAttempt.outputCapture.stdout).toMatchObject({
+    complete: true,
+    closed: false,
+  });
+});
+
+test("ordinary Vitest fails closed on missing binary hash input without inventing a child status", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  let failure;
+  try {
+    await recordedCommand(
+      "vitest",
+      process.execPath,
+      [
+        "--eval",
+        binaryControlProgram(
+          directory,
+          4,
+          7,
+          `fs.unlinkSync(${JSON.stringify(resolve(directory, "vitest.stdout.bin"))});`,
+        ),
+      ],
+      outputFile,
+      120_000,
+      {
+        fileCapture: true,
+        stderr: new Writable({
+          write(chunk, encoding, callback) {
+            callback();
+          },
+        }),
+      },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  await preserveBinaryControl("gate-hash-failure", directory, {
+    error: { code: failure?.code, message: failure?.message },
+    custodyErrors: failure?.custodyErrors,
+  });
+  expect(failure.ciOutputAttempt.exitCode).toBe(7);
+  expect(failure.custodyErrors).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ phase: "hash", stream: "stdout", code: "ENOENT" }),
+    ]),
+  );
+  expect(failure.ciOutputAttempt.outputCapture.stdout.complete).toBe(false);
+});
+
+test("ordinary Vitest records replay failure after durable binary custody", async () => {
+  const outputFile = await isolatedEvidence();
+  const directory = dirname(outputFile);
+  const failureSink = new Writable({
+    write(chunk, encoding, callback) {
+      callback(
+        Object.assign(new Error("Controlled replay destination failure"), { code: "EPIPE" }),
+      );
+    },
+  });
+  let failure;
+  try {
+    await recordedCommand(
+      "vitest",
+      process.execPath,
+      ["--eval", binaryControlProgram(directory, 4)],
+      outputFile,
+      120_000,
+      {
+        fileCapture: true,
+        stdout: failureSink,
+        stderr: new Writable({
+          write(chunk, encoding, callback) {
+            callback();
+          },
+        }),
+      },
+    );
+  } catch (error) {
+    failure = error;
+  }
+  await preserveBinaryControl("gate-replay-failure", directory, {
+    error: { code: failure?.code, message: failure?.message },
+    custodyErrors: failure?.custodyErrors,
+  });
+  expect(failure.code).toBe("EPIPE");
+  expect(failure.ciOutputAttempt).toMatchObject({ exitCode: 0, errorCode: null });
+  expect(failure.ciOutputAttempt.outputCapture.stdout).toMatchObject({ complete: true, bytes: 4 });
+  expect(JSON.parse(await readFile(outputFile, "utf8"))[0].outputCapture.custodyErrors).toEqual(
+    expect.arrayContaining([expect.objectContaining({ phase: "replay", code: "EPIPE" })]),
+  );
 });
