@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -24,11 +25,12 @@ import { LocalRuntimeClock } from "../../dist/terminal/local-runtime-clock.js";
 import { WorkerProcess } from "../../dist/terminal/worker-process.js";
 import { actualHeaders } from "../../dist/transport/local-admission.js";
 import { TerminalWebSocket } from "../../dist/transport/terminal-websocket.js";
-import { rpcBody } from "../../dist/transport/http-rpc.js";
+import { rpcBody, boundRpcResponseBody } from "../../dist/transport/http-rpc.js";
 import { createPipeDecoder, encodePipeFrame } from "@cove/protocol/pipe";
 import { encodeTerminalFrame, MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
 import { REQUIRED_CAPABILITIES } from "@cove/protocol/bootstrap";
+import { composeRpcResponse } from "@cove/protocol/rpc";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 
 async function recordAuthor(name, data) {
@@ -882,5 +884,411 @@ describe("D passive production local entry", () => {
       expect(local.admission.snapshot().authenticated).toBe(0);
       expect(local.admission.snapshot().unauthenticated).toBe(0);
     });
+  });
+  it("D-A24 registered HTTP bootstrap preserves four exact kind refusals and success/mismatch/malformed classes", async () => {
+    const fixed = [
+      {
+        name: "DN08.http-bootstrap-unsupported",
+        input: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 2,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: [
+            "terminal-framing-v2",
+            "logical-grid-recovery-v1",
+            "worker-pipe-v2",
+            "terminal-preview-v1",
+            "operation-receipts-v1",
+          ],
+          profiles: ["pragmatic-logical-grid-v1"],
+          encodings: ["vt-checkpoint-tail-v1"],
+        },
+        inputSha256: "0f13595b09415125e87a3433e4f5e1bc814185e8fe529cfeb5876d27fa1a2f9c",
+        expected: {
+          type: "cove-bootstrap-error",
+          kind: "BOOTSTRAP_UNSUPPORTED",
+          message: "BOOTSTRAP UNSUPPORTED",
+          supportedVersions: {
+            bootstrap: [1],
+            protocol: [2],
+          },
+        },
+      },
+      {
+        name: "DN08.http-missing-capability",
+        input: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 1,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: ["terminal-framing-v2"],
+          profiles: ["pragmatic-logical-grid-v1"],
+          encodings: ["vt-checkpoint-tail-v1"],
+        },
+        inputSha256: "ddb277f478a994d03fbecddba0ce16788a65e7b5ebbbdf8d7ef214fa72cacef4",
+        expected: {
+          type: "cove-bootstrap-error",
+          kind: "CAPABILITY_UNAVAILABLE",
+          message: "CAPABILITY UNAVAILABLE",
+          supportedVersions: {
+            bootstrap: [1],
+            protocol: [2],
+          },
+        },
+      },
+      {
+        name: "DN08.http-profile-unsupported",
+        input: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 1,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: [
+            "terminal-framing-v2",
+            "logical-grid-recovery-v1",
+            "worker-pipe-v2",
+            "terminal-preview-v1",
+            "operation-receipts-v1",
+          ],
+          profiles: ["unsupported-profile"],
+          encodings: ["vt-checkpoint-tail-v1"],
+        },
+        inputSha256: "276eaf1526a429f11cb380fb83aefc636486c43c1be838a49d2c8debb9e77a35",
+        expected: {
+          type: "cove-bootstrap-error",
+          kind: "PROFILE_UNSUPPORTED",
+          message: "PROFILE UNSUPPORTED",
+          supportedVersions: {
+            bootstrap: [1],
+            protocol: [2],
+          },
+        },
+      },
+      {
+        name: "DN08.http-encoding-unsupported",
+        input: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 1,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: [
+            "terminal-framing-v2",
+            "logical-grid-recovery-v1",
+            "worker-pipe-v2",
+            "terminal-preview-v1",
+            "operation-receipts-v1",
+          ],
+          profiles: ["pragmatic-logical-grid-v1"],
+          encodings: ["unsupported-encoding"],
+        },
+        inputSha256: "e2e8a6fa284c0b8f6654e8e8a80335aee90398d3441de2e88386548cb887c87f",
+        expected: {
+          type: "cove-bootstrap-error",
+          kind: "PROFILE_UNSUPPORTED",
+          message: "PROFILE UNSUPPORTED",
+          supportedVersions: {
+            bootstrap: [1],
+            protocol: [2],
+          },
+        },
+      },
+    ];
+    const valid = {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "dn-server",
+      expectedRelayInstanceId: "dn-instance",
+      protocolVersion: 2,
+      buildVersion: "oracle-client-a",
+      capabilities: [
+        "terminal-framing-v2",
+        "logical-grid-recovery-v1",
+        "worker-pipe-v2",
+        "terminal-preview-v1",
+        "operation-receipts-v1",
+      ],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    };
+    const local = createLocalApplication(
+      { ...options, port: 19041, allowedOrigins: ["http://127.0.0.1:19042"] },
+      { identity: { ...identity, serverId: "dn-server", relayInstanceId: "dn-instance" } },
+    );
+    const headers = {
+      host: "127.0.0.1:19041",
+      origin: "http://127.0.0.1:19042",
+      authorization: `Bearer ${identity.secret}`,
+    };
+    try {
+      await local.app.ready();
+      for (const row of fixed) {
+        const bytes = utf8(row.input);
+        const inputSha256 = createHash("sha256").update(bytes).digest("hex");
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/bootstrap",
+          headers,
+          payload: bytes,
+        });
+        await recordAuthor(row.name, {
+          input: row.input,
+          inputSha256,
+          status: response.statusCode,
+          headers: response.headers,
+          body: response.body,
+          quota: local.admission.snapshot(),
+        });
+        expect(inputSha256).toBe(row.inputSha256);
+        expect(response.statusCode).toBe(400);
+        expect(response.json()).toEqual(row.expected);
+        expect(local.admission.snapshot().rpc).toBe(0);
+        expect(local.core.runtime.registry.count).toBe(0);
+      }
+      for (const [name, payload, expectedStatus, kind, type, empty] of [
+        ["success", utf8(valid), 200, undefined, "cove-bootstrap-result", false],
+        [
+          "protocol",
+          utf8({ ...valid, protocolVersion: 3 }),
+          409,
+          "PROTOCOL_MISMATCH",
+          "cove-bootstrap-error",
+          false,
+        ],
+        [
+          "instance",
+          utf8({ ...valid, expectedRelayInstanceId: "other" }),
+          409,
+          "INSTANCE_MISMATCH",
+          "cove-bootstrap-error",
+          false,
+        ],
+        ["malformed", Buffer.from("{"), 400, undefined, undefined, true],
+      ]) {
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/bootstrap",
+          headers,
+          payload,
+        });
+        await recordAuthor(`A24-${name}`, {
+          status: response.statusCode,
+          headers: response.headers,
+          body: response.body,
+          quota: local.admission.snapshot(),
+        });
+        expect(response.statusCode).toBe(expectedStatus);
+        const parsedBody = response.body === "" ? undefined : response.json();
+        expect(parsedBody?.kind).toBe(kind);
+        expect(parsedBody?.type).toBe(type);
+        expect(response.body === "").toBe(empty);
+        expect(response.body).not.toContain(identity.secret);
+      }
+    } finally {
+      await local.app.close();
+      local.disposeCore();
+    }
+  });
+  it("D-A25 actual factory forwards one timer to clock and first-message deadlines with genuine handle cleanup", async () => {
+    const jobs = new Map();
+    const events = [];
+    let next = 0;
+    let now = 0;
+    const timer = {
+      set: (callback, milliseconds) => {
+        const handle = ++next;
+        jobs.set(handle, { callback, milliseconds });
+        events.push({ type: "set", handle, milliseconds });
+        return handle;
+      },
+      clear: (handle) => {
+        events.push({ type: "clear", handle, removed: jobs.delete(handle) });
+      },
+    };
+    const local = createLocalApplication(options, { identity, timer, monotonic: () => now });
+    const peers = [];
+    const open = () => {
+      const prepared = local.terminal.prepare(auth);
+      const peer = new Socket();
+      peers.push(peer);
+      local.terminal.accept(peer, prepared.claim);
+      return peer;
+    };
+    try {
+      await local.app.ready();
+      local.clock.start();
+      const clockHandle = next;
+      expect(jobs.get(clockHandle).milliseconds).toBe(25);
+      local.clock.stop();
+      local.clock.stop();
+      const eligible = open();
+      const bootstrapHandle = next;
+      now = 5000;
+      eligible.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      await recordAuthor("A25-equality", {
+        events,
+        sent: eligible.sent,
+        codes: eligible.codes,
+        quota: local.admission.snapshot(),
+      });
+      expect(JSON.parse(eligible.sent[0]).type).toBe("cove-bootstrap-result");
+      expect(
+        events.find((event) => event.type === "set" && event.handle === bootstrapHandle)
+          .milliseconds,
+      ).toBe(5000);
+      expect(jobs.has(bootstrapHandle)).toBe(false);
+      eligible.finish();
+      eligible.finish();
+      const late = open();
+      now = 10001;
+      late.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      expect(late.codes).toEqual([1008]);
+      late.finish();
+      const expired = open();
+      const deadline = next;
+      jobs.get(deadline).callback();
+      expired.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      expect(expired.sent).toEqual([]);
+      expect(expired.codes).toEqual([1008]);
+      expired.finish();
+      await recordAuthor("A25-retired", {
+        events,
+        remainingHandles: [...jobs.keys()],
+        quota: local.admission.snapshot(),
+      });
+      expect(
+        events.filter((event) => event.type === "clear" && event.handle === clockHandle),
+      ).toHaveLength(1);
+      expect(
+        events.filter(
+          (event) => event.type === "clear" && event.handle === bootstrapHandle && event.removed,
+        ),
+      ).toHaveLength(1);
+      expect(jobs.size).toBe(0);
+      expect(local.admission.snapshot().authenticated).toBe(0);
+    } finally {
+      local.terminal.close();
+      for (const peer of peers) peer.finish();
+      await local.app.close();
+      local.disposeCore();
+    }
+  });
+  it("D-A26 actual factory forwards WorkerSpawn through the original worker handshake and lower retirement", async () => {
+    const child = new EventEmitter();
+    child.pid = 123;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const decoder = createPipeDecoder();
+    const writes = [];
+    let selectedBin;
+    let spawns = 0;
+    child.stdin.on("data", (bytes) => {
+      for (const frame of decoder.read(bytes).frames) {
+        const hello = JSON.parse(Buffer.from(frame.metadata).toString());
+        writes.push({ hello, bytes: Buffer.from(bytes).toString("base64") });
+        child.stdout.write(
+          encodePipeFrame(2, utf8({ ...hello, type: "ready" }), new Uint8Array()).value,
+        );
+      }
+    });
+    child.stdin.on("finish", () => {
+      child.stdin.destroy();
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+    });
+    const local = createLocalApplication(options, {
+      identity,
+      monotonic: () => 0,
+      workerSpawn: (bin) => {
+        selectedBin = bin;
+        spawns++;
+        return child;
+      },
+    });
+    let worker;
+    try {
+      await local.app.ready();
+      worker = local.createWorker();
+      worker.start();
+      await worker.ready;
+      await recordAuthor("A26-ready", {
+        selectedBin,
+        spawns,
+        writes,
+        snapshot: worker.snapshot(),
+        lowerPid123NotNativeBirth: true,
+      });
+      expect(worker).toBeInstanceOf(WorkerProcess);
+      expect(selectedBin).toMatch(/node_modules[/\\]\.bin[/\\]cove-terminal-worker$/);
+      expect(spawns).toBe(1);
+      expect(writes[0].hello.type).toBe("hello");
+      expect(worker.snapshot().ready).toBe(true);
+      child.stdout.emit("error", new Error("fixed lower contact loss"));
+      expect(worker.snapshot().contact).toBe("unverifiable");
+      expect(worker.snapshot().directlyOwnedLeaderExited).toBe(false);
+      const receipt = await worker.close();
+      await recordAuthor("A26-closed", { receipt, snapshot: worker.snapshot(), spawns });
+      expect(receipt.status).toBe("exited");
+      expect(worker.snapshot().directlyOwnedLeaderExited).toBe(true);
+    } finally {
+      await worker?.close();
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      await local.app.close();
+      local.disposeCore();
+    }
+  });
+  it("D-A27 extracted aggregate response guard keeps exact UTF8 boundaries without closed-method bypass", async () => {
+    const envelope = { jsonrpc: "2.0", id: "component", result: "" };
+    const overhead = Buffer.byteLength(JSON.stringify(envelope));
+    for (const [bytes, expectedStatus, accepted] of [
+      [262144, 200, true],
+      [262145, 413, false],
+    ]) {
+      const remaining = bytes - overhead;
+      const result = "é".repeat(Math.floor(remaining / 2)) + "a".repeat(remaining % 2);
+      const value = { ...envelope, result };
+      const body = JSON.stringify(value);
+      const composer = composeRpcResponse(value, (text) => Buffer.from(text));
+      const guard = boundRpcResponseBody(body, 262144);
+      await recordAuthor(`A27-${bytes}`, {
+        body,
+        bytes: Buffer.byteLength(body),
+        sha256: createHash("sha256").update(body).digest("hex"),
+        composer,
+        guard,
+        credit: "COMPONENT_ONLY",
+      });
+      expect(Buffer.byteLength(body)).toBe(bytes);
+      expect(guard.status).toBe(expectedStatus);
+      expect(composer).toEqual(accepted ? value : null);
+      expect(guard.body).toBe(accepted ? body : undefined);
+      const changed = body.replace("é", "è");
+      const changedGuard = boundRpcResponseBody(changed, 262144);
+      await recordAuthor(`A27-changed-${bytes}`, {
+        body: changed,
+        bytes: Buffer.byteLength(changed),
+        guard: changedGuard,
+      });
+      expect(Buffer.byteLength(changed)).toBe(bytes);
+      expect(changedGuard.status).toBe(guard.status);
+      expect(changed).not.toBe(body);
+    }
+    expect(
+      composeRpcResponse(
+        { ...envelope, error: { code: -32603, message: "Internal error" } },
+        (text) => Buffer.from(text),
+      ),
+    ).toBeNull();
   });
 });
