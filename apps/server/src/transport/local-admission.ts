@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+import { OpaqueIdSchema } from "@cove/protocol/identity";
 import { timingSafeEqual } from "node:crypto";
 import {
   evaluateAdmission,
@@ -21,10 +23,36 @@ export function actualHeaders(headers: LocalHeaders, raw: readonly string[]): Lo
   const seen = new Set<string>();
   for (let i = 0; i < raw.length; i += 2) {
     const name = raw[i]!.toLowerCase();
-    if (seen.has(name)) copy[name] = "";
+    if (seen.has(name)) copy[name] = [raw[i + 1] ?? ""];
     seen.add(name);
   }
   return copy;
+}
+function malformedHeaders(headers: LocalHeaders): boolean {
+  const names = [
+    "host",
+    "origin",
+    "authorization",
+    "cove-protocol",
+    "cove-server-id",
+    "cove-instance-id",
+  ];
+  if (names.some((name) => Array.isArray(headers[name]))) return true;
+  const host = header(headers, "host");
+  if (!host || /[\s/@?#]/.test(host)) return true;
+  const match = /^(\[[^\]]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)(?::([0-9]+))?$/.exec(host);
+  if (!match || (match[1]!.startsWith("[") && isIP(match[1]!.slice(1, -1)) !== 6)) return true;
+  if (match[2] !== undefined && (Number(match[2]) < 1 || Number(match[2]) > 65535)) return true;
+  const protocol = header(headers, "cove-protocol");
+  if (
+    protocol !== undefined &&
+    (!/^(0|[1-9][0-9]*)$/.test(protocol) || !Number.isSafeInteger(Number(protocol)))
+  )
+    return true;
+  return ["cove-server-id", "cove-instance-id"].some((name) => {
+    const value = header(headers, name);
+    return value !== undefined && !OpaqueIdSchema.safeParse(value).success;
+  });
 }
 export class LocalAdmission {
   private authority: string | undefined;
@@ -59,6 +87,15 @@ export class LocalAdmission {
     bytes: number,
     ownsClaim = false,
   ): AdmissionKind {
+    if (malformedHeaders(headers)) return "malformed";
+    if (
+      method === "POST" &&
+      path === "/rpc" &&
+      ["cove-protocol", "cove-server-id", "cove-instance-id"].some(
+        (name) => header(headers, name) === undefined,
+      )
+    )
+      return "malformed";
     const cap = path === "/rpc" ? this.budgets.rpcRequestBytes : this.budgets.bootstrapBytes;
     const protocol = header(headers, "cove-protocol");
     const server = header(headers, "cove-server-id");
@@ -97,6 +134,7 @@ export class LocalAdmission {
     return result === "accepted" && method === "POST" && bytes > cap ? "too-large" : result;
   }
   upgrade(path: string, headers: LocalHeaders): AdmissionKind {
+    if (malformedHeaders(headers)) return "malformed";
     const origin = header(headers, "origin");
     return evaluateWsUpgrade({
       path,

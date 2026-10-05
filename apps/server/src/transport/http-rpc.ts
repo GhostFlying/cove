@@ -1,5 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { ADMISSION_STATUS, negotiateBootstrap, LOCAL_PATHS } from "@cove/protocol/bootstrap";
+import {
+  ADMISSION_STATUS,
+  negotiateBootstrap,
+  LOCAL_PATHS,
+  PROTOCOL_VERSION,
+} from "@cove/protocol/bootstrap";
 import { PROFILE } from "@cove/protocol/profile";
 import { domainError, ERROR_CODES, type DomainError } from "@cove/protocol/errors";
 import {
@@ -98,7 +103,16 @@ export async function rpcBody(
       : classifyRpcEnvelope(value, parseFailed);
   const responses = [];
   for (const item of items) {
-    if (item.kind === "notification") continue;
+    if (item.kind === "notification") {
+      if (item.params !== null) {
+        try {
+          await dispatchLocalRpc(core, item.method as RpcMethod, item.params);
+        } catch {
+          // Notifications execute without emitting success or failure replies.
+        }
+      }
+      continue;
+    }
     if (item.kind === "error") {
       responses.push(item.response);
       continue;
@@ -151,7 +165,7 @@ export function registerHttpRpc(
           "Access-Control-Allow-Headers",
           "Authorization, Content-Type, Cove-Protocol, Cove-Server-Id, Cove-Instance-Id",
         )
-        .code(204)
+        .code(ADMISSION_STATUS.accepted)
         .send();
     });
     app.post(
@@ -167,6 +181,11 @@ export function registerHttpRpc(
             reply.code(ADMISSION_STATUS[result]).send();
             return;
           }
+          if (path === LOCAL_PATHS.rpc)
+            reply
+              .header("Cove-Protocol", String(PROTOCOL_VERSION))
+              .header("Cove-Server-Id", admission.identity.serverId)
+              .header("Cove-Instance-Id", admission.identity.relayInstanceId);
           const claim = admission.claim("rpc");
           if (!claim) {
             reply.code(ADMISSION_STATUS.busy).send();

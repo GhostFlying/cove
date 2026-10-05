@@ -100,7 +100,11 @@ export class TerminalWebSocket {
       if (retired || physicallyClosed) return;
       try {
         if (!authenticated) {
-          if (binary || bytes.byteLength > this.admission.budgets.bootstrapBytes) {
+          if (binary) {
+            close();
+            return;
+          }
+          if (bytes.byteLength > this.admission.budgets.bootstrapBytes) {
             close(WS_CLOSE_CODES.size);
             return;
           }
@@ -190,7 +194,11 @@ export class TerminalWebSocket {
           });
           return;
         }
-        if (!binary || bytes.byteLength > MAX_FRAME_BYTES) {
+        if (!binary) {
+          close();
+          return;
+        }
+        if (bytes.byteLength > MAX_FRAME_BYTES) {
           close(WS_CLOSE_CODES.size);
           return;
         }
