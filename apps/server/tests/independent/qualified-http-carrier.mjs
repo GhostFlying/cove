@@ -174,7 +174,20 @@ export function qualifiedHttpCarrier(local, row, inputBytes, rawPairs, capture) 
       client.push(null);
       client.resume();
       await ended;
-      return { wire, body, status: response.statusCode, headers: response.getHeaders() };
+      const projection = responseHeaderProjection(wire);
+      capture("completed-response-header-projection", {
+        ...projection,
+        serverResponseHeaders: response.getHeaders(),
+        projectionOrigin: "COMPLETED_OWN_WIRE",
+      });
+      return {
+        wire,
+        body,
+        status: response.statusCode,
+        headers: projection.headers,
+        rawHeaderPairs: projection.rawHeaderPairs,
+        serverResponseHeaders: response.getHeaders(),
+      };
     },
     async dispose() {
       const closed = socket.closed ? undefined : once(socket, "close");
@@ -188,6 +201,29 @@ export function qualifiedHttpCarrier(local, row, inputBytes, rawPairs, capture) 
       });
     },
   };
+}
+
+function responseHeaderProjection(wire) {
+  const boundary = wire.indexOf("\r\n\r\n");
+  if (boundary < 0) throw new Error("Actual HTTP response header boundary missing");
+  const [statusLine, ...lines] = wire.subarray(0, boundary).toString("latin1").split("\r\n");
+  const headers = Object.create(null);
+  const rawHeaderPairs = [];
+  for (const line of lines) {
+    const colon = line.indexOf(":");
+    if (colon < 1) throw new Error("Actual HTTP response header separator missing");
+    const name = line.slice(0, colon);
+    const rawValue = line.slice(colon + 1);
+    rawHeaderPairs.push([name, rawValue]);
+    const key = name.toLowerCase();
+    const value = rawValue.replace(/^[ \t]+|[ \t]+$/g, "");
+    const previous = headers[key];
+    headers[key] =
+      previous === undefined
+        ? value
+        : [...(Array.isArray(previous) ? previous : [previous]), value];
+  }
+  return { statusLine, headers, rawHeaderPairs };
 }
 
 function responseBody(wire) {
