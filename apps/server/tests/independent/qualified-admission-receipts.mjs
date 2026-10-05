@@ -97,7 +97,12 @@ export async function closeAdmissionResources(
       errors.push(error);
     }
   }
-  if (local && Object.values(local.admission.snapshot()).some((count) => count !== 0))
+  if (
+    local &&
+    ["unauthenticated", "authenticated", "rpc"].some(
+      (kind) => local.admission.snapshot()[kind] !== 0,
+    )
+  )
     errors.push(new Error("Own factory admission claims remain after real finally"));
   if (local && local.core.runtime.composition.bytes.snapshot().total !== 0)
     errors.push(
