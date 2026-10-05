@@ -1,0 +1,1 @@
+{"type":"cove-bootstrap","bootstrapVersion":1,"expectedServerId":"dn-server","expectedRelayInstanceId":"dn-instance","protocolVersion":2,"buildVersion":"oracle-client-a","capabilities":["terminal-framing-v2"],"profiles":["pragmatic-logical-grid-v1"],"encodings":["vt-checkpoint-tail-v1"]}

@@ -200,7 +200,7 @@ export function registerHttpRpc(
     if (origin && admission.options.allowedOrigins.includes(origin))
       reply.header("Access-Control-Allow-Origin", origin).header("Vary", "Origin");
   };
-  for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc]) {
+  for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc, LOCAL_PATHS.terminal]) {
     app.options(path, (request, reply) => {
       const result = admission.http("OPTIONS", path, headers(request), 0);
       if (result !== "accepted") return reply.code(ADMISSION_STATUS[result]).send();

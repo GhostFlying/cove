@@ -232,6 +232,11 @@ export const requiredSuites = [
   },
   {
     project: "server",
+    file: "apps/server/tests/independent/qualified-local-admission.test.mjs",
+    minimumTests: 4,
+  },
+  {
+    project: "server",
     file: "apps/server/tests/author/worker-pipe-session.test.mjs",
     minimumTests: 11,
   },
@@ -1892,6 +1897,7 @@ async function main() {
       runnerArch: toolchain.runnerArch,
     });
     stage = "vitest";
+    process.env.COVE_D_QUALIFIED_OUTPUT ??= join(evidenceDir, "qualified-local-admission", runId);
     const runArgs = [
       vitest,
       "run",
