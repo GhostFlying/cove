@@ -13,6 +13,7 @@ import { qualifiedHttpCarrier } from "./qualified-http-carrier.mjs";
 import { qualifiedWebSocketCarrier } from "./qualified-websocket-carrier.mjs";
 import { checkHttp, checkWebSocket, runComponent } from "./qualified-local-admission-checks.mjs";
 import { runFixedStatus } from "./qualified-status-carrier.mjs";
+import { admissionReceipts } from "./qualified-admission-receipts.mjs";
 
 const rows = new Map(cases.rows.map((row) => [row.id, row]));
 
@@ -187,12 +188,23 @@ async function runQuota(row) {
 }
 
 async function runWebSocket(row) {
+  if (row.input.ordering === "close-before-message") {
+    const receipts = admissionReceipts(row, []);
+    receipts.record("original-named-stage-not-exercised", {
+      originalInput: row.input,
+      originalExpected: row.expected,
+      stage: "physical-close-before-genuine-late-message",
+      reason:
+        "The lower adapter has no genuine post-close ingress; invoking its EventEmitter would manufacture delivery",
+      timerOnlyWholeRowCredit: false,
+    });
+    receipts.finish("NOT_EXERCISED", []);
+    return false;
+  }
   await withQualifiedApplication(
     row,
     async ({ local, identity, otherSecret, receipts, carriers, timers, setNow }) => {
       const lower = row.input;
-      if (lower.ordering === "close-before-message")
-        throw new Error("Original close-code origin recipe not yet bound");
       let healthy;
       if (lower.callbackOrder) {
         healthy = acceptPeer(local, lower, "dn07-distinct-healthy", receipts, carriers);
@@ -212,14 +224,32 @@ async function runWebSocket(row) {
         return;
       }
       const carrier = peer.carrier;
-      const ownTimer = timers.at(-1);
+      const ownTimer = timers.filter((timer) => timer.ms === 5000).at(-1);
+      assert.ok(ownTimer);
       const baseline = healthy ? local.admission.snapshot().unauthenticated : undefined;
       if (lower.messageAtMs !== undefined) setNow(lower.messageAtMs);
       if (
         lower.ordering === "expiry-before-message" ||
         lower.callbackOrder === "timeout-close-late-send"
-      )
+      ) {
+        receipts.record("original-due-timer-before", {
+          ordinal: ownTimer.ordinal,
+          deadlineMs: ownTimer.ms,
+          originalMessageAtMs: lower.messageAtMs,
+          physicalClosed: carrier.transport.closed,
+        });
         ownTimer.callback();
+        receipts.record("original-due-timer-after-before-guards", {
+          ordinal: ownTimer.ordinal,
+          sourceRequestedCodes: carrier.closeCodes,
+          physicalClosed: carrier.transport.closed,
+          admission: local.admission.snapshot(),
+        });
+        if (lower.ordering === "expiry-before-message") {
+          assert.equal(carrier.transport.closed, false);
+          assert.equal(carrier.closeCodes[0], row.expected.WSclose);
+        }
+      }
       if (lower.callbackOrder === "close-close-timeout") {
         await carrier.dispose();
         await carrier.dispose();
@@ -229,6 +259,13 @@ async function runWebSocket(row) {
           wsInput(lower, identity.secret, otherSecret),
           lower.firstMessageKind === "binary" || lower.messageKind === "binary",
         );
+        if (lower.ordering === "expiry-before-message") {
+          receipts.record("original-expiry-message-delivered-before-physical-close", {
+            physicalClosed: carrier.transport.closed,
+            admission: local.admission.snapshot(),
+          });
+          assert.equal(carrier.transport.closed, false);
+        }
         if (lower.extraMessageFixture)
           carrier.message(
             wsInput(
@@ -268,6 +305,7 @@ async function runWebSocket(row) {
       }
     },
   );
+  return true;
 }
 
 describe("qualified local admission original fixed rows", () => {
@@ -284,11 +322,15 @@ describe("qualified local admission original fixed rows", () => {
   });
   it("routes the original48 lower WS-group rows with actual public handler and owned streams", async () => {
     const passed = [];
+    const namedStageNotExercised = [];
     for (const id of cases.groups.wsLower48) {
-      await runWebSocket(rows.get(id));
-      passed.push(id);
+      if (await runWebSocket(rows.get(id))) passed.push(id);
+      else namedStageNotExercised.push(id);
     }
-    expect(passed).toEqual(cases.groups.wsLower48);
+    expect(namedStageNotExercised).toEqual(["DN06.clock-5000-close-before-message"]);
+    expect(passed).toEqual(
+      cases.groups.wsLower48.filter((id) => id !== "DN06.clock-5000-close-before-message"),
+    );
   });
   it("checks the original20 option composer and sensitivity component rows", () => {
     const passed = [];
