@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
 } from "@cove/protocol/bootstrap";
 import { PROFILE } from "@cove/protocol/profile";
+import { boundedJsonStructure } from "@cove/protocol/terminal";
 import { domainError, ERROR_CODES, type DomainError } from "@cove/protocol/errors";
 import {
   classifyRpcEnvelope,
@@ -117,7 +118,11 @@ export async function rpcBody(
     Array.isArray(value) && value.length > core.runtime.composition.budgets.rpcBatch
       ? classifyRpcEnvelope([])
       : classifyRpcEnvelope(value, parseFailed);
-  const batch = Array.isArray(value);
+  const batch =
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= Math.min(M0_LIMITS.rpcBatch, core.runtime.composition.budgets.rpcBatch) &&
+    boundedJsonStructure(value);
   const oversized = Symbol("response scratch limit");
   const encodeResponse = (text: string): Uint8Array => {
     const length = Buffer.byteLength(text);
