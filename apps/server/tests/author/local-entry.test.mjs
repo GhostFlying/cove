@@ -1621,4 +1621,304 @@ describe("D passive production local entry", () => {
       ),
     ).toBeNull();
   });
+  it("D-A31 real admission count retirement preserves shared backing and rejects ledger exhaustion", async () => {
+    await withApp(async ({ admission, core }) => {
+      const bytes = core.runtime.composition.bytes;
+      const before = bytes.snapshot();
+      const claims = [];
+      let denial;
+      try {
+        for (let i = 0; i < 32; i++) claims.push(admission.claim("rpc"));
+        await recordAuthor("A31-full", {
+          quota: admission.snapshot(),
+          bytes: bytes.snapshot(),
+          before,
+          credit: "ADMISSION_COMPONENT_ONLY",
+        });
+        expect(claims.every((claim) => claim !== null)).toBe(true);
+        expect(admission.snapshot().rpc).toBe(32);
+        expect(bytes.snapshot().total).toBe(before.total + 32 * 69632);
+        expect(admission.claim("rpc")).toBe(null);
+        claims[0].retireAdmission();
+        claims[0].retireAdmission();
+        await recordAuthor("A31-count-only", {
+          quota: admission.snapshot(),
+          bytes: bytes.snapshot(),
+        });
+        expect(admission.snapshot().rpc).toBe(31);
+        expect(bytes.snapshot().total).toBe(before.total + 32 * 69632);
+        const replacement = admission.claim("rpc");
+        expect(replacement).not.toBe(null);
+        claims.push(replacement);
+        for (const claim of claims) claim.retireAdmission();
+        expect(admission.snapshot().rpc).toBe(0);
+        expect(bytes.snapshot().total).toBe(before.total + 33 * 69632);
+        const remaining = bytes.limit - bytes.controlReserve - bytes.snapshot().ordinary;
+        denial = bytes.reserve(remaining);
+        await recordAuthor("A31-real-ledger-denial", {
+          quota: admission.snapshot(),
+          bytes: bytes.snapshot(),
+          remaining,
+        });
+        expect(denial).not.toBe(null);
+        expect(admission.claim("rpc")).toBe(null);
+      } finally {
+        denial?.release();
+        for (const claim of claims) {
+          claim?.release();
+          claim?.release();
+        }
+      }
+      await recordAuthor("A31-released", { quota: admission.snapshot(), bytes: bytes.snapshot() });
+      expect(bytes.snapshot()).toEqual(before);
+      expect(admission.snapshot().rpc).toBe(0);
+    });
+  });
+  it("D-A32 default factory admits 32 pending readers and refuses the 33rd without domain dispatch", async () => {
+    await withApp(async ({ app, admission, core }) => {
+      const before = core.runtime.composition.bytes.snapshot();
+      const streams = Array.from({ length: 32 }, () => new PassThrough());
+      const pending = streams.map((payload) =>
+        app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: { ...business, "content-type": "application/json" },
+          payload,
+        }),
+      );
+      let responses;
+      try {
+        for (let turn = 0; turn < 100 && admission.snapshot().rpc !== 32; turn++)
+          await new Promise(setImmediate);
+        await recordAuthor("A32-pending-readers", {
+          quota: admission.snapshot(),
+          bytes: core.runtime.composition.bytes.snapshot(),
+          before,
+          pendingReader: 32,
+          pendingDomain: "NOT_EXERCISED",
+          requestIds: streams.map((_stream, id) => `reader-${id}`),
+        });
+        expect(admission.snapshot().rpc).toBe(32);
+        expect(core.runtime.composition.bytes.snapshot().total).toBe(before.total + 32 * 1118976);
+        const refused = await app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: business,
+          payload: utf8({ ...statusCall, id: "reader-33" }),
+        });
+        await recordAuthor("A32-refused", {
+          status: refused.statusCode,
+          body: refused.body,
+          headers: refused.headers,
+          quota: admission.snapshot(),
+          bytes: core.runtime.composition.bytes.snapshot(),
+        });
+        expect(refused.statusCode).toBe(429);
+        expect(admission.snapshot().rpc).toBe(32);
+      } finally {
+        streams.forEach((stream, id) => stream.end(utf8({ ...statusCall, id: `reader-${id}` })));
+        responses = await Promise.all(pending);
+        for (const stream of streams) stream.destroy();
+      }
+      await recordAuthor("A32-actual-finish", {
+        responses: responses.map((response) => ({
+          status: response.statusCode,
+          headers: response.headers,
+          body: response.body,
+        })),
+        quota: admission.snapshot(),
+        bytes: core.runtime.composition.bytes.snapshot(),
+        carrier: "passive inject framework finish; not real OS socket",
+      });
+      expect(responses.every((response) => response.statusCode === 200)).toBe(true);
+      expect(responses.map((response) => response.json().id)).toEqual(
+        streams.map((_stream, id) => `reader-${id}`),
+      );
+      expect(admission.snapshot().rpc).toBe(0);
+      expect(core.runtime.composition.bytes.snapshot()).toEqual(before);
+    });
+  });
+  it("D-A33 legal bootstrap input greater than RPC input keeps independent generated response capacity", async () => {
+    await withApp(
+      async ({ app, admission, core }) => {
+        const before = core.runtime.composition.bytes.snapshot();
+        const payload = utf8(bootstrap);
+        const response = await app.inject({
+          method: "POST",
+          url: "/bootstrap",
+          headers: auth,
+          payload,
+        });
+        await recordAuthor("A33-bootstrap", {
+          input: payload.toString("base64"),
+          inputBytes: payload.byteLength,
+          headers: response.headers,
+          status: response.statusCode,
+          body: response.body,
+          bodyBytes: Buffer.byteLength(response.body),
+          quota: admission.snapshot(),
+          bytes: core.runtime.composition.bytes.snapshot(),
+          advertised: core.runtime.composition.budgets,
+        });
+        expect(payload.byteLength).toBeGreaterThan(128);
+        expect(response.statusCode).toBe(200);
+        expect(response.json().type).toBe("cove-bootstrap-result");
+        expect(Buffer.byteLength(response.body)).toBeGreaterThan(128);
+        expect(Buffer.byteLength(response.body)).toBeLessThanOrEqual(2371);
+        expect(response.json().effectiveBudgets.rpcResponseBytes).toBe(128);
+        const rpc = await app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: business,
+          payload: utf8({ ...statusCall, id: "small-response" }),
+        });
+        await recordAuthor("A33-rpc-small-response", {
+          headers: rpc.headers,
+          status: rpc.statusCode,
+          body: rpc.body,
+          quota: admission.snapshot(),
+          bytes: core.runtime.composition.bytes.snapshot(),
+        });
+        expect(rpc.statusCode).toBe(413);
+        expect(core.runtime.composition.bytes.snapshot()).toEqual(before);
+      },
+      { ...M0_LIMITS, rpcRequestBytes: 128, rpcResponseBytes: 128 },
+    );
+  });
+  it("D-A34 original 16 admitted FIFO effects continue after early aggregate overflow", async () => {
+    await withApp(
+      async ({ app, core, admission }) => {
+        const actualSnapshot = core.runtime.pool.snapshot;
+        const effects = [];
+        core.runtime.pool.snapshot = function (...args) {
+          const result = Reflect.apply(actualSnapshot, this, args);
+          effects.push({ ordinal: effects.length, result });
+          return result;
+        };
+        const batch = Array.from({ length: 16 }, (_unused, index) =>
+          index < 2
+            ? { ...statusCall, id: `overflow-${index}` }
+            : { jsonrpc: "2.0", method: "server.status", params: {} },
+        );
+        const before = core.runtime.composition.bytes.snapshot();
+        try {
+          const response = await app.inject({
+            method: "POST",
+            url: "/rpc",
+            headers: business,
+            payload: utf8(batch),
+          });
+          await recordAuthor("A34-fifo-overflow", {
+            batch,
+            response: {
+              status: response.statusCode,
+              headers: response.headers,
+              body: response.body,
+            },
+            effects,
+            quota: admission.snapshot(),
+            bytes: core.runtime.composition.bytes.snapshot(),
+            before,
+          });
+          expect(response.statusCode).toBe(413);
+          expect(response.body).toBe("");
+          expect(effects).toHaveLength(16);
+          expect(effects.map((effect) => effect.ordinal)).toEqual(
+            Array.from({ length: 16 }, (_unused, index) => index),
+          );
+          expect(admission.snapshot().rpc).toBe(0);
+          expect(core.runtime.composition.bytes.snapshot()).toEqual(before);
+        } finally {
+          core.runtime.pool.snapshot = actualSnapshot;
+        }
+      },
+      { ...M0_LIMITS, rpcResponseBytes: 1024 },
+    );
+  });
+  it("D-A35 borrowed small view is copied into exact owned input before backing mutation", async () => {
+    const local = createLocalApplication(options, { identity });
+    const source = new PassThrough();
+    const large = Buffer.alloc(1048576);
+    const input = utf8({ ...statusCall, id: "borrowed-view" });
+    large.set(input);
+    const view = large.subarray(0, input.byteLength);
+    const observed = [];
+    let resolveReader;
+    let resolveConsumed;
+    const readerReady = new Promise((resolve) => {
+      resolveReader = resolve;
+    });
+    const consumed = new Promise((resolve) => {
+      resolveConsumed = resolve;
+    });
+    let copied;
+    let responsePromise;
+    local.app.addHook("preParsing", (request, _reply, payload, done) => {
+      request.raw.on("data", (chunk) => {
+        observed.push({
+          byteLength: chunk.byteLength,
+          backingBytes: chunk.buffer.byteLength,
+          sha256: createHash("sha256").update(chunk).digest("hex"),
+        });
+        resolveConsumed();
+      });
+      resolveReader();
+      done(null, payload);
+    });
+    local.app.addHook("preValidation", (request, _reply, done) => {
+      copied = {
+        byteLength: request.body.byteLength,
+        backingBytes: request.body.buffer.byteLength,
+        sameIncomingBacking: request.body.buffer === large.buffer,
+        bytes: Buffer.from(request.body).toString("base64"),
+        sha256: createHash("sha256").update(request.body).digest("hex"),
+      };
+      done();
+    });
+    try {
+      await local.app.ready();
+      responsePromise = local.app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: { ...business, "content-type": "application/json" },
+        payload: source,
+      });
+      await readerReady;
+      source.write(view);
+      await consumed;
+      large.fill(0);
+      source.end();
+      const response = await responsePromise;
+      await recordAuthor("A35-borrowed-copy", {
+        observed,
+        copied,
+        originalBytes: input.toString("base64"),
+        originalSha256: createHash("sha256").update(input).digest("hex"),
+        observerOwnedIncomingBackingBytes: large.buffer.byteLength,
+        status: response.statusCode,
+        headers: response.headers,
+        body: response.body,
+        quota: local.admission.snapshot(),
+        bytes: local.core.runtime.composition.bytes.snapshot(),
+      });
+      expect(observed).toHaveLength(1);
+      expect(copied.backingBytes).toBe(65536);
+      expect(copied.sameIncomingBacking).toBe(false);
+      expect(copied.bytes).toBe(input.toString("base64"));
+      expect(response.statusCode).toBe(200);
+      expect(response.json().id).toBe("borrowed-view");
+    } finally {
+      source.end();
+      source.destroy();
+      try {
+        if (responsePromise) await responsePromise;
+      } finally {
+        try {
+          await local.app.close();
+        } finally {
+          local.disposeCore();
+        }
+      }
+    }
+  });
 });
