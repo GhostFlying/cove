@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import {
   ADMISSION_STATUS,
+  BOOTSTRAP_VERSION,
   LOCAL_PATHS,
   negotiateBootstrap,
   validateWsFirstMessage,
@@ -119,18 +120,33 @@ export class TerminalWebSocket {
             input && typeof input === "object" && "secret" in input
               ? (input as { secret: unknown }).secret
               : undefined;
-          const request = validateWsFirstMessage(
-            input,
-            bytes.byteLength,
-            this.now() - started,
-            typeof secret === "string" && this.admission.verifies(secret),
-          );
+          const elapsedMs = this.now() - started;
+          const secretMatches = typeof secret === "string" && this.admission.verifies(secret);
+          const request = validateWsFirstMessage(input, bytes.byteLength, elapsedMs, secretMatches);
           if (!request) {
-            close(WS_CLOSE_CODES.policy);
-            return;
+            const version =
+              input && typeof input === "object" && "bootstrapVersion" in input
+                ? input.bootstrapVersion
+                : undefined;
+            // Probe the auth/shape guard; negotiate the untouched version below.
+            const unsupportedVersion =
+              typeof version === "number" &&
+              Number.isSafeInteger(version) &&
+              version > 0 &&
+              version !== BOOTSTRAP_VERSION &&
+              validateWsFirstMessage(
+                { ...(input as Record<string, unknown>), bootstrapVersion: BOOTSTRAP_VERSION },
+                bytes.byteLength,
+                elapsedMs,
+                secretMatches,
+              ) !== null;
+            if (!unsupportedVersion) {
+              close(WS_CLOSE_CODES.policy);
+              return;
+            }
           }
           const result = negotiateBootstrap(
-            request,
+            request ?? input,
             {
               ...this.admission.identity,
               buildVersion: this.core.buildVersion,
