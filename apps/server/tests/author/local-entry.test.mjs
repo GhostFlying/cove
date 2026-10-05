@@ -1,7 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtemp, readFile, stat, rm, writeFile, unlink, readdir } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  stat,
+  rm,
+  writeFile,
+  unlink,
+  readdir,
+  realpath,
+  mkdir,
+  chmod,
+  symlink,
+  lstat,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalApplication } from "../../dist/entry/main.js";
@@ -9,14 +22,21 @@ import { validateLocalOptions, parseLocalOptions } from "../../dist/entry/m0-loc
 import { LocalRendezvous, launchIdentity } from "../../dist/entry/local-rendezvous.js";
 import { LocalRuntimeClock } from "../../dist/terminal/local-runtime-clock.js";
 import { WorkerProcess } from "../../dist/terminal/worker-process.js";
+import { actualHeaders } from "../../dist/transport/local-admission.js";
 import { TerminalWebSocket } from "../../dist/transport/terminal-websocket.js";
 import { rpcBody } from "../../dist/transport/http-rpc.js";
 import { createPipeDecoder, encodePipeFrame } from "@cove/protocol/pipe";
-import { encodeTerminalFrame } from "@cove/protocol/terminal";
+import { encodeTerminalFrame, MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
 import { REQUIRED_CAPABILITIES } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 
+async function recordAuthor(name, data) {
+  const sink = process.env.COVE_D_AUTHOR_OUTPUT;
+  if (!sink) return;
+  await mkdir(sink, { recursive: true });
+  await writeFile(join(sink, `${name}.json`), JSON.stringify(data, null, 2) + "\n");
+}
 const identity = {
   serverId: "author-server",
   relayInstanceId: "author-instance",
@@ -210,7 +230,7 @@ describe("D passive production local entry", () => {
       };
       expect(
         (await app.inject({ method: "OPTIONS", url: "/rpc", headers: preflight })).statusCode,
-      ).toBe(204);
+      ).toBe(200);
       expect(
         (
           await app.inject({
@@ -275,7 +295,7 @@ describe("D passive production local entry", () => {
     });
   });
   it("D-A06 classifier batch and notification behavior remain schema-bound without partial writes", async () => {
-    await withApp(async ({ app, core }) => {
+    await withApp(async ({ app, core, admission }) => {
       const batch = Array.from({ length: 16 }, (_, id) => ({ ...statusCall, id }));
       expect(
         (
@@ -303,6 +323,28 @@ describe("D passive production local entry", () => {
         ).statusCode,
       ).toBe(204);
       expect(core.runtime.registry.count).toBe(0);
+      const snapshot = core.runtime.pool.snapshot.bind(core.runtime.pool);
+      let dispatched = 0;
+      core.runtime.pool.snapshot = () => {
+        dispatched++;
+        return snapshot();
+      };
+      const notification = await app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: business,
+        payload: utf8({ jsonrpc: "2.0", method: "server.status", params: {} }),
+      });
+      await recordAuthor("A06-notification", {
+        status: notification.statusCode,
+        body: notification.body,
+        headers: notification.headers,
+        dispatched,
+        quota: admission.snapshot(),
+      });
+      expect(notification.statusCode).toBe(204);
+      expect(notification.body).toBe("");
+      expect(dispatched).toBe(1);
     });
   });
   it("D-A07 in-flight readers hold ownership until the correlated domain completion", async () => {
@@ -382,7 +424,7 @@ describe("D passive production local entry", () => {
     await withWs(async ({ open, local }) => {
       const peer = open();
       peer.emit("message", Buffer.from([1, 2, 3]), true);
-      expect(peer.codes).toEqual([1009]);
+      expect(peer.codes).toEqual([1002]);
       expect(local.admission.snapshot().unauthenticated).toBe(1);
       expect(local.core.runtime.registry.count).toBe(0);
       peer.finish();
@@ -533,7 +575,7 @@ describe("D passive production local entry", () => {
     });
   });
   it("D-A15 rendezvous publishes complete restricted bytes and preserves a replaced foreign file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "cove-entry-author-"));
+    const dir = await mkdtemp(join(await realpath(tmpdir()), "cove-entry-author-"));
     const path = join(dir, "rendezvous");
     const file = new LocalRendezvous(path);
     try {
@@ -556,7 +598,7 @@ describe("D passive production local entry", () => {
     }
   });
   it("D-A16 failed publication never overwrites prior rendezvous or leaks owned temporary resources", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "cove-entry-failure-"));
+    const dir = await mkdtemp(join(await realpath(tmpdir()), "cove-entry-failure-"));
     const path = join(dir, "rendezvous");
     const file = new LocalRendezvous(path);
     try {
@@ -590,6 +632,255 @@ describe("D passive production local entry", () => {
       core.runtime.previews.cache.list = () => ({ runs: records });
       const list = { jsonrpc: "2.0", id: "list", method: "terminal.list", params: { limit: 128 } };
       expect((await rpcBody(core, utf8(Array.from({ length: 16 }, () => list)))).status).toBe(413);
+    });
+  });
+  it("D-A18 secure missing leaf directory is created 0700 and removed only after owned file cleanup", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-secure-parent-"));
+    const parent = join(root, "owned");
+    const path = join(parent, "rendezvous");
+    const file = new LocalRendezvous(path);
+    try {
+      await file.publish({
+        bootstrapVersion: 1,
+        ...launchIdentity(),
+        endpoint: "http://127.0.0.1:32123",
+      });
+      const directory = await lstat(parent);
+      const published = await lstat(path);
+      await recordAuthor("A18-published", {
+        directory: { uid: directory.uid, mode: directory.mode & 0o777 },
+        file: { uid: published.uid, mode: published.mode & 0o777 },
+        names: await readdir(parent),
+      });
+      expect(directory.mode & 0o777).toBe(0o700);
+      expect(directory.uid).toBe(process.getuid());
+      expect(published.mode & 0o777).toBe(0o600);
+      await file.close();
+      await file.close();
+      const remaining = await readdir(root);
+      await recordAuthor("A18-closed", { remaining });
+      expect(remaining).toEqual([]);
+    } finally {
+      await file.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it("D-A19 insecure and symlinked configured parents refuse publication and preserve foreign bytes", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-refused-parent-"));
+    try {
+      const insecure = join(root, "insecure");
+      const target = join(root, "target");
+      const alias = join(root, "alias");
+      await mkdir(insecure, { mode: 0o700 });
+      await chmod(insecure, 0o755);
+      await mkdir(target, { mode: 0o700 });
+      await symlink(target, alias);
+      await writeFile(join(insecure, "prior"), "foreign-insecure");
+      await writeFile(join(target, "prior"), "foreign-target");
+      for (const [name, parent] of [
+        ["insecure", insecure],
+        ["symlink", alias],
+      ]) {
+        const file = new LocalRendezvous(join(parent, "rendezvous"));
+        let error;
+        try {
+          await file.publish({
+            bootstrapVersion: 1,
+            ...launchIdentity(),
+            endpoint: "http://127.0.0.1:32123",
+          });
+        } catch (caught) {
+          error = caught;
+        } finally {
+          await file.close();
+        }
+        const info = await lstat(parent);
+        const names = await readdir(parent);
+        await recordAuthor(`A19-${name}`, {
+          error: error?.message,
+          mode: info.mode & 0o777,
+          symlink: info.isSymbolicLink(),
+          names,
+          prior: await readFile(join(parent, "prior"), "utf8"),
+        });
+        expect(error?.message).toBe("Local rendezvous publication failed");
+        expect(names).toEqual(["prior"]);
+      }
+      expect((await lstat(insecure)).mode & 0o777).toBe(0o755);
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+      expect(await readFile(join(target, "prior"), "utf8")).toBe("foreign-target");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it("D-A20 valid notifications dispatch through the real map and invalid or unknown notifications do not", async () => {
+    await withApp(async ({ app, core, admission }) => {
+      const snapshot = core.runtime.pool.snapshot.bind(core.runtime.pool);
+      let dispatches = 0;
+      core.runtime.pool.snapshot = () => {
+        dispatches++;
+        return snapshot();
+      };
+      const payload = [
+        { jsonrpc: "2.0", method: "server.status", params: {} },
+        { jsonrpc: "2.0", method: "server.status", params: [] },
+        { jsonrpc: "2.0", method: "unknown", params: {} },
+        statusCall,
+      ];
+      const response = await app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: business,
+        payload: utf8(payload),
+      });
+      await recordAuthor("A20-mixed", {
+        status: response.statusCode,
+        body: response.body,
+        headers: response.headers,
+        dispatches,
+        quota: admission.snapshot(),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toHaveLength(1);
+      expect(response.json()[0].id).toBe("status");
+      expect(dispatches).toBe(2);
+      expect(admission.snapshot().rpc).toBe(0);
+      core.runtime.pool.snapshot = () => {
+        throw new Error("fixed snapshot failure");
+      };
+      const failedNotification = await app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: business,
+        payload: utf8({ jsonrpc: "2.0", method: "server.status", params: {} }),
+      });
+      await recordAuthor("A20-failed-notification", {
+        status: failedNotification.statusCode,
+        body: failedNotification.body,
+        headers: failedNotification.headers,
+        quota: admission.snapshot(),
+      });
+      expect(failedNotification.statusCode).toBe(204);
+      expect(failedNotification.body).toBe("");
+      expect(admission.snapshot().rpc).toBe(0);
+    });
+  });
+  it("D-A21 admitted RPC success, parse failure, no-reply and size refusal retain exact current identity headers", async () => {
+    await withApp(async ({ app, admission }) => {
+      for (const [name, payload, status] of [
+        ["success", utf8(statusCall), 200],
+        ["parse", Buffer.from("{"), 200],
+        ["notification", utf8({ jsonrpc: "2.0", method: "server.status", params: {} }), 204],
+        ["too-large", Buffer.alloc(65537, 32), 413],
+      ]) {
+        const response = await app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: business,
+          payload,
+        });
+        await recordAuthor(`A21-${name}`, {
+          status: response.statusCode,
+          body: response.body,
+          headers: response.headers,
+          quota: admission.snapshot(),
+        });
+        expect(response.statusCode).toBe(status);
+        expect(response.headers["cove-protocol"]).toBe("2");
+        expect(response.headers["cove-server-id"]).toBe(identity.serverId);
+        expect(response.headers["cove-instance-id"]).toBe(identity.relayInstanceId);
+        expect(response.headers.authorization).toBeUndefined();
+        expect(response.body).not.toContain(identity.secret);
+        expect(admission.snapshot().rpc).toBe(0);
+      }
+    });
+  });
+  it("D-A22 malformed and ambiguous real raw headers precede authority, credential and metadata mismatch", async () => {
+    await withApp(async ({ admission, app }) => {
+      const raw = Object.entries(business).flatMap(([key, value]) => [key, value]);
+      const cases = [
+        ["missing-host", { ...business, host: undefined }],
+        ["bad-host", { ...business, host: "bad host" }],
+        ["bad-protocol", { ...business, "cove-protocol": "NaN" }],
+        ["bad-server", { ...business, "cove-server-id": "bad id" }],
+        ["missing-instance", { ...business, "cove-instance-id": undefined }],
+        ...["host", "origin", "authorization"].map((key) => [
+          `duplicate-${key}`,
+          actualHeaders(business, [...raw, key, "foreign", key, "second"]),
+        ]),
+      ];
+      for (const [name, headers] of cases) {
+        const result = admission.http("POST", "/rpc", headers, 0);
+        await recordAuthor(`A22-${name}`, {
+          result,
+          headers: { ...headers, authorization: "[REDACTED]" },
+          quota: admission.snapshot(),
+        });
+        expect(result).toBe("malformed");
+      }
+      for (const key of ["host", "origin", "authorization"]) {
+        const headers = actualHeaders(auth, [
+          "Host",
+          auth.host,
+          key,
+          "one",
+          key.toUpperCase(),
+          "two",
+        ]);
+        expect(admission.http("POST", "/bootstrap", headers, 0)).toBe("malformed");
+        expect(admission.http("OPTIONS", "/rpc", headers, 0)).toBe("malformed");
+        expect(admission.upgrade("/terminal", headers)).toBe("malformed");
+      }
+      expect(admission.http("POST", "/rpc", { ...business, host: "example.com:32123" }, 0)).toBe(
+        "forbidden",
+      );
+      expect(
+        admission.http("POST", "/rpc", { ...business, authorization: "Bearer wrong" }, 0),
+      ).toBe("unauthenticated");
+      expect(admission.http("POST", "/rpc", { ...business, "cove-server-id": "foreign" }, 0)).toBe(
+        "mismatch",
+      );
+      const response = await app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: { ...business, "cove-protocol": "NaN" },
+        payload: utf8(statusCall),
+      });
+      await recordAuthor("A22-real-route", {
+        status: response.statusCode,
+        body: response.body,
+        headers: response.headers,
+        quota: admission.snapshot(),
+      });
+      expect(response.statusCode).toBe(400);
+      expect(admission.snapshot().rpc).toBe(0);
+    });
+  });
+  it("D-A23 wrong message kinds use protocol close while true oversized messages retain size close", async () => {
+    await withWs(async ({ open, local }) => {
+      const oversized = open();
+      oversized.emit("message", Buffer.alloc(8193), false);
+      const text = open();
+      text.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      text.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      const binary = open();
+      binary.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      binary.emit("message", Buffer.alloc(MAX_FRAME_BYTES + 1), true);
+      await recordAuthor("A23-before-close", {
+        oversized: oversized.codes,
+        secondText: text.codes,
+        binary: binary.codes,
+        quota: local.admission.snapshot(),
+      });
+      expect(oversized.codes).toEqual([1009]);
+      expect(text.codes).toEqual([1002]);
+      expect(binary.codes).toEqual([1009]);
+      oversized.finish();
+      text.finish();
+      binary.finish();
+      await recordAuthor("A23-physical-close", { quota: local.admission.snapshot() });
+      expect(local.admission.snapshot().authenticated).toBe(0);
+      expect(local.admission.snapshot().unauthenticated).toBe(0);
     });
   });
 });

@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, normalize, basename } from "node:path";
 
 export type M0LocalOptions = {
   mode: "m0-local";
@@ -16,6 +16,9 @@ export function validateLocalOptions(input: M0LocalOptions): M0LocalOptions {
     input.port < 0 ||
     input.port > 65535 ||
     !isAbsolute(input.rendezvousPath) ||
+    normalize(input.rendezvousPath) !== input.rendezvousPath ||
+    !basename(input.rendezvousPath) ||
+    input.rendezvousPath.endsWith("/") ||
     input.allowedOrigins.length > 16 ||
     input.allowedOrigins.some((origin) => {
       try {
