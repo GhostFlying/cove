@@ -66,7 +66,7 @@ export class WorkerProcess {
           return child.stdin.write(bytes, (error) => {
             if (!owned) return;
             owned = false;
-            settled(error);
+            settled(error ?? undefined);
           });
         },
       },

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   mkdtemp,
   readFile,
@@ -79,6 +80,108 @@ async function withApp(body, budgets = { ...M0_LIMITS }) {
     local.disposeCore();
   }
 }
+
+function workerWriteControl(core, mode) {
+  const child = new EventEmitter();
+  child.pid = 123;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const failure = new Error("real lower Writable failure");
+  const decoder = createPipeDecoder();
+  const events = [];
+  let completeWrite;
+  let worker;
+  let resolveCallback;
+  const callbackDelivered = new Promise((resolve) => {
+    resolveCallback = resolve;
+  });
+  child.stdin = new Writable({
+    write(bytes, _encoding, completed) {
+      const frames = decoder.read(bytes).frames;
+      events.push({
+        type: "lower-write",
+        bytes: Buffer.from(bytes).toString("base64"),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        metadata: frames.map((frame) => JSON.parse(Buffer.from(frame.metadata).toString())),
+      });
+      if (mode === "late") {
+        completeWrite = completed;
+        return;
+      }
+      if (mode === "error") {
+        completed(failure);
+        return;
+      }
+      for (const frame of frames) {
+        const hello = JSON.parse(Buffer.from(frame.metadata).toString());
+        const readyBytes = encodePipeFrame(
+          2,
+          utf8({ ...hello, type: "ready" }),
+          new Uint8Array(),
+        ).value;
+        events.push({
+          type: "ready-frame",
+          bytes: Buffer.from(readyBytes).toString("base64"),
+          sha256: createHash("sha256").update(readyBytes).digest("hex"),
+        });
+        child.stdout.write(readyBytes);
+      }
+      completed();
+    },
+  });
+  const originalWrite = child.stdin.write;
+  child.stdin.write = function (bytes, callback) {
+    const returned = Reflect.apply(originalWrite, this, [
+      bytes,
+      function (error) {
+        events.push({
+          type: "callback-before",
+          category: error === null ? "NULL" : error === undefined ? "UNDEFINED" : "ERROR",
+          sameError: error === failure,
+          error: error instanceof Error ? { name: error.name, message: error.message } : null,
+          session: worker.session.snapshot(),
+        });
+        try {
+          return Reflect.apply(callback, this, [error]);
+        } finally {
+          events.push({
+            type: "callback-after",
+            snapshot: worker.snapshot(),
+            session: worker.session.snapshot(),
+          });
+          resolveCallback(error);
+        }
+      },
+    ]);
+    events.push({ type: "write-return", returned });
+    return returned;
+  };
+  child.stdin.on("finish", () => child.stdin.destroy());
+  child.stdin.on("close", () => {
+    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
+  });
+  worker = new WorkerProcess(
+    core.runtime,
+    {
+      serverId: identity.serverId,
+      relayInstanceId: identity.relayInstanceId,
+      workerId: `write-${mode}`,
+      workerIncarnationId: "birth",
+    },
+    () => 0,
+    () => child,
+  );
+  return {
+    child,
+    worker,
+    failure,
+    events,
+    callbackDelivered,
+    finishLowerWrite: () => completeWrite(),
+  };
+}
+
 class Socket extends EventEmitter {
   sent = [];
   codes = [];
@@ -1189,15 +1292,74 @@ describe("D passive production local entry", () => {
     child.stderr = new PassThrough();
     const decoder = createPipeDecoder();
     const writes = [];
+    const events = [];
+    let worker;
+    const originalWrite = child.stdin.write;
+    child.stdin.write = function (bytes, callback) {
+      const returned = Reflect.apply(originalWrite, this, [
+        bytes,
+        function (error) {
+          events.push({
+            type: "callback-before",
+            error:
+              error === null
+                ? "NULL"
+                : error === undefined
+                  ? "UNDEFINED"
+                  : { name: error.name, message: error.message },
+            snapshot: worker.snapshot(),
+            session: worker.session.snapshot(),
+          });
+          try {
+            return Reflect.apply(callback, this, [error]);
+          } finally {
+            events.push({
+              type: "callback-after",
+              snapshot: worker.snapshot(),
+              session: worker.session.snapshot(),
+            });
+          }
+        },
+      ]);
+      events.push({
+        type: "write-return",
+        returned,
+        bytes: Buffer.from(bytes).toString("base64"),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      });
+      return returned;
+    };
+    for (const streamName of ["stdin", "stdout", "stderr"]) {
+      for (const event of ["error", "end", "finish", "close"]) {
+        child[streamName].on(event, (error) =>
+          events.push({
+            streamName,
+            type: event,
+            error: error instanceof Error ? { name: error.name, message: error.message } : null,
+          }),
+        );
+      }
+    }
+    for (const event of ["exit", "close"])
+      child.on(event, (code, signal) => events.push({ type: `child-${event}`, code, signal }));
     let selectedBin;
     let spawns = 0;
     child.stdin.on("data", (bytes) => {
       for (const frame of decoder.read(bytes).frames) {
         const hello = JSON.parse(Buffer.from(frame.metadata).toString());
         writes.push({ hello, bytes: Buffer.from(bytes).toString("base64") });
-        child.stdout.write(
-          encodePipeFrame(2, utf8({ ...hello, type: "ready" }), new Uint8Array()).value,
-        );
+        const readyBytes = encodePipeFrame(
+          2,
+          utf8({ ...hello, type: "ready" }),
+          new Uint8Array(),
+        ).value;
+        events.push({
+          type: "ready-frame",
+          hello,
+          bytes: Buffer.from(readyBytes).toString("base64"),
+          sha256: createHash("sha256").update(readyBytes).digest("hex"),
+        });
+        child.stdout.write(readyBytes);
       }
     });
     child.stdin.on("finish", () => {
@@ -1214,7 +1376,8 @@ describe("D passive production local entry", () => {
         return child;
       },
     });
-    let worker;
+    let primaryError;
+    let errors;
     try {
       await local.app.ready();
       worker = local.createWorker();
@@ -1231,6 +1394,23 @@ describe("D passive production local entry", () => {
       expect(selectedBin).toMatch(/node_modules[/\\]\.bin[/\\]cove-terminal-worker$/);
       expect(spawns).toBe(1);
       expect(writes[0].hello.type).toBe("hello");
+      const sink = process.env.COVE_D_AUTHOR_OUTPUT;
+      if (sink) {
+        mkdirSync(sink, { recursive: true });
+        writeFileSync(
+          join(sink, "A26-live-guard.json"),
+          JSON.stringify(
+            {
+              events,
+              snapshot: worker.snapshot(),
+              session: worker.session.snapshot(),
+              lowerPid123NotNativeBirth: true,
+            },
+            null,
+            2,
+          ) + "\n",
+        );
+      }
       expect(worker.snapshot().ready).toBe(true);
       child.stdout.emit("error", new Error("fixed lower contact loss"));
       expect(worker.snapshot().contact).toBe("unverifiable");
@@ -1239,14 +1419,164 @@ describe("D passive production local entry", () => {
       await recordAuthor("A26-closed", { receipt, snapshot: worker.snapshot(), spawns });
       expect(receipt.status).toBe("exited");
       expect(worker.snapshot().directlyOwnedLeaderExited).toBe(true);
+    } catch (error) {
+      primaryError = error;
     } finally {
-      await worker?.close();
-      child.stdin.destroy();
-      child.stdout.destroy();
-      child.stderr.destroy();
-      await local.app.close();
-      local.disposeCore();
+      errors = primaryError === undefined ? [] : [primaryError];
+      for (const [name, action] of [
+        [
+          "before-close-observation",
+          () =>
+            recordAuthor("A26-before-finally", {
+              events,
+              snapshot: worker?.snapshot(),
+              session: worker?.session.snapshot(),
+            }),
+        ],
+        ["worker.close", () => worker?.close()],
+        ["stdin.destroy", () => child.stdin.destroy()],
+        ["stdout.destroy", () => child.stdout.destroy()],
+        ["stderr.destroy", () => child.stderr.destroy()],
+        ["app.close", () => local.app.close()],
+        ["disposeCore", () => local.disposeCore()],
+      ]) {
+        try {
+          await action();
+          events.push({ type: "finally-attempt", name, outcome: "returned" });
+        } catch (error) {
+          errors.push(error);
+          events.push({
+            type: "finally-attempt",
+            name,
+            outcome: "threw",
+            error: { name: error.name, message: error.message },
+          });
+        }
+      }
+      try {
+        await recordAuthor("A26-finally-after", {
+          events,
+          snapshot: worker?.snapshot(),
+          session: worker?.session.snapshot(),
+          destroyed: {
+            stdin: child.stdin.destroyed,
+            stdout: child.stdout.destroyed,
+            stderr: child.stderr.destroyed,
+          },
+          errors: errors.map((error) => ({ name: error.name, message: error.message })),
+        });
+      } catch (error) {
+        errors.push(error);
+      }
     }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1)
+      throw new AggregateError(errors, "Worker fixture body and cleanup failures", {
+        cause: errors[0],
+      });
+  });
+  it("D-A28 real Node Writable null success retains live readiness and retires physical backing", async () => {
+    await withApp(async ({ core }) => {
+      const rig = workerWriteControl(core, "success");
+      try {
+        rig.worker.start();
+        await rig.worker.ready;
+        const error = await rig.callbackDelivered;
+        await recordAuthor("A28-null-success", {
+          events: rig.events,
+          snapshot: rig.worker.snapshot(),
+          session: rig.worker.session.snapshot(),
+          lowerPid123NotNativeBirth: true,
+        });
+        expect(error).toBe(null);
+        expect(rig.worker.snapshot().ready).toBe(true);
+        expect(rig.worker.snapshot().contact).toBe("live");
+        expect(rig.worker.session.snapshot().physicalBytes).toBe(0);
+        expect(rig.events.filter((event) => event.type === "callback-after")).toHaveLength(1);
+      } finally {
+        try {
+          await rig.worker.close();
+        } finally {
+          rig.child.stdin.destroy();
+          rig.child.stdout.destroy();
+          rig.child.stderr.destroy();
+        }
+      }
+    });
+  });
+  it("D-A29 real Node Writable Error preserves identity and refuses ready resurrection", async () => {
+    await withApp(async ({ core }) => {
+      const rig = workerWriteControl(core, "error");
+      try {
+        rig.worker.start();
+        const error = await rig.callbackDelivered;
+        await recordAuthor("A29-real-error", {
+          events: rig.events,
+          snapshot: rig.worker.snapshot(),
+          session: rig.worker.session.snapshot(),
+          lowerPid123NotNativeBirth: true,
+        });
+        expect(error).toBe(rig.failure);
+        await expect(rig.worker.ready).rejects.toThrow("Worker startup unavailable");
+        expect(rig.worker.snapshot().ready).toBe(false);
+        expect(rig.worker.snapshot().contact).toBe("unverifiable");
+        expect(rig.worker.session.snapshot().physicalBytes).toBe(0);
+        expect(rig.events.filter((event) => event.type === "callback-after")).toHaveLength(1);
+      } finally {
+        try {
+          await rig.worker.close();
+        } finally {
+          rig.child.stdin.destroy();
+          rig.child.stdout.destroy();
+          rig.child.stderr.destroy();
+        }
+      }
+    });
+  });
+  it("D-A30 actual stream close precedes late Writable completion without duplicate retirement", async () => {
+    await withApp(async ({ core }) => {
+      const rig = workerWriteControl(core, "late");
+      try {
+        rig.worker.start();
+        const held = rig.worker.session.snapshot();
+        await recordAuthor("A30-held", {
+          events: rig.events,
+          held,
+          snapshot: rig.worker.snapshot(),
+          lowerPid123NotNativeBirth: true,
+        });
+        expect(held.physicalBytes).toBeGreaterThan(0);
+        const closed = new Promise((resolve) => rig.child.stdin.once("close", resolve));
+        rig.child.stdin.destroy();
+        await closed;
+        const released = rig.worker.session.snapshot();
+        await recordAuthor("A30-closed-before-late", {
+          events: rig.events,
+          released,
+          snapshot: rig.worker.snapshot(),
+        });
+        expect(released.physicalBytes).toBe(0);
+        rig.finishLowerWrite();
+        await rig.callbackDelivered;
+        await recordAuthor("A30-late-after-close", {
+          events: rig.events,
+          snapshot: rig.worker.snapshot(),
+          session: rig.worker.session.snapshot(),
+        });
+        expect(rig.worker.session.snapshot()).toEqual(released);
+        expect(rig.worker.snapshot().ready).toBe(false);
+        expect(rig.events.filter((event) => event.type === "callback-after")).toHaveLength(1);
+        expect((await rig.worker.close()).status).toBe("exited");
+      } finally {
+        try {
+          await rig.worker.close();
+        } finally {
+          rig.child.stdin.destroy();
+          rig.child.stdout.destroy();
+          rig.child.stderr.destroy();
+        }
+      }
+    });
   });
   it("D-A27 extracted aggregate response guard keeps exact UTF8 boundaries without closed-method bypass", async () => {
     const envelope = { jsonrpc: "2.0", id: "component", result: "" };
