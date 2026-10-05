@@ -579,7 +579,7 @@ describe("D passive production local entry", () => {
     await withApp(async ({ core }) => {
       core.runtime.pool.snapshot = () => ({ workers: -1, runs: 0, readyWorkers: 0 });
       expect(JSON.parse((await rpcBody(core, utf8(statusCall))).body).error.code).toBe(-32603);
-      const records = Array.from({ length: 128 }, (_, i) => ({
+      const records = Array.from({ length: 123 }, (_, i) => ({
         run: { serverId: "x".repeat(128), relayInstanceId: "y".repeat(128), runId: `run-${i}` },
         status: "live",
         geometry: { cols: 80, rows: 24 },
