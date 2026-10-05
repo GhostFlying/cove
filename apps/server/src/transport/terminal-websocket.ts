@@ -14,7 +14,7 @@ import {
   MAX_FRAME_BYTES,
   type TerminalCommand,
 } from "@cove/protocol/terminal";
-import type { ConnectionRef } from "@cove/protocol/identity";
+import { sameConnectionRef, type ConnectionRef } from "@cove/protocol/identity";
 import { TerminalConnectionDelivery } from "../terminal/terminal-connection-delivery.js";
 import { TerminalCommandService } from "../terminal/terminal-command-service.js";
 import { ControlArbiter } from "../terminal/control-arbiter.js";
@@ -215,6 +215,13 @@ export class TerminalWebSocket {
             }
             const parsed = validateTerminalFrame(frame, metadata, connection);
             if (!parsed.ok || frame.kind !== 1) {
+              close();
+              break;
+            }
+            if (
+              parsed.value.type === "attach" &&
+              !sameConnectionRef(parsed.value.connection, connection)
+            ) {
               close();
               break;
             }
