@@ -1,0 +1,1340 @@
+{
+  "state": "PREPARED_NOT_LAUNCHED",
+  "rows": [
+    {
+      "id": "DN01.valid-v4",
+      "family": "DN01",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "mode": "m0-local",
+        "explicit": true,
+        "listen": "127.0.0.1",
+        "port": 19041,
+        "ownedBind": "success"
+      },
+      "expected": {
+        "bindCalls": 1,
+        "boundAuthority": "127.0.0.1:19041",
+        "publishExactlyOnce": true
+      },
+      "validCounterpart": "DN01.valid-v4",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN01",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "qualification": "ENTRY_READY",
+      "exactRecipe": "Original exact127.0.0.1:19041 startLocalEntry; real installed worker.ready before actual single listen, actual public listening/address, private publish then close.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN01.valid-v6",
+      "family": "DN01",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "mode": "m0-local",
+        "explicit": true,
+        "listen": "::1",
+        "port": 19041,
+        "ownedBind": "success"
+      },
+      "expected": {
+        "bindCalls": 1,
+        "boundAuthority": "[::1]:19041",
+        "publishExactlyOnce": true
+      },
+      "validCounterpart": "DN01.valid-v4",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN01",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "qualification": "ENTRY_ENV_PRECONDITION",
+      "exactRecipe": "Same original::1:19041, IPv6 actual availability; absent support NOT_EXERCISED, never v4 fallback.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN01.owned-bind-failure",
+      "family": "DN01",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "mode": "m0-local",
+        "explicit": true,
+        "listen": "127.0.0.1",
+        "port": 19041,
+        "ownedBind": "EADDRINUSE_TASK_OWNED"
+      },
+      "expected": {
+        "published": false,
+        "domainDelta": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        },
+        "ownedPartialStartupFinally": "released according to actual acquired owner IDs",
+        "foreignResourceMutation": 0
+      },
+      "validCounterpart": "DN01.valid-v4",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN01",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "qualification": "ENTRY_READY",
+      "exactRecipe": "First hold19041 in a new owned real listener, then original startLocalEntry; EADDRINUSE own control, source starts worker before bind, actual partial startup exit/close proof required.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.success",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "success",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": true,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Two actual sequential entries on same fixed endpoint, two real generated identities/secret comparisons confined private600 files; full publication then genuine shutdown; companion exact public LocalRendezvous component control.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.fail-before-owned-file",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "fail-before-owned-file",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Task-owned regular file as would-be final directory; original directory walk rejects before open; no fs shim. Source order worker/bind first preserved.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.fail-after-owned-file",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "fail-after-owned-file",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_FS_STAGE_RECEIPT_TODO",
+      "exactRecipe": "Pre-existing task-owned target in secureleaf makes actual link fail after original temporary open/write/sync. Stage follows frozen source37-47; actual temporary inode/time receipts must be captured before claiming original owner proof, not fabricated after cleanup.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.normal-shutdown",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "normal-shutdown",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": true,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Real entry.close, actual worker.closed exited and serverclose; private owned file removed, sentinel byte/mode/uid/dev/ino unchanged; lower class control separate.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.duplicate-cleanup",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "duplicate-cleanup",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": true,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Same returned close callable twice; source cached Promise once; direct same promise identity, actual successful original closure and no second release/event observed; compare sentinel.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.late-cleanup",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "late-cleanup",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": true,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "A actual entry close fully, B fresh entry same endpoint then late cached A.close; B actual inode/identity remains. Companion component replacement-inode-before-A-close checks stronger original removeOwned path without private mutation.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.foreign-existing-file",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "foreign-existing-file",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Task-owned pre-existing sentinel is foreign to entry A, same OSUID; actual link refuses overwrite; compare exact dev/ino/uid/mode/hash. Different-UID claim not supplied.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.symlink-path",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "symlink-path",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Task-owned final path symlink to own sentinel; original hardlink fails EEXIST without following; compare real symlink inode and target full bytehash, no arbitrary host target.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.insecure-directory",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "insecure-directory",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "ENTRY_AND_FS_READY",
+      "exactRecipe": "Own leaf chmod0755 before startup while original requested0700 unchanged; original directory guard rejects; restore fixture leaf only after actual entry/class close, label fixture cleanup separately.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    },
+    {
+      "id": "DN02.unowned-file",
+      "family": "DN02",
+      "phase": "PREPARED_NOT_EXECUTED",
+      "input": {
+        "launchIds": ["dn-instance-a", "dn-instance-b"],
+        "entropySource": "bounded two distinct private256-bit samples owned lower port; actual production generates fresh secret",
+        "rendezvousPathHandle": "TASK_PRIVATE_FILE",
+        "foreignPathHandle": "FOREIGN_FILE_UNCHANGED",
+        "faultPhase": "unowned-file",
+        "requestedDirectoryMode": "0700",
+        "requestedFileMode": "0600"
+      },
+      "expected": {
+        "freshInstance": true,
+        "freshSecret": true,
+        "secretPublications": 0,
+        "urlQuerySubprotocolCredentials": 0,
+        "ownedPublishOnly": false,
+        "restrictedPermissions": ["0700", "0600"],
+        "foreignBytesModeOwnerUnchanged": true,
+        "symlinkInsecureUnownedRejectedBeforeOverwrite": true,
+        "permittedStartupOwnedAllocations": "capture actual IDs then once cleanup; not falsely zero-allocation"
+      },
+      "validCounterpart": "DN02.success",
+      "oneFaultRule": "Only named changed field/event/order differs; complete same refs/remaining bytes and capacities unchanged",
+      "before": {
+        "unauthenticatedClaims": 0,
+        "authenticatedClaims": 0,
+        "rpcInflight": 0,
+        "taskOwnedTransportClaims": 0,
+        "domainEffects": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        }
+      },
+      "eventOrder": [
+        "carrier receipt raw headers/body",
+        "production normalize/validate",
+        "production reserve only eligible ownership",
+        "production dispatch iff admitted",
+        "real completion/send/close",
+        "passive receipts before assertions",
+        "actual finally cleanup"
+      ],
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": [
+        "inputs/04-plan.md:C1 DN02",
+        "accepted-public-contracts/docs/tasks/m0-supported-protocol-plan.md:119-162",
+        "accepted-public-contracts/packages/protocol/src/bootstrap.ts",
+        "accepted-public-contracts/packages/protocol/src/rpc.ts",
+        "accepted-public-contracts/packages/protocol/src/errors.ts"
+      ],
+      "notes": [
+        "Private credential/rendezvous body is consumed locally, never serialized into evidence. Public endpoint/IDs and permission/owned cleanup receipts only. Freshness compares unequal opaque private slots, no secret hashes demanded publicly."
+      ],
+      "qualification": "NOT_EXERCISED_OTHER_UID_PRECONDITION",
+      "exactRecipe": "Original final or directory authenticated different UID must be provisioned through separately authorized other-principal control and readable exact facts. No chown/UID override/privatefsshim, no sameUID sentinel substitution.",
+      "execution": "FUTURE_NOT_RUN",
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "sourceTree": "12ad9b7b9469117683e427fccd9eb168e908c683",
+      "fullRowCredit": "NONE_UNTIL_ACTUAL_ORIGINAL_ALL_GUARDS_AND_RECEIPTS",
+      "requiredReceipts": [
+        "original public input/result/error/actual listen address and startup domain delta separately",
+        "actual generated IDs and secret equality booleans only; private full file hash/bytes/mode/uid/dev/ino",
+        "actual call/settlement/event order before assertions",
+        "owned entry/worker PID births and direct exited receipt; pipe close separate",
+        "actual finally inode-scoped ownership release and positive persistent baseline separately"
+      ],
+      "notPermitted": [
+        "substitute option validation for bind",
+        "fake entropy/publication",
+        "private ownerIDs",
+        "force callback/exit",
+        "change original input or expected"
+      ],
+      "drafts": [
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/rendezvous-controls.UNAPPLIED.mjs",
+        "drafts/owned-launch.UNAPPLIED.py"
+      ]
+    }
+  ],
+  "subjects": 0,
+  "originalFieldsUnchanged": [
+    "id",
+    "input",
+    "expected",
+    "validCounterpart",
+    "cleanup",
+    "authority"
+  ],
+  "componentVsEntry": "LocalRendezvous class component is not whole installed startup credit",
+  "allRowReady": false
+}
