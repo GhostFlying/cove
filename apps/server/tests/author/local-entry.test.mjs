@@ -139,8 +139,12 @@ describe("D passive production local entry", () => {
       { rendezvousPath: "relative" },
       { allowedOrigins: ["null"] },
     ])
-      expect(() => validateLocalOptions({ ...options, ...change })).toThrow();
-    expect(() => parseLocalOptions(["--port", "32123"])).toThrow();
+      expect(() => validateLocalOptions({ ...options, ...change })).toThrow(
+        "Invalid explicit m0-local options",
+      );
+    expect(() => parseLocalOptions(["--port", "32123"])).toThrow(
+      "Invalid explicit m0-local options",
+    );
   });
   it("D-A02 the registered passive bootstrap authenticates and redacts the per-launch secret", async () => {
     await withApp(async ({ app, core }) => {

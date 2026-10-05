@@ -106,6 +106,7 @@ function connectionListenerCapacity(authenticatedSockets) {
     runtime.dispose();
   }
   expect(bytes.snapshot().total).toBe(0);
+  return bytes.snapshot().total;
 }
 
 function rejectReadyWorker(change, foreignBytes = null, foreignBudgets = { ...M0_LIMITS }) {
@@ -155,7 +156,7 @@ describe("runtime admission ownership", () => {
   });
 
   it("uses the lower validated authenticated cap without adding public socket capacity", () => {
-    connectionListenerCapacity(2);
+    expect(connectionListenerCapacity(2)).toBe(0);
   });
 
   it("keeps duplicate and disposed listener guards with exactly-once 512-byte release", () => {
