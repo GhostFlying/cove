@@ -185,6 +185,7 @@ catalogs:
 
 patchedDependencies:
   node-pty@1.1.0: 7597b50397cd456b692683b6c01908323c8288afbec509fef13e4778b2b1006e
+  thread-stream@4.2.0: 4ce497b8c4dc193cac4f5654035df6ee6af7e5fb5f7f1cf264c452371d785641
 
 importers:
 
@@ -1785,7 +1786,7 @@ snapshots:
       real-require: 1.0.0
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
-      thread-stream: 4.2.0
+      thread-stream: 4.2.0(patch_hash=4ce497b8c4dc193cac4f5654035df6ee6af7e5fb5f7f1cf264c452371d785641)
 
   playwright-core@1.63.0: {}
 
@@ -1884,7 +1885,7 @@ snapshots:
       minizlib: 3.1.0
       yallist: 5.0.0
 
-  thread-stream@4.2.0:
+  thread-stream@4.2.0(patch_hash=4ce497b8c4dc193cac4f5654035df6ee6af7e5fb5f7f1cf264c452371d785641):
     dependencies:
       real-require: 1.0.0
 
