@@ -145,7 +145,7 @@ export class LocalAdmission {
       capacityAvailable: this.counts.unauthenticated < this.budgets.unauthenticatedSockets,
     });
   }
-  claim(kind: keyof LocalAdmission["counts"]): { release(): void } | null {
+  claim(kind: keyof LocalAdmission["counts"]): { retireAdmission(): void; release(): void } | null {
     const cap =
       kind === "rpc"
         ? this.budgets.rpcInflight
@@ -162,12 +162,19 @@ export class LocalAdmission {
     const lease = this.bytes.reserve(size);
     if (!lease) return null;
     this.counts[kind]++;
+    let admitted = true;
+    const retireAdmission = (): void => {
+      if (!admitted) return;
+      admitted = false;
+      this.counts[kind]--;
+    };
     let owned = true;
     return {
+      retireAdmission,
       release: () => {
         if (!owned) return;
         owned = false;
-        this.counts[kind]--;
+        retireAdmission();
         lease.release();
       },
     };
