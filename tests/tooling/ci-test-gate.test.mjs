@@ -136,6 +136,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
   const registrations = [
     ["author", "runtime-admission", 21],
     ["author", "local-entry", 17],
+    ["independent", "qualified-local-admission", 4],
     ["author", "worker-pipe-session", 11],
     ["author", "operation-receipts", 15],
     ["author", "terminal-subscriptions", 14],
