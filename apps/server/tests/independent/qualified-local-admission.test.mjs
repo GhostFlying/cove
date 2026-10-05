@@ -469,15 +469,29 @@ async function runQuota(row) {
   );
 }
 
+const wsStageUnavailable = Object.freeze([
+  "DN06.clock-5000-expiry-before-message",
+  "DN06.clock-5000-close-before-message",
+]);
+
 async function runWebSocket(row) {
-  if (row.input.ordering === "close-before-message") {
+  if (wsStageUnavailable.includes(row.id)) {
     const receipts = admissionReceipts(row, []);
     receipts.record("original-named-stage-not-exercised", {
       originalInput: row.input,
       originalExpected: row.expected,
-      stage: "physical-close-before-genuine-late-message",
+      stage:
+        row.input.ordering === "expiry-before-message"
+          ? "expiry-before-genuine-message-before-physical-close"
+          : "physical-close-before-genuine-late-message",
       reason:
-        "The lower adapter has no genuine post-close ingress; invoking its EventEmitter would manufacture delivery",
+        "The lower close request destroys its Writable; its message emitter cannot prove genuine ingress after that request",
+      carrierQualification: {
+        path: "apps/server/tests/independent/qualified-websocket-carrier.mjs",
+        sha256: "062e9ff916fffd453a29b6d6f2525503255478f9622147b6144f49e6a7ee5eff",
+        scope:
+          "Immutable R17 carrier qualification; changed carriers require fresh reachability evidence",
+      },
       timerOnlyWholeRowCredit: false,
     });
     receipts.finish("NOT_EXERCISED", []);
@@ -622,10 +636,8 @@ describe("qualified local admission original fixed rows", () => {
       if (await runWebSocket(rows.get(id))) passed.push(id);
       else namedStageNotExercised.push(id);
     }
-    expect(namedStageNotExercised).toEqual(["DN06.clock-5000-close-before-message"]);
-    expect(passed).toEqual(
-      cases.groups.wsLower48.filter((id) => id !== "DN06.clock-5000-close-before-message"),
-    );
+    expect(namedStageNotExercised).toEqual(wsStageUnavailable);
+    expect(passed).toEqual(cases.groups.wsLower48.filter((id) => !wsStageUnavailable.includes(id)));
   });
   it("checks the original20 option composer and sensitivity component rows", () => {
     const passed = [];
