@@ -1,0 +1,496 @@
+{
+  "count": 8,
+  "state": "FUTURE_NOT_RUN_SEPARATE_REAL_CARRIER_GO",
+  "episodes": [
+    {
+      "id": "QN01",
+      "name": "owned bind/rendezvous/redaction",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        {
+          "options": "explicit numeric127.0.0.1:task-owned-port"
+        },
+        {
+          "options": "explicit numeric[::1]:task-owned-port"
+        },
+        {
+          "options": "invalid0.0.0.0"
+        },
+        {
+          "options": "task-owned occupied-port"
+        },
+        {
+          "options": "failure-after-owned-file"
+        }
+      ],
+      "validCounterpart": "successful owned compiled entry/rendezvous then normalshutdown",
+      "expected": {
+        "ownerOnlyDirectory": "0700",
+        "ownerOnlyFile": "0600",
+        "endpointActualNumericBoundAuthority": true,
+        "freshInstanceSecret": true,
+        "noSuccessfulPublicationOnFailure": true,
+        "noCredentialURLLogTraceVT": true,
+        "onlyOwnResourcesRemoved": true
+      },
+      "resourceBound": "one actual installed entry allocation plus task-private occupied-port control, no foreign port probe",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Original own-port v4 thenv6 separately, real worker ready, actual publish+normal shutdown valid counterpart",
+        "Ownoccupiedport failure only ownlistener, exact publicInvalid0.0.0.0 no bind; fail-afterfile exactstage receipt TODO",
+        "Observe actual default25ms monotonicclock and original worker15s recovery deadline; no injectedtimer"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN02",
+      "name": "exact Host real HTTP+WS",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "HTTP otherwisevalid wrongportHost127.0.0.1:19043",
+        "WS otherwisevalid wrongportHost127.0.0.1:19043"
+      ],
+      "validCounterpart": "same owned port actualexactHost",
+      "expected": {
+        "admission": "forbidden",
+        "domainDelta": {
+          "workerCreates": 0,
+          "runCreates": 0,
+          "receiptReservations": 0,
+          "spawn": 0,
+          "stop": 0,
+          "input": 0,
+          "resize": 0,
+          "control": 0,
+          "openSubscription": 0,
+          "closeSubscription": 0,
+          "ackApplied": 0,
+          "preview": 0,
+          "businessDecode": 0,
+          "dispatch": 0,
+          "foreignMutations": 0,
+          "sensitivePublications": 0
+        },
+        "noBusinessPublication": true,
+        "HTTP": 403
+      },
+      "resourceBound": "one negative real carrier at a time, no new run/PTY",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "One genuine HTTP request or WS upgrade at a time using original wrong19043Host, otherwise same private credentials/Origin",
+        "Observe actual403 HTTP upgrade refusal/typed WS stage and correctHost validcarrier; no newrun/PTY"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN03",
+      "name": "present Origin/preflight/CLI absence",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "authenticatedHTTP hostileOrigin",
+        "WS hostileOrigin",
+        "HTTP+WS literalnull",
+        "CLI-labelled presenthostile",
+        "HTTPactual browserOrigin-required absentbranch",
+        "allowedpreflight",
+        "disallowedrequestedX-Not-Allowed"
+      ],
+      "validCounterpart": "allowedOrigin http://127.0.0.1:19042 and authenticatedorigin-absentCLI bootstrap",
+      "expected": {
+        "presentHostileForbidden403": true,
+        "noBusiness": true,
+        "WSAbsenceOnlyUnauthBeforeSecret": true,
+        "preflightNoBusinessPromotion": true
+      },
+      "resourceBound": "temporary real carriers within quota max; no run/PTY",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Use original allowed19042Origin/hostile/null/CLI-present cases and actual browser-origin-required branch; preserve absentOrigin semantics",
+        "Actual OPTIONS request through registered route with fixed original header list and method; prospective R12 one-expression correction not yet subject-bound, original expectation unchanged"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN04",
+      "name": "credentials/pre-auth nonce effects",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "wrongHTTPsecret",
+        "wrongWSfirstsecret",
+        "preauthWSbinary terminal-input fixture targetedownedrun with DN05_NONCE",
+        "preauthWSfocus fixture"
+      ],
+      "validCounterpart": "two functional compiled client sockets authenticated and healthy status/terminal benign check",
+      "expected": {
+        "HTTPwrongSecret401": true,
+        "WSwrongSecret1008": true,
+        "WSbinaryBeforeText1002": true,
+        "nonceWrittenBytes": 0,
+        "controlGeometrySubscriptionWorkerRunReceiptCountersUnchanged": true
+      },
+      "resourceBound": "reuse two functional sockets; deniedpeer0newrun0newPTY",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Two actual functional compiled clients, two genuine created native PTYs with complete original refs, benign ready+byte receipt before fault",
+        "Wrong HTTPsecret and wrong first WSsecret, preauthbinary original nonce/control payload to owned RunRef; capture realclose1002/1008 and nonce input bytes0, counters/focus/geometry unchanged"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN05",
+      "name": "real bootstrap cap+late deadline",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "HTTP8192 and8193 whitespace-padded fixedbootstrap",
+        "WS8192 and8193 private-slot scaffold",
+        "oneWS held beyondfirstmessage5s thenlatebootstrap/business"
+      ],
+      "validCounterpart": "validreal8192 reader andhealthyexistingclient",
+      "expected": {
+        "capPlus1HTTP413WS1009": true,
+        "lateAuthenticationNoBusiness": true,
+        "WSownedCloseQuotaRecovery": true,
+        "exact5000vs5001": "DN deterministic only; do not claim real race precision"
+      },
+      "resourceBound": "one timed unauthpeer + temporary requests, no retries/newSLO",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "HTTP fixed8192/8193 exact scaffold and WS text8192/8193 private-slot scaffold on real parsers/reassembly",
+        "One genuinely unauthpeer held; await original5000ms timer-induced close then original late send; real clock timestamps and actual send refusal/handedoff distinct; no exact real5000/5001 race proof"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN06",
+      "name": "real socket quotas/promotion",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "hold8unauth attempt9",
+        "hold32auth attempt33",
+        "32auth+8unauth correctsecret promotion full; thencloseown rejectedpeer"
+      ],
+      "validCounterpart": "healthyfunctional socketserverstatus and terminalcheck remain usable",
+      "expected": {
+        "unauthPeak": 8,
+        "authPeak": 32,
+        "quotaRefusalHTTP429OrPostUpgradeWS1013AccordingToExactStage": true,
+        "noEvictionOrRunPTYCreation": true,
+        "ownClaimsFinally0": true
+      },
+      "resourceBound": "max33authenticated probe carriers OR32auth+8unauth+one rejected9th carrier, plusoneHTTPcontrol; two functional sockets included incounts",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Count functional2 inside actual authenticated32; establish auth controls, hold actual8 unauth, reject9th beforeauth/public32auth reject33rd",
+        "Promotion-at32auth+8unauth via actual correctfirstsecret; no peer evictions/no newPTY, observe actual claim acquire/retire/release public wrappers separately from physical debt; every held-peer setup must remain true in original5s window"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN07",
+      "name": "real protocol/instance checking",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "HTTPRPC Cove-Protocol1",
+        "HTTPRPC oldCove-Instance-Id",
+        "WSbootstrap protocol1",
+        "WSbootstrap wrongexpectedinstance"
+      ],
+      "validCounterpart": "sameprotocol2differentbuild/originalfullrefs",
+      "expected": {
+        "HTTPmismatch409": true,
+        "WSboundedBootstrapFailure1002": true,
+        "noBusinessReplacementStopRestart": true,
+        "oldExitNotInferred": true
+      },
+      "resourceBound": "one negative carrier at a time within fixedquotas",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Original protocol1/oldinstance HTTP fields and WSfirstbootstrap wrongexpectedinstance, otherwise samefixed valid offer",
+        "Full409 or actual bounded typed bootstrap error then1002; preserve correctprotocol2 differentbuild counterpart and no stop/restart effect"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    },
+    {
+      "id": "QN08",
+      "name": "real RPC bytes/batch/recovery",
+      "phase": "FUTURE_NOT_RUN",
+      "subject": "Actual public installed compiled main plus installed worker; no Fastify injection/fake listener",
+      "episodes": [
+        "HTTP65536status and65537 whitespace counterpart",
+        "realbatch16 and17 otherwisevalidharmlessstatuscalls"
+      ],
+      "validCounterpart": "healthyrealstatusandterminal afterallrefusals",
+      "expected": {
+        "65537HTTP413ZeroDispatch": true,
+        "17batchHTTP200InvalidRequest32600ZeroPartialDispatch": true,
+        "valid16Dispatch16": true,
+        "redactedHeadersResponseLogs": true,
+        "inflightAndResponseFullMatrix": "DN09 only; no QN substitute"
+      },
+      "resourceBound": "temporaryHTTP requests+twofunctional sockets; negative0newPTY0run",
+      "cleanup": {
+        "actualCallbacks": "once-only actual accepted lower-carrier callbacks/close retirement; no forced success/fake callback",
+        "ownersFinal": "all task-owned transport/file/claim/timer owners empty after actual permitted retirement; unrelated healthy peers unchanged",
+        "physicalDebt": "Accepted/denied or logical quota release is not physical backing release; bytes/copies remain accounted through genuine send/write callback or owned close; capture category/owner-ID/event order before assertions",
+        "once": "each acquired task-owned claim/file/timer/physical owner released at most once and final matching acquire/release IDs; duplicate/late events create no new auth/business",
+        "persistent": "Any worker/core persistent/reserved baseline reported separately, never normalized to zero",
+        "bodyThrow": "outer finally begins immediately after actual factory acquisition and includes all setup/body exits; primary error retained independently of cleanup failure"
+      },
+      "authority": "inputs/04-plan.md:194-213",
+      "requires": [
+        "G-D-ORACLE accepted",
+        "G-D-SOURCE accepted",
+        "G-D-ADMISSION PASS",
+        "separate G-Q-CARRIER exact runtime GO",
+        "permitted same-boundary process ownership proof and exclusive heavy/native lease"
+      ],
+      "concreteSchedule": [
+        "Exact original65536/65537 RPCstatus bodies on real HTTP parser, original16/17batch namedharmless status calls",
+        "413 beforedispatch for65537;17invalidrequest32600 HTTP200 withzero partialdispatch;16 actual16 results; original notification/error envelopes preserved; no pending-domain DN09 replacement"
+      ],
+      "sourceHead": "db71cee7568ab43878a91516048fa4d9e87e7a73",
+      "futureHeadBinding": "UNBOUND_UNTIL_ROOT_COHERENT_GO",
+      "execution": "FUTURE_NOT_RUN",
+      "carrierCredit": "ACTUAL_OS_SOCKET_NODE_HTTP_PARSER_REGISTERED_WS_UPGRADE_AND_REASSEMBLY_ONLY_AFTER_EXECUTION",
+      "requiredDirectBeforeGuard": [
+        "complete actual request IDs/refs/response classification/full bytehash/eventorder",
+        "original public domain effects and actual class/count leases separately",
+        "actual Node send/write/close callbacks, physical backing-debt retirement vs accepted result",
+        "owned PIDbirth/leaderexit/group uncertainty/FD custody/inode-scoped finally"
+      ],
+      "drafts": [
+        "drafts/raw-real-carriers.UNAPPLIED.mjs",
+        "drafts/entry-child.UNAPPLIED.mjs",
+        "drafts/installed-episode-lifecycle.UNAPPLIED.md",
+        "drafts/own-pty-nonce-child.UNAPPLIED.mjs"
+      ]
+    }
+  ],
+  "bindingRecipe": {
+    "server": "exact actual public bootstrap serverId",
+    "relayInstance": "exact generated perlaunch public bootstrap relayInstanceId; never same as build/address",
+    "worker": "complete installedworker ready WorkerRef with workerIncarnationId",
+    "runA": "complete accepted create RunRef for first nonce-owned PTY",
+    "runB": "complete accepted create RunRef for second nonce-owned PTY",
+    "connections": "two actual public negotiated ConnectionRefs distinct, no fabricated generations",
+    "requestIds": "QNxx-episode-index fixed distinct public IDs; cap probes qn-u-01..09 and qn-a-01..33; same fault/counterpart except named field",
+    "actualValues": "UNBOUND before separately reviewed Q runtime packet; freeze actualcomplete refs before subject episodes, no endpoint/worker alias"
+  }
+}
