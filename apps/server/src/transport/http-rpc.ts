@@ -86,6 +86,12 @@ export async function dispatchLocalRpc(
   }
 }
 
+export function boundRpcResponseBody(body: string, responseBytes: number) {
+  return Buffer.byteLength(body) <= responseBytes
+    ? { status: 200, body }
+    : { status: ADMISSION_STATUS["too-large"] };
+}
+
 export async function rpcBody(
   core: LocalCore,
   bytes: Uint8Array,
@@ -134,9 +140,7 @@ export async function rpcBody(
   }
   if (!responses.length) return { status: rpcHttpSuccessStatus(items) };
   const body = JSON.stringify(Array.isArray(value) ? responses : responses[0]);
-  return Buffer.byteLength(body) <= core.runtime.composition.budgets.rpcResponseBytes
-    ? { status: 200, body }
-    : { status: ADMISSION_STATUS["too-large"] };
+  return boundRpcResponseBody(body, core.runtime.composition.budgets.rpcResponseBytes);
 }
 
 export function registerHttpRpc(
@@ -227,7 +231,13 @@ export function registerHttpRpc(
             buildVersion: core.buildVersion,
             effectiveBudgets: admission.budgets,
           });
-          return reply.code(outcome.type === "cove-bootstrap-result" ? 200 : 409).send(outcome);
+          const status =
+            outcome.type === "cove-bootstrap-result"
+              ? ADMISSION_STATUS.accepted
+              : outcome.kind === "PROTOCOL_MISMATCH" || outcome.kind === "INSTANCE_MISMATCH"
+                ? ADMISSION_STATUS.mismatch
+                : ADMISSION_STATUS.malformed;
+          return reply.code(status).send(outcome);
         }
         owner.dispatched = true;
         try {

@@ -14,8 +14,8 @@ import { ControlArbiter } from "../terminal/control-arbiter.js";
 import { OperationReceipts } from "../operations/operation-receipts.js";
 import { TerminalOperations } from "../operations/terminal-operations.js";
 import { SESSION_CONTROL_RESERVE } from "../terminal/worker-pipe-session.js";
-import { WorkerProcess } from "../terminal/worker-process.js";
-import { LocalRuntimeClock } from "../terminal/local-runtime-clock.js";
+import { WorkerProcess, type WorkerSpawn } from "../terminal/worker-process.js";
+import { LocalRuntimeClock, type LocalTimer } from "../terminal/local-runtime-clock.js";
 import { LocalAdmission } from "../transport/local-admission.js";
 import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/terminal-websocket.js";
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
@@ -34,6 +34,8 @@ export function createLocalApplication(
     budgets?: EffectiveBudgets;
     core?: LocalCore;
     monotonic?: () => number;
+    timer?: LocalTimer;
+    workerSpawn?: WorkerSpawn;
   },
 ) {
   const options = validateLocalOptions(input);
@@ -53,7 +55,7 @@ export function createLocalApplication(
       for (const session of core.runtime.pool.sessions()) session.loseContact();
       terminal?.close();
     },
-    undefined,
+    injected?.timer,
     injected?.monotonic,
   );
   const composition =
@@ -96,7 +98,7 @@ export function createLocalApplication(
     budgets,
     composition.bytes,
   );
-  terminal = new TerminalWebSocket(admission, core, arbiter, clock.now);
+  terminal = new TerminalWebSocket(admission, core, arbiter, clock.now, injected?.timer);
   const app = Fastify({
     logger: false,
     bodyLimit: budgets.rpcRequestBytes,
@@ -131,6 +133,7 @@ export function createLocalApplication(
           workerIncarnationId: randomUUID(),
         },
         clock.now,
+        injected?.workerSpawn,
       );
       return worker;
     },
