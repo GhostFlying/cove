@@ -33,6 +33,8 @@ import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
 import { REQUIRED_CAPABILITIES } from "@cove/protocol/bootstrap";
 import { composeRpcResponse } from "@cove/protocol/rpc";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { ConnectionRefSchema } from "@cove/protocol/identity";
+import { qualifiedWebSocketCarrier } from "../independent/qualified-websocket-carrier.mjs";
 
 async function recordAuthor(name, data) {
   const sink = process.env.COVE_D_AUTHOR_OUTPUT;
@@ -250,6 +252,1058 @@ async function withWs(body, budgets = { ...M0_LIMITS }) {
       for (const peer of peers) peer.finish();
     }
   }, budgets);
+}
+
+const wsClassificationControls = [
+  {
+    id: "D-A39.valid-version1",
+    group: "A39",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-result",
+        bootstrapVersion: 1,
+        serverId: "author-server",
+        relayInstanceId: "author-instance",
+        protocolVersion: 2,
+        buildVersion: "0.0.0",
+        capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+        profile: "pragmatic-logical-grid-v1",
+        encoding: "vt-checkpoint-tail-v1",
+        effectiveBudgets: "CURRENT_DEFAULT_M0_LIMITS_FULL_EQUAL",
+        connection: "ACTUAL_FULL_CONNECTION_REF_SCHEMA",
+      },
+      closeCodes: [],
+      authenticated: 1,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 1,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.unsupported-version2",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "BOOTSTRAP_UNSUPPORTED",
+        message: "BOOTSTRAP UNSUPPORTED",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.unsupported-version2-held",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: true,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "BOOTSTRAP_UNSUPPORTED",
+        message: "BOOTSTRAP UNSUPPORTED",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.protocol-mismatch",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 3,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "PROTOCOL_MISMATCH",
+        message: "PROTOCOL MISMATCH",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.capability-unavailable",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: [],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "CAPABILITY_UNAVAILABLE",
+        message: "CAPABILITY UNAVAILABLE",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.profile-unsupported",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["unsupported-profile"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "PROFILE_UNSUPPORTED",
+        message: "PROFILE UNSUPPORTED",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A40.encoding-unsupported",
+    group: "A40",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 1,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["unsupported-encoding"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: {
+        type: "cove-bootstrap-error",
+        kind: "PROFILE_UNSUPPORTED",
+        message: "PROFILE UNSUPPORTED",
+        supportedVersions: {
+          bootstrap: [1],
+          protocol: [2],
+        },
+      },
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.wrong-secret",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "wrong",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.absent-secret",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "absent",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 0,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.invalid-secret-grammar",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "invalid",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.wrong-type",
+    group: "A41",
+    input: {
+      type: "wrong",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.missing-build",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: null,
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.invalid-protocol",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 0,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.long-build",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion:
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.long-capability",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.invalid-profile-type",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: 1,
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.tag-string",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: "2",
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.tag-zero",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 0,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.tag-fraction",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2.5,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.oversize",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: false,
+    oversize: true,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1009],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 0,
+      clockReads: 1,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.late-time",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 5001,
+    binary: false,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1008],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 1,
+      clockReads: 2,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+  {
+    id: "D-A41.binary",
+    group: "A41",
+    input: {
+      type: "cove-bootstrap",
+      bootstrapVersion: 2,
+      expectedServerId: "author-server",
+      expectedRelayInstanceId: "author-instance",
+      protocolVersion: 2,
+      buildVersion: "different-build",
+      capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
+      profiles: ["pragmatic-logical-grid-v1"],
+      encodings: ["vt-checkpoint-tail-v1"],
+    },
+    secretKind: "current",
+    elapsed: 0,
+    binary: true,
+    oversize: false,
+    held: false,
+    expected: {
+      response: null,
+      closeCodes: [1002],
+      authenticated: 0,
+      unauthenticated: 0,
+      rpc: 0,
+      services: 0,
+      verifyCalls: 0,
+      clockReads: 1,
+      finallyClosed: true,
+      finallyLedgerTotal: 0,
+      finallyLive: {
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      },
+      timerJobs: 0,
+    },
+  },
+];
+
+async function wsClassificationControl(control) {
+  const events = [];
+  const errors = [];
+  const timer = timerFixture();
+  let now = 0;
+  let clockReads = 0;
+  let verifyCalls = 0;
+  const local = createLocalApplication(options, {
+    identity,
+    timer,
+    monotonic: () => {
+      clockReads++;
+      return now;
+    },
+  });
+  const originalVerify = local.admission.verifies;
+  local.admission.verifies = function (...args) {
+    verifyCalls++;
+    return Reflect.apply(originalVerify, this, args);
+  };
+  const redact = (raw) => {
+    const bytes = Buffer.from(raw);
+    const text = bytes.toString();
+    return {
+      bytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      redactedBase64: Buffer.from(
+        text.replaceAll(identity.secret, "?".repeat(43)).replaceAll("w".repeat(43), "?".repeat(43)),
+      ).toString("base64"),
+      actualPrivateBytesNotPublished: true,
+    };
+  };
+  const capture = (event, value) => {
+    events.push({
+      ordinal: events.length + 1,
+      event,
+      ...value,
+      raw: value.raw === undefined ? undefined : redact(value.raw),
+      bytes: value.bytes === undefined ? undefined : redact(value.bytes),
+      error:
+        value.error instanceof Error
+          ? { name: value.error.name, message: value.error.message }
+          : value.error,
+      counts: local.admission.snapshot(),
+      ledger: local.core.runtime.composition.bytes.snapshot(),
+    });
+  };
+  const carrier = qualifiedWebSocketCarrier(control.id, capture, control.held);
+  let actual;
+  try {
+    await local.app.ready();
+    const prepared = local.terminal.prepare(auth);
+    capture("actual-public-prepare", { kind: prepared.kind, claimPresent: !!prepared.claim });
+    if (!prepared.claim) throw new Error("Expected fixed author upgrade admission");
+    local.terminal.accept(carrier.socket, prepared.claim);
+    const input = structuredClone(control.input);
+    if (control.secretKind === "current") input.secret = identity.secret;
+    if (control.secretKind === "wrong") input.secret = "w".repeat(43);
+    if (control.secretKind === "invalid") input.secret = "!".repeat(43);
+    const bytes = control.oversize ? Buffer.alloc(8193, 32) : utf8(input);
+    now = control.elapsed;
+    capture("fixed-input-before-message", {
+      bytes,
+      input: control.input,
+      secretKind: control.secretKind,
+      elapsed: now,
+      binary: control.binary,
+      expected: control.expected,
+    });
+    carrier.message(bytes, control.binary);
+    await carrier.settle();
+    const response = carrier.writes.length ? JSON.parse(carrier.writes[0].toString()) : null;
+    actual = {
+      response,
+      closeCodes: [...carrier.closeCodes],
+      authenticated: local.admission.snapshot().authenticated,
+      unauthenticated: local.admission.snapshot().unauthenticated,
+      rpc: local.admission.snapshot().rpc,
+      services: local.terminal.services.size,
+      verifyCalls,
+      clockReads,
+      timerJobs: timer.jobs.size,
+    };
+    await recordAuthor(control.id + "-before-guards", {
+      control,
+      actual,
+      events,
+      actualResponseBytes: carrier.writes.map(redact),
+      ownedBaselineDistinct: local.core.runtime.composition.bytes.snapshot(),
+    });
+  } catch (error) {
+    errors.push(error);
+    await recordAuthor(control.id + "-primary-before-finally", {
+      error: { name: error.name, message: error.message },
+      events,
+    });
+  } finally {
+    for (const cleanup of [
+      () => carrier.dispose(),
+      () => local.terminal.close(),
+      () => local.app.close(),
+      () => local.disposeCore(),
+      () => {
+        local.admission.verifies = originalVerify;
+      },
+    ]) {
+      try {
+        await cleanup();
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (actual) {
+      actual.finallyClosed = carrier.transport.closed;
+      actual.finallyLedgerTotal = local.core.runtime.composition.bytes.snapshot().total;
+      actual.finallyLive = local.admission.snapshot();
+    }
+    await recordAuthor(control.id + "-finally", {
+      actual,
+      events,
+      counts: local.admission.snapshot(),
+      ledger: local.core.runtime.composition.bytes.snapshot(),
+      errors: errors.map((error) => ({ name: error.name, message: error.message })),
+    });
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length) throw new AggregateError(errors, "WS classification control body/cleanup");
+  return actual;
 }
 
 const batchEnvelopeAuthorControls = [
@@ -2955,6 +4009,58 @@ describe("D passive production local entry", () => {
         rpcCount: 0,
         registryCount: 0,
       });
+    }
+  });
+  it("D-A39 genuine public version1 still authenticates with a full connection reference", async () => {
+    const control = wsClassificationControls.find((row) => row.group === "A39");
+    const actual = await wsClassificationControl(control);
+    expect(ConnectionRefSchema.safeParse(actual.response.connection).success).toBe(true);
+    expect(actual).toEqual({
+      ...control.expected,
+      response: {
+        ...control.expected.response,
+        effectiveBudgets: { ...M0_LIMITS },
+        connection: actual.response.connection,
+      },
+    });
+  });
+  it("D-A40 authenticated tag-only and semantic bootstrap refusals retain full canonical readable errors", async () => {
+    const controls = wsClassificationControls.filter((row) => row.group === "A40");
+    expect(controls.map((row) => row.id)).toEqual([
+      "D-A40.unsupported-version2",
+      "D-A40.unsupported-version2-held",
+      "D-A40.protocol-mismatch",
+      "D-A40.capability-unavailable",
+      "D-A40.profile-unsupported",
+      "D-A40.encoding-unsupported",
+    ]);
+    for (const control of controls) {
+      const actual = await wsClassificationControl(control);
+      expect(actual).toEqual(control.expected);
+    }
+  });
+  it("D-A41 unsupported tags cannot bypass original secret structure byte time or binary admission", async () => {
+    const controls = wsClassificationControls.filter((row) => row.group === "A41");
+    expect(controls.map((row) => row.id)).toEqual([
+      "D-A41.wrong-secret",
+      "D-A41.absent-secret",
+      "D-A41.invalid-secret-grammar",
+      "D-A41.wrong-type",
+      "D-A41.missing-build",
+      "D-A41.invalid-protocol",
+      "D-A41.long-build",
+      "D-A41.long-capability",
+      "D-A41.invalid-profile-type",
+      "D-A41.tag-string",
+      "D-A41.tag-zero",
+      "D-A41.tag-fraction",
+      "D-A41.oversize",
+      "D-A41.late-time",
+      "D-A41.binary",
+    ]);
+    for (const control of controls) {
+      const actual = await wsClassificationControl(control);
+      expect(actual).toEqual(control.expected);
     }
   });
 });
