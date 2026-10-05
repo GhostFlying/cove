@@ -16,8 +16,289 @@ import { runFixedStatus } from "./qualified-status-carrier.mjs";
 import { admissionReceipts } from "./qualified-admission-receipts.mjs";
 
 const rows = new Map(cases.rows.map((row) => [row.id, row]));
+const browserStageUnavailable = ["DN04.bootstrap-absent-browser", "DN04.rpc-absent-browser"];
+const browserClassificationSourceBinding = [
+  {
+    path: "apps/server/src/transport/local-admission.ts",
+    sha256: "8f3599c1cf168802cc09ed4181780d2eb5141bfc5a619fa7fc51f69be27ca928",
+  },
+  {
+    path: "packages/protocol/src/bootstrap.ts",
+    sha256: "25587d654c0c2e800101d30d1ef10344207918ed8663fd1e5c8846c7f5969fe3",
+  },
+];
+const publicFetchSupplements = [
+  {
+    id: "SUPPLEMENT.fetch-bootstrap-absent-origin",
+    family: "SUPPLEMENT_PUBLIC_FETCH_CLASSIFICATION",
+    input: {
+      method: "POST",
+      path: "/bootstrap",
+      rawHeaderPairs: [
+        ["Host", "127.0.0.1:19041"],
+        ["Content-Type", "application/json"],
+        ["User-Agent", "registered-browser-fixture"],
+        ["Sec-Fetch-Mode", "cors"],
+        ["Sec-Fetch-Site", "same-origin"],
+      ],
+      credential: {
+        header: "Authorization",
+        scheme: "Bearer",
+        privateValueSlot: "CURRENT_LAUNCH_SECRET",
+        evidence: "redacted field presence/length and opaque handle only; no raw credential",
+      },
+      bodyFixture: "http-bootstrap",
+      classification: "Actual registered HTTP extraction; no caller-forced browser predicate bit",
+    },
+    expected: {
+      admission: "forbidden",
+      domainDelta: {
+        workerCreates: 0,
+        runCreates: 0,
+        receiptReservations: 0,
+        spawn: 0,
+        stop: 0,
+        input: 0,
+        resize: 0,
+        control: 0,
+        openSubscription: 0,
+        closeSubscription: 0,
+        ackApplied: 0,
+        preview: 0,
+        businessDecode: 0,
+        dispatch: 0,
+        foreignMutations: 0,
+        sensitivePublications: 0,
+      },
+      noBusinessPublication: true,
+      HTTP: 403,
+    },
+    validCounterpart: "SUPPLEMENT.fetch-bootstrap-allowed-origin",
+    originalStimulusReference: "DN04.bootstrap-absent-browser",
+    originalAllowedOriginReference: "DN04.bootstrap-allowed",
+    fixtureBindings: {
+      bodyFixture: {
+        name: "http-bootstrap",
+        path: "fixed-bytes/http-bootstrap.bin",
+        bytes: 378,
+        sha256: "8285489be26eaba9e5d52f6c7165b2dd382d5b0dd9d961b0242ad2530d298abd",
+        value: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 1,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: [
+            "terminal-framing-v2",
+            "logical-grid-recovery-v1",
+            "worker-pipe-v2",
+            "terminal-preview-v1",
+            "operation-receipts-v1",
+          ],
+          profiles: ["pragmatic-logical-grid-v1"],
+          encodings: ["vt-checkpoint-tail-v1"],
+        },
+        padding: null,
+      },
+    },
+    creditOrigin: "NEW_STIMULUS_NOT_ORIGINAL166_OR184",
+    nativeHttpParserCredit: false,
+  },
+  {
+    id: "SUPPLEMENT.fetch-bootstrap-allowed-origin",
+    family: "SUPPLEMENT_PUBLIC_FETCH_CLASSIFICATION",
+    input: {
+      method: "POST",
+      path: "/bootstrap",
+      rawHeaderPairs: [
+        ["Host", "127.0.0.1:19041"],
+        ["Content-Type", "application/json"],
+        ["User-Agent", "registered-browser-fixture"],
+        ["Sec-Fetch-Mode", "cors"],
+        ["Sec-Fetch-Site", "same-origin"],
+        ["Origin", "http://127.0.0.1:19042"],
+      ],
+      credential: {
+        header: "Authorization",
+        scheme: "Bearer",
+        privateValueSlot: "CURRENT_LAUNCH_SECRET",
+        evidence: "redacted field presence/length and opaque handle only; no raw credential",
+      },
+      bodyFixture: "http-bootstrap",
+      classification: "Actual registered HTTP extraction; no caller-forced browser predicate bit",
+    },
+    expected: {
+      admission: "accepted",
+      noWildcardOrReflection: true,
+      unauthBeforeWSBootstrap: false,
+    },
+    validCounterpart: "SUPPLEMENT.fetch-bootstrap-absent-origin",
+    originalStimulusReference: "DN04.bootstrap-absent-browser",
+    originalAllowedOriginReference: "DN04.bootstrap-allowed",
+    fixtureBindings: {
+      bodyFixture: {
+        name: "http-bootstrap",
+        path: "fixed-bytes/http-bootstrap.bin",
+        bytes: 378,
+        sha256: "8285489be26eaba9e5d52f6c7165b2dd382d5b0dd9d961b0242ad2530d298abd",
+        value: {
+          type: "cove-bootstrap",
+          bootstrapVersion: 1,
+          expectedServerId: "dn-server",
+          expectedRelayInstanceId: "dn-instance",
+          protocolVersion: 2,
+          buildVersion: "oracle-client-a",
+          capabilities: [
+            "terminal-framing-v2",
+            "logical-grid-recovery-v1",
+            "worker-pipe-v2",
+            "terminal-preview-v1",
+            "operation-receipts-v1",
+          ],
+          profiles: ["pragmatic-logical-grid-v1"],
+          encodings: ["vt-checkpoint-tail-v1"],
+        },
+        padding: null,
+      },
+    },
+    creditOrigin: "NEW_STIMULUS_NOT_ORIGINAL166_OR184",
+    nativeHttpParserCredit: false,
+  },
+  {
+    id: "SUPPLEMENT.fetch-rpc-absent-origin",
+    family: "SUPPLEMENT_PUBLIC_FETCH_CLASSIFICATION",
+    input: {
+      method: "POST",
+      path: "/rpc",
+      rawHeaderPairs: [
+        ["Host", "127.0.0.1:19041"],
+        ["Content-Type", "application/json"],
+        ["Cove-Protocol", "2"],
+        ["Cove-Server-Id", "dn-server"],
+        ["Cove-Instance-Id", "dn-instance"],
+        ["User-Agent", "registered-browser-fixture"],
+        ["Sec-Fetch-Mode", "cors"],
+        ["Sec-Fetch-Site", "same-origin"],
+      ],
+      credential: {
+        header: "Authorization",
+        scheme: "Bearer",
+        privateValueSlot: "CURRENT_LAUNCH_SECRET",
+        evidence: "redacted field presence/length and opaque handle only; no raw credential",
+      },
+      bodyFixture: "rpc-status",
+      classification: "Actual registered HTTP extraction; no caller-forced browser predicate bit",
+    },
+    expected: {
+      admission: "forbidden",
+      domainDelta: {
+        workerCreates: 0,
+        runCreates: 0,
+        receiptReservations: 0,
+        spawn: 0,
+        stop: 0,
+        input: 0,
+        resize: 0,
+        control: 0,
+        openSubscription: 0,
+        closeSubscription: 0,
+        ackApplied: 0,
+        preview: 0,
+        businessDecode: 0,
+        dispatch: 0,
+        foreignMutations: 0,
+        sensitivePublications: 0,
+      },
+      noBusinessPublication: true,
+      HTTP: 403,
+    },
+    validCounterpart: "SUPPLEMENT.fetch-rpc-allowed-origin",
+    originalStimulusReference: "DN04.rpc-absent-browser",
+    originalAllowedOriginReference: "DN04.rpc-allowed",
+    fixtureBindings: {
+      bodyFixture: {
+        name: "rpc-status",
+        path: "fixed-bytes/rpc-status.bin",
+        bytes: 75,
+        sha256: "82bae99737ffce37b1088c694d913dd6708824b66e6813d7c8c43e4bbe76e688",
+        value: { jsonrpc: "2.0", id: "dn-rpc-status", method: "server.status", params: {} },
+        padding: null,
+      },
+    },
+    creditOrigin: "NEW_STIMULUS_NOT_ORIGINAL166_OR184",
+    nativeHttpParserCredit: false,
+  },
+  {
+    id: "SUPPLEMENT.fetch-rpc-allowed-origin",
+    family: "SUPPLEMENT_PUBLIC_FETCH_CLASSIFICATION",
+    input: {
+      method: "POST",
+      path: "/rpc",
+      rawHeaderPairs: [
+        ["Host", "127.0.0.1:19041"],
+        ["Content-Type", "application/json"],
+        ["Cove-Protocol", "2"],
+        ["Cove-Server-Id", "dn-server"],
+        ["Cove-Instance-Id", "dn-instance"],
+        ["User-Agent", "registered-browser-fixture"],
+        ["Sec-Fetch-Mode", "cors"],
+        ["Sec-Fetch-Site", "same-origin"],
+        ["Origin", "http://127.0.0.1:19042"],
+      ],
+      credential: {
+        header: "Authorization",
+        scheme: "Bearer",
+        privateValueSlot: "CURRENT_LAUNCH_SECRET",
+        evidence: "redacted field presence/length and opaque handle only; no raw credential",
+      },
+      bodyFixture: "rpc-status",
+      classification: "Actual registered HTTP extraction; no caller-forced browser predicate bit",
+    },
+    expected: {
+      admission: "accepted",
+      noWildcardOrReflection: true,
+      unauthBeforeWSBootstrap: false,
+      dispatchCount: 1,
+    },
+    validCounterpart: "SUPPLEMENT.fetch-rpc-absent-origin",
+    originalStimulusReference: "DN04.rpc-absent-browser",
+    originalAllowedOriginReference: "DN04.rpc-allowed",
+    fixtureBindings: {
+      bodyFixture: {
+        name: "rpc-status",
+        path: "fixed-bytes/rpc-status.bin",
+        bytes: 75,
+        sha256: "82bae99737ffce37b1088c694d913dd6708824b66e6813d7c8c43e4bbe76e688",
+        value: { jsonrpc: "2.0", id: "dn-rpc-status", method: "server.status", params: {} },
+        padding: null,
+      },
+    },
+    creditOrigin: "NEW_STIMULUS_NOT_ORIGINAL166_OR184",
+    nativeHttpParserCredit: false,
+  },
+];
 
 async function runHttp(row) {
+  if (browserStageUnavailable.includes(row.id)) {
+    const receipts = admissionReceipts(row, []);
+    const selectors = row.input.rawHeaderPairs.filter(([name]) =>
+      ["sec-fetch-mode", "sec-fetch-site"].includes(name.toLowerCase()),
+    );
+    receipts.record("original-browser-stage-eligibility-before-body", {
+      originalInput: row.input,
+      originalExpected: row.expected,
+      originalCounterpart: row.validCounterpart,
+      selectors,
+      sourceBinding: browserClassificationSourceBinding,
+      stage: "NOT_EXERCISED_BROWSER_REQUIRED_ORIGIN_STAGE",
+      reason: "Both source public fetch selectors are absent; UA is not authority",
+      original403Changed: false,
+    });
+    assert.equal(selectors.length, 0);
+    receipts.finish("NOT_EXERCISED_BROWSER_REQUIRED_ORIGIN_STAGE", []);
+    return false;
+  }
   await withQualifiedApplication(
     row,
     async ({ local, identity, otherSecret, receipts, carriers, observer }) => {
@@ -48,6 +329,7 @@ async function runHttp(row) {
       if (row.expected.actualBodyBytes) assert.equal(input.length, row.expected.actualBodyBytes);
     },
   );
+  return true;
 }
 
 function acceptPeer(local, input, peerID, receipts, carriers, held = false) {
@@ -310,15 +592,28 @@ async function runWebSocket(row) {
 
 describe("qualified local admission original fixed rows", () => {
   it("routes the original98 HTTP-group rows with actual factory carriers and quota schedules", async () => {
+    const supplementPassed = [];
+    for (const row of publicFetchSupplements) {
+      await runHttp(row);
+      supplementPassed.push(row.id);
+    }
+    expect(supplementPassed).toEqual(publicFetchSupplements.map((row) => row.id));
     const passed = [];
+    const namedBrowserStageNotExercised = [];
     for (const id of cases.groups.http98) {
       const row = rows.get(id);
       if (row.input.upgrades || row.input.heldUnauth || row.input.heldAuth || row.input.peers)
         await runQuota(row);
-      else await runHttp(row);
+      else if (!(await runHttp(row))) {
+        namedBrowserStageNotExercised.push(id);
+        continue;
+      }
       passed.push(id);
     }
-    expect(passed).toEqual(cases.groups.http98);
+    expect(namedBrowserStageNotExercised).toEqual(browserStageUnavailable);
+    expect(passed).toEqual(
+      cases.groups.http98.filter((id) => !browserStageUnavailable.includes(id)),
+    );
   });
   it("routes the original48 lower WS-group rows with actual public handler and owned streams", async () => {
     const passed = [];
