@@ -61,7 +61,9 @@ export class TerminalWebSocket {
     let retired = false;
     let physicallyClosed = false;
     let deadline: unknown;
-    const close = (code = WS_CLOSE_CODES.protocol): void => {
+    const close = (
+      code: (typeof WS_CLOSE_CODES)[keyof typeof WS_CLOSE_CODES] = WS_CLOSE_CODES.protocol,
+    ): void => {
       if (retired) return;
       retired = true;
       this.timer.clear(deadline);

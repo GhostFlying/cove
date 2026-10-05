@@ -25,3 +25,4 @@ minimumReleaseAgeExclude:
   - vitest@5.0.2
 patchedDependencies:
   node-pty@1.1.0: patches/node-pty@1.1.0.patch
+  thread-stream@4.2.0: patches/thread-stream@4.2.0.patch
