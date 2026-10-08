@@ -148,7 +148,17 @@ export function createLocalApplication(
   };
 }
 
-export async function startLocalEntry(input: M0LocalOptions) {
+export class LocalEntryStartupError extends Error {
+  constructor(
+    readonly category: "worker" | "listen" | "rendezvous" | "interrupted",
+    readonly cleanup: "verified" | "unverifiable",
+  ) {
+    super("Local entry startup unavailable");
+    this.name = "LocalEntryStartupError";
+  }
+}
+
+export async function startLocalEntry(input: M0LocalOptions, shutdown?: { signal?: AbortSignal }) {
   const local = createLocalApplication(input);
   const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
   const worker = local.createWorker();
@@ -167,46 +177,114 @@ export async function startLocalEntry(input: M0LocalOptions) {
       } catch {
         failed = true;
       }
-      const receipt = await worker.close();
-      local.disposeCore();
-      if (failed || receipt.status !== "exited")
+      let receipt: Awaited<WorkerProcess["closed"]> | undefined;
+      try {
+        receipt = await worker.close();
+      } catch {
+        failed = true;
+      } finally {
+        try {
+          local.disposeCore();
+        } catch {
+          failed = true;
+        }
+      }
+      if (failed || receipt?.status !== "exited")
         throw new Error("Local entry cleanup unverifiable");
     })());
+  const interrupted = (): void => {
+    if (shutdown?.signal?.aborted) throw new LocalEntryStartupError("interrupted", "unverifiable");
+  };
+  let category: "worker" | "listen" | "rendezvous" = "worker";
   try {
+    interrupted();
     local.clock.start();
     worker.start();
-    await worker.ready;
+    const signal = shutdown?.signal;
+    let abort: (() => void) | undefined;
+    try {
+      await (signal
+        ? Promise.race([
+            worker.ready,
+            new Promise<never>((_resolve, reject) => {
+              abort = () => reject(new LocalEntryStartupError("interrupted", "unverifiable"));
+              signal.addEventListener("abort", abort, { once: true });
+              if (signal.aborted) abort();
+            }),
+          ])
+        : worker.ready);
+    } finally {
+      if (abort) signal?.removeEventListener("abort", abort);
+    }
+    interrupted();
+    category = "listen";
     await local.app.listen({ host: local.options.host, port: local.options.port });
+    // Drain an in-flight listen/publication before rollback. Abandoning either
+    // promise on a signal could publish a listener/file after cleanup completed.
+    interrupted();
     const bound = local.app.server.address();
     if (!bound || typeof bound === "string" || bound.address !== local.options.host)
       throw new Error("Invalid numeric local bind");
     local.admission.bind(bound.port);
     const endpoint = `http://${localAuthority(local.options.host, bound.port)}`;
+    category = "rendezvous";
     await rendezvous.publish({ bootstrapVersion: 1, ...local.identity, endpoint });
+    interrupted();
     return { endpoint, close };
-  } catch {
+  } catch (error) {
+    let cleanup: "verified" | "unverifiable" = "verified";
     try {
       await close();
     } catch {
-      /* Cleanup uncertainty remains a failed startup. */
+      cleanup = "unverifiable";
     }
-    throw new Error("Local entry startup unavailable");
+    // Preserve a safe initiating category and a separate ownership outcome,
+    // without copying raw exception messages, paths or secret-bearing inputs.
+    throw new LocalEntryStartupError(
+      error instanceof LocalEntryStartupError ? error.category : category,
+      cleanup,
+    );
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   void (async () => {
-    const server = await startLocalEntry(parseLocalOptions(process.argv.slice(2)));
-    const shutdown = (): void => {
+    const controller = new AbortController();
+    let server: Awaited<ReturnType<typeof startLocalEntry>> | undefined;
+    let closing: Promise<void> | undefined;
+    const detach = (): void => {
       process.off("SIGINT", shutdown);
       process.off("SIGTERM", shutdown);
-      void server.close().catch(() => {
+    };
+    const close = (): Promise<void> => (closing ??= server!.close().finally(detach));
+    const shutdown = (): void => {
+      if (controller.signal.aborted) return;
+      controller.abort();
+      if (!server) return;
+      void close().catch(() => {
         process.exitCode = 1;
         process.stderr.write("m0-local cleanup unverifiable\n");
       });
     };
-    process.once("SIGINT", shutdown);
-    process.once("SIGTERM", shutdown);
+    // Latch signals before parsing or acquiring any startup resources. Keep the
+    // handlers through cleanup so a repeated signal cannot bypass retirement.
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    try {
+      server = await startLocalEntry(parseLocalOptions(process.argv.slice(2)), {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) await close();
+    } catch (error) {
+      detach();
+      if (
+        error instanceof LocalEntryStartupError &&
+        error.category === "interrupted" &&
+        error.cleanup === "verified"
+      )
+        return;
+      throw error;
+    }
   })().catch(() => {
     process.exitCode = 1;
     process.stderr.write("m0-local startup unavailable\n");
