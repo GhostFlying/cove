@@ -36,7 +36,9 @@ decisions without concrete evidence or a user request.
   rationale; task plans retain dependencies and acceptance; handoffs retain exact
   state and next actions. Start by reading `docs/handoff.md` and the applicable
   design/task documents instead of relying on conversation history. Update the
-  handoff at ownership changes, blockers, integration and milestone review.
+  handoff at ownership changes, blockers, integration and milestone review. Keep
+  `docs/handoff.md` current-state only and at most 150 lines; link history in
+  Issues/PRs, Git and controlled evidence rather than appending checkpoint dumps.
 
 ## Coordinate concurrent agents
 
@@ -110,6 +112,10 @@ decisions without concrete evidence or a user request.
   GitHub approval. Record the independent report with its SHA; do not fabricate
   approvals or bypass repository protection to simulate them.
 
+- Apply Conventional Commits to future changes. Record existing nonconforming
+  history as a deviation; do not rewrite retained commits for cosmetic repair or
+  make that repair a new runtime acceptance prerequisite.
+
 ## Explain non-obvious code
 
 - Add necessary comments explaining why an approach is used, including invariants,
@@ -175,6 +181,39 @@ decisions without concrete evidence or a user request.
   Do not use those deferred features as prerequisites for the initial workflows.
 
 ## Validate and report
+
+- Follow [engineering section 6.9](docs/engineering-plan.md)
+  over conflicting historical process gates. Product contracts, acceptance and
+  safety boundaries, independent roles, required CI and actual-main checks remain.
+- Self-check one-off off-tree local harnesses/readers, then run them on isolated
+  task-owned resources without independent source prereview or per-atom seals.
+  Fix tool defects and rerun without separate review loops; retain raw failures,
+  UNKNOWN, missing and unexecuted results. Repository/CI tools or tests and
+  acceptance-semantic changes are PR deliverables and require review.
+- Read-only or task-owned isolated runtime verification has no source-prereview
+  dependency. There is no first-run-success requirement. Do not blindly replay
+  uncertain external commands or terminal input; establish state and safe replay.
+- Push a buildable task branch and open a draft PR early; run CI alongside local
+  acceptance. Mandatory local/native gates still precede merge and dependent work.
+- Do one complete independent PR review and batch all independently evaluable
+  findings. Review corrections' delta and impact in the same PR context; broaden
+  review only when affected contracts or new evidence warrant it. Preserve
+  independent implementation, testing and review responsibilities.
+- Use reproducible PR/CI/raw logs with exact revision and environment; give
+  irreplaceable results special custody. Archive complete superseded evidence,
+  including failures/UNKNOWN, only after active dependencies are resolved; never
+  keep success-only history or move active absolute-path dependencies. Do not
+  publish sensitive raw private logs.
+- Notify the user with cause, impact, options and a recommendation after three
+  unresolved correction rounds on one gate, 24 hours without substantive active
+  task source/PR/test progress, 48 hours without a main merge while work is ready,
+  or recovery from automation interruption longer than two hours. Track alerts
+  and notify again only for meaningful changes, not unchanged repeated status.
+- Advance on completion/failure/dependency events; heartbeats are fallback checks.
+  Use fresh implementation task/PR and independent review sessions, retaining the
+  same PR context for fixes. Around 20 coordinator compactions or 48 hours signals
+  a controlled handoff/restart with one coordinator and preserved active command
+  and resource ownership; it never establishes that an old process exited.
 
 - Run checks appropriate to the change, including affected contracts and error
   boundaries. Do not add tests that merely restate a trivial implementation.
