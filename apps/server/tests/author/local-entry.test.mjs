@@ -4142,4 +4142,112 @@ describe("D passive production local entry", () => {
       local.disposeCore();
     }
   });
+  it("D-A45 worker close observes direct graceful exit without signaling and clears its deadline", async () => {
+    await withApp(async (local) => {
+      const child = new EventEmitter();
+      Object.assign(child, {
+        pid: 123,
+        exitCode: null,
+        signalCode: null,
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: () => {
+          throw new Error("Graceful child must not be signaled");
+        },
+        unref: () => child,
+      });
+      const timer = timerFixture();
+      const worker = new WorkerProcess(
+        local.core.runtime,
+        {
+          serverId: identity.serverId,
+          relayInstanceId: identity.relayInstanceId,
+          workerId: "graceful-close",
+          workerIncarnationId: "owned-birth",
+        },
+        () => 0,
+        () => child,
+        timer,
+      );
+      try {
+        worker.start();
+        const closing = worker.close();
+        expect(worker.close()).toBe(closing);
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+        expect(await closing).toEqual({ status: "exited", code: 0, signal: null });
+        expect(timer.jobs.size).toBe(0);
+        expect(worker.snapshot().directlyOwnedLeaderExited).toBe(true);
+      } finally {
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    });
+  });
+  it("D-A46 finite worker close preserves uncertainty after signals and late physical exit stays separate", async () => {
+    await withApp(async (local) => {
+      const child = new EventEmitter();
+      const signals = [];
+      let unreferenced = false;
+      Object.assign(child, {
+        pid: 124,
+        exitCode: null,
+        signalCode: null,
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill: (signal) => {
+          signals.push(signal);
+          return true;
+        },
+        unref: () => {
+          unreferenced = true;
+          return child;
+        },
+      });
+      const timer = timerFixture();
+      const worker = new WorkerProcess(
+        local.core.runtime,
+        {
+          serverId: identity.serverId,
+          relayInstanceId: identity.relayInstanceId,
+          workerId: "unverifiable-close",
+          workerIncarnationId: "owned-birth",
+        },
+        () => 0,
+        () => child,
+        timer,
+      );
+      try {
+        worker.start();
+        const closing = worker.close();
+        let physicalClosed = false;
+        void worker.closed.then(() => {
+          physicalClosed = true;
+        });
+        timer.fire();
+        expect(signals).toEqual(["SIGTERM"]);
+        expect(worker.snapshot().directlyOwnedLeaderExited).toBe(false);
+        timer.fire();
+        expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+        expect(physicalClosed).toBe(false);
+        timer.fire();
+        expect(await closing).toEqual({ status: "unverifiable" });
+        expect(unreferenced).toBe(true);
+        expect(timer.jobs.size).toBe(0);
+        expect(physicalClosed).toBe(false);
+        expect(worker.snapshot().directlyOwnedLeaderExited).toBe(false);
+        child.emit("exit", null, "SIGKILL");
+        child.emit("close", null, "SIGKILL");
+        expect(await worker.closed).toEqual({ status: "exited", code: null, signal: "SIGKILL" });
+        expect(await worker.close()).toEqual({ status: "unverifiable" });
+      } finally {
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    });
+  });
 });

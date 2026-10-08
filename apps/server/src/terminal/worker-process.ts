@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { WorkerRef } from "@cove/protocol/identity";
 import { WorkerPipeSession } from "./worker-pipe-session.js";
 import type { LocalRuntime } from "./local-runtime.js";
+import type { LocalTimer } from "./local-runtime-clock.js";
 
 export type WorkerSpawn = (bin: string) => ChildProcessWithoutNullStreams;
 const installedWorkerBin = resolve(
@@ -12,6 +13,10 @@ const installedWorkerBin = resolve(
 );
 const spawnWorker: WorkerSpawn = (bin) =>
   spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], shell: false });
+const closeTimers: LocalTimer = {
+  set: (callback, milliseconds) => setTimeout(callback, milliseconds),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 // Only the directly spawned child supplies process-exit proof. Pipe loss is contact loss.
 export class WorkerProcess {
@@ -31,11 +36,13 @@ export class WorkerProcess {
   private firstError: "spawn" | "pipe" | "contact" | undefined;
   private writerClosed = false;
   private leaderExited = false;
+  private closing: Promise<Awaited<WorkerProcess["closed"]>> | undefined;
   constructor(
     readonly runtime: LocalRuntime,
     worker: WorkerRef,
     now: () => number,
     private readonly createChild: WorkerSpawn = spawnWorker,
+    private readonly closeTimer: LocalTimer = closeTimers,
   ) {
     this.ready = new Promise((resolve, reject) => {
       this.readyResolve = resolve;
@@ -153,9 +160,56 @@ export class WorkerProcess {
       this.session.loseContact();
       if (!this.started) {
         this.closedResolve({ status: "unverifiable" });
-      } else if (this.child && !this.child.stdin.destroyed) this.child.stdin.end();
+      } else if (this.child && !this.child.stdin.destroyed) {
+        try {
+          this.child.stdin.end();
+        } catch {
+          this.fail("pipe");
+        }
+      }
     }
-    return this.closed;
+    return (this.closing ??= new Promise((resolve) => {
+      let settled = false;
+      let handle: unknown;
+      const finish = (receipt: Awaited<WorkerProcess["closed"]>): void => {
+        if (settled) return;
+        settled = true;
+        if (handle !== undefined) this.closeTimer.clear(handle);
+        resolve(receipt);
+      };
+      const signal = (value: NodeJS.Signals): void => {
+        const child = this.child;
+        // Use only the captured directly spawned child, never an arbitrary PID
+        // or process group. A signal request is not exit or stream-close proof.
+        if (!child || this.leaderExited || child.exitCode !== null || child.signalCode !== null)
+          return;
+        try {
+          child.kill(value);
+        } catch {
+          // Keep waiting for observed closure; failure to signal proves no exit.
+        }
+      };
+      void this.closed.then(finish);
+      handle = this.closeTimer.set(() => {
+        if (settled) return;
+        signal("SIGTERM");
+        handle = this.closeTimer.set(() => {
+          if (settled) return;
+          signal("SIGKILL");
+          handle = this.closeTimer.set(() => {
+            // Retire our own local transport handles so an unverified child
+            // cannot keep the entry's event loop alive forever. This supplies
+            // only stream retirement; the physical child-close observer and
+            // direct exit observer remain the sole process evidence sources.
+            this.child?.stdin.destroy();
+            this.child?.stdout.destroy();
+            this.child?.stderr.destroy();
+            this.child?.unref();
+            finish({ status: "unverifiable" });
+          }, 1000);
+        }, 2000);
+      }, 5000);
+    }));
   }
   snapshot() {
     return {
