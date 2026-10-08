@@ -1,6 +1,6 @@
 # Cove current handoff
 
-Updated: 2026-10-08 process reset. Recheck GitHub, checkout and live command state
+Updated: 2026-10-08 active transfer and draft PR #66. Recheck GitHub, checkout and live command state
 before resuming. This file holds current state only (maximum 150 lines).
 
 ## Authorized stage and process
@@ -44,11 +44,14 @@ native, CI and actual-main gates remain. No first-run-success requirement.
   `b443982e123224ad0a8d4249db5ba86c32fcd4ce`, tree
   `6f8dc22fa0205a5ecbfb7943c7841acebdb50b44`: 17 original commits above main.
   Product/compiled bytes remain at `b443982`; preserve all original commits/refs.
-  The three process documents are checked and staged; no reset commit was created.
-  Normal commit is blocked by `NORMAL_PRECOMMIT_SHELL_STARTUP_WAIT`; the task's
-  stuck Git/hook command was cancelled and reaped, with raw diagnostics retained.
-- Candidate is not pushed, has no PR/hosted CI yet. Push/open draft early and run
-  CI in parallel with local acceptance; independent full-PR review batches findings.
+  Process documents committed as `82e5c17` with the existing user identity; original
+  17 commits are unchanged. Global ByteSec no-op prepare/commit-msg/pre-push wrappers
+  caused startup waits; cancelled owned commands were reaped. User authorized skipping
+  unrelated hooks: command-scoped hook directory omits only these three wrappers,
+  preserves original pre-commit, and changes no persistent config/global files.
+- Normal push completed; [draft PR #66](https://github.com/GhostFlying/cove/pull/66)
+  targets `6414a0d`. Hosted Ubuntu/macOS checks started; CI is not yet acceptance.
+  Independent full-PR review and real installed/native acceptance run in parallel.
 - [D plan](tasks/m0-server-local-entry-plan.md) and
   [D results](tasks/m0-server-local-entry-results.md) retain source and scoped history.
   Process-only stop/review gates in old records are superseded by 6.9.
@@ -88,13 +91,13 @@ at the allocated DAG gate. Preserve each task's actual prerequisite/acceptance s
 
 ### Next actions
 
-1. Transfer coordination using this checked/staged handoff. User-approved 6.9 is
-   effective; fresh sessions must not restart per-tool source-prereview loops.
+1. Coordination transfer is ACTIVE in `process-reset-20261008/coordinator-transfer.json`;
+   user-approved 6.9 is effective, with no per-tool source-prereview loops.
 2. Allocate the remaining actual installed/startup13/QN8/default-timer/native/full
    acceptance above on isolated owned resources; completed DG does not satisfy it.
    Self-check/fix off-tree tools directly and retain raw failures/UNKNOWN/history.
-3. Push the buildable candidate/open draft PR early; run CI while independently
-   completing required installed/native/full acceptance. Product fixes get atomic
+3. Follow draft PR #66 CI while independently completing required installed/native/full
+   acceptance. Product fixes get atomic
    Conventional Commits; original 17 subjects remain historical deviations.
 4. Complete one full independent PR review, batch findings, then review fixes'
    delta and impact. Integrate only with current evidence/all required gates;
@@ -119,14 +122,11 @@ No R74 per-tool review is planned; full detail remains in off-tree reports.
 Own carrier/Node births, CLI0 wait/reap and later absence confirmed, signals0;
 no host-zero claim. The pre-close outcome lease
 snapshot lacks an explicit durable outcome-close receipt; preserve that limitation.
-The normal-hook environment block does not gate runtime. The document writer
-releases its three-doc/Git scope with its completion report. After safe environment
-recovery, the next assigned Git owner completes the normal atomic docs commit with original user hooks/identity;
-do not bypass hooks, retry blindly or wait for all runtime tests to commit docs.
-The coordinator has replaced the heartbeat with the
-approved short process prompt and it is ACTIVE; the old prompt is superseded.
-Root will open the fresh coordinator chat and transfer its heartbeat from this
-ready handoff; old owners have no active commands after completion.
+Fresh `/root/d_git_pr_owner` owns checkout/index/docs and PR integration; no heavy lease.
+Fresh installed/native test and independent complete-review owners are allocated by
+active coordinator `01a119b2-d605-7e61-a39a-29006cb49213`; old coordinator is RETIRED.
+30-minute heartbeat targets the active chat and uses the approved short prompt.
+Git/hook diagnosis and command receipts: `process-reset-20261008/fresh-git-pr/`.
 Only one coordinator may be active; transfer live command handles/resources
 explicitly. Notify on the 6.9 three-round/24h/48h/interruption>2h conditions;
 events advance work immediately, heartbeat is fallback, unchanged alerts are quiet.
