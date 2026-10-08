@@ -1,6 +1,6 @@
 # Cove current handoff
 
-Updated: 2026-10-08 active transfer and draft PR #66. Recheck GitHub, checkout and live command state
+Updated: 2026-10-08 PR #66 complete-review corrections. Recheck GitHub, checkout and live command state
 before resuming. This file holds current state only (maximum 150 lines).
 
 ## Authorized stage and process
@@ -43,14 +43,17 @@ native, CI and actual-main gates remain. No first-run-success requirement.
   branch `p/luchengxuan/m0-18-local-entry`. Original D head
   `b443982e123224ad0a8d4249db5ba86c32fcd4ce`, tree
   `6f8dc22fa0205a5ecbfb7943c7841acebdb50b44`: 17 original commits above main.
-  Product/compiled bytes remain at `b443982`; preserve all original commits/refs.
+  Original `b443982` and all 17 commits remain preserved; current source includes
+  PR #66 review corrections. Compiled delivery awaits independent changed-head rebuild.
   Process documents committed as `82e5c17` with the existing user identity; original
   17 commits are unchanged. Global ByteSec no-op prepare/commit-msg/pre-push wrappers
   caused startup waits; cancelled owned commands were reaped. User authorized skipping
   unrelated hooks: command-scoped hook directory omits only these three wrappers,
-  preserves original pre-commit, and changes no persistent config/global files.
+  preserved pre-commit then; user later removed global ByteSec hookspath entirely.
+  Normal Git now uses the unchanged project hooks; no identity change.
 - Normal push completed; [draft PR #66](https://github.com/GhostFlying/cove/pull/66)
-  targets `6414a0d`. Hosted Ubuntu/macOS checks started; CI is not yet acceptance.
+  targets `6414a0d`. Both first hosted OS checks failed a stale P2-A manifest guard;
+  targeted correction and F01-F07 source corrections require fresh CI/acceptance.
   Independent full-PR review and real installed/native acceptance run in parallel.
 - [D plan](tasks/m0-server-local-entry-plan.md) and
   [D results](tasks/m0-server-local-entry-results.md) retain source and scoped history.
@@ -106,7 +109,7 @@ at the allocated DAG gate. Preserve each task's actual prerequisite/acceptance s
 
 ## Worktrees, active resources and controlled transfer
 
-Only primary `cove` (`aef2fe1`) and `m0-probes-verify` (`b443982`) remain.
+Only primary `cove` (`aef2fe1`) and the active PR #66 `m0-probes-verify` remain.
 Approved recovery/view cleanup completed: normal `git worktree remove` both CLI0,
 target directories absent; all Git refs unchanged and branches `ca934043`/`1c3a61e9`
 retained (5/6 equivalent patches, zero unmatched against accepted main `6414a0d`).
@@ -116,11 +119,9 @@ R54–R72 evidence is untouched; archive only after D PR merge and active-path r
 
 R73 is RELEASED_STOP (CLI0, own commands reaped); its cleanup-order tool finding
 R73-F01 remains PR reference, not product acceptance or a DG prerequisite.
-No R74 per-tool review is planned; full detail remains in off-tree reports.
 
 `/root/dg_runtime_execution` completed and RELEASED its runtime-heavy lease.
-Own carrier/Node births, CLI0 wait/reap and later absence confirmed, signals0;
-no host-zero claim. The pre-close outcome lease
+Own carrier/Node births, CLI0 wait/reap and later absence confirmed, signals0; no host-zero claim. The pre-close outcome lease
 snapshot lacks an explicit durable outcome-close receipt; preserve that limitation.
 Fresh `/root/d_git_pr_owner` owns checkout/index/docs and PR integration; no heavy lease.
 Fresh installed/native test and independent complete-review owners are allocated by

@@ -12,6 +12,7 @@ import {
   evaluateWsUpgrade,
   negotiateBootstrap,
   validateWsFirstMessage,
+  bootstrapFailure,
 } from "@cove/protocol/bootstrap";
 import {
   RPC_METHODS,
@@ -75,6 +76,28 @@ const admission = {
   relayInstanceId: "i1",
   capacityAvailable: true,
 };
+
+test("admission failures use the bounded existing bootstrap shape and fixed closed reasons", () => {
+  for (const kind of ["UNAUTHENTICATED", "FORBIDDEN", "BUSY", "UNAVAILABLE"]) {
+    const value = bootstrapFailure(kind);
+    expect(value).toEqual({
+      type: "cove-bootstrap-error",
+      kind,
+      message: kind.replaceAll("_", " "),
+      supportedVersions: { bootstrap: [1], protocol: [2] },
+    });
+    expect(BootstrapFailureSchema.safeParse(value).success).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThan(256);
+    expect(
+      BootstrapFailureSchema.safeParse({ ...value, message: "private token/path" }).success,
+    ).toBe(false);
+    expect(BootstrapFailureSchema.safeParse({ ...value, kind: "ARBITRARY_ERROR" }).success).toBe(
+      false,
+    );
+    const decoded = BootstrapFailureSchema.parse({ ...value, secret: "not part of the contract" });
+    expect(decoded).not.toHaveProperty("secret");
+  }
+});
 
 test("bootstrap separates protocol and build and intersects only known capabilities", () => {
   const result = negotiateBootstrap(request, server);

@@ -1,6 +1,6 @@
 import { TextDecoder, TextEncoder } from "node:util";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
+import { M0_CAPABILITIES, PROTOCOL_VERSION, bootstrapFailure } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
 import { domainError } from "@cove/protocol/errors";
@@ -256,6 +256,30 @@ function stopParams(operationId) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("dual-channel connection", () => {
+  test("non-200 bootstrap admission errors retain fixed remote reasons without retry or replay", async () => {
+    for (const [status, kind] of [
+      [401, "UNAUTHENTICATED"],
+      [403, "FORBIDDEN"],
+      [429, "BUSY"],
+      [503, "UNAVAILABLE"],
+    ]) {
+      const context = harness();
+      try {
+        const connecting = context.client.connect();
+        await flush();
+        context.http.respond(0, bootstrapFailure(kind), { status });
+        expect(await connecting).toEqual({
+          ok: false,
+          error: { category: "remote-bootstrap", reason: kind },
+        });
+        expect(context.http.requests).toHaveLength(1);
+        expect(context.terminal.opens).toHaveLength(1);
+        expect(context.scheduler.timers.size).toBe(0);
+      } finally {
+        context.client.dispose();
+      }
+    }
+  });
   test("commits only after semantically equal successes and accepts server build different from client", async () => {
     const context = harness();
     const states = [];

@@ -30,7 +30,7 @@ import { rpcBody, boundRpcResponseBody } from "../../dist/transport/http-rpc.js"
 import { createPipeDecoder, encodePipeFrame } from "@cove/protocol/pipe";
 import { encodeTerminalFrame, MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
-import { REQUIRED_CAPABILITIES } from "@cove/protocol/bootstrap";
+import { REQUIRED_CAPABILITIES, BootstrapFailureSchema } from "@cove/protocol/bootstrap";
 import { composeRpcResponse } from "@cove/protocol/rpc";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { ConnectionRefSchema } from "@cove/protocol/identity";
@@ -4248,6 +4248,115 @@ describe("D passive production local entry", () => {
         child.stdout.destroy();
         child.stderr.destroy();
       }
+    });
+  });
+  it("D-A47 HTTP admission envelopes retain existing auth ordering and distinguish actual mismatches", async () => {
+    await withApp(async (local) => {
+      const rows = [
+        [{ ...auth, authorization: "Bearer wrong" }, utf8(bootstrap), 401, "UNAUTHENTICATED"],
+        [{ ...auth, host: "localhost:32123" }, utf8(bootstrap), 403, "FORBIDDEN"],
+        [
+          { ...auth, "cove-protocol": "invalid", authorization: "Bearer wrong" },
+          utf8(bootstrap),
+          400,
+          "BOOTSTRAP_UNSUPPORTED",
+        ],
+        [
+          { ...auth, "cove-protocol": "1", authorization: "Bearer wrong" },
+          utf8(bootstrap),
+          401,
+          "UNAUTHENTICATED",
+        ],
+        [
+          { ...auth, "cove-protocol": "1", "cove-instance-id": "other-instance" },
+          utf8(bootstrap),
+          409,
+          "PROTOCOL_MISMATCH",
+        ],
+        [
+          { ...auth, "cove-instance-id": "other-instance" },
+          utf8(bootstrap),
+          409,
+          "INSTANCE_MISMATCH",
+        ],
+        [auth, Buffer.from("{"), 400, "BOOTSTRAP_UNSUPPORTED"],
+        [auth, Buffer.alloc(8193), 413, "INVALID_SIZE"],
+      ];
+      for (const [headers, payload, status, kind] of rows) {
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/bootstrap",
+          headers,
+          payload,
+        });
+        expect(response.statusCode).toBe(status);
+        expect(response.json()).toEqual({
+          type: "cove-bootstrap-error",
+          kind,
+          message: kind.replaceAll("_", " "),
+          supportedVersions: { bootstrap: [1], protocol: [2] },
+        });
+        expect(BootstrapFailureSchema.safeParse(response.json()).success).toBe(true);
+        expect(response.body).not.toMatch(
+          /author-server|author-instance|other-instance|localhost|Bearer/,
+        );
+        expect(response.body).not.toContain(identity.secret);
+        expect(local.core.runtime.registry.count).toBe(0);
+        expect(local.admission.snapshot().rpc).toBe(0);
+      }
+      const admitted = await local.app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: business,
+        payload: Buffer.from("{"),
+      });
+      expect(admitted.statusCode).toBe(200);
+      expect(admitted.json().error.code).toBe(-32700);
+    });
+  });
+  it("D-A48 rejected preflight quota and pre-upgrade use stable envelopes without admitting business", async () => {
+    await withApp(async (local) => {
+      const denied = await local.app.inject({
+        method: "OPTIONS",
+        url: "/bootstrap",
+        headers: {
+          host: auth.host,
+          origin: options.allowedOrigins[0],
+          "access-control-request-method": "DELETE",
+        },
+      });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().kind).toBe("FORBIDDEN");
+      const httpClaims = Array.from({ length: 32 }, () => local.admission.claim("rpc"));
+      try {
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/bootstrap",
+          headers: auth,
+          payload: utf8(bootstrap),
+        });
+        expect(response.statusCode).toBe(429);
+        expect(response.json().kind).toBe("BUSY");
+        expect(BootstrapFailureSchema.safeParse(response.json()).success).toBe(true);
+      } finally {
+        for (const claim of httpClaims) claim?.release();
+      }
+      const wsClaims = Array.from({ length: 8 }, () => local.admission.claim("unauthenticated"));
+      try {
+        const response = await local.app.inject({ method: "GET", url: "/terminal", headers: auth });
+        expect(response.statusCode).toBe(429);
+        expect(response.json().kind).toBe("BUSY");
+        expect(BootstrapFailureSchema.safeParse(response.json()).success).toBe(true);
+      } finally {
+        for (const claim of wsClaims) claim?.release();
+      }
+      expect(local.core.runtime.registry.count).toBe(0);
+      expect(local.admission.snapshot()).toEqual({
+        unauthenticated: 0,
+        authenticated: 0,
+        rpc: 0,
+        protocol: 2,
+      });
     });
   });
 });

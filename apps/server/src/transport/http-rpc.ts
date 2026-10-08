@@ -5,6 +5,9 @@ import {
   negotiateBootstrap,
   LOCAL_PATHS,
   PROTOCOL_VERSION,
+  bootstrapFailure,
+  type AdmissionKind,
+  type BootstrapFailure,
 } from "@cove/protocol/bootstrap";
 import { PROFILE } from "@cove/protocol/profile";
 import { boundedJsonStructure } from "@cove/protocol/terminal";
@@ -21,7 +24,7 @@ import {
 } from "@cove/protocol/rpc";
 import type { LocalRuntime } from "../terminal/local-runtime.js";
 import type { TerminalOperations } from "../operations/terminal-operations.js";
-import { actualHeaders, header, LocalAdmission } from "./local-admission.js";
+import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 
 export type LocalCore = {
   runtime: LocalRuntime;
@@ -30,6 +33,63 @@ export type LocalCore = {
 };
 const encoder = new TextEncoder();
 export const encodeUtf8 = (text: string): Uint8Array => encoder.encode(text);
+const admissionFailureKinds: readonly BootstrapFailure["kind"][] = [
+  "BOOTSTRAP_UNSUPPORTED",
+  "PROTOCOL_MISMATCH",
+  "INSTANCE_MISMATCH",
+  "INVALID_SIZE",
+  "UNAUTHENTICATED",
+  "FORBIDDEN",
+  "BUSY",
+  "UNAVAILABLE",
+];
+const admissionFailureBodies = new Map<BootstrapFailure["kind"], string>(
+  admissionFailureKinds.map((kind) => [kind, JSON.stringify(bootstrapFailure(kind))]),
+);
+
+export function sendHttpAdmissionFailure(
+  reply: FastifyReply,
+  kind: AdmissionKind,
+  headers: LocalHeaders = {},
+) {
+  let failure: BootstrapFailure["kind"];
+  switch (kind) {
+    case "malformed":
+      failure = "BOOTSTRAP_UNSUPPORTED";
+      break;
+    case "unauthenticated":
+      failure = "UNAUTHENTICATED";
+      break;
+    case "forbidden":
+      failure = "FORBIDDEN";
+      break;
+    case "too-large":
+      failure = "INVALID_SIZE";
+      break;
+    case "busy":
+      failure = "BUSY";
+      break;
+    case "unavailable":
+      failure = "UNAVAILABLE";
+      break;
+    case "mismatch": {
+      const protocol = header(headers, "cove-protocol");
+      failure =
+        protocol !== undefined && protocol !== String(PROTOCOL_VERSION)
+          ? "PROTOCOL_MISMATCH"
+          : "INSTANCE_MISMATCH";
+      break;
+    }
+    default:
+      throw new Error("Accepted request cannot be an admission failure");
+  }
+  // Only fixed precomputed bodies are sent. A denied quota never allocates a
+  // staging owner and neither input identities nor credentials are reflected.
+  return reply
+    .code(ADMISSION_STATUS[kind])
+    .type("application/json; charset=utf-8")
+    .send(admissionFailureBodies.get(failure)!);
+}
 const standard = (id: RpcId, code: keyof typeof STANDARD_RPC_MESSAGES) => ({
   jsonrpc: "2.0" as const,
   id,
@@ -222,14 +282,14 @@ export function registerHttpRpc(
     ]);
     // Unexpected allocation/setup/invariant failures belong to infrastructure,
     // never the client's malformed-request class. Do not send raw error text.
-    return reply
-      .code(code === "FST_ERR_CTP_BODY_TOO_LARGE" ? 413 : malformed.has(String(code)) ? 400 : 500)
-      .send();
+    if (code === "FST_ERR_CTP_BODY_TOO_LARGE") return sendHttpAdmissionFailure(reply, "too-large");
+    if (malformed.has(String(code))) return sendHttpAdmissionFailure(reply, "malformed");
+    return reply.code(500).send();
   });
   for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc, LOCAL_PATHS.terminal]) {
     app.options(path, (request, reply) => {
       const result = admission.http("OPTIONS", path, headers(request), 0);
-      if (result !== "accepted") return reply.code(ADMISSION_STATUS[result]).send();
+      if (result !== "accepted") return sendHttpAdmissionFailure(reply, result, headers(request));
       cors(request, reply);
       return reply
         .header("Access-Control-Allow-Methods", "POST")
@@ -366,7 +426,7 @@ export function registerHttpRpc(
           onRequest: (request, reply, done) => {
             const result = admission.http("POST", path, headers(request), 0);
             if (result !== "accepted") {
-              reply.code(ADMISSION_STATUS[result]).send();
+              sendHttpAdmissionFailure(reply, result, headers(request));
               return;
             }
             if (path === LOCAL_PATHS.rpc)
@@ -376,7 +436,7 @@ export function registerHttpRpc(
                 .header("Cove-Instance-Id", admission.identity.relayInstanceId);
             const claim = admission.claim("rpc");
             if (!claim) {
-              reply.code(ADMISSION_STATUS.busy).send();
+              sendHttpAdmissionFailure(reply, "busy");
               return;
             }
             const physicalBytes =
@@ -391,7 +451,7 @@ export function registerHttpRpc(
             const physical = core.runtime.composition.bytes.reserve(physicalBytes);
             if (!physical) {
               claim.release();
-              reply.code(ADMISSION_STATUS.busy).send();
+              sendHttpAdmissionFailure(reply, "busy");
               return;
             }
             const requestLimit =
@@ -458,7 +518,7 @@ export function registerHttpRpc(
         },
         async (request, reply) => {
           const owner = claims.get(request);
-          if (!owner) return reply.code(ADMISSION_STATUS.unavailable).send();
+          if (!owner) return sendHttpAdmissionFailure(reply, "unavailable");
           if (owner.logicalClosed) return reply;
           owner.handlerStarted = true;
           owner.domainPending = true;
@@ -466,14 +526,15 @@ export function registerHttpRpc(
             const bytes = request.body instanceof Uint8Array ? request.body : new Uint8Array();
             // The admitted reader already owns its slot; its own full-cap claim is eligible.
             const result = admission.http("POST", path, headers(request), bytes.byteLength, true);
-            if (result !== "accepted") return reply.code(ADMISSION_STATUS[result]).send();
+            if (result !== "accepted")
+              return sendHttpAdmissionFailure(reply, result, headers(request));
             cors(request, reply);
             if (path === LOCAL_PATHS.bootstrap) {
               let parsed: unknown;
               try {
                 parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
               } catch {
-                return reply.code(400).send();
+                return sendHttpAdmissionFailure(reply, "malformed");
               }
               const outcome = negotiateBootstrap(parsed, {
                 ...admission.identity,
