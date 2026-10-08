@@ -94,6 +94,10 @@ const BootstrapFailureFieldsSchema = z.object({
     "CAPABILITY_UNAVAILABLE",
     "PROFILE_UNSUPPORTED",
     "INVALID_SIZE",
+    "UNAUTHENTICATED",
+    "FORBIDDEN",
+    "BUSY",
+    "UNAVAILABLE",
   ]),
   message: z.string().min(1).max(256),
   supportedVersions: z.object({
@@ -117,12 +121,13 @@ export const BootstrapFailureSchema = BootstrapFailureFieldsSchema.refine(
 );
 export type BootstrapFailure = z.infer<typeof BootstrapFailureSchema>;
 
-const failure = (kind: BootstrapFailure["kind"]): BootstrapFailure => ({
+export const bootstrapFailure = (kind: BootstrapFailure["kind"]): BootstrapFailure => ({
   type: "cove-bootstrap-error",
   kind,
   message: kind.replaceAll("_", " "),
   supportedVersions: { bootstrap: [BOOTSTRAP_VERSION], protocol: [PROTOCOL_VERSION] },
 });
+const failure = bootstrapFailure;
 
 export function negotiateBootstrap(
   request: unknown,

@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import {
-  ADMISSION_STATUS,
   BOOTSTRAP_VERSION,
   LOCAL_PATHS,
   negotiateBootstrap,
@@ -21,7 +20,7 @@ import { TerminalCommandService } from "../terminal/terminal-command-service.js"
 import { ControlArbiter } from "../terminal/control-arbiter.js";
 import { actualHeaders, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 import type { LocalCore } from "./http-rpc.js";
-import { encodeUtf8 } from "./http-rpc.js";
+import { encodeUtf8, sendHttpAdmissionFailure } from "./http-rpc.js";
 import type { LocalTimer } from "../terminal/local-runtime-clock.js";
 
 export interface LocalSocket {
@@ -273,7 +272,7 @@ export function registerTerminalWebSocket(app: FastifyInstance, terminal: Termin
       onRequest: (request, reply, done) => {
         const result = terminal.prepare(actualHeaders(request.headers, request.raw.rawHeaders));
         if (!result.claim) {
-          reply.code(ADMISSION_STATUS[result.kind]).send();
+          sendHttpAdmissionFailure(reply, result.kind);
           return;
         }
         claims.set(request, result.claim);

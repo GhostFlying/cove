@@ -4,6 +4,7 @@ import {
   M0_CAPABILITIES,
   PROTOCOL_VERSION,
   type BootstrapSuccess,
+  type BootstrapFailure,
 } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError, type DomainError } from "@cove/protocol/errors";
@@ -94,13 +95,7 @@ export type ClientError =
     }
   | {
       readonly category: "remote-bootstrap";
-      readonly reason:
-        | "BOOTSTRAP_UNSUPPORTED"
-        | "PROTOCOL_MISMATCH"
-        | "INSTANCE_MISMATCH"
-        | "CAPABILITY_UNAVAILABLE"
-        | "PROFILE_UNSUPPORTED"
-        | "INVALID_SIZE";
+      readonly reason: BootstrapFailure["kind"];
     };
 
 export type ConnectOutcome =
