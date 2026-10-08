@@ -3210,7 +3210,14 @@ describe("D passive production local entry", () => {
           "cove-bootstrap-error",
           false,
         ],
-        ["malformed", Buffer.from("{"), 400, undefined, undefined, true],
+        [
+          "malformed",
+          Buffer.from("{"),
+          400,
+          "BOOTSTRAP_UNSUPPORTED",
+          "cove-bootstrap-error",
+          false,
+        ],
       ]) {
         const response = await local.app.inject({
           method: "POST",
