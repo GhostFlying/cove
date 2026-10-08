@@ -193,18 +193,39 @@ export function registerHttpRpc(
 ): void {
   app.removeAllContentTypeParsers();
   app.addContentTypeParser("*", { parseAs: "buffer" }, (_request, body, done) => done(null, body));
-  app.setErrorHandler((error, _request, reply) => {
-    const tooLarge =
-      error instanceof Error && "code" in error && error.code === "FST_ERR_CTP_BODY_TOO_LARGE";
-    return reply.code(tooLarge ? 413 : 400).send();
-  });
   const headers = (request: FastifyRequest) =>
     actualHeaders(request.headers, request.raw.rawHeaders);
   const cors = (request: FastifyRequest, reply: FastifyReply): void => {
     const origin = header(headers(request), "origin");
     if (origin && admission.options.allowedOrigins.includes(origin))
-      reply.header("Access-Control-Allow-Origin", origin).header("Vary", "Origin");
+      reply
+        .header("Access-Control-Allow-Origin", origin)
+        .header("Access-Control-Expose-Headers", "Cove-Protocol, Cove-Server-Id, Cove-Instance-Id")
+        .header("Vary", "Origin");
   };
+  // Origin approval is independent of authentication, quota and body parsing.
+  // Let an approved browser observe those failures without approving a hostile
+  // or ambiguous Origin and without reflecting any authentication input.
+  app.addHook("onRequest", (request, reply, done) => {
+    cors(request, reply);
+    done();
+  });
+  app.setErrorHandler((error, request, reply) => {
+    cors(request, reply);
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    const malformed = new Set([
+      "FST_ERR_CTP_INVALID_CONTENT_LENGTH",
+      "FST_ERR_CTP_INVALID_JSON_BODY",
+      "FST_ERR_CTP_EMPTY_JSON_BODY",
+      "FST_ERR_CTP_INVALID_MEDIA_TYPE",
+      "COVE_HTTP_BODY_CLOSED",
+    ]);
+    // Unexpected allocation/setup/invariant failures belong to infrastructure,
+    // never the client's malformed-request class. Do not send raw error text.
+    return reply
+      .code(code === "FST_ERR_CTP_BODY_TOO_LARGE" ? 413 : malformed.has(String(code)) ? 400 : 500)
+      .send();
+  });
   for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc, LOCAL_PATHS.terminal]) {
     app.options(path, (request, reply) => {
       const result = admission.http("OPTIONS", path, headers(request), 0);
@@ -318,7 +339,12 @@ export function registerHttpRpc(
         } else finish();
       };
       const onError = (error: Error): void => finish(error);
-      const onClose = (): void => finish(new Error("HTTP body closed before end"));
+      const onClose = (): void =>
+        finish(
+          Object.assign(new Error("HTTP body closed before end"), {
+            code: "COVE_HTTP_BODY_CLOSED",
+          }),
+        );
       if (contentLength > owner.requestLimit) {
         finish(tooLarge());
         return;
