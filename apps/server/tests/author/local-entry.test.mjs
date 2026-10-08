@@ -4063,4 +4063,83 @@ describe("D passive production local entry", () => {
       expect(actual).toEqual(control.expected);
     }
   });
+  it("D-A42 allowed browser responses expose exactly the three instance-binding headers", async () => {
+    await withApp(async (local) => {
+      const response = await local.app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: { ...business, origin: options.allowedOrigins[0] },
+        payload: utf8(statusCall),
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["access-control-allow-origin"]).toBe(options.allowedOrigins[0]);
+      expect(response.headers["access-control-expose-headers"]).toBe(
+        "Cove-Protocol, Cove-Server-Id, Cove-Instance-Id",
+      );
+      expect(response.headers["cove-protocol"]).toBe("2");
+      expect(response.headers["cove-server-id"]).toBe(identity.serverId);
+      expect(response.headers["cove-instance-id"]).toBe(identity.relayInstanceId);
+    });
+  });
+  it("D-A43 browser origin approval precedes authentication quota identity and parser refusals", async () => {
+    await withApp(async (local) => {
+      const origin = options.allowedOrigins[0];
+      for (const [headers, payload, status] of [
+        [{ ...business, authorization: "Bearer wrong", origin }, utf8(statusCall), 401],
+        [{ ...business, "cove-instance-id": "stale-instance", origin }, utf8(statusCall), 409],
+        [{ ...business, origin }, Buffer.alloc(65537), 413],
+      ]) {
+        const response = await local.app.inject({ method: "POST", url: "/rpc", headers, payload });
+        expect(response.statusCode).toBe(status);
+        expect(response.headers["access-control-allow-origin"]).toBe(origin);
+      }
+      const claims = Array.from({ length: 32 }, () => local.admission.claim("rpc"));
+      try {
+        expect(claims.every(Boolean)).toBe(true);
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: { ...business, origin },
+          payload: utf8(statusCall),
+        });
+        expect(response.statusCode).toBe(429);
+        expect(response.headers["access-control-allow-origin"]).toBe(origin);
+      } finally {
+        for (const claim of claims) claim?.release();
+      }
+      for (const invalidOrigin of ["null", "http://127.0.0.1:32125", [origin, origin]]) {
+        const response = await local.app.inject({
+          method: "POST",
+          url: "/rpc",
+          headers: { ...business, origin: invalidOrigin },
+          payload: utf8(statusCall),
+        });
+        expect(response.statusCode).toBe(invalidOrigin instanceof Array ? 400 : 403);
+        expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+        expect(response.headers["access-control-expose-headers"]).toBeUndefined();
+      }
+    });
+  });
+  it("D-A44 unexpected infrastructure exceptions stay bounded 500 with approved origin visibility", async () => {
+    const local = createLocalApplication(options, { identity });
+    local.app.addHook("preHandler", () => {
+      throw new Error(`private fixture failure ${identity.secret}`);
+    });
+    try {
+      const response = await local.app.inject({
+        method: "POST",
+        url: "/rpc",
+        headers: { ...business, origin: options.allowedOrigins[0] },
+        payload: utf8(statusCall),
+      });
+      expect(response.statusCode).toBe(500);
+      expect(response.body).toBe("");
+      expect(response.headers["access-control-allow-origin"]).toBe(options.allowedOrigins[0]);
+      expect(response.body).not.toContain(identity.secret);
+      expect(local.admission.snapshot().rpc).toBe(0);
+    } finally {
+      await local.app.close();
+      local.disposeCore();
+    }
+  });
 });
