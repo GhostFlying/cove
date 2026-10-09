@@ -196,6 +196,56 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(after.controller.snapshot().execution.status).not.toBe("exited");
   });
 
+  test("S1 keys typed back-to-back right after a click all reach the PTY in order", async () => {
+    const run = await createRun(ECHO_LOOP);
+    const client = await connectClient();
+    // Emit focus and input intents the way the xterm view does: each deliberate key is
+    // preceded by a focus intent, and nothing waits for the click's focus to be granted.
+    const recording = createRecordingView();
+    const focusListeners = new Set();
+    const inputListeners = new Set();
+    const subscribe = (set) => (listener) => {
+      set.add(listener);
+      return { dispose: () => set.delete(listener) };
+    };
+    const view = {
+      ...recording.view,
+      onFocusIntent: subscribe(focusListeners),
+      onInputIntent: subscribe(inputListeners),
+    };
+    const opened = client.openTerminal({
+      run,
+      viewId: "s1-typing-view",
+      view,
+      initialAppearance: DEFAULT_APPEARANCE,
+    });
+    expect(opened.ok).toBe(true);
+    const controller = opened.value;
+    expect(await controller.attach()).toMatchObject({ ok: true });
+    await waitFor("the run's first output", () => recording.text().includes("loop-ready"));
+    const outcomes = [];
+    controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
+
+    const line = "typed-fast-0123456789-abcdefghijklmnopqrstuvwxyz";
+    const keys = [...`${line}\r`];
+    const viewGeneration = controller.snapshot().viewGeneration;
+    const geometry = recording.view.measureGrid();
+    controller.setInputTarget(true, true);
+    const focus = controller.requestFocus(geometry);
+    keys.forEach((key, index) => {
+      for (const listener of focusListeners)
+        listener({ viewGeneration, focusSeq: index + 1, focused: true, geometry });
+      for (const listener of inputListeners)
+        listener({ viewGeneration, source: "keyboard", bytes: encoder.encode(key) });
+    });
+    expect(await focus).toMatchObject({ ok: true });
+    await waitFor("every input outcome", () => outcomes.length === keys.length);
+    expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([]);
+    await waitFor("the echoed line", () => recording.text().includes(`echo:${line}`));
+    // One click is one grant: per-key focus intents must not mint further epochs.
+    expect(controller.snapshot().controlEpoch).toBe((await focus).value.epoch);
+  });
+
   test("S8 a wrong protocol version is refused on both channels without touching a live PTY", async () => {
     const run = await createRun(ECHO_LOOP);
     const { record } = fixture;
