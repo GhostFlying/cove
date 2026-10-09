@@ -955,7 +955,7 @@ test("supported terminal protocol suite is mandatory with compiled cases", async
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/supported-terminal.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 14 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 21 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });

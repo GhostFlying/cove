@@ -219,7 +219,7 @@ export const requiredSuites = [
   {
     project: "protocol",
     file: "packages/protocol/tests/supported-terminal.test.mjs",
-    minimumTests: 14,
+    minimumTests: 21,
   },
   { project: "protocol", file: "packages/protocol/tests/supported-pipe.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/admission-rpc.test.mjs", minimumTests: 22 },
