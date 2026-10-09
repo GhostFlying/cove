@@ -620,7 +620,20 @@ export class RoutedTerminalController implements TerminalController {
         this.phase === "ready" &&
         this.control.pendingIntent === intent) ||
         this.control.carriesFocus(intent));
-    if (!valid()) return { ok: false, error: localError("invalid-state") };
+    // Until the command is handed to the socket, it must also still be the latest focus request
+    // with no input-target loss since it was made. Observers notified by the publication above
+    // (or by commands that cancelUnsent or the lane settles) can reenter: one may start another
+    // resize-context recovery, which carries this intent, and request a newer focus that defers
+    // behind it. `valid` alone would then still pass through carriesFocus and put this older
+    // focus on the wire after the newer intent. The lane evaluates `sendable` again at the
+    // actual handoff, so no reentrant window remains before it. Once handed off, the result is
+    // judged by `valid` only: a newer request then follows it on the wire and supersedes it there.
+    const sendable = (): boolean => current() && valid();
+    if (!sendable()) {
+      this.control.failFocus(intent);
+      this.publish();
+      return { ok: false, error: localError("invalid-state") };
+    }
     let settled = false;
     let receipt: TerminalOutcome<TerminalControlReceipt> | undefined;
     let acceptedAtMs = 0;
@@ -667,7 +680,7 @@ export class RoutedTerminalController implements TerminalController {
       5_000,
       undefined,
       handle,
-      valid,
+      sendable,
     );
     handle(outcome);
     const granted = receipt!;
