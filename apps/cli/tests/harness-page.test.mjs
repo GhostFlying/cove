@@ -143,6 +143,16 @@ const screenRows = (page) =>
     divs.map((row) => row.textContent.trimEnd()),
   );
 
+// Wait until the production view renders a row that is exactly `text`.
+const waitForRow = (page, text) =>
+  page.waitForFunction(
+    (wanted) =>
+      [...document.querySelectorAll("#terminal .xterm-rows > div")].some(
+        (row) => row.textContent.trim() === wanted,
+      ),
+    text,
+  );
+
 async function openConnectedPage({ server, page }) {
   const url = server.report.harness;
   expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#/);
@@ -208,15 +218,14 @@ test("S4 the production view answers no terminal query and passes real keys and 
         const status = document.getElementById("terminal-status");
         return status?.dataset.phase === "ready" && status.textContent.includes("controlling");
       });
+      // The probe prints this only after switching its tty to raw mode; typed earlier, the
+      // tty's ICRNL would turn Enter into a newline and the probe would never ask.
+      await waitForRow(page, "query-probe-ready");
       await page.keyboard.type("go");
       await page.keyboard.press("Enter");
       await waitFor("the probe to see both replies", probe.seen);
       // The view has parsed the queries, which precede this line in the output.
-      await page.waitForFunction(() =>
-        [...document.querySelectorAll("#terminal .xterm-rows > div")].some(
-          (row) => row.textContent.trim() === "replies-seen",
-        ),
-      );
+      await waitForRow(page, "replies-seen");
       await page.keyboard.type("kbd-1");
       // A real paste event on xterm's input element, as a browser delivers it.
       await page.locator("#terminal textarea").evaluate((textarea) => {
