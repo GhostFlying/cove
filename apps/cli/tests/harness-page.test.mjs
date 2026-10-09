@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
+import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
 import { waitFor } from "./recording-view.mjs";
 import { stopServer, within } from "./server-process.mjs";
 
@@ -41,7 +42,7 @@ async function startServer(directory) {
       20_000,
     );
     if (wrapper.exitCode !== null) throw new Error("cove server start --harness exited");
-    return { wrapper, exited, report: JSON.parse(stdout) };
+    return { wrapper, exited, env, report: JSON.parse(stdout) };
   } catch (error) {
     await stopServer(wrapper, exited);
     throw new Error(`${error.message}: ${stderr}`, { cause: error });
@@ -79,7 +80,10 @@ async function closeChromium(chromiumServer, browser) {
   });
 }
 
-test("the harness page creates a terminal, takes typed input and renders its output", async () => {
+// Run `body` against a harness server and a page in the managed Chromium, then tear both
+// down. Every cleanup step runs even when an earlier one fails, and the body's own failure
+// is reported in preference to any cleanup failure.
+async function withHarness(body) {
   // Realpath the temp root: on macOS /var is a symlink and the server refuses a rendezvous
   // reached through a symlinked ancestor.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-harness-")));
@@ -90,11 +94,6 @@ test("the harness page creates a terminal, takes typed input and renders its out
   let failure;
   try {
     server = await startServer(directory);
-    const url = server.report.harness;
-    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#/);
-    const secret = new URLSearchParams(new URL(url).hash.slice(1)).get("secret");
-    expect(secret).toBeTruthy();
-
     if (!(await stat(browsersPath).catch(() => null)))
       throw new Error(`Managed Chromium is not installed under ${browsersPath}`);
     // Playwright reads its browser location when it is first loaded.
@@ -106,11 +105,59 @@ test("the harness page creates a terminal, takes typed input and renders its out
     page.setDefaultTimeout(15_000);
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
+    await body({ directory, server, page, pageErrors });
+  } catch (error) {
+    failure = error;
+  }
+  const cleanupErrors = [];
+  const attempt = async (step) => {
+    try {
+      await step();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  };
+  if (chromiumServer) await attempt(() => closeChromium(chromiumServer, browser));
+  if (server)
+    await attempt(async () => {
+      stopped = await stopServer(server.wrapper, server.exited, server.report.pid);
+    });
+  await attempt(() => rm(directory, { recursive: true, force: true }));
+  if (failure) throw failure;
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "harness test cleanup failed");
+  expect(stopped).toBe(0);
+}
 
-    await page.goto(url);
-    await page.waitForFunction(
-      () => document.getElementById("connection")?.textContent === "connected",
-    );
+// Name the page's own account of a failure, such as an input rejection, and its screen.
+async function describePage(page, error) {
+  const status = await page.textContent("#terminal-status").catch(() => null);
+  const rows = await screenRows(page).catch(() => []);
+  return new Error(
+    `${error.message}\nterminal status: ${status}\nscreen:\n${rows.filter(Boolean).join("\n")}`,
+    { cause: error },
+  );
+}
+
+const screenRows = (page) =>
+  page.$$eval("#terminal .xterm-rows > div", (divs) =>
+    divs.map((row) => row.textContent.trimEnd()),
+  );
+
+async function openConnectedPage({ server, page }) {
+  const url = server.report.harness;
+  expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#/);
+  const secret = new URLSearchParams(new URL(url).hash.slice(1)).get("secret");
+  expect(secret).toBeTruthy();
+  await page.goto(url);
+  await page.waitForFunction(
+    () => document.getElementById("connection")?.textContent === "connected",
+  );
+  return secret;
+}
+
+test("the harness page creates a terminal, takes typed input and renders its output", async () => {
+  await withHarness(async ({ server, page, pageErrors }) => {
+    const secret = await openConnectedPage({ server, page });
     // The fragment, and the secret in it, is gone from the address bar once read.
     expect(page.url()).not.toContain(secret);
     expect(await page.evaluate(() => location.href)).not.toContain(secret);
@@ -134,39 +181,72 @@ test("the harness page creates a terminal, takes typed input and renders its out
         MARKER,
       );
     } catch (error) {
-      // Name the page's own account of the failure, such as an input rejection.
-      const status = await page.textContent("#terminal-status").catch(() => null);
-      const rows = await page
-        .$$eval("#terminal .xterm-rows > div", (divs) =>
-          divs.map((row) => row.textContent.trimEnd()).filter(Boolean),
-        )
-        .catch(() => []);
-      throw new Error(`${error.message}\nterminal status: ${status}\nscreen:\n${rows.join("\n")}`, {
-        cause: error,
-      });
+      throw await describePage(page, error);
     }
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
-  } catch (error) {
-    failure = error;
-  }
-  // Every cleanup step runs even when an earlier one fails, and the test's own failure is
-  // reported in preference to any cleanup failure.
-  const cleanupErrors = [];
-  const attempt = async (step) => {
-    try {
-      await step();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  };
-  if (chromiumServer) await attempt(() => closeChromium(chromiumServer, browser));
-  if (server)
-    await attempt(async () => {
-      stopped = await stopServer(server.wrapper, server.exited, server.report.pid);
-    });
-  await attempt(() => rm(directory, { recursive: true, force: true }));
-  if (failure) throw failure;
-  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "harness test cleanup failed");
-  expect(stopped).toBe(0);
+  });
 });
+
+test("S4 the production view answers no terminal query and passes real keys and paste through", async () => {
+  await withHarness(async ({ directory, server, page, pageErrors }) => {
+    // The probe sends DA and CPR once it reads the typed line `go`, and reports every byte it
+    // reads until `done`. The page's xterm parses those queries and would answer them; only
+    // the server's replies may reach the process.
+    const probe = await writeQueryProbe(directory, "wait");
+    const run = await createRun(server.env, directory, probe.argv);
+    await openConnectedPage({ server, page });
+    await page.click(`#runs button[data-run-id="${run.runId}"]`);
+    await page.waitForFunction(
+      () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+    );
+    await page.waitForSelector("#terminal .xterm-rows");
+    try {
+      // A click takes control at the page's grid; a size change is recovered and retaken.
+      await page.click("#terminal");
+      await page.waitForFunction(() => {
+        const status = document.getElementById("terminal-status");
+        return status?.dataset.phase === "ready" && status.textContent.includes("controlling");
+      });
+      await page.keyboard.type("go");
+      await page.keyboard.press("Enter");
+      await waitFor("the probe to see both replies", probe.seen);
+      // The view has parsed the queries, which precede this line in the output.
+      await page.waitForFunction(() =>
+        [...document.querySelectorAll("#terminal .xterm-rows > div")].some(
+          (row) => row.textContent.trim() === "replies-seen",
+        ),
+      );
+      await page.keyboard.type("kbd-1");
+      // A real paste event on xterm's input element, as a browser delivers it.
+      await page.locator("#terminal textarea").evaluate((textarea) => {
+        const clipboardData = new DataTransfer();
+        clipboardData.setData("text/plain", "paste-2");
+        textarea.dispatchEvent(
+          new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }),
+        );
+      });
+      await page.keyboard.type("done");
+      await page.keyboard.press("Enter");
+      expect(await probe.received()).toMatch(QUERY_REPLIES_THEN("kbd-1paste-2"));
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+function createRun(env, directory, argv) {
+  return new Promise((done, fail) => {
+    execFile(
+      process.execPath,
+      [cli, "terminal", "create", "--cwd", directory, "--", ...argv],
+      { env, timeout: 20_000 },
+      (error, stdout, stderr) =>
+        error
+          ? fail(new Error(`cove terminal create failed: ${stderr}`))
+          : done(JSON.parse(stdout)),
+    );
+  });
+}
