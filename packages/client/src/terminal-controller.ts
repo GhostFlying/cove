@@ -577,6 +577,8 @@ export class RoutedTerminalController implements TerminalController {
       return { ok: false, error: localError("invalid-state") };
     const requestId = this.host.lane.nextRequestId(this.host.generation());
     const focusSeq = this.host.lane.nextFocusSeq(ref);
+    // The ID supplier can reenter and end the subscription; see TerminalLane.nextFocusSeq.
+    if (focusSeq === undefined) return { ok: false, error: localError("invalid-state") };
     if (!requestId || focusSeq === null)
       return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     const intent = this.control.beginFocus();
@@ -930,6 +932,8 @@ export class RoutedTerminalController implements TerminalController {
         const chunk = owned.subarray(written, end);
         const requestId = this.host.lane.nextRequestId(this.host.generation());
         const inputSeq = this.host.lane.nextInputSeq(ref);
+        // The ID supplier can reenter and end the subscription; see TerminalLane.nextInputSeq.
+        if (inputSeq === undefined) return reject(localError("invalid-state"), written);
         if (!requestId || inputSeq === null)
           return reject(domainError("COUNTER_EXHAUSTED"), written);
         inFlightBytes = chunk.byteLength;
