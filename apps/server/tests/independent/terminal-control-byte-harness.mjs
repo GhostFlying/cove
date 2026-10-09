@@ -479,11 +479,13 @@ export async function connectConsumer(rig, c = rig.primary) {
       const pipe = rig.commands.slice(start).find((x) => x.type === "set-control");
       assert(pipe);
       rig.accept(pipe, { atSeq });
-      const reply = await pending;
+      // A focus at a new grid resolves only once its grant is applied or lost, so the grant's
+      // ordered fact is delivered before the reply is awaited.
       if (apply) {
         rig.control(this.ref, pipe.nextEpoch, atSeq, grid);
         await this.drainAcks();
       }
+      const reply = await pending;
       return { pending, reply, pipe };
     },
     set ref(value) {
