@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@cove/client": "workspace:*",
+    "@cove/m0-harness": "workspace:*",
     "@cove/protocol": "workspace:*",
     "@cove/server": "workspace:*"
   },
