@@ -184,6 +184,21 @@ async function harness({
   };
 }
 
+// Settles one more transfer preview than the recent window holds, so "preview-0" (version 1) is
+// evicted and a duplicate of it is indistinguishable from a transfer for a new request on the run.
+// Then leaves a fresh preview for the same run pending.
+async function pendingAfterEviction() {
+  const h = await harness();
+  for (let index = 0; index <= 256; index++) {
+    const settled = h.client.getPreview(run);
+    h.peer.transfer(`preview-${index}`, index + 1, new Uint8Array([index % 256]));
+    h.peer.result(h.commands.at(-1), "transfer", index + 1, `preview-${index}`);
+    expect((await settled).ok).toBe(true);
+  }
+  const pending = h.client.getPreview(run);
+  return { h, pending, sent: h.commands.at(-1) };
+}
+
 describe("client preview transaction", () => {
   test.each(["result-first", "events-first"])(
     "joins one opaque transfer in %s order without a live controller",
@@ -615,6 +630,52 @@ describe("client preview transaction", () => {
     // ... while one evicted from the window is as unrouteable as a never-issued reply.
     h.peer.result(h.commands[0], "transfer", 1, "preview-0");
     expect(h.client.snapshot().status).toBe("incompatible");
+    h.client.dispose();
+  });
+
+  // The stale transfer is fully delivered before the reply naming the real one, which is the
+  // order a correct server keeps for a single preview, so only the ID can tell them apart.
+  test("an evicted transfer then a same-version result fails the newer preview", async () => {
+    const { h, pending, sent } = await pendingAfterEviction();
+    h.peer.transfer("preview-0", 1, new Uint8Array([0xee]));
+    h.peer.result(sent, "transfer", 1, "fresh");
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
+    // The run stays fenced, so the real transfer arriving late stays local too.
+    h.peer.transfer("fresh", 1, new Uint8Array([0x01]));
+    expect(h.client.snapshot().status).toBe("connected");
+    expect(await h.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    h.client.dispose();
+  });
+
+  test("an evicted transfer then a different-version result fails the newer preview", async () => {
+    const { h, pending, sent } = await pendingAfterEviction();
+    h.peer.transfer("preview-0", 1, new Uint8Array([0xee]));
+    h.peer.result(sent, "transfer", 258, "fresh");
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
+  });
+
+  test("an evicted transfer after the result names another fails the newer preview", async () => {
+    const { h, pending, sent } = await pendingAfterEviction();
+    h.peer.result(sent, "transfer", 1, "fresh");
+    h.peer.transfer("preview-0", 1, new Uint8Array([0xee]));
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
+    h.client.dispose();
+  });
+
+  test("a second transfer for one request fails it even when the result names the second", async () => {
+    const { h, pending, sent } = await pendingAfterEviction();
+    h.peer.transfer("preview-0", 1, new Uint8Array([0xee]));
+    h.peer.transfer("fresh", 1, new Uint8Array([0x01]));
+    h.peer.result(sent, "transfer", 1, "fresh");
+    expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+    expect(h.client.snapshot().status).toBe("connected");
     h.client.dispose();
   });
 
