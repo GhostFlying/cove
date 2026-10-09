@@ -218,6 +218,9 @@ importers:
       '@cove/client':
         specifier: workspace:*
         version: link:../../packages/client
+      '@cove/m0-harness':
+        specifier: workspace:*
+        version: link:../m0-harness
       '@cove/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

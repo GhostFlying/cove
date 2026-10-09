@@ -9,10 +9,11 @@ import type { CallOutcome, Client } from "@cove/client";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import type { OperationRecord, RunRecord } from "@cove/protocol/rpc";
 import { openSession, readRendezvous, resolveRendezvousPath, type Session } from "./session.js";
+import { harnessPageRoot, startHarnessServer, type HarnessServer } from "./harness-server.js";
 
 const USAGE = `usage: cove [--rendezvous PATH] <command>
 
-  server start [--port N] [--origin URL]...
+  server start [--port N] [--origin URL]... [--harness [--harness-port N]]
   status
   terminal create [--cwd DIR] [--cols N] [--rows N] -- <executable> [args...]
   terminal list
@@ -20,11 +21,16 @@ const USAGE = `usage: cove [--rendezvous PATH] <command>
   terminal stop <runId>
   operation get <operationId>
 
-The rendezvous path defaults to $COVE_RENDEZVOUS or ~/.cove/m0/run/rendezvous.json.`;
+The rendezvous path defaults to $COVE_RENDEZVOUS or ~/.cove/m0/run/rendezvous.json.
+With --harness, the M0 browser test page is served on 127.0.0.1 and its URL, which carries the
+server secret in its fragment, is printed once the server is ready.`;
 
 const OPERATION_WAIT_MS = 30_000;
 const POLL_MS = 100;
 const RENDEZVOUS_WAIT_MS = 20_000;
+
+// Flags that take no value.
+const SWITCHES = new Set(["--harness"]);
 
 class UsageError extends Error {}
 
@@ -51,7 +57,9 @@ function parseArguments(argv: readonly string[]): Arguments {
   for (let i = 0; i < argv.length; i++) {
     const item = argv[i]!;
     if (item === "--") return { words, flags, command: argv.slice(i + 1) };
-    if (item.startsWith("--")) {
+    if (SWITCHES.has(item)) {
+      flags.set(item, [...(flags.get(item) ?? []), ""]);
+    } else if (item.startsWith("--")) {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--"))
         throw new UsageError(`${item} needs a value`);
@@ -363,38 +371,72 @@ async function waitForRendezvous(path: string, child: ChildProcess) {
   throw new Error("cove-server did not publish its rendezvous in time");
 }
 
+// The fragment is never sent to any server; the page drops it from the address bar as soon
+// as it has read it.
+function pageUrl(
+  harness: HarnessServer,
+  record: { endpoint: string; serverId: string; relayInstanceId: string; secret: string },
+): string {
+  const fragment = new URLSearchParams({
+    endpoint: record.endpoint,
+    serverId: record.serverId,
+    instance: record.relayInstanceId,
+    secret: record.secret,
+    cwd: process.cwd(),
+    shell: process.env.SHELL || "/bin/sh",
+  });
+  return `${harness.origin}/#${fragment}`;
+}
+
 async function serverStart(args: Arguments): Promise<number> {
-  takeFlags(args, ["--port", "--origin"]);
+  takeFlags(args, ["--port", "--origin", "--harness", "--harness-port"]);
   if (args.words.length !== 2 || args.command)
     throw new UsageError("server start takes no arguments");
   const port = integerFlag(args, "--port", 0);
+  const withHarness = args.flags.has("--harness");
+  if (!withHarness && args.flags.has("--harness-port"))
+    throw new UsageError("--harness-port needs --harness");
+  const harnessPort = integerFlag(args, "--harness-port", 0);
+  const pageRoot = withHarness ? await harnessPageRoot() : undefined;
   const path = await prepareRendezvousPath(resolveRendezvousPath(flag(args, "--rendezvous")));
   const origins = args.flags.get("--origin") ?? [];
   const entry = await serverEntry();
   const releaseLock = await acquireStartLock(path);
   let exit: Promise<number>;
+  let harness: HarnessServer | undefined;
   try {
     if (await exists(path))
       throw new Error(
         `${path} already exists; another server may be running. ` +
           "Stop it, or remove the file if that server is gone.",
       );
+    // The page listener starts first: the server must allow the page's exact origin, which
+    // includes the listener's port.
+    if (pageRoot) harness = await startHarnessServer(pageRoot, harnessPort);
     const child = spawn(
       process.execPath,
       [
         entry,
         ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", String(port)],
         ...["--rendezvous", path],
-        ...origins.flatMap((origin) => ["--origin", origin]),
+        ...[...origins, ...(harness ? [harness.origin] : [])].flatMap((origin) => [
+          "--origin",
+          origin,
+        ]),
       ],
       { stdio: ["ignore", "inherit", "inherit"] },
     );
+    const page = harness;
     exit = new Promise<number>((done) => {
       child.once("error", () => done(1));
       // Report the server's own status; a signal death uses the shell's 128 + N convention.
       child.once("exit", (code, signal) =>
         done(code ?? (signal ? 128 + (constants.signals[signal] ?? 0) : 1)),
       );
+    }).then(async (status) => {
+      // The page server lives exactly as long as the server it points at.
+      await page?.close();
+      return status;
     });
     // The server retires its rendezvous and PTYs on SIGINT/SIGTERM; forward them instead of
     // dying first so the operator's Ctrl-C always reaches an orderly shutdown.
@@ -402,12 +444,14 @@ async function serverStart(args: Arguments): Promise<number> {
       process.on(signal, () => child.kill(signal));
     try {
       const record = await waitForRendezvous(path, child);
+      harness?.allowEndpoint(record.endpoint);
       print({
         endpoint: record.endpoint,
         serverId: record.serverId,
         relayInstanceId: record.relayInstanceId,
         rendezvous: path,
         pid: child.pid,
+        ...(harness ? { harness: pageUrl(harness, record) } : {}),
       });
     } catch (error) {
       // A child that ended on its own before readiness owns the status; one we stop here
@@ -418,6 +462,11 @@ async function serverStart(args: Arguments): Promise<number> {
       if (endedOnItsOwn && error instanceof Error) throw new StatusError(error.message, status);
       throw error;
     }
+  } catch (error) {
+    // Before the child exists nothing else owns the page server; afterwards `exit` also
+    // closes it, and closing is idempotent.
+    await harness?.close();
+    throw error;
   } finally {
     await releaseLock();
   }
