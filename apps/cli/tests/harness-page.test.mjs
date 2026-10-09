@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
+import { writeFitProbe } from "./fit-probe.mjs";
 import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
 import { waitFor } from "./recording-view.mjs";
 import { stopServer, within } from "./server-process.mjs";
@@ -105,7 +106,7 @@ async function withHarness(body) {
     page.setDefaultTimeout(15_000);
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
-    await body({ directory, server, page, pageErrors });
+    await body({ directory, server, browser, page, pageErrors });
   } catch (error) {
     failure = error;
   }
@@ -152,6 +153,57 @@ const waitForRow = (page, text) =>
       ),
     text,
   );
+
+// A click takes control at the page's grid; a changed grid is recovered with a fresh baseline
+// and control is retaken, and input typed in between is refused. Wait until the status has
+// stayed attached and controlling for a while before typing.
+async function waitForSteadyControl(page) {
+  let last;
+  let since = Date.now();
+  await waitFor(
+    "steady control of the terminal",
+    async () => {
+      const { text, phase } = await page.evaluate(() => {
+        const status = document.getElementById("terminal-status");
+        return { text: status?.textContent ?? "", phase: status?.dataset.phase };
+      });
+      if (text !== last) {
+        last = text;
+        since = Date.now();
+      }
+      return phase === "ready" && text.includes("controlling") && Date.now() - since > 750;
+    },
+    20_000,
+  );
+}
+
+// Where the last cell of the grid and the last glyphs of the first two rows end, against the
+// right edge of the area a user can see: the host's content box, short of xterm's vertical
+// scrollbar, which overlays the right edge of the terminal.
+const fitGeometry = (page) =>
+  page.evaluate(() => {
+    const host = document.getElementById("terminal");
+    const style = getComputedStyle(host);
+    const box = host.getBoundingClientRect();
+    const contentRight =
+      box.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+    const scrollbar = host.querySelector(".xterm .scrollbar.vertical")?.getBoundingClientRect();
+    const visibleRight = Math.min(contentRight, scrollbar?.width ? scrollbar.left : Infinity);
+    const screenRight = host.querySelector(".xterm-screen").getBoundingClientRect().right;
+    const glyphRights = [...host.querySelectorAll(".xterm-rows > div")].slice(0, 2).map((row) => {
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      let last;
+      for (let node = walker.nextNode(); node; node = walker.nextNode())
+        if (node.data.trimEnd()) last = node;
+      if (!last) return null;
+      const range = document.createRange();
+      const end = last.data.trimEnd().length;
+      range.setStart(last, end - 1);
+      range.setEnd(last, end);
+      return range.getBoundingClientRect().right;
+    });
+    return { visibleRight, screenRight, glyphRights };
+  });
 
 async function openConnectedPage({ server, page }) {
   const url = server.report.harness;
@@ -243,6 +295,65 @@ test("S4 the production view answers no terminal query and passes real keys and 
     }
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
+  });
+});
+
+test("the measured grid fits the visible terminal at several window sizes and pixel ratios", async () => {
+  await withHarness(async ({ directory, server, browser }) => {
+    const probe = await writeFitProbe(directory);
+    const run = await createRun(server.env, directory, probe.argv);
+    const layouts = [
+      { width: 1000, height: 640, deviceScaleFactor: 1 },
+      { width: 1003, height: 611, deviceScaleFactor: 1.25 },
+      { width: 1157, height: 700, deviceScaleFactor: 2 },
+    ];
+    const results = [];
+    for (const [index, layout] of layouts.entries()) {
+      const { width, height, deviceScaleFactor } = layout;
+      const context = await browser.newContext({
+        viewport: { width, height },
+        deviceScaleFactor,
+      });
+      try {
+        const page = await context.newPage();
+        page.setDefaultTimeout(15_000);
+        const pageErrors = [];
+        page.on("pageerror", (error) => pageErrors.push(error.message));
+        await openConnectedPage({ server, page });
+        await page.click(`#runs button[data-run-id="${run.runId}"]`);
+        await page.waitForFunction(
+          () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+        );
+        try {
+          if (index === 0) await waitForRow(page, "fit-probe-ready");
+          await page.click("#terminal");
+          await waitForSteadyControl(page);
+          await page.keyboard.press("p");
+          const printed = await probe.nextPrint();
+          await page.waitForFunction(
+            (cols) => document.getElementById("terminal-status")?.textContent.includes(`${cols}×`),
+            printed.cols,
+          );
+          // The probe printed at the grid the PTY had; the page shows that same grid.
+          await waitForRow(page, printed.ascii);
+          await waitForRow(page, printed.mixed);
+          const geometry = await fitGeometry(page);
+          results.push({ ...layout, cols: printed.cols, ...geometry });
+        } catch (error) {
+          throw await describePage(page, error);
+        }
+        expect(pageErrors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+    expect(results).toHaveLength(layouts.length);
+    // Half a device pixel absorbs subpixel layout rounding, not a clipped cell.
+    const clipped = results.filter((result) => {
+      const limit = result.visibleRight + 0.5 / result.deviceScaleFactor;
+      return result.screenRight > limit || result.glyphRights.some((right) => right > limit);
+    });
+    expect(clipped).toEqual([]);
   });
 });
 

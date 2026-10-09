@@ -20,6 +20,7 @@ import { takeConnectionInfo, type ConnectionInfo } from "./fragment.js";
 const BUILD_VERSION = "m0-harness-0.0.0";
 const OPERATION_WAIT_MS = 30_000;
 const LIST_REFRESH_MS = 2_000;
+const XTERM_SCROLLBAR_WIDTH = 14;
 
 const element = <T extends HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -86,8 +87,13 @@ function estimateGrid(): Geometry {
   const box = probe.getBoundingClientRect();
   probe.remove();
   const style = getComputedStyle(terminalHost);
+  // Leave room for xterm's vertical scrollbar, which overlays the right edge (see the view's
+  // measureTerminalGrid), so the first grid is not wider than the visible area either.
   const width =
-    terminalHost.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    terminalHost.clientWidth -
+    parseFloat(style.paddingLeft) -
+    parseFloat(style.paddingRight) -
+    XTERM_SCROLLBAR_WIDTH;
   const height =
     terminalHost.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
   if (!(box.width > 0 && box.height > 0 && width > 0 && height > 0)) return { cols: 80, rows: 24 };

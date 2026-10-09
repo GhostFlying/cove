@@ -14,6 +14,17 @@ function clamp(value: number, lower: number, upper: number): number {
   return Math.max(lower, Math.min(upper, value));
 }
 
+// xterm 6 overlays its vertical scrollbar on the right edge of the terminal, inside the host,
+// whenever the terminal keeps scrollback. Its width is `overviewRuler.width` or this default
+// (ViewportConstants.DEFAULT_SCROLL_BAR_WIDTH in xterm 6.0.0). Cells under it are hidden by the
+// scrollbar, so they are not part of the visible grid. @xterm/addon-fit reserves the same width.
+const DEFAULT_SCROLLBAR_WIDTH = 14;
+
+function scrollbarWidth(terminal: Terminal): number {
+  if (terminal.options.scrollback === 0) return 0;
+  return terminal.options.overviewRuler?.width || DEFAULT_SCROLLBAR_WIDTH;
+}
+
 export function measureTerminalGrid(
   terminal: Terminal,
   container: HTMLElement,
@@ -23,12 +34,24 @@ export function measureTerminalGrid(
   // an xterm upgrade cannot silently turn a viewport estimate into an authoritative resize.
   const cell = (terminal as unknown as RenderSurface)._core?._renderService?.dimensions?.css?.cell;
   const style = container.ownerDocument.defaultView?.getComputedStyle(container);
-  const horizontalPadding =
-    Number.parseFloat(style?.paddingLeft ?? "0") + Number.parseFloat(style?.paddingRight ?? "0");
-  const verticalPadding =
-    Number.parseFloat(style?.paddingTop ?? "0") + Number.parseFloat(style?.paddingBottom ?? "0");
-  const width = container.clientWidth - horizontalPadding;
-  const height = container.clientHeight - verticalPadding;
+  const px = (value: string | undefined) => Number.parseFloat(value ?? "0") || 0;
+  // Use the fractional layout box: clientWidth rounds to whole pixels and can round a partial
+  // pixel up, which would admit a column that does not fit. Grid sizes are always floored, so a
+  // PTY never wraps at a column the user cannot see.
+  const box = container.getBoundingClientRect();
+  const width =
+    box.width -
+    px(style?.borderLeftWidth) -
+    px(style?.borderRightWidth) -
+    px(style?.paddingLeft) -
+    px(style?.paddingRight) -
+    scrollbarWidth(terminal);
+  const height =
+    box.height -
+    px(style?.borderTopWidth) -
+    px(style?.borderBottomWidth) -
+    px(style?.paddingTop) -
+    px(style?.paddingBottom);
   if (
     !cell ||
     !Number.isFinite(cell.width) ||
