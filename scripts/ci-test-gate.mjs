@@ -197,6 +197,7 @@ export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/reattach-lifetime.test.mjs", minimumTests: 2 },
   { project: "cli", file: "apps/cli/tests/worker-pipe-burst.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/three-client-acks.test.mjs", minimumTests: 1 },
+  { project: "cli", file: "apps/cli/tests/client-lifetime.test.mjs", minimumTests: 3 },
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   {
