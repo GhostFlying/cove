@@ -69,8 +69,8 @@ export class TerminalControl {
     return this.grant?.atSeq;
   }
 
-  // True while this subscription's accepted grant is still the newest control fact it has seen,
-  // whether or not the grant fact has been applied yet. Unlike ready(), this does not require the
+  // True while this subscription's accepted grant is not contested by any control fact it has
+  // seen, whether or not the grant fact has arrived or been applied yet. Unlike ready(), this does not require the
   // grant to be usable for input; it only says that asking for focus again would add nothing.
   holds(ref: SubscriptionRef, viewGeneration: number): boolean {
     const grant = this.grant;
@@ -81,7 +81,12 @@ export class TerminalControl {
       !!grant &&
       sameSubscriptionRef(grant.ref, ref) &&
       grant.viewGeneration === viewGeneration &&
-      (!observed || (observed.epoch === grant.epoch && heldBy(ref, observed)))
+      // A grant accepted from its focus result may be newer than the last observed control fact
+      // (e.g. reacquiring after another holder); that older fact does not contest it. An equal
+      // epoch must name this holder, and observe() drops the grant on any newer epoch.
+      (!observed ||
+        observed.epoch < grant.epoch ||
+        (observed.epoch === grant.epoch && heldBy(ref, observed)))
     );
   }
 
