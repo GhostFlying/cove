@@ -375,9 +375,12 @@ describe("P2-B1 independent compiled public client composition", () => {
           ["stop", "set-control", "input"].includes(command.type),
         ),
       ).toBe(false);
-      expect(harness.service.snapshot(initial.subscription.subscriptionId).route.phase).toBe(
-        "retired",
-      );
+      // The retired route is released once its unsubscribe settled; no record is retained.
+      expect(harness.service.snapshot(initial.subscription.subscriptionId)).toMatchObject({
+        routes: 0,
+        active: 0,
+        route: undefined,
+      });
     });
   });
 });

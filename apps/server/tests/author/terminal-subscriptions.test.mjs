@@ -350,28 +350,75 @@ describe("private terminal subscription delivery", () => {
     }
   });
 
-  it("refuses lifetime tombstone cap plus one and detaches without stopping the run", async () => {
-    const f = fixture({}, { identityLimit: 1 });
+  // Contract change: retired routes used to stay until the connection closed, so the
+  // identityLimit+1th attach on one connection was refused with BUSY forever. A route is now
+  // released once its queue drained and its unsubscribe settled; the retired ref is still
+  // refused without a worker command.
+  it("admits far more attaches than identityLimit and still refuses retired refs", async () => {
+    const f = fixture({}, { identityLimit: 2 });
     const a = f.connect();
     try {
-      const ref = (await f.attach(a)).subscription;
-      const detach = a.service.handle(command("detach", ref, "detach"));
-      const sent = f.latest();
-      expect(sent.type).toBe("unsubscribe");
-      f.session.receive(f.reply(sent));
-      expect((await detach).type).toBe("detach-result");
+      const refs = [];
+      for (let index = 0; index < 20; index++) {
+        const ref = (await f.attach(a, 0, `attach-${index}`)).subscription;
+        refs.push(ref);
+        const detach = a.service.handle(command("detach", ref, `detach-${index}`));
+        const sent = f.latest();
+        expect(sent.type).toBe("unsubscribe");
+        f.session.receive(f.reply(sent));
+        expect((await detach).type).toBe("detach-result");
+        await turns();
+        expect(a.service.snapshot()).toMatchObject({ routes: 0, active: 0, pending: 0 });
+      }
+      expect(new Set(refs.map((ref) => ref.subscriptionId)).size).toBe(refs.length);
       const count = f.pipeWrites.length;
-      expect((await a.service.handle(a.attach("next", 0))).error.kind).toBe("BUSY");
-      expect(
-        (await a.service.handle(command("recover", ref, "reuse", { reason: "gap" }))).type,
-      ).toBe("error");
-      f.session.receive(f.output(ref, 1));
+      for (const ref of [refs[0], refs.at(-1)])
+        expect(
+          (
+            await a.service.handle(
+              command("recover", ref, `reuse-${ref.subscriptionId}`, { reason: "gap" }),
+            )
+          ).error.kind,
+        ).toBe("STALE_CONNECTION");
+      f.session.receive(f.output(refs.at(-1), 1));
       expect(a.writes.map((item) => decode(item.data).metadata.type)).not.toContain("run-event");
       expect(f.pipeWrites).toHaveLength(count);
       expect(f.runtime.registry.get(run).capacityOwned).toBe(true);
     } finally {
       await f.dispose();
     }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("reports a released route's first cause within the recent retired window", async () => {
+    const f = fixture({ recoveryDeadlineMs: 20 }, { identityLimit: 2 });
+    const a = f.connect();
+    try {
+      const refs = [];
+      for (let index = 0; index < 3; index++) {
+        const ref = (await f.attach(a, null, `attach-${index}`)).subscription;
+        refs.push(ref);
+        f.clock(20 * (index + 1));
+        a.service.tick();
+        const sent = f.latest();
+        expect(sent).toMatchObject({ type: "unsubscribe", subscription: ref });
+        f.session.receive(f.reply(sent));
+        await turns();
+        expect(a.service.snapshot()).toMatchObject({ routes: 0, active: 0 });
+      }
+      expect(a.service.snapshot().retiredFailures).toBe(2);
+      const count = f.pipeWrites.length;
+      const reply = async (ref, id) =>
+        (await a.service.handle(command("recover", ref, id, { reason: "expired" }))).error.kind;
+      // The window holds identityLimit failures; the oldest falls back to a plain refusal.
+      expect(await reply(refs[0], "late-0")).toBe("STALE_CONNECTION");
+      expect(await reply(refs[1], "late-1")).toBe("RECOVERY_EXPIRED");
+      expect(await reply(refs[2], "late-2")).toBe("RECOVERY_EXPIRED");
+      expect(f.pipeWrites).toHaveLength(count);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
   });
 
   it("requires current baseline progress and final handed-off end before ACK N installation", async () => {

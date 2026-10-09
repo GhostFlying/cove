@@ -193,25 +193,30 @@ describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
     },
   );
 
-  test("F06-03 retired subscription tombstone refuses cap+1 without evicting proof", async () => {
+  // Contract change: a retired subscription no longer holds an identity slot for the
+  // connection's lifetime (identityLimit+1 attaches used to be refused with BUSY forever).
+  // Its route is released once its queue drained and its unsubscribe settled; commands on
+  // it are still refused without a worker command because subscription IDs are minted by
+  // the server and never reused.
+  test("F06-03 retired subscription is refused without holding a lifetime identity slot", async () => {
     await usingRig({ identityLimit: 1 }, async (rig) => {
       const { subscription } = await attach(rig);
       const detached = rig.service.handle(rig.routeCommand("detach", subscription));
       rig.accept(rig.lastCommand("unsubscribe"));
       expect((await detached).type).toBe("detach-result");
       await turns();
+      expect(rig.service.snapshot()).toMatchObject({ routes: 0, active: 0 });
       const before = rig.commands.length;
       const retained = rig.account.snapshot().total;
-      expect((await rig.service.handle(rig.attachCommand({ viewId: "new-view" }))).error.kind).toBe(
-        "BUSY",
-      );
       expect(
         (await rig.service.handle(rig.routeCommand("recover", subscription, { reason: "expired" })))
-          .type,
-      ).toBe("error");
+          .error.kind,
+      ).toBe("STALE_CONNECTION");
       expect(rig.commands.length).toBe(before);
       expect(rig.account.snapshot().total).toBe(retained);
-      expect(rig.service.snapshot()).toMatchObject({ routes: 1, active: 0 });
+      const next = await attach(rig, { viewId: "new-view" });
+      expect(next.subscription.subscriptionId).not.toBe(subscription.subscriptionId);
+      expect(rig.service.snapshot()).toMatchObject({ routes: 1, active: 1 });
     });
   });
 
