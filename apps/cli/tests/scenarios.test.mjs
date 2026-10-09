@@ -508,6 +508,94 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(after.local).toEqual(B.recording.screen());
   });
 
+  test("S7 the server evicts a client that stops consuming while a healthy client keeps working", async () => {
+    const run = await createRun(PROBE);
+    const slow = await connectTapped();
+    const healthy = await connectTapped();
+    const S = await attach(slow.client, run, "s7-slow", createScreenView());
+    const H = await attach(healthy.client, run, "s7-healthy", createRecordingView());
+    await waitFor("the probe on both views", () =>
+      [S, H].every(({ recording }) => recording.text().includes("probe-ready")),
+    );
+    await focusAndType(H.controller, "before-flood\r");
+    await waitFor("the first echo on the slow view", () =>
+      S.recording.text().includes("echo:before-flood"),
+    );
+
+    // The slow client stops consuming: its frames are held at the transport port, so it
+    // neither parses nor acknowledges, and the server's backlog for it grows past the limit.
+    const evicted = S.controller.snapshot().subscription;
+    slow.tap.pause();
+    await typeText(H.controller, "flood 20000\r");
+    await waitFor(
+      "the flood on the healthy view",
+      () => H.recording.text().includes("flood-20000-done"),
+      30_000,
+    );
+    // Once evicted, the server refuses the old subscription's acknowledgements.
+    await waitFor("the server to evict the slow subscription", async () => {
+      const ack = await slow.tap.inject({
+        type: "applied-ack",
+        run: evicted.run,
+        subscription: evicted,
+        appliedSeq: S.controller.snapshot().appliedSeq,
+      });
+      return ack.metadata.type === "error" && ack.metadata.error.kind === "RESYNC_REQUIRED";
+    });
+
+    // Meanwhile the healthy client still types, refocuses and receives output.
+    await typeText(H.controller, "during-eviction\r");
+    await waitFor("input during the eviction", () =>
+      H.recording.text().includes("echo:during-eviction"),
+    );
+    await focusAndType(H.controller, "refocused\r");
+    await waitFor("input after refocusing", () => H.recording.text().includes("echo:refocused"));
+    // terminal.get reads the server's periodically refreshed run record, so wait for it.
+    const holder = H.controller.snapshot().subscription;
+    await waitFor("the run record to name the healthy holder", async () => {
+      const record = await coveJson("terminal", "get", run.runId);
+      return record.controlHolder?.subscriptionId === holder.subscriptionId;
+    });
+
+    // When the slow client catches up, its stale subscription is refused and it attaches
+    // again from a new baseline.
+    await slow.tap.resume();
+    await waitFor(
+      "the slow client to see the eviction",
+      () => S.controller.snapshot().phase === "unavailable",
+      20_000,
+    );
+    // The client's own command on the evicted subscription was refused with RESYNC_REQUIRED.
+    const evictedRequests = new Set(
+      slow.tap.outbound
+        .filter((frame) => frame.metadata.subscription?.subscriptionId === evicted.subscriptionId)
+        .map((frame) => frame.metadata.requestId),
+    );
+    expect(
+      slow.tap.inbound.some(
+        (frame) =>
+          evictedRequests.has(frame.metadata.requestId) &&
+          frame.metadata.type === "error" &&
+          frame.metadata.error.kind === "RESYNC_REQUIRED",
+      ),
+    ).toBe(true);
+    // The client cannot release the evicted subscription, so it retires its connection;
+    // it reconnects and attaches from a new baseline.
+    await waitFor(
+      "the slow client to drop its connection",
+      () => slow.client.snapshot().status !== "connected",
+    );
+    await reattach(slow, S);
+    expect(S.controller.snapshot().subscription.subscriptionId).not.toBe(evicted.subscriptionId);
+    expect(S.recording.events.filter((event) => event.type === "baseline-start")).toHaveLength(2);
+    await waitFor("the new baseline", () => S.recording.screen().rows.includes("echo:refocused"));
+    await typeText(H.controller, "after-eviction\r");
+    await waitFor("output after the new baseline", () =>
+      S.recording.screen().rows.includes("echo:after-eviction"),
+    );
+    await expectScreenMatchesServer(slow.client, run, S.controller, S.recording);
+  });
+
   test("S8 a wrong protocol version is refused on both channels without touching a live PTY", async () => {
     const run = await createRun(ECHO_LOOP);
     const { record } = fixture;
