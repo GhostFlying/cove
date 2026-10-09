@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- M0 test harness; not the phase-2 Web App or the Electron renderer. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Cove M0 harness</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #111;
+        color: #ddd;
+        font:
+          13px/1.4 system-ui,
+          sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        padding: 6px 10px;
+        border-bottom: 1px solid #333;
+      }
+      header .spacer {
+        flex: 1;
+      }
+      #error {
+        padding: 6px 10px;
+        background: #5a1d1d;
+        color: #fdd;
+        white-space: pre-wrap;
+      }
+      #error:empty {
+        display: none;
+      }
+      main {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+      }
+      nav {
+        width: 220px;
+        overflow-y: auto;
+        border-right: 1px solid #333;
+      }
+      nav ul {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+      nav li button {
+        display: block;
+        width: 100%;
+        padding: 6px 10px;
+        border: 0;
+        background: none;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      nav li button[aria-current="true"] {
+        background: #2a2f3a;
+      }
+      nav .status {
+        color: #999;
+        font-size: 12px;
+      }
+      section {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      #terminal-status {
+        padding: 4px 10px;
+        color: #aaa;
+        border-bottom: 1px solid #222;
+      }
+      #terminal {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        padding: 4px;
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Cove M0 harness</strong>
+      <span id="connection">starting</span>
+      <button id="reconnect" type="button" hidden>Reconnect</button>
+      <span class="spacer"></span>
+      <button id="new-terminal" type="button" disabled>New terminal</button>
+    </header>
+    <div id="error" role="alert"></div>
+    <main>
+      <nav><ul id="runs"></ul></nav>
+      <section>
+        <div id="terminal-status">No terminal open</div>
+        <div id="terminal"></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

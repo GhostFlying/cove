@@ -1,0 +1,20 @@
+{
+  "name": "@cove/m0-harness",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && pnpm build:browser",
+    "build:browser": "vite build",
+    "clean": "tsc -b --clean && pnpm clean:browser",
+    "clean:browser": "node --input-type=module -e \"import {rm} from 'node:fs/promises'; await rm('dist/page',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@cove/client": "workspace:*",
+    "@cove/protocol": "workspace:*",
+    "@cove/terminal-web": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "8.3.1"
+  }
+}
