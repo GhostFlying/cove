@@ -274,6 +274,21 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+// One server path must map to one lock even when spelled differently on a case-insensitive
+// filesystem, so key the lock by the on-disk spelling (native realpath) of the deepest
+// existing directory. Components that do not exist yet have no on-disk spelling and are
+// lowercased; on a case-sensitive filesystem that only serializes starts that differ by case.
+async function lockKey(path: string): Promise<string> {
+  const runDirectory = dirname(path);
+  const file = basename(path).toLowerCase();
+  try {
+    return join(await realpath(runDirectory), file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return join(await realpath(dirname(runDirectory)), basename(runDirectory).toLowerCase(), file);
+  }
+}
+
 // The rendezvous record carries no pid, so a record cannot be traced back to the process
 // that published it. Instead `server start` holds an exclusive lock from its existence check until readiness is announced: while the lock is held no other
 // CLI start can spawn a server for this path, so a record that appears after our check was
@@ -286,7 +301,12 @@ async function exists(path: string): Promise<boolean> {
 async function acquireStartLock(path: string): Promise<() => Promise<void>> {
   const locks = join(homedir(), ".cove", "m0", "locks");
   await mkdir(locks, { recursive: true, mode: 0o700 });
-  const lock = join(locks, `${createHash("sha256").update(path).digest("hex")}.lock`);
+  const lock = join(
+    locks,
+    `${createHash("sha256")
+      .update(await lockKey(path))
+      .digest("hex")}.lock`,
+  );
   let handle;
   try {
     handle = await open(lock, "wx", 0o600);
