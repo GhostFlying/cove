@@ -462,12 +462,11 @@ test("S4 the production view answers no terminal query and passes real keys and 
     expect(await rendererOf(page)).toBe("dom");
     await page.waitForSelector("#terminal .xterm-rows");
     try {
-      // A click takes control at the page's grid; a size change is recovered and retaken.
+      // A click takes control at the page's grid. The run was created by the CLI at another grid,
+      // so the size change is recovered with a fresh baseline and control is retaken; the status
+      // briefly reads controlling before that recovery refuses input, so wait until it is steady.
       await page.click("#terminal");
-      await page.waitForFunction(() => {
-        const status = document.getElementById("terminal-status");
-        return status?.dataset.phase === "ready" && status.textContent.includes("controlling");
-      });
+      await waitForSteadyControl(page);
       // The probe prints this only after switching its tty to raw mode; typed earlier, the
       // tty's ICRNL would turn Enter into a newline and the probe would never ask.
       await waitForRow(page, "query-probe-ready");
