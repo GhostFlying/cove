@@ -791,6 +791,85 @@ describe("client control authority", () => {
       expect(outcome).toMatchObject({ ok: false, error: { reason: "timeout" } });
     });
 
+    test("an older control fact before the grant's seq does not revoke it", async () => {
+      const { controller, peer } = await harness();
+      const third = { connection, viewId: "view-3", subscriptionId: "subscription-8" };
+      peer.event({ type: "control", run, seq: 1, epoch: 1, holder: other, geometry });
+      await settle();
+      controller.setInputTarget(true, true);
+      const pending = controller.requestFocus(geometry);
+      peer.result(peer.commands.at(-1).command, { epoch: 3, atSeq: 3 });
+      expect(await pending).toEqual({ ok: true, value: { epoch: 3, atSeq: 3 } });
+      // Epoch 2 at seq 2 precedes the grant (epoch 3 at seq 3), so it says nothing against it.
+      peer.event({ type: "control", run, seq: 2, epoch: 2, holder: third, geometry });
+      await settle();
+      expect(controller.snapshot().controlEpoch).toBe(3);
+      peer.event({ type: "control", run, seq: 3, epoch: 3, holder: self, geometry });
+      await settle();
+      expect(controller.snapshot()).toMatchObject({ inputReady: true, controlEpoch: 3 });
+      const sent = controller.sendInput({ source: "keyboard", bytes: encoder.encode("x") });
+      await settle();
+      const input = peer.commands.at(-1).command;
+      expect(input).toMatchObject({ type: "input", epoch: 3 });
+      peer.result(input, {
+        epoch: 3,
+        inputSeq: input.inputSeq,
+        status: "written",
+        writtenBytes: 1,
+      });
+      expect(await sent).toMatchObject({ ok: true });
+    });
+
+    test("a focus still awaiting its result survives a second resize recovery", async () => {
+      const { controller, peer } = await harness();
+      const third = { cols: 120, rows: 40 };
+      const blurs = () => peer.commands.filter(({ command }) => command.type === "blur").length;
+      controller.setInputTarget(true, true);
+      const pending = controller.requestFocus(larger);
+      const focus = peer.commands.at(-1).command;
+      peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
+      await recoverWith(peer, { epoch: 0, holder: null }, 1);
+      expect(controller.snapshot().phase).toBe("ready");
+      // Another grid change before the focus result: a second resize-context recovery.
+      peer.event({ type: "resize", run, seq: 2, geometry: third, requiresBaseline: true });
+      await settle();
+      const recover = peer.commands.findLast(({ command }) => command.type === "recover").command;
+      peer.result(recover, { mode: "baseline", atSeq: 2 });
+      peer.baseline(2, {
+        baselineId: "baseline-3",
+        grid: third,
+        control: { epoch: 0, holder: null },
+      });
+      await settle();
+      expect(peer.commands.filter(({ command }) => command.type === "recover")).toHaveLength(2);
+      // The result arrives after both baselines; its fact (seq 3) is still ahead of B = 2.
+      peer.result(focus, { epoch: 1, atSeq: 3 });
+      await settle();
+      expect(controller.snapshot().controlEpoch).toBe(1);
+      peer.event({ type: "control", run, seq: 3, epoch: 1, holder: self, geometry: third });
+      expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 3 } });
+      expect(controller.snapshot()).toMatchObject({ inputReady: true, controlEpoch: 1 });
+      expect(blurs()).toBe(0);
+      expect(focusCount(peer)).toBe(1);
+    });
+
+    test("a focus result after a baseline that rules it out settles as a failure", async () => {
+      const { controller, peer } = await harness();
+      controller.setInputTarget(true, true);
+      let outcome;
+      void controller.requestFocus(larger).then((value) => (outcome = value));
+      const focus = peer.commands.at(-1).command;
+      peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
+      // B = 2 reports epoch 0, so a grant of epoch 1 at A = 2 cannot be current.
+      await recoverWith(peer, { epoch: 0, holder: null }, 2);
+      peer.result(focus, { epoch: 1, atSeq: 2 });
+      await settle();
+      expect(outcome).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+      const snapshot = controller.snapshot();
+      expect(snapshot.controlEpoch).toBeUndefined();
+      expect(snapshot.inputReady).toBe(false);
+    });
+
     // Returns how many focus commands were sent: recovery must not have asked again.
     async function dropCarriedGrant(control) {
       const { controller, peer } = await harness();

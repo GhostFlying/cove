@@ -26,6 +26,25 @@ function heldBy(ref: SubscriptionRef, fact: ControlFact): boolean {
   );
 }
 
+// The one rule for whether control authority known as of `fact.seq` rules out this
+// subscription's grant of `epoch` at `atSeq`. The server raises the epoch on every grant and a
+// blur nulls the holder within its epoch, so authority at any seq >= atSeq has an epoch >= the
+// grant's and, at the grant's epoch, names this holder until the grant ends. Hence:
+// - a newer epoch, or the same epoch naming another holder or none, ends the grant;
+// - an older epoch is consistent only before atSeq (the grant's own fact is still ahead) and
+//   contradicts the grant at or after it.
+// Observed facts, baseline authority and late focus results all use this check, so no path
+// can revoke a grant with an older fact or install one a known later authority rules out.
+function contradicts(
+  grant: { readonly epoch: number; readonly atSeq: number },
+  ref: SubscriptionRef,
+  fact: ControlFact,
+): boolean {
+  if (fact.epoch > grant.epoch) return true;
+  if (fact.epoch === grant.epoch) return !heldBy(ref, fact);
+  return fact.seq >= grant.atSeq;
+}
+
 // A focus result is only a candidate grant until its ordered control fact is parsed.
 export class TerminalControl {
   private intent = 0;
@@ -104,11 +123,9 @@ export class TerminalControl {
       sameSubscriptionRef(grant.ref, ref) &&
       grant.viewGeneration === viewGeneration &&
       // A grant accepted from its focus result may be newer than the last observed control fact
-      // (e.g. reacquiring after another holder); that older fact does not contest it. An equal
-      // epoch must name this holder, and observe() drops the grant on any newer epoch.
-      (!observed ||
-        observed.epoch < grant.epoch ||
-        (observed.epoch === grant.epoch && heldBy(ref, observed)))
+      // (e.g. reacquiring after another holder); an older fact before the grant's seq does not
+      // contest it.
+      (!observed || !contradicts(grant, ref, observed))
     );
   }
 
@@ -133,8 +150,8 @@ export class TerminalControl {
   ): boolean {
     const carried = this.carriedIntent === intent;
     if ((this.pending !== intent && !carried) || !this.wantsFocus || this.exited) return false;
-    if (this.observed && this.observed.epoch > epoch) return false;
-    if (this.observed?.epoch === epoch && !heldBy(ref, this.observed)) return false;
+    // Includes a result that arrives after a baseline: an older epoch at B >= atSeq rules it out.
+    if (this.observed && contradicts({ epoch, atSeq }, ref, this.observed)) return false;
     if (carried) {
       // The result of a focus sent before the recovery: hold it for the baseline's verdict, or,
       // once the baseline is in, bind it to the view generation the baseline produced.
@@ -171,10 +188,11 @@ export class TerminalControl {
       return false;
     this.canonicalFacts.set(fact, canonical);
     this.observed = canonical;
-    if (this.grant && (canonical.epoch > this.grant.epoch || !heldBy(ref, canonical))) {
+    if (this.grant && contradicts(this.grant, ref, canonical)) {
       this.grant = undefined;
       this.pending = undefined;
     }
+    if (this.carried && contradicts(this.carried, ref, canonical)) this.carried = undefined;
     return true;
   }
 
@@ -218,10 +236,12 @@ export class TerminalControl {
     this.carriedIntent = undefined;
   }
 
-  // A resize-context recovery: reset like any recovery, but carry the grant or pending focus.
+  // A resize-context recovery: reset like any recovery, but carry the grant or the focus still
+  // awaiting its result. That focus may already be carried from an earlier resize recovery, so a
+  // second recovery keeps it until its result arrives or it is explicitly invalidated.
   suspendForRecovery(): void {
     const grant = this.grant;
-    const pending = this.pending;
+    const pending = this.pending ?? this.carriedIntent;
     this.resetForRecovery();
     if (!this.wantsFocus || this.exited) return;
     this.recovering = true;
@@ -266,20 +286,10 @@ export class TerminalControl {
     this.restoredGeneration = viewGeneration;
     if (!carried || !this.wantsFocus || this.exited || !sameSubscriptionRef(carried.ref, ref))
       return;
-    // An older epoch at B is acceptable only while the grant's own fact is still ahead (B < A):
-    // it is then applied from the ordered stream and checked like any grant. An older epoch at or
-    // after A contradicts the grant and drops it. The same epoch must still name this
-    // subscription, at or after A.
-    const kept =
-      (canonical.epoch < carried.epoch && atSeq < carried.atSeq) ||
-      (canonical.epoch === carried.epoch && heldBy(ref, canonical) && atSeq >= carried.atSeq);
-    const latest = this.observed!;
-    if (
-      !kept ||
-      latest.epoch > carried.epoch ||
-      (latest.epoch === carried.epoch && !heldBy(ref, latest))
-    )
-      return;
+    // Exact (epoch, this subscription) at B reinstates the grant; an older epoch at B keeps it only
+    // while its own fact is still ahead (B < A), to be applied from the ordered stream. A newer
+    // fact observed after B must not contradict it either.
+    if (contradicts(carried, ref, canonical) || contradicts(carried, ref, this.observed!)) return;
     this.grant = { ...carried, viewGeneration };
   }
 
