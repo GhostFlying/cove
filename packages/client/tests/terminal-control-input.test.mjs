@@ -1474,4 +1474,50 @@ describe("input right after a focus grant (Issue #21)", () => {
     expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
     expect(controller.snapshot().controlEpoch).toBe(1);
   });
+
+  test("reacquiring control: a key between the newer focus result and its fact keeps the grant", async () => {
+    const { controller, peer, mounted } = await harness();
+    // Another view holds epoch 2; this view's grant will be newer than that observed fact.
+    peer.event({
+      type: "control",
+      run,
+      seq: 1,
+      epoch: 2,
+      holder: { connection, viewId: "other-view", subscriptionId: "other-subscription" },
+      geometry,
+    });
+    await settle();
+    const outcomes = [];
+    controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
+    controller.setInputTarget(true, true);
+    const focus = controller.requestFocus(geometry);
+    type(controller, mounted, 1, "a");
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    peer.result(ofType(peer, "focus")[0].command, { epoch: 3, atSeq: 2 });
+    expect((await focus).ok).toBe(true);
+    type(controller, mounted, 2, "b");
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(outcomes).toHaveLength(0);
+    peer.event({ type: "control", run, seq: 2, epoch: 3, holder, geometry });
+    await settle();
+    const delivered = [];
+    for (let index = 0; index < 2; index++) {
+      const entry = ofType(peer, "input")[index];
+      expect(entry).toBeDefined();
+      expect(entry.command.epoch).toBe(3);
+      delivered.push(decoder.decode(entry.payload));
+      peer.result(entry.command, {
+        epoch: 3,
+        inputSeq: entry.command.inputSeq,
+        status: "written",
+        writtenBytes: 1,
+      });
+      await settle();
+    }
+    expect(delivered.join("")).toBe("ab");
+    expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true]);
+    expect(controller.snapshot().controlEpoch).toBe(3);
+  });
 });
