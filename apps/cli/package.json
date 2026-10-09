@@ -18,6 +18,7 @@
   },
   "scripts": {
     "build": "tsc -b",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project cli",
     "clean": "tsc -b --clean"
   },
   "dependencies": {
