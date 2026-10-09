@@ -6,6 +6,7 @@ import { MAX_READ_BYTES } from "@cove/protocol/pipe";
 import { WorkerPipeSession } from "./worker-pipe-session.js";
 import type { LocalRuntime } from "./local-runtime.js";
 import type { LocalTimer } from "./local-runtime-clock.js";
+import type { ByteReservation } from "./runtime-retained-bytes.js";
 
 export type WorkerSpawn = (bin: string) => ChildProcessWithoutNullStreams;
 const installedWorkerBin = resolve(
@@ -160,9 +161,12 @@ export class WorkerProcess {
   //
   // ingressBytes counts the backing stores actually kept alive, not the views into them: a
   // small remainder view can pin a much larger read buffer, so every retained remainder is
-  // first copied into right-sized storage. The count only drops when an entry is released,
-  // because a partially consumed entry still pins its whole copy.
-  private readonly ingress: Uint8Array[] = [];
+  // first copied into right-sized storage. Each copy is also reserved in the shared runtime
+  // byte account before it is made, like every other retained server buffer, and that lease
+  // is held until the copy is fully consumed or the backlog is dropped. The count and the
+  // lease only drop when an entry is released, because a partially consumed entry still
+  // pins its whole copy. Failing either bound is contact loss, never a silent drop.
+  private readonly ingress: { bytes: Uint8Array; lease: ByteReservation }[] = [];
   private ingressBytes = 0;
   private ingressScheduled = false;
 
@@ -196,14 +200,18 @@ export class WorkerProcess {
   }
 
   private queueIngress(child: ChildProcessWithoutNullStreams, bytes: Uint8Array): void {
-    // Check the cap before copying so an oversized remainder is never duplicated.
-    if (this.ingressBytes + bytes.byteLength > this.runtime.composition.budgets.pipeQueuedBytes) {
+    // Check both bounds before copying so an unaffordable remainder is never duplicated.
+    const lease =
+      this.ingressBytes + bytes.byteLength > this.runtime.composition.budgets.pipeQueuedBytes
+        ? null
+        : this.runtime.composition.bytes.reserve(bytes.byteLength);
+    if (!lease) {
       this.dropIngress(child);
       this.session.loseContact();
       return;
     }
     const owned = new Uint8Array(bytes);
-    this.ingress.push(owned);
+    this.ingress.push({ bytes: owned, lease });
     this.ingressBytes += owned.buffer.byteLength;
     child.stdout.pause();
     if (this.ingressScheduled) return;
@@ -214,21 +222,23 @@ export class WorkerProcess {
   // One budgeted read per turn; resume stdout only after the backlog is fully consumed.
   private pumpIngress(child: ChildProcessWithoutNullStreams): void {
     this.ingressScheduled = false;
-    const head = this.ingress[0];
-    if (!head || this.session.closed) {
+    const entry = this.ingress[0];
+    if (!entry || this.session.closed) {
       this.dropIngress(child);
       return;
     }
+    const head = entry.bytes;
     const consumed = this.receiveSlice(head);
     if (consumed === undefined) {
       this.dropIngress(child);
       return;
     }
     if (consumed < head.byteLength) {
-      this.ingress[0] = head.subarray(consumed);
+      entry.bytes = head.subarray(consumed);
     } else {
       this.ingress.shift();
       this.ingressBytes -= head.buffer.byteLength;
+      entry.lease.release();
     }
     if (this.ingress.length !== 0) {
       this.ingressScheduled = true;
@@ -241,7 +251,7 @@ export class WorkerProcess {
   // After contact loss nothing more is decoded; keep stdout flowing so the worker is never
   // blocked on a full pipe while it is being shut down.
   private dropIngress(child: ChildProcessWithoutNullStreams): void {
-    this.ingress.length = 0;
+    for (const entry of this.ingress.splice(0)) entry.lease.release();
     this.ingressBytes = 0;
     child.stdout.resume();
   }
