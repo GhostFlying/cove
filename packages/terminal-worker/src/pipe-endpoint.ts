@@ -563,8 +563,25 @@ class WorkerPipeCore {
     return true;
   }
 
+  // A BUSY reply normally takes the slot route control uses, one at a time. An ordinary
+  // command refused only for reply bytes (its output lane is backed up) is one of the
+  // runtime's pendingWorkerCommands, though: the runtime may legally have that many ordinary
+  // commands outstanding while a route command or an earlier BUSY is unsettled. So its
+  // rejection may also be held within the ordinary window, counted with the executing ones.
+  #ordinaryRejectionFits(command: PipeCommand): boolean {
+    if (this.#role(command) !== "ordinary") return false;
+    let count = 0;
+    for (const record of this.#pending.values())
+      if (
+        (record.role === "ordinary" && record.phase !== "parked") ||
+        (record.role === "rejection" && this.#role(record.command) === "ordinary")
+      )
+        count++;
+    return count < this.#hello!.effectiveBudgets.pendingWorkerCommands;
+  }
+
   #rejectBusy(command: PipeCommand): boolean {
-    if (!this.#slotAvailable("route")) {
+    if (!this.#slotAvailable("route") && !this.#ordinaryRejectionFits(command)) {
       void this.shutdown("rejection-slot-exhausted");
       return false;
     }

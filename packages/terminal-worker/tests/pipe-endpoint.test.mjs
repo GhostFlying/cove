@@ -1136,6 +1136,64 @@ test("ordinary response reservations stop before spending the control reserve", 
   await h.pipe.shutdown("test-complete");
 });
 
+test("ordinary BUSY replies for reply bytes fit the ordinary window beside unsettled route control", async () => {
+  const budgets = {
+    ...M0_LIMITS,
+    pipeQueuedBytes: 69_648,
+    reservedControlBytes: 8_192,
+    pendingWorkerCommands: 32,
+  };
+  const { h, held } = await routeHarness(
+    (command) =>
+      command.type === "preview-refresh"
+        ? new Promise(() => {})
+        : Promise.resolve({
+            type: "error",
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+            error: domainError("CAPABILITY_UNAVAILABLE"),
+          }),
+    budgets,
+  );
+  // The ack's reply stays unsettled, holding the slot a BUSY reply would otherwise take.
+  h.input.write(encode(routeControl(0)));
+  await tick();
+  // 13 previews use up the ordinary reply bytes; the next three are refused for bytes alone.
+  // All 17 commands are within the runtime's windows, so none of this is a violation.
+  const previews = Array.from({ length: 16 }, (_, index) => ({
+    type: "preview-refresh",
+    worker,
+    run,
+    requestId: `preview-${index}`,
+  }));
+  h.input.write(Buffer.concat(previews.map((command) => encode(command))));
+  await tick();
+  // The ack's reply and the three BUSY replies are handed to the Writable, all unsettled.
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    outstandingRequests: 17,
+    responseItems: 4,
+  });
+  expect(h.calls.filter(({ command }) => command.type === "preview-refresh")).toHaveLength(13);
+  // The rejections settle like any reply, and route control then runs again.
+  for (let turn = 0; turn < 8 && held.callbacks.length; turn++) {
+    while (held.callbacks.length) held.callbacks.shift()();
+    await tick();
+  }
+  const busy = h
+    .frames()
+    .filter((frame) => frame.error?.kind === "BUSY")
+    .map((frame) => frame.requestId);
+  expect(busy).toEqual(["preview-13", "preview-14", "preview-15"]);
+  h.input.write(encode(routeControl(1)));
+  await tick();
+  expect(h.calls.at(-1).command.requestId).toBe("route-1");
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 14 });
+  await h.pipe.shutdown("test-complete");
+});
+
 test("duplicate outstanding ID rejects second command without releasing first", async () => {
   let settle;
   const pending = new Promise((resolve) => {
