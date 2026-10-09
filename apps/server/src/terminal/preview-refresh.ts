@@ -28,6 +28,8 @@ type Job = {
   collector?: PreviewCollector;
   outcome?: PreviewOutcome;
   retired: boolean;
+  // Transfer identities this job claimed; released when the job retires.
+  claimed: string[];
 };
 
 export class PreviewRefresh {
@@ -35,6 +37,10 @@ export class PreviewRefresh {
   readonly policy: Readonly<PreviewPolicy>;
   private readonly jobs = new Map<string, Job>();
   private readonly schedule = new Map<string, Schedule>();
+  // Worker transfer identities of in-flight refresh jobs only. The pipe is ordered and a
+  // collector accepts events only while its job is current, so a transfer cannot outlive
+  // its job; keeping settled identities would cap lifetime refreshes and permanently
+  // stale every preview. identityLimit bounds concurrent claims, never the lifetime total.
   private readonly transferIds = new Map<string, ByteReservation>();
   private readonly listener: { dispose(): void };
   private readonly arena: ByteReservation;
@@ -142,16 +148,22 @@ export class PreviewRefresh {
     job.retired = true;
     job.collector?.dispose();
     if (this.jobs.get(job.run.runId) === job) this.jobs.delete(job.run.runId);
+    for (const key of job.claimed.splice(0)) {
+      this.transferIds.get(key)?.release();
+      this.transferIds.delete(key);
+    }
     job.lease.release();
     if (this.disposed && !this.jobs.size) this.arena.release();
   }
   private claimId(job: Job, previewId: string): boolean {
+    if (job.retired) return false;
     const key = JSON.stringify([job.run, job.worker, previewId]);
     if (this.transferIds.has(key) || this.transferIds.size >= this.policy.identityLimit)
       return false;
     const lease = this.runtime.composition.bytes.reserve(2048);
     if (!lease) return false;
     this.transferIds.set(key, lease);
+    job.claimed.push(key);
     return true;
   }
 
@@ -160,7 +172,8 @@ export class PreviewRefresh {
       this.disposed ||
       this.jobs.has(run.runId) ||
       this.jobs.size >= this.runtime.composition.budgets.previewRefreshes ||
-      this.sequence >= this.policy.identityLimit
+      // The prefix counter only has to stay unique, not bounded: see transferIds.
+      this.sequence === Number.MAX_SAFE_INTEGER
     )
       return null;
     const record = this.runtime.registry.get(run);
@@ -185,6 +198,7 @@ export class PreviewRefresh {
       lease,
       waiters: new Set(),
       retired: false,
+      claimed: [],
     };
     this.jobs.set(run.runId, job);
     // Starting on a microtask gives the first caller its waiter before a reentrant pipe reply.
