@@ -555,7 +555,7 @@ export const requiredSuites = [
   {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
-    minimumTests: 12,
+    minimumTests: 13,
   },
   {
     project: "terminal-worker",

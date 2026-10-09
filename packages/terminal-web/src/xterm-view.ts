@@ -365,6 +365,7 @@ export function createXtermTerminalView(
     let terminal: Terminal | undefined;
     let tracker: BrowserInputTracker | undefined;
     let origin: InputOriginAttachment | undefined;
+    let built: Backend;
     try {
       terminal = new Terminal({
         ...terminalOptions(targetGeometry),
@@ -397,7 +398,7 @@ export function createXtermTerminalView(
       // Load the renderer last: it cannot fail construction, and a construction failure above
       // must not leave a GPU context behind.
       renderers.attach(terminal);
-      return { terminal, origin, tracker, incarnation: targetIncarnation };
+      built = { terminal, origin, tracker, incarnation: targetIncarnation };
     } catch (error) {
       const primary = asDomainError(error);
       const cleanup = cleanupAll([
@@ -407,6 +408,23 @@ export function createXtermTerminalView(
       ]);
       throw combineErrors(primary, cleanup, "Terminal construction and cleanup failed");
     }
+    // Attaching the renderer notifies renderer-change listeners synchronously, and a listener may
+    // dispose or reinitialize the view. Either way this xterm no longer belongs to the view:
+    // retire it here rather than install it and revive a disposed view or replace a successor.
+    if (state === "disposed" || targetIncarnation !== incarnation) {
+      const cleanup = cleanupAll([
+        () => built.tracker.dispose(),
+        () => built.origin.dispose(),
+        () => renderers.detach(built.terminal),
+        () => built.terminal.dispose(),
+      ]);
+      throw combineErrors(
+        domainError("RESYNC_REQUIRED"),
+        cleanup,
+        "Superseded terminal construction cleanup failed",
+      );
+    }
+    return built;
   };
 
   const failAndRetire = (error: unknown, targetIncarnation = incarnation): never => {
@@ -428,11 +446,14 @@ export function createXtermTerminalView(
       publishFailure(failure, true);
       throw combineErrors(failure, cleanup, "Terminal replacement cleanup failed");
     }
+    // Retire only this construction's incarnation on failure; a listener called during
+    // construction may already have built a successor that must survive.
+    const target = incarnation + 1;
     try {
       backend = constructBackend(geometry, appearance);
       pristine = true;
     } catch (error) {
-      failAndRetire(error);
+      failAndRetire(error, target);
     }
   };
 
@@ -473,10 +494,12 @@ export function createXtermTerminalView(
       effectivelyFocused = false;
       focusSeq = 0;
       failurePublishedFor = -1;
+      // As in replaceBackend, a failure retires only this construction's incarnation.
+      const target = incarnation + 1;
       try {
         backend = constructBackend(geometry, appearance);
       } catch (error) {
-        failAndRetire(error);
+        failAndRetire(error, target);
       }
       pristine = true;
       state = "initialized";
