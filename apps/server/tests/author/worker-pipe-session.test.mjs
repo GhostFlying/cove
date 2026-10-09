@@ -337,6 +337,53 @@ describe("bounded worker pipe session", () => {
     f.session.transportReleased();
   });
 
+  // Regression: routes stayed (inactive) after their unsubscribe until the pipe closed, so
+  // the worker refused every subscribe with BUSY after maxRuns × subscriptionsPerConnection
+  // lifetime subscriptions (2048 by default).
+  it("releases a route when its unsubscribe settles and keeps fencing its late events", async () => {
+    const f = fixture();
+    const count = M0_LIMITS.maxRuns * M0_LIMITS.subscriptionsPerConnection + 8;
+    f.start();
+    const delivered = [];
+    f.session.onEvent((event) => delivered.push(event.subscription.subscriptionId));
+    const output = (ref, seq) =>
+      frame(
+        {
+          type: "terminal-event",
+          worker,
+          run,
+          subscription: ref,
+          terminal: { type: "output", run, seq },
+        },
+        new Uint8Array([65]),
+      );
+    for (let index = 0; index < count; index++) {
+      const ref = { ...subscription, subscriptionId: `subscription-${index}` };
+      const subscribe = f.command("subscribe", `subscribe-${index}`, {
+        subscription: ref,
+        atSeq: 0,
+      });
+      const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+      f.session.receive(f.reply(subscribe, { recoveryMode: "baseline", atSeq: 0 }));
+      expect((await opened).outcome).toBe("accepted");
+      f.session.receive(output(ref, 1));
+      const unsubscribe = f.command("unsubscribe", `unsubscribe-${index}`, { subscription: ref });
+      const closed = f.session.request(unsubscribe);
+      expect(f.session.snapshot().routes).toBe(1);
+      // An outcome other than accepted still settles the route: it stays fenced either way.
+      f.session.receive(
+        index % 2 ? f.reply(unsubscribe) : f.reply(unsubscribe, { outcome: "unknown" }),
+      );
+      await closed;
+      expect(f.session.snapshot()).toMatchObject({ routes: 0, pending: 0, identities: 0 });
+      f.session.receive(output(ref, 2));
+    }
+    expect(delivered).toEqual(Array.from({ length: count }, (_, index) => `subscription-${index}`));
+    expect(f.lost()).toBe(0);
+    f.session.loseContact();
+    f.session.transportReleased();
+  });
+
   it("makes monotonic deadline loss unknown and ignores late disposed result", async () => {
     const f = fixture();
     f.start();
