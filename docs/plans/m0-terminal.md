@@ -1,5 +1,7 @@
 # M0 terminal-engine / terminal-worker plan
 
+> **2026-10-09 已被取代：** M0 验收与剩余工作以 [milestones/m0.md](../milestones/m0.md) 的 S1–S8 为准；本文的 DAG、A0–A9 清单、跨 build 兼容和 100 PTY 门槛仅作历史记录。
+
 > 2026-09-26 用户决策更新：首发采用 [terminal-architecture.md §3.2.1](../terminal-architecture.md#321-首发恢复精度与验收2026-09-26-用户已确认) 的实用恢复 profile。保存 SGR/charset、retained off-grid/混合物理行完整等价改为保留证据的非阻塞诊断；普通画面/输入/预算内 normal+alternate、解析/顺序/有界性仍必需。暂停引擎安装 API 和逆向 reflow。T1 确定性验证后才释放 P1b；Codex/TraeX/Claude Code 小规模真实工作流在 H1/C3 的真实 PTY+浏览器链路验证，原生 mobile 和 100 个真实 agent 的容量资格仍属后续阶段。本文原有完整等价措辞按此明确更新解释，旧失败不改记为通过。
 
 Status: M0 entry approved by the user on 2026-09-26. Dispatch follows the aggregate DAG; this plan is not implementation evidence.

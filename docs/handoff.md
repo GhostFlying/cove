@@ -16,6 +16,9 @@ before resuming; history lives in Git, Issues and PRs (the long pre-takeover han
 ## Main
 
 - `origin/main` = `3d7349a` (PR #66 local entry merged 2026-10-09).
+  PR #66 qualified by macOS/Ubuntu CI (run 37880784592), the earlier full independent
+  review on `5c7ba9b`, and a TraeX delta review of the two test-expectation fixes.
+  Protocol version 2, profile `pragmatic-logical-grid-v1`, encoding `vt-checkpoint-tail-v1`.
 - Server runs as `cove-server` (`apps/server/dist/entry/main.js`) with HTTP RPC
   (`server.status`, `terminal.create|get|list|stop`, `operation.get`) and the terminal WebSocket.
 - `@cove/client` and `@cove/terminal-web` exist as libraries; there is no `apps/cli` and
