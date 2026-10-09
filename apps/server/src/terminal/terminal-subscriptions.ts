@@ -77,6 +77,18 @@ type Teardown = {
 // One authenticated connection owns refs; the runtime still owns execution facts.
 export class TerminalSubscriptions {
   private readonly routes = new Map<string, Route>();
+  // Retired routes leave `routes` once their queue drained and their unsubscribe settled
+  // (see reap()), so attach admission is bounded by live and retiring routes, never by the
+  // connection's lifetime total. Commands for a dropped subscription still get refused:
+  // subscription IDs are minted here with a per-connection sequence and never reused, so
+  // an unknown ID is answered STALE_CONNECTION without remembering it. Only a route that
+  // retired with a specific first cause (RECOVERY_EXPIRED, RESYNC_REQUIRED, ...) needs
+  // memory to report that cause, and only within a bounded FIFO window of recent
+  // failures; older ones fall back to STALE_CONNECTION, which is still a refusal.
+  private readonly retiredFailures = new Map<
+    string,
+    { ref: SubscriptionRef; failure: DomainError; lease: ByteReservation | null }
+  >();
   private readonly requests = new Map<string, Request>();
   private readonly teardownQueue: Teardown[] = [];
   private teardownActive = false;
@@ -276,7 +288,7 @@ export class TerminalSubscriptions {
       if (!this.runtime.registry.get(command.run)) return this.reject(command, "RUN_NOT_FOUND");
     } else {
       route = this.find(command);
-      if (!route) return this.reject(command, "STALE_CONNECTION");
+      if (!route) return this.reject(command, this.retiredFailure(command) ?? "STALE_CONNECTION");
       if (route.phase === "retired")
         return this.reject(command, route.failure ?? "STALE_CONNECTION");
       if (
@@ -397,6 +409,50 @@ export class TerminalSubscriptions {
     route!.queue.push(request);
     void this.run(route!);
     return promise;
+  }
+
+  private retiredFailure(command: Exclude<Supported, { type: "attach" }>): DomainError | undefined {
+    const entry = this.retiredFailures.get(command.subscription.subscriptionId);
+    return entry &&
+      sameSubscriptionRef(entry.ref, command.subscription) &&
+      sameRunRef(command.run, entry.ref.run)
+      ? entry.failure
+      : undefined;
+  }
+
+  // Drops a retired route once nothing can still reference it through this connection:
+  // its queue has drained (each request holds the route directly until dequeued) and its
+  // unsubscribe settled, so the worker no longer routes events to it and no teardown
+  // still needs the record. The arbiter was already told at retirement. The 8 KiB route
+  // lease is released with it.
+  private reap(route: Route): void {
+    const id = route.ref.subscriptionId;
+    if (
+      this.closed ||
+      route.phase !== "retired" ||
+      route.running ||
+      route.queue.length ||
+      !route.teardownSent ||
+      route.teardown ||
+      this.routes.get(id) !== route
+    )
+      return;
+    this.routes.delete(id);
+    route.lease.release();
+    if (!route.failure) return;
+    // As with settledIds, only the window size evicts; without byte capacity the entry
+    // is remembered unaccounted (still bounded by identityLimit).
+    while (this.retiredFailures.size >= this.options.identityLimit) {
+      const oldest = this.retiredFailures.entries().next();
+      if (oldest.done) break;
+      this.retiredFailures.delete(oldest.value[0]);
+      oldest.value[1].lease?.release();
+    }
+    this.retiredFailures.set(id, {
+      ref: route.ref,
+      failure: route.failure,
+      lease: this.composition.bytes.reserve(1024),
+    });
   }
 
   private isDomain(command: TerminalCommand): command is ControlCommand {
@@ -536,6 +592,7 @@ export class TerminalSubscriptions {
       }
     } finally {
       route.running = false;
+      this.reap(route);
     }
   }
 
@@ -846,6 +903,7 @@ export class TerminalSubscriptions {
       this.inFlight--;
       this.flushTeardown();
       this.releaseClosedRecords();
+      this.reap(route);
     };
     try {
       void this.runtime
@@ -939,6 +997,8 @@ export class TerminalSubscriptions {
     this.externalIds.clear();
     for (const lease of this.settledIds.values()) lease?.release();
     this.settledIds.clear();
+    for (const entry of this.retiredFailures.values()) entry.lease?.release();
+    this.retiredFailures.clear();
     this.previewAttempts.clear();
     this.arena.release();
   }
@@ -946,6 +1006,7 @@ export class TerminalSubscriptions {
     const route = subscriptionId ? this.routes.get(subscriptionId) : undefined;
     return {
       routes: this.routes.size,
+      retiredFailures: this.retiredFailures.size,
       previews: this.previewAttempts.size,
       active: [...this.routes.values()].filter((entry) => entry.phase !== "retired").length,
       identities: this.externalIds.size + this.settledIds.size,
