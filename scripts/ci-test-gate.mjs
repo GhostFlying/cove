@@ -1926,7 +1926,10 @@ async function main() {
       process.execPath,
       runArgs,
       join(evidenceDir, "execution.json"),
-      8 * 60_000,
+      // The whole suite took 440 s on macOS runners before the WebGL renderer tests, and real
+      // browser suites vary by tens of seconds between runs. Keep a bound well inside the 30-minute
+      // job timeout so a hung run still fails with recorded evidence, not a cancelled job.
+      12 * 60_000,
       { fileCapture: true },
     );
     if (result.status !== 0) throw new Error(`Vitest exited ${result.status}`);
