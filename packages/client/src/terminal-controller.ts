@@ -91,6 +91,27 @@ function errorOutcome(error: ClientError | DomainError): TerminalOutcome<Termina
   return { ok: false, error };
 }
 
+// Whether a detach outcome leaves the connection's subscription state unprovable, so only
+// replacing the connection can release it. A server reply with acceptance "not-accepted"
+// (the lane creates no such error locally) proves the detach did not run: the server has
+// already retired the route (STALE_CONNECTION, or the failure that retired it such as
+// RESYNC_REQUIRED) or refused it outright (e.g. BUSY). The controller has already withdrawn
+// the route, so its frames are dropped and the subscription simply ends here; retiring the
+// healthy connection would end every other terminal on it and misreport a transport loss.
+// A route the server may still hold after a refusal such as BUSY stays until the server
+// evicts it or the connection closes; meanwhile its frames are dropped here. The detach is never resent: a definite refusal is final
+// for this subscription, and an unknown result is never repeated. Everything else — an
+// unknown or accepted result, a timeout after handoff, or a detach that never reached the
+// server — keeps the old rule and retires the connection.
+function detachLeavesStateUnproven(outcome: CommandOutcome): boolean {
+  if (outcome.ok) return false;
+  return (
+    outcome.uncertain ||
+    !("acceptance" in outcome.error) ||
+    outcome.error.acceptance !== "not-accepted"
+  );
+}
+
 function safeDispose(disposable: Disposable | undefined): void {
   try {
     disposable?.dispose();
@@ -457,7 +478,8 @@ export class RoutedTerminalController implements TerminalController {
       { type: "detach", requestId, run: this.run, subscription: ref },
       5_000,
     );
-    if (!result.ok && this.currentConnection(ref)) this.host.retireConnection();
+    if (detachLeavesStateUnproven(result) && this.currentConnection(ref))
+      this.host.retireConnection();
     return result.ok ? { ok: true, value: undefined } : { ok: false, error: result.error };
   }
 
@@ -1770,7 +1792,8 @@ export class RoutedTerminalController implements TerminalController {
     void this.host.lane
       .send({ type: "detach", requestId, run: this.run, subscription: ref }, 5_000)
       .then((outcome) => {
-        if (!outcome.ok && this.currentConnection(ref)) this.host.retireConnection();
+        if (detachLeavesStateUnproven(outcome) && this.currentConnection(ref))
+          this.host.retireConnection();
       });
   }
 
