@@ -2232,6 +2232,91 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
+  test("focus and input counters are released with each retired subscription", async () => {
+    let serial = 0;
+    let seq = 3;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        serial++;
+        reply(
+          command,
+          peer,
+          subscription(command.viewId, `subscription-${serial}`),
+          "baseline",
+          seq,
+        );
+      } else if (command.type === "focus") {
+        seq++;
+        peer.emit(2, {
+          type: "focus-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          epoch: serial,
+          atSeq: seq,
+        });
+        peer.emit(3, {
+          type: "run-event",
+          subscription: command.subscription,
+          event: {
+            type: "control",
+            run,
+            seq,
+            epoch: serial,
+            holder: {
+              connection,
+              viewId: command.subscription.viewId,
+              subscriptionId: command.subscription.subscriptionId,
+            },
+            geometry,
+          },
+        });
+      } else if (command.type === "input")
+        peer.emit(2, {
+          type: "input-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          epoch: command.epoch,
+          inputSeq: command.inputSeq,
+          status: "written",
+          writtenBytes: 1,
+        });
+      else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "cycler",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    controller.setInputTarget(true, true);
+    for (let index = 0; index < 300; index++) {
+      const attached = controller.attach();
+      baselineTo(peer, subscription("cycler", `subscription-${index + 1}`), seq);
+      expect((await attached).ok).toBe(true);
+      expect((await controller.requestFocus()).ok).toBe(true);
+      await settle();
+      const sent = await controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
+      expect(sent).toMatchObject({ ok: true, value: { writtenBytes: 1 } });
+      expect((await controller.detach()).ok).toBe(true);
+    }
+    expect(peer.commands.filter((command) => command.type === "input")).toHaveLength(300);
+    expect(client.terminalLane.focusSequences.size).toBe(0);
+    expect(client.terminalLane.inputSequences.size).toBe(0);
+    expect(client.snapshot().status).toBe("connected");
+    controller.dispose();
+    client.dispose();
+  });
+
   test("two active refs retire past the recent tombstone window without retiring the connection", async () => {
     let serial = 0;
     const { client, peer } = await harness((command, peer) => {

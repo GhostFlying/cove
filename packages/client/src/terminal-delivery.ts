@@ -127,9 +127,11 @@ export class TerminalLane {
     return `${supplied.slice(0, 128 - suffix.length)}${suffix}`;
   }
 
+  // The server checks focusSeq and inputSeq against counters it keeps per subscription, so
+  // the client keys both per subscription too and releases them when the subscription retires
+  // (a recovery keeps the same ref and its counters).
   nextFocusSeq(ref: SubscriptionRef): number | null {
-    const { connection, viewId } = ref;
-    const key = JSON.stringify([connection.connectionId, connection.generation, viewId]);
+    const key = routeKey(ref);
     const next = nextCounter(this.focusSequences.get(key) ?? 0);
     if (next !== null) this.focusSequences.set(key, next);
     return next;
@@ -264,6 +266,8 @@ export class TerminalLane {
   retire(ref: SubscriptionRef): void {
     const key = routeKey(ref);
     this.routes.delete(key);
+    this.focusSequences.delete(key);
+    this.inputSequences.delete(key);
     if (this.retiredRefs.has(key)) return;
     while (this.retiredRefs.size >= RECENT_RETIRED_REFS) {
       const oldest = this.retiredRefs.values().next();
