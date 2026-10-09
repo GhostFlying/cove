@@ -14,7 +14,7 @@ import {
 import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { createSessionClient, readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
-import { createScreenView } from "./screen-view.mjs";
+import { createScreenView, parsePreview } from "./screen-view.mjs";
 import { stopServer } from "./server-process.mjs";
 import { createTappedClient } from "./wire-tap.mjs";
 
@@ -126,11 +126,43 @@ async function typeText(controller, text, source = "keyboard") {
 
 const ECHO_LOOP = 'printf "loop-ready\\n"; while read line; do printf "echo:%s\\n" "$line"; done';
 
+// One shell probe drives S3–S7 through typed commands. Typed lines are echoed by the tty, so
+// every assertion matches the probe's reply format (`size-TAG:`, `seq-`, `burst-N-done`, ...)
+// rather than the command text itself. `flood` pipes through cat so the PTY sees large
+// writes and the flood arrives as a modest number of large output events.
+const PROBE = String.raw`printf 'probe-ready\n'
+while IFS= read -r line; do
+  set -- $line
+  case "$1" in
+    size) printf 'size-%s:%s\n' "$2" "$(stty size)" ;;
+    burst) i=$2; while [ "$i" -le "$3" ]; do printf 'seq-%05d\n' "$i"; i=$((i+1)); done; printf 'burst-%s-done\n' "$3" ;;
+    flood) awk -v n="$2" 'BEGIN { for (i = 1; i <= n; i++) printf "flood-%06d-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n", i }' | cat; printf 'flood-%s-done\n' "$2" ;;
+    alt-enter) printf '\033[?1049h\033[H\033[2Jalt-screen-%s\n' "$2" ;;
+    alt-exit) printf '\033[?1049lnormal-again-%s\n' "$2" ;;
+    *) printf 'echo:%s\n' "$line" ;;
+  esac
+done`;
+
 async function connectTapped() {
   const tapped = createTappedClient(fixture.record);
   fixture.clients.push(tapped.client);
   expect((await tapped.client.connect()).ok).toBe(true);
   return tapped;
+}
+
+// Compare the client's rendered screen with the server model's preview at the same seq. The
+// caller makes the run quiescent first, so the two converge on one seq.
+async function expectScreenMatchesServer(client, run, controller, screen) {
+  let preview;
+  await waitFor("a server preview at the client's applied seq", async () => {
+    preview = await client.getPreview(run);
+    expect(preview).toMatchObject({ ok: true, status: "transfer" });
+    return preview.atSeq === controller.snapshot().appliedSeq;
+  });
+  const local = screen.screen();
+  const server = parsePreview(preview);
+  expect({ geometry: local.geometry, rows: local.rows, cursor: local.cursor }).toEqual(server);
+  return { local, server };
 }
 
 // A process that sends DA (ESC[c) and CPR (ESC[6n) to its terminal and records every byte it
@@ -360,6 +392,57 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(holder.tap.sentInput(H.controller.snapshot().subscription.subscriptionId)).toBe(
       "done\r",
     );
+  });
+
+  test("S5 a reconnecting client recovers from a baseline plus increments with nothing lost or duplicated", async () => {
+    const run = await createRun(PROBE);
+    const a = await connectTapped();
+    const b = await connectTapped();
+    const A = await attach(a.client, run, "s5-a", createScreenView());
+    const B = await attach(b.client, run, "s5-b", createScreenView());
+    await waitFor("the probe on both views", () =>
+      [A, B].every(({ recording }) => recording.text().includes("probe-ready")),
+    );
+    await focusAndType(B.controller, "burst 1 100\r");
+    await waitFor("the first burst on A", () => A.recording.text().includes("burst-100-done"));
+
+    // A loses its connection; output continues while it is away.
+    a.tap.disconnect();
+    await waitFor("A to notice the loss", () => A.controller.snapshot().phase === "unavailable");
+    await typeText(B.controller, "burst 101 400\r");
+    await waitFor("the burst A missed", () => B.recording.text().includes("burst-400-done"));
+    const missedSeq = B.controller.snapshot().appliedSeq;
+
+    // Reconnect while more output is being produced, so the baseline lands mid-stream.
+    expect((await a.client.reconnect()).ok).toBe(true);
+    await typeText(B.controller, "burst 401 700\r");
+    expect(await A.controller.attach()).toMatchObject({ ok: true });
+    await waitFor("the overlapping burst on A", () =>
+      A.recording.text().includes("burst-700-done"),
+    );
+    // And output that certainly follows the new baseline.
+    await typeText(B.controller, "burst 701 720\r");
+    await waitFor("the last burst on both views", () =>
+      [A, B].every(({ recording }) => recording.text().includes("burst-720-done")),
+    );
+
+    // The new baseline covers what A missed, and increments followed it.
+    const baselines = A.recording.events.filter((event) => event.type === "baseline-start");
+    expect(baselines).toHaveLength(2);
+    expect(baselines[1].atSeq).toBeGreaterThanOrEqual(missedSeq);
+    const afterBaseline = A.recording.events.slice(A.recording.events.indexOf(baselines[1]));
+    expect(afterBaseline.some((event) => event.type === "output")).toBe(true);
+
+    // Every numbered line is present exactly once and in order, matching the client that
+    // never disconnected.
+    const numbered = (screen) => screen.normalLines().filter((line) => /^seq-\d{5}$/.test(line));
+    const expected = Array.from(
+      { length: 720 },
+      (_, index) => `seq-${String(index + 1).padStart(5, "0")}`,
+    );
+    expect(numbered(A.recording)).toEqual(expected);
+    expect(numbered(B.recording)).toEqual(expected);
+    await expectScreenMatchesServer(a.client, run, A.controller, A.recording);
   });
 
   test("S8 a wrong protocol version is refused on both channels without touching a live PTY", async () => {
