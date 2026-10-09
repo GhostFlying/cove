@@ -39,6 +39,9 @@ export function createTappedClient(record) {
     outbound: [],
     held: [],
     paused: false,
+    // Outbound messages withheld from the server, and the test's choice of which to withhold.
+    heldOutbound: [],
+    outboundHold: undefined,
     // Hold inbound terminal frames instead of handing them to the client.
     pause() {
       tap.paused = true;
@@ -52,6 +55,18 @@ export function createTappedClient(record) {
         if (connection === current) callbacks.onBinary(bytes);
         await new Promise((resolve) => setImmediate(resolve));
       }
+    },
+    // Withhold outbound messages carrying a frame whose metadata matches `predicate`. The
+    // client sees them as handed off, as it would for a message still in the network.
+    holdOutbound(predicate) {
+      tap.outboundHold = predicate;
+    },
+    // Send every withheld message, in order, synchronously, so messages held by several taps
+    // and released together reach the server as one burst.
+    releaseOutbound() {
+      tap.outboundHold = undefined;
+      for (const { raw, message, connection } of tap.heldOutbound.splice(0))
+        if (connection === current) raw.send(message);
     },
     disconnect() {
       if (!current) throw new Error("wire tap has no open connection");
@@ -123,8 +138,14 @@ export function createTappedClient(record) {
           connection.raw = raw;
           callbacks.onOpen({
             send(message) {
-              if (message instanceof Uint8Array)
-                tap.outbound.push(...decodeFrames(connection.outbound, message));
+              if (message instanceof Uint8Array) {
+                const frames = decodeFrames(connection.outbound, message);
+                tap.outbound.push(...frames);
+                if (tap.outboundHold && frames.some((frame) => tap.outboundHold(frame.metadata))) {
+                  tap.heldOutbound.push({ raw, message: message.slice(), connection });
+                  return "handed-off";
+                }
+              }
               return raw.send(message);
             },
             close() {
