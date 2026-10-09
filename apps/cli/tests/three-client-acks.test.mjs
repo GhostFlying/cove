@@ -18,15 +18,12 @@ import { createTappedClient } from "./wire-tap.mjs";
 // RESULT_UNKNOWN. That needs the three acks to reach the worker in one read, which in the
 // field happens when the worker is busy or descheduled under load. The test makes it happen
 // every round: the tap withholds each client's post-recovery ack, the test suspends the
-// server's worker processes, releases the three acks so the server writes them to the worker
-// pipe, and resumes the workers, which then read all three at once.
+// server's worker processes, releases the three acks, proves the server wrote all three into
+// the worker pipe (see `forwardedBarrier`), and resumes the workers, which then read all three
+// at once.
 const cli = resolve(import.meta.dirname, "../dist/main.js");
 const encoder = new TextEncoder();
 const ROUNDS = 4;
-// Time for the server to forward released acks into the suspended worker's pipe. A server
-// slower than this only spreads the acks out again: the round can then miss a broken worker,
-// but it never fails a correct one.
-const FORWARD_MS = 300;
 const GRIDS = [
   { cols: 100, rows: 30 },
   { cols: 90, rows: 25 },
@@ -96,6 +93,30 @@ async function workerPids() {
 
 // Run `step` with every worker suspended, resuming them even if it throws, so a failing round
 // never leaves a stopped process behind for cleanup to hang on.
+// Proves the server has written this connection's released ack into the worker pipe, without
+// the worker's help. The server handles one connection's frames in order, and for an ACK on an
+// idle route it runs synchronously from the frame to the pipe write: subscription admission,
+// the route queue, LocalRuntime.request and WorkerPipeSession.request all reach
+// child.stdin.write before their first await. So once the server answers a later frame on the
+// same connection, the ack ahead of it is in the pipe. The probe is an ACK for a subscription
+// that does not exist, which the server refuses itself with STALE_CONNECTION; it touches no
+// route and no worker. The acks are a few hundred bytes into a pipe the stopped worker had
+// drained, so the kernel takes them whole and the resumed worker reads them in one read.
+async function forwardedBarrier({ tap, controller }) {
+  const ref = controller.snapshot().subscription;
+  const reply = await tap.inject(
+    {
+      type: "applied-ack",
+      run: ref.run,
+      subscription: { ...ref, subscriptionId: `barrier-${ref.subscriptionId}` },
+      appliedSeq: 0,
+    },
+    undefined,
+    5_000,
+  );
+  expect(reply.metadata).toMatchObject({ type: "error", error: { kind: "STALE_CONNECTION" } });
+}
+
 async function withWorkersSuspended(step) {
   const pids = await workerPids();
   expect(pids.length).toBeGreaterThan(0);
@@ -225,7 +246,14 @@ test("three clients' simultaneous recovery acks after resizes keep the run's wor
     );
     await withWorkersSuspended(async () => {
       for (const { tap } of clients) tap.releaseOutbound();
-      await new Promise((done) => setTimeout(done, FORWARD_MS));
+      // All three acks are in the suspended worker's pipe before it may read any of them.
+      await Promise.all(clients.map(forwardedBarrier));
+      // Nothing in the pipe was answered while the worker was stopped.
+      expect(
+        clients.some(({ tap }, index) =>
+          tap.inbound.some((frame) => frame.metadata.requestId === released[index]),
+        ),
+      ).toBe(false);
     });
     const replies = () =>
       clients.map(({ tap }, index) =>
