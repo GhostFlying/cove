@@ -99,15 +99,18 @@ function assertClientBoundary(manifest: {
     manifest.dependencies["@cove/protocol"] !== "workspace:*"
   )
     throw new Error("Client runtime dependencies escaped the pure protocol boundary");
+  // The client entry plus its platform-independent web-standard transport ports.
   if (
-    Object.keys(manifest.exports).join() !== "." ||
+    Object.keys(manifest.exports).join() !== ".,./web-ports" ||
     JSON.stringify(manifest.exports["."]) !==
-      JSON.stringify({ types: "./dist/client.d.ts", import: "./dist/client.js" })
+      JSON.stringify({ types: "./dist/client.d.ts", import: "./dist/client.js" }) ||
+    JSON.stringify(manifest.exports["./web-ports"]) !==
+      JSON.stringify({ types: "./dist/web-ports.d.ts", import: "./dist/web-ports.js" })
   )
-    throw new Error("Client public export escaped the single compiled entry");
+    throw new Error("Client public export escaped the compiled entries");
 }
 
-test("client manifest exposes one ES-only entry and only the protocol runtime dependency", async () => {
+test("client manifest exposes ES-only compiled entries and only the protocol runtime dependency", async () => {
   const manifest = JSON.parse(await readFile(join(client, "package.json"), "utf8"));
   assertClientBoundary(manifest);
   expect(() =>

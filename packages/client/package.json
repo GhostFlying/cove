@@ -7,6 +7,10 @@
     ".": {
       "types": "./dist/client.d.ts",
       "import": "./dist/client.js"
+    },
+    "./web-ports": {
+      "types": "./dist/web-ports.d.ts",
+      "import": "./dist/web-ports.js"
     }
   },
   "scripts": {
