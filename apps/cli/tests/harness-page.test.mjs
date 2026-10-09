@@ -155,15 +155,25 @@ const waitForRow = (page, text) =>
     text,
   );
 
-// Whether this Chromium offers WebGL2 at all. Headless CI Chromium may draw it in software
-// (SwiftShader) or not offer it; without it the view must report the DOM fallback.
-const offersWebgl2 = (page) =>
-  page.evaluate(() => {
+// Whether this Chromium offers WebGL2 at all, and which WebGL implementation backs it. Headless
+// CI Chromium may draw it in software (SwiftShader) or not offer it; without it the view must
+// report the DOM fallback. The implementation is recorded in the test's metadata, which the JSON
+// report keeps as CI evidence.
+async function offersWebgl2(page, task) {
+  const offered = await page.evaluate(() => {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl2");
-    gl?.getExtension("WEBGL_lose_context")?.loseContext();
-    return Boolean(gl);
+    if (!gl) return { webgl2: false, implementation: null };
+    const info = gl.getExtension("WEBGL_debug_renderer_info");
+    const implementation = String(
+      gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) ?? "",
+    );
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    return { webgl2: true, implementation };
   });
+  task.meta.webgl = offered;
+  return offered.webgl2;
+}
 
 const rendererOf = (page) =>
   page.evaluate(() => document.getElementById("terminal-status")?.dataset.renderer);
@@ -318,14 +328,16 @@ async function openConnectedPage({ server, page }, renderer) {
   return secret;
 }
 
-test("the harness page creates a terminal, takes typed input and renders its output", async () => {
+test("the harness page creates a terminal, takes typed input and renders its output", async ({
+  task,
+}) => {
   await withHarness(async ({ server, page, pageErrors }) => {
     const secret = await openConnectedPage({ server, page });
     // The fragment, and the secret in it, is gone from the address bar once read.
     expect(page.url()).not.toContain(secret);
     expect(await page.evaluate(() => location.href)).not.toContain(secret);
     expect(await page.evaluate(() => location.hash)).toBe("");
-    const webgl2 = await offersWebgl2(page);
+    const webgl2 = await offersWebgl2(page, task);
 
     await openNewTerminal(page);
     // The printed URL names no renderer, so the view takes WebGL2 whenever the browser offers it.
@@ -368,10 +380,12 @@ test("renderer=dom selects the DOM renderer, which renders typed output", async 
   });
 });
 
-test("a lost WebGL context falls back to DOM, retries once, and stays on DOM after a second loss", async () => {
+test("a lost WebGL context falls back to DOM, retries once, and stays on DOM after a second loss", async ({
+  task,
+}) => {
   await withHarness(async ({ server, page, pageErrors }) => {
     await openConnectedPage({ server, page }, "webgl");
-    const webgl2 = await offersWebgl2(page);
+    const webgl2 = await offersWebgl2(page, task);
     await openNewTerminal(page);
     await page.click("#terminal");
     try {
