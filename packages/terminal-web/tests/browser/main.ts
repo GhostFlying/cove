@@ -30,6 +30,30 @@ const offersWebgl2 = (() => {
   return Boolean(gl);
 })();
 const container = document.querySelector<HTMLElement>("#terminal")!;
+// While set, every WebGL2 context request fails, as in a browser that has lost WebGL2, so the
+// WebGL addon's load throws and the view falls back to DOM in the middle of an operation.
+let webgl2Refused = false;
+const originalGetContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function (
+  this: HTMLCanvasElement,
+  type: string,
+  ...rest: unknown[]
+) {
+  if (webgl2Refused && type === "webgl2") return null;
+  return (originalGetContext as (...args: unknown[]) => RenderingContext | null).call(
+    this,
+    type,
+    ...rest,
+  );
+} as typeof HTMLCanvasElement.prototype.getContext;
+const refusingWebgl2 = <T>(step: () => T): T => {
+  webgl2Refused = true;
+  try {
+    return step();
+  } finally {
+    webgl2Refused = false;
+  }
+};
 const originalTerminalOpen = Terminal.prototype.open;
 const captureOpenedTerminal = (terminal: Terminal, element: HTMLElement) => {
   if (element === container) capturedTerminal = terminal;
@@ -231,6 +255,43 @@ function evidence() {
     renderer: view?.renderer,
     webgl2: offersWebgl2,
   };
+}
+
+// Helpers for views a fixture creates and drives itself, outside the shared `view`.
+const ownedRoots = () => container.querySelectorAll("[data-cove-terminal-view]").length;
+const kindOf = (caught: unknown) => (caught as DomainError).kind ?? String(caught);
+const settle = (operation: Promise<void>): Promise<string | undefined> =>
+  operation.then(() => undefined, kindOf);
+
+function standaloneView(): XtermTerminalView {
+  view?.dispose();
+  view = undefined;
+  container.replaceChildren();
+  return createXtermTerminalView(container);
+}
+
+function initializeStandalone(
+  target: XtermTerminalView,
+  viewGeneration: number,
+  geometry: Geometry,
+): Promise<void> {
+  return target.initialize({
+    profile: "pragmatic-logical-grid-v1",
+    encoding: "vt-checkpoint-tail-v1",
+    geometry,
+    appearance,
+    viewGeneration,
+  });
+}
+
+function standaloneDescriptor(geometry: Geometry, bytes = 3): BaselineDescriptor {
+  return { ...descriptor(bytes), captureGeometry: geometry, currentGeometry: geometry };
+}
+
+async function installStandalone(target: XtermTerminalView, geometry: Geometry): Promise<void> {
+  await target.beginBaseline(standaloneDescriptor(geometry));
+  await target.writeBaselineChunk(encoder.encode("new"));
+  await target.finishBaseline();
 }
 
 const fixture = {
@@ -790,6 +851,147 @@ const fixture = {
       ownedRoots,
       rootsAfterDispose: roots(),
     };
+  },
+  // A WebGL view at 40x10 whose baseline replacement falls back to DOM, with a listener that
+  // initializes a 60x10 successor when it sees DOM. The old baseline must not be installed into
+  // the successor.
+  async baselineReplacementReentry() {
+    const candidate = standaloneView();
+    await initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 });
+    await installStandalone(candidate, { cols: 40, rows: 10 });
+    const seen: string[] = [];
+    let nested: Promise<string | undefined> | undefined;
+    candidate.onRendererChange((renderer) => {
+      seen.push(renderer);
+      if (renderer === "dom" && !nested)
+        nested = settle(initializeStandalone(candidate, ++generation, { cols: 60, rows: 10 }));
+    });
+    const begin = await settle(
+      refusingWebgl2(() => candidate.beginBaseline(standaloneDescriptor({ cols: 40, rows: 10 }))),
+    );
+    const nestedError = await nested;
+    const chunk = await settle(candidate.writeBaselineChunk(encoder.encode("old")));
+    const successor = await settle(installStandalone(candidate, { cols: 60, rows: 10 }));
+    const result = {
+      webgl2: offersWebgl2,
+      seen,
+      begin,
+      nestedError,
+      chunk,
+      successor,
+      cols: capturedTerminal?.cols,
+      renderer: candidate.renderer,
+      ownedRoots: ownedRoots(),
+    };
+    candidate.dispose();
+    return result;
+  },
+  // Listener A initializes a newer generation, whose WebGL load fails, from the first WebGL
+  // notification; listener B only records. B must end on the renderer that is really active.
+  async staleRendererDelivery() {
+    const candidate = standaloneView();
+    const a: string[] = [];
+    const b: string[] = [];
+    let nested: Promise<string | undefined> | undefined;
+    candidate.onRendererChange((renderer) => {
+      a.push(renderer);
+      if (renderer === "webgl" && !nested)
+        nested = refusingWebgl2(() =>
+          settle(initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 })),
+        );
+    });
+    candidate.onRendererChange((renderer) => b.push(renderer));
+    const initial = await settle(
+      initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 }),
+    );
+    const nestedError = await nested;
+    const result = {
+      webgl2: offersWebgl2,
+      a,
+      b,
+      initial,
+      nestedError,
+      renderer: candidate.renderer,
+      ownedRoots: ownedRoots(),
+    };
+    candidate.dispose();
+    return result;
+  },
+  // Every operation that can change the renderer partway through, each with a listener that
+  // initializes a 60x10 successor or disposes the view from the first notification it gets.
+  async reentryMatrix() {
+    const results = [];
+    for (const point of ["initialize", "beginBaseline", "retire"] as const)
+      for (const reaction of ["initialize", "dispose"] as const) {
+        const candidate = standaloneView();
+        await initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 });
+        await installStandalone(candidate, { cols: 40, rows: 10 });
+        const seen: string[] = [];
+        let nested: Promise<string | undefined> | undefined;
+        let armed = true;
+        candidate.onRendererChange((renderer) => {
+          seen.push(renderer);
+          if (!armed) return;
+          armed = false;
+          if (reaction === "dispose") candidate.dispose();
+          else
+            nested = settle(initializeStandalone(candidate, ++generation, { cols: 60, rows: 10 }));
+        });
+        let operation: Promise<string | undefined>;
+        let continuation: () => Promise<string | undefined>;
+        if (point === "initialize") {
+          operation = refusingWebgl2(() =>
+            settle(initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 })),
+          );
+          continuation = () => settle(installStandalone(candidate, { cols: 40, rows: 10 }));
+        } else if (point === "beginBaseline") {
+          operation = refusingWebgl2(() =>
+            settle(candidate.beginBaseline(standaloneDescriptor({ cols: 40, rows: 10 }))),
+          );
+          continuation = () => settle(candidate.writeBaselineChunk(encoder.encode("old")));
+        } else {
+          const originalResize = Terminal.prototype.resize;
+          Terminal.prototype.resize = () => {
+            throw new Error("resize failed");
+          };
+          try {
+            operation = settle(
+              candidate.applyEvent({
+                type: "resize",
+                run,
+                seq: 1,
+                geometry: { cols: 41, rows: 10 },
+                requiresBaseline: false,
+              }),
+            );
+          } finally {
+            Terminal.prototype.resize = originalResize;
+          }
+          continuation = () => settle(installStandalone(candidate, { cols: 41, rows: 10 }));
+        }
+        const operationError = await operation;
+        const nestedError = await nested;
+        const continued = await continuation();
+        const rootsAfter = ownedRoots();
+        const successor =
+          reaction === "initialize"
+            ? await settle(installStandalone(candidate, { cols: 60, rows: 10 }))
+            : await settle(installStandalone(candidate, { cols: 40, rows: 10 }));
+        results.push({
+          point,
+          reaction,
+          seen,
+          operationError,
+          nestedError,
+          continued,
+          successor,
+          cols: reaction === "initialize" ? capturedTerminal?.cols : undefined,
+          renderer: candidate.renderer,
+          ownedRoots: rootsAfter,
+        });
+        candidate.dispose();
+      }
+    return { webgl2: offersWebgl2, results };
   },
   // The live WebGL contexts in the terminal; the addon's 2D link layer canvas has none.
   webglContexts() {

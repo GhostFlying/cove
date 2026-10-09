@@ -686,3 +686,104 @@ test("V1-L14 a renderer-change listener cannot interleave with a transition and 
     rootsAfterDispose: 0,
   });
 });
+
+test("V1-L15 a listener reinitializing on a baseline's DOM fallback never receives the old baseline", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.baselineReplacementReentry()),
+  );
+  // The baseline replacement falls back to DOM. The listener hears of it only once beginBaseline
+  // has committed the 40x10 baseline, and its 60x10 successor discards that baseline: the old
+  // chunk is refused and the successor installs its own. Without WebGL2 nothing changes renderer
+  // and the 40x10 baseline continues.
+  expect(result).toEqual(
+    result.webgl2
+      ? {
+          webgl2: true,
+          seen: ["dom"],
+          begin: undefined,
+          nestedError: undefined,
+          chunk: "RESYNC_REQUIRED",
+          successor: undefined,
+          cols: 60,
+          renderer: "dom",
+          ownedRoots: 1,
+        }
+      : {
+          webgl2: false,
+          seen: [],
+          begin: undefined,
+          nestedError: undefined,
+          chunk: undefined,
+          successor: "RESYNC_REQUIRED",
+          cols: 40,
+          renderer: "dom",
+          ownedRoots: 1,
+        },
+  );
+});
+
+test("V1-L16 every renderer-change listener ends on the renderer that is active", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.staleRendererDelivery()),
+  );
+  // A's reinitialization falls back to DOM while WebGL is still being announced. The stale WebGL
+  // announcement is dropped for B, and both then hear DOM.
+  expect(result).toEqual({
+    webgl2: result.webgl2,
+    a: result.webgl2 ? ["webgl", "dom"] : [],
+    b: result.webgl2 ? ["dom"] : [],
+    initial: undefined,
+    nestedError: undefined,
+    renderer: "dom",
+    ownedRoots: 1,
+  });
+});
+
+test("V1-L17 a listener initializing or disposing the view from any renderer change mid-operation", async () => {
+  const { webgl2, results } = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.reentryMatrix()),
+  );
+  // Each operation finishes, or fails as it would on its own, before the listener hears of the
+  // DOM fallback it caused. Its later steps are then refused, nothing of it reaches the
+  // listener's successor, and a disposed view stays disposed with nothing left behind.
+  const expected = (point, reaction) => {
+    const notified = webgl2;
+    const operationError = point === "retire" ? "RECOVERY_UNAVAILABLE" : undefined;
+    if (!notified)
+      return {
+        point,
+        reaction,
+        seen: [],
+        operationError,
+        nestedError: undefined,
+        continued: point === "retire" ? "RESYNC_REQUIRED" : undefined,
+        // No listener ran: the 60x10 install does not match the 40x10 view, and the 40x10 one
+        // only fits a view that is not still installing or failed.
+        successor:
+          reaction === "initialize" || point !== "initialize" ? "RESYNC_REQUIRED" : undefined,
+        cols: reaction === "initialize" ? 40 : undefined,
+        renderer: "dom",
+        ownedRoots: point === "retire" ? 0 : 1,
+      };
+    // A retirement drops WebGL without spending the fallback, so a successor built from its
+    // notification loads WebGL again, which is announced once that initialize has finished.
+    const reloads = point === "retire" && reaction === "initialize";
+    return {
+      point,
+      reaction,
+      seen: reloads ? ["dom", "webgl"] : ["dom"],
+      operationError,
+      nestedError: undefined,
+      continued: "RESYNC_REQUIRED",
+      successor: reaction === "initialize" ? undefined : "RESYNC_REQUIRED",
+      cols: reaction === "initialize" ? 60 : undefined,
+      renderer: reloads ? "webgl" : "dom",
+      ownedRoots: reaction === "initialize" ? 1 : 0,
+    };
+  };
+  expect(results).toEqual(
+    ["initialize", "beginBaseline", "retire"].flatMap((point) =>
+      ["initialize", "dispose"].map((reaction) => expected(point, reaction)),
+    ),
+  );
+});
