@@ -19,7 +19,7 @@ import {
   type RunStatus,
 } from "@cove/protocol/pipe";
 import { PROFILE, validateAppearance, type Geometry } from "@cove/protocol/profile";
-import { createNativePtyFactory, type NativePtyFactory } from "./native-pty.js";
+import { createNativePtyFactory, reportedExit, type NativePtyFactory } from "./native-pty.js";
 import {
   createWorkerRunSession,
   type RunSession,
@@ -585,8 +585,7 @@ class WorkerExecutionCore {
               : state?.recovery.reason
                 ? { reason: state.recovery.reason.slice(0, 128) }
                 : {}),
-      exitCode: leader?.exitCode ?? null,
-      signal: leader?.signal === undefined ? null : String(leader.signal),
+      ...(leader ? reportedExit(leader) : { exitCode: null, signal: null }),
     };
   }
 
