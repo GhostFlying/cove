@@ -42,10 +42,12 @@ decisions without concrete evidence or a user request.
 
 ## Coordinate concurrent agents
 
-- The coordinator may implement critical-path work directly; it is not limited
-  to dispatching. Use helper agents only for genuinely independent work, with
-  disjoint files. Plans are short and live in the PR or Issue, not in separate
-  per-task plan/result documents.
+- The coordinator plans, dispatches, routes reviews, integrates and merges; it
+  does not implement, so its context stays on the whole project. Each
+  implementation slice goes to a fresh Claude subagent in its own worktree with
+  a self-contained brief (findings, constraints, acceptance). Keep hand-offs
+  light: one brief in, commits and a short report out. Plans are short and live
+  in the PR or Issue, not in separate per-task plan/result documents.
 - Each PR gets one full independent review from an agent that did not write it:
   codex `gpt-6.1-sol` xhigh by default. Local TraeX `gpt-5.6-sol` xhigh is a
   fallback when codex is unavailable, or an optional second reviewer for
