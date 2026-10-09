@@ -48,8 +48,8 @@ async function startServer(directory) {
   }
 }
 
-// Chromium is launched as a BrowserServer so this test owns its process: a client-side
-// Browser from launch() exposes no process handle to kill when close hangs.
+// Chromium is launched as a BrowserServer so this test can force it down: a client-side
+// Browser from launch() offers no way to kill Chromium when close hangs.
 async function closeChromium(chromiumServer, browser) {
   if (browser)
     await within(
@@ -64,12 +64,19 @@ async function closeChromium(chromiumServer, browser) {
     10_000,
   );
   if (closed === "closed") return;
-  const child = chromiumServer.process();
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise((done) => child.once("exit", done));
-  child.kill("SIGKILL");
-  if ((await within(exited, 5_000)) === "timeout")
-    throw new Error(`Chromium ${child.pid} survived SIGKILL`);
+  // Playwright starts Chromium in its own process group; kill() signals the whole group and
+  // waits for cleanup, whereas signalling only the parent would leave descendants running.
+  const killed = await within(
+    chromiumServer.kill().then(
+      () => "killed",
+      (error) => error,
+    ),
+    10_000,
+  );
+  if (killed === "killed") return;
+  throw new Error(`Chromium ${chromiumServer.process().pid} was not killed`, {
+    cause: killed === "timeout" ? undefined : killed,
+  });
 }
 
 test("the harness page creates a terminal, takes typed input and renders its output", async () => {
