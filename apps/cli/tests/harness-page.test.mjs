@@ -17,6 +17,9 @@ const browsersPath =
 
 const MARKER = "cove-harness-ok";
 const SECOND_MARKER = "cove-harness-dom";
+// The marker draws about 300 glyph pixels under SwiftShader at ratio 1 and a row of red cells
+// without text none, so a third of that proves the text was drawn with margin for rasterizers.
+const MARKER_GLYPH_PIXELS = 100;
 
 async function startServer(directory) {
   const env = {
@@ -193,9 +196,13 @@ async function printMarker(page, marker) {
   await page.keyboard.press("Enter");
 }
 
-// Counts pixels of the terminal host close to the harness palette red, rgb(204, 0, 0), in a
-// real screenshot: what the compositor shows rather than what a renderer claims to have drawn.
-async function redPixels(page) {
+// Counts, in a real screenshot of the terminal host (what the compositor shows rather than what
+// a renderer claims to have drawn), pixels close to the harness palette red, rgb(204, 0, 0), and
+// glyph pixels inside red cells: near-white foreground pixels with red within three pixels on the
+// same row. Red background alone does not prove the marker's text was drawn; a renderer whose
+// glyph atlas is broken still fills cell backgrounds. The typed command line, white on black,
+// has no red beside its glyphs.
+async function screenPixels(page) {
   const png = await page.locator("#terminal").screenshot();
   return page.evaluate(async (base64) => {
     const image = new Image();
@@ -206,13 +213,32 @@ async function redPixels(page) {
     canvas.height = image.naturalHeight;
     const context = canvas.getContext("2d");
     context.drawImage(image, 0, 0);
-    const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
-    let count = 0;
-    for (let index = 0; index < data.length; index += 4)
-      if (data[index] > 150 && data[index + 1] < 60 && data[index + 2] < 60) count++;
-    return count;
+    const { width, height } = canvas;
+    const { data } = context.getImageData(0, 0, width, height);
+    const at = (x, y) => (y * width + x) * 4;
+    const isRed = (index) => data[index] > 150 && data[index + 1] < 60 && data[index + 2] < 60;
+    const isWhite = (index) => data[index] > 200 && data[index + 1] > 200 && data[index + 2] > 200;
+    let red = 0;
+    let glyph = 0;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const index = at(x, y);
+        if (isRed(index)) red++;
+        else if (isWhite(index)) {
+          for (let dx = -3; dx <= 3; dx++) {
+            const nx = x + dx;
+            if (dx !== 0 && nx >= 0 && nx < width && isRed(at(nx, y))) {
+              glyph++;
+              break;
+            }
+          }
+        }
+      }
+    return { red, glyph };
   }, png.toString("base64"));
 }
+
+const redPixels = async (page) => (await screenPixels(page)).red;
 
 async function waitForRedPixels(page, minimum = 200) {
   let count = 0;
@@ -223,6 +249,19 @@ async function waitForRedPixels(page, minimum = 200) {
   ).catch((error) => {
     throw new Error(`${error.message} (last count ${count})`, { cause: error });
   });
+}
+
+// Waits for the marker's own glyphs, drawn in its red cells, as screenPixels counts them.
+async function waitForMarkerGlyphs(page, minimum) {
+  let count = 0;
+  await waitFor(
+    "marker glyph pixels on screen",
+    async () => (count = (await screenPixels(page)).glyph) >= minimum,
+    15_000,
+  ).catch((error) => {
+    throw new Error(`${error.message} (last count ${count})`, { cause: error });
+  });
+  return count;
 }
 
 // Loses every live WebGL context drawn in the terminal, as a GPU reset would, and checks that
@@ -354,12 +393,16 @@ test("the printed harness URL renders typed output with the default renderer and
       await printMarker(page, MARKER);
       await waitForRedPixels(page);
       if (webgl2) {
+        // WebGL drew the marker's text, not only its red cells.
+        await waitForMarkerGlyphs(page, MARKER_GLYPH_PIXELS);
         await recordRendererChanges(page);
         // xterm waits up to three seconds for the browser to restore a lost context before it
         // reports the loss; the view then drops to DOM and retries WebGL once after a delay.
         await loseWebglContexts(page, 1);
         await waitForRendererChanges(page, ["dom", "webgl"]);
         await waitForRedPixels(page);
+        // The retried WebGL renderer rebuilt its glyph atlas and draws the text again.
+        await waitForMarkerGlyphs(page, MARKER_GLYPH_PIXELS);
         await loseWebglContexts(page, 1);
         await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
         // Well past the retry delay the view is still on DOM: the single retry was spent.
