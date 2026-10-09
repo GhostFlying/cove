@@ -55,10 +55,12 @@ export function createTappedClient(record) {
     },
     disconnect() {
       if (!current) throw new Error("wire tap has no open connection");
+      abandonInjected(current);
       current.raw.close();
     },
     // Send one hand-built command on the live connection and resolve with its reply frame.
-    inject(metadata, payload = new Uint8Array()) {
+    // It rejects if no reply arrives within the deadline or the connection ends first.
+    inject(metadata, payload = new Uint8Array(), deadlineMs = 10_000) {
       if (!current) throw new Error("wire tap has no open connection");
       const requestId = `tap-${randomUUID()}`;
       const encoded = encodeTerminalFrame(
@@ -67,9 +69,17 @@ export function createTappedClient(record) {
         payload,
       );
       if (!encoded.ok) throw new Error("wire tap could not encode a command");
-      const reply = new Promise((resolve) => current.injected.set(requestId, resolve));
-      if (current.raw.send(encoded.value) !== "handed-off")
-        throw new Error("wire tap could not send a command");
+      const connection = current;
+      const reply = new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () => settleInjected(connection, requestId, new Error(`no reply to ${metadata.type}`)),
+          deadlineMs,
+        );
+        connection.injected.set(requestId, { resolve, reject, timer });
+      });
+      if (connection.raw.send(encoded.value) !== "handed-off") {
+        settleInjected(connection, requestId, new Error("wire tap could not send a command"));
+      }
       return reply;
     },
     // Input payloads the client itself sent, decoded as text, per subscription id.
@@ -84,6 +94,20 @@ export function createTappedClient(record) {
         .join("");
     },
   };
+
+  // Settle one pending injection with its reply frame, or reject it with an error.
+  function settleInjected(connection, requestId, outcome) {
+    const pending = connection.injected.get(requestId);
+    if (!pending) return;
+    connection.injected.delete(requestId);
+    clearTimeout(pending.timer);
+    if (outcome instanceof Error) pending.reject(outcome);
+    else pending.resolve(outcome);
+  }
+  function abandonInjected(connection) {
+    for (const requestId of [...connection.injected.keys()])
+      settleInjected(connection, requestId, new Error("wire tap connection ended"));
+  }
 
   const terminal = {
     open(callbacks) {
@@ -103,22 +127,26 @@ export function createTappedClient(record) {
                 tap.outbound.push(...decodeFrames(connection.outbound, message));
               return raw.send(message);
             },
-            close: () => raw.close(),
-            dispose: () => raw.dispose(),
+            close() {
+              abandonInjected(connection);
+              raw.close();
+            },
+            dispose() {
+              abandonInjected(connection);
+              raw.dispose();
+            },
           });
         },
         onText: (message) => callbacks.onText(message),
         onBinary(bytes) {
           const frames = decodeFrames(connection.inbound, bytes);
-          // The tap sends whole frames per message, so a reply to an injected command
+          // The server sends one frame per message, so a reply to an injected command
           // always arrives as its own message and can be withheld from the client.
           const injected = frames.find((frame) =>
             connection.injected.has(frame.metadata.requestId),
           );
           if (injected) {
-            const resolve = connection.injected.get(injected.metadata.requestId);
-            connection.injected.delete(injected.metadata.requestId);
-            resolve(injected);
+            settleInjected(connection, injected.metadata.requestId, injected);
             return;
           }
           tap.inbound.push(...frames);
@@ -127,6 +155,7 @@ export function createTappedClient(record) {
         },
         onClose() {
           if (current === connection) current = undefined;
+          abandonInjected(connection);
           callbacks.onClose();
         },
       });
