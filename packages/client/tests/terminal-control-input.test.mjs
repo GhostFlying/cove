@@ -138,13 +138,27 @@ function clock() {
   };
 }
 
-async function harness({ budgets = {}, scheduler, onCommand, onApply, autoOpen = true } = {}) {
+async function harness({
+  budgets = {},
+  scheduler,
+  onCommand,
+  onApply,
+  autoOpen = true,
+  holdAcks = false,
+} = {}) {
   const commands = [];
+  const heldAcks = [];
   let currentRef = ref;
   let callbacks;
   let request = 0;
   const peer = {
     commands,
+    // With holdAcks, applied-ack replies wait here, modelling an ack still in flight.
+    releaseAck() {
+      const command = heldAcks.shift();
+      if (command) this.result(command, { appliedSeq: command.appliedSeq });
+      return command;
+    },
     get currentRef() {
       return currentRef;
     },
@@ -260,8 +274,10 @@ async function harness({ budgets = {}, scheduler, onCommand, onApply, autoOpen =
             const disposition = onCommand?.(entry, peer);
             if (command.type === "attach")
               peer.result(command, { mode: "baseline", atSeq: currentRef === ref ? 0 : 1 });
-            if (command.type === "applied-ack")
-              peer.result(command, { appliedSeq: command.appliedSeq });
+            if (command.type === "applied-ack") {
+              if (holdAcks) heldAcks.push(command);
+              else peer.result(command, { appliedSeq: command.appliedSeq });
+            }
             if (command.type === "baseline-progress")
               peer.result(command, {
                 baselineId: command.baselineId,
@@ -1291,6 +1307,7 @@ describe("client control authority", () => {
 });
 
 describe("input right after a focus grant (Issue #21)", () => {
+  const holder = { connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId };
   const type = (controller, mounted, focusSeq, text, keyGeometry = geometry) => {
     // Mirrors the xterm view: every deliberate input is preceded by a focus intent.
     const viewGeneration = controller.snapshot().viewGeneration;
@@ -1298,6 +1315,55 @@ describe("input right after a focus grant (Issue #21)", () => {
     mounted.input({ viewGeneration, source: "keyboard", bytes: encoder.encode(text) });
   };
   const ofType = (peer, type) => peer.commands.filter(({ command }) => command.type === type);
+
+  test("keys typed while the click's focus is pending ride that grant and follow its ack", async () => {
+    const { controller, peer, mounted } = await harness({ holdAcks: true });
+    // The attach commit's ack stays in flight, so the grant's covering ack must queue behind it.
+    expect(ofType(peer, "applied-ack")).toHaveLength(1);
+    const outcomes = [];
+    controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
+    controller.setInputTarget(true, true);
+    const focus = controller.requestFocus(geometry);
+    const text = "echo cove-web-ok\r";
+    [...text].forEach((key, index) => type(controller, mounted, index + 1, key));
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(ofType(peer, "input")).toHaveLength(0);
+    peer.result(ofType(peer, "focus")[0].command, { epoch: 1, atSeq: 1 });
+    expect((await focus).ok).toBe(true);
+    peer.event({ type: "control", run, seq: 1, epoch: 1, holder, geometry });
+    await settle();
+    // The grant is applied locally, but no ack covering seq 1 has reached the uplink yet.
+    expect(controller.snapshot().inputReady).toBe(true);
+    expect(ofType(peer, "input")).toHaveLength(0);
+    peer.releaseAck();
+    await settle();
+    const ackIndex = peer.commands.findIndex(
+      ({ command }) => command.type === "applied-ack" && command.appliedSeq >= 1,
+    );
+    expect(ackIndex).toBeGreaterThan(-1);
+    const delivered = [];
+    for (let index = 0; index < text.length; index++) {
+      const inputs = ofType(peer, "input");
+      expect(inputs).toHaveLength(index + 1);
+      const entry = inputs[index];
+      expect(peer.commands.indexOf(entry)).toBeGreaterThan(ackIndex);
+      expect(entry.command.epoch).toBe(1);
+      delivered.push(decoder.decode(entry.payload));
+      peer.result(entry.command, {
+        epoch: 1,
+        inputSeq: entry.command.inputSeq,
+        status: "written",
+        writtenBytes: entry.payload.byteLength,
+      });
+      await settle();
+    }
+    expect(delivered.join("")).toBe(text);
+    expect(outcomes).toHaveLength(text.length);
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(controller.snapshot().controlEpoch).toBe(1);
+  });
 
   test("repeated focus intents while holding control keep the epoch; a new grid refocuses", async () => {
     const { controller, peer, mounted } = await harness();
@@ -1327,5 +1393,36 @@ describe("input right after a focus grant (Issue #21)", () => {
     });
     expect(ofType(peer, "focus")).toHaveLength(2);
     expect(ofType(peer, "focus")[1].command.geometry).toEqual({ cols: 100, rows: 30 });
+  });
+
+  test("input under a resized grant waits for the ack covering the resize", async () => {
+    const { controller, peer, mounted } = await harness({ holdAcks: true });
+    controller.setInputTarget(true, true);
+    const focus = controller.requestFocus(geometry);
+    peer.result(ofType(peer, "focus")[0].command, { epoch: 1, atSeq: 1 });
+    expect((await focus).ok).toBe(true);
+    peer.event({ type: "control", run, seq: 1, epoch: 1, holder, geometry });
+    await settle();
+    peer.releaseAck();
+    await settle();
+    peer.releaseAck();
+    const resized = { cols: 90, rows: 30 };
+    const resize = controller.requestResize(resized);
+    await settle();
+    peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
+    expect((await resize).ok).toBe(true);
+    type(controller, mounted, 1, "x", resized);
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(ofType(peer, "input")).toHaveLength(0);
+    peer.event({ type: "resize", run, seq: 2, geometry: resized, requiresBaseline: false });
+    await settle();
+    const input = ofType(peer, "input")[0];
+    expect(input).toBeDefined();
+    const ack = peer.commands.findIndex(
+      ({ command }) => command.type === "applied-ack" && command.appliedSeq >= 2,
+    );
+    expect(ack).toBeGreaterThan(-1);
+    expect(peer.commands.indexOf(input)).toBeGreaterThan(ack);
   });
 });
