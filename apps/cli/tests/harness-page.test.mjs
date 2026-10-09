@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
@@ -477,6 +477,42 @@ test("S4 the production view answers no terminal query and passes real keys and 
     } catch (error) {
       throw await describePage(page, error);
     }
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+// A user's first click in a new terminal takes control and is followed at once by typing, with no
+// wait for control to settle. The page created the terminal at its estimate of the grid the view
+// measures, so taking control resizes nothing and nothing typed in between may be lost. When the
+// grid does change, the controller refuses input during the resize recovery; that remains a known
+// gap of the M0 harness, not covered here.
+test("a first click in a new terminal keeps the input typed right after it", async ({ task }) => {
+  await withHarness(async ({ directory, server, page, pageErrors }) => {
+    await openConnectedPage({ server, page });
+    await offersWebgl2(page, task);
+    await openNewTerminal(page);
+    const statusGrid = () =>
+      page.evaluate(
+        () => document.getElementById("terminal-status")?.textContent.match(/\d+×\d+/)?.[0],
+      );
+    const created = await statusGrid();
+    const target = join(directory, "first-click.txt");
+    try {
+      await page.click("#terminal");
+      await page.keyboard.type(`echo first-click-ok > '${target}'`);
+      await page.keyboard.press("Enter");
+      await waitFor(
+        "the command typed after the first click to run",
+        async () => (await readFile(target, "utf8").catch(() => "")) === "first-click-ok\n",
+        15_000,
+      );
+      await waitForSteadyControl(page);
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(created).toMatch(/^\d+×\d+$/);
+    expect(await statusGrid()).toBe(created);
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
   });

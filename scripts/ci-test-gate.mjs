@@ -191,7 +191,7 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 10 },
-  { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 3 },
+  { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 4 },
   { project: "cli", file: "apps/cli/tests/request-identity-cap.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/focus-resize.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/reattach-lifetime.test.mjs", minimumTests: 2 },
