@@ -5,17 +5,22 @@ const { Terminal } = require("@xterm/headless");
 const decoder = new TextDecoder();
 
 // A headless TerminalView that renders what it is given into an xterm grid, so a test can
-// compare the screen a client recovered with the server model's preview. Like a real view
-// it never forwards xterm's automatic replies (onData): the server model alone answers
-// terminal queries.
+// compare the screen a client recovered with the server model's preview. It never forwards
+// xterm's automatic replies (onData), so it says nothing about whether the production view
+// suppresses them; the browser harness test covers that.
 export function createScreenView(geometry = { cols: 80, rows: 24 }) {
   let terminal;
   let text = "";
   const events = [];
+  // Publish text only once xterm has parsed it, so a test that waits for some text and then
+  // reads the grid always sees that text in the grid.
   const write = (bytes) =>
     new Promise((resolve) => {
-      text += decoder.decode(bytes, { stream: true });
-      terminal.write(bytes, resolve);
+      const decoded = decoder.decode(bytes, { stream: true });
+      terminal.write(bytes, () => {
+        text += decoded;
+        resolve();
+      });
     });
   const fresh = ({ cols, rows }) => {
     terminal?.dispose();
