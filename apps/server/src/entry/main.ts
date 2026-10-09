@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import websocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -103,7 +103,8 @@ export function createLocalApplication(
     logger: false,
     bodyLimit: budgets.rpcRequestBytes,
     requestTimeout: 5000,
-    disableRequestLogging: true,
+    // The top-level disableRequestLogging option is deprecated (FSTDEP023).
+    logController: new LogController({ disableRequestLogging: true }),
   });
   // Register the plugin before routes; business handlers attach synchronously on upgrade.
   const terminalRoutes = terminal;
