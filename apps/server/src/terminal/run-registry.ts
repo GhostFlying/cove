@@ -83,9 +83,34 @@ export class RunRegistry {
       !sameWorkerRef(entry.worker, worker)
     )
       return false;
-    // A run cannot be resurrected by a delayed status reply.
-    if (entry.status.status === "exited") return status.status === "exited";
+    // A run cannot be resurrected by a delayed status reply. A later exited status
+    // may still refine one recorded from the exit event, but never with older facts.
+    if (entry.status.status === "exited") {
+      if (status.status !== "exited") return false;
+      if ((status.parsedSeq ?? -1) < (entry.status.parsedSeq ?? -1)) return true;
+    }
     entry.status = copy(parsed.data);
+    return true;
+  }
+
+  // The worker's exit fact proves the leader exited; sequence fields stay as last
+  // reported until a status reply carries the worker's own counters.
+  observeExit(
+    worker: WorkerRef,
+    run: RunRef,
+    exit: Pick<RunStatus, "exitCode" | "signal">,
+  ): boolean {
+    const entry = this.entries.get(run.runId);
+    if (!entry || !sameRunRef(entry.run, run) || !sameWorkerRef(entry.worker, worker)) return false;
+    if (entry.status.status === "exited") return true;
+    const parsed = RunStatusSchema.safeParse({
+      ...entry.status,
+      status: "exited",
+      exitCode: exit.exitCode,
+      signal: exit.signal,
+    });
+    if (!parsed.success) return false;
+    entry.status = parsed.data;
     return true;
   }
 

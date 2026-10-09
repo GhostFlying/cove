@@ -42,6 +42,10 @@ export class LocalRuntime implements RuntimeTerminalPort {
     try {
       listener = session.onEvent((event, payload) => {
         if (this.disposed) return;
+        // Record the exit before any subscriber can publish it, so a client that has
+        // seen the exit event never reads a live run record afterwards.
+        if (event.terminal.type === "exit")
+          this.registry.observeExit(event.worker, event.run, event.terminal);
         for (const sink of [...this.listeners.keys()]) {
           if (this.disposed) break;
           if (this.listeners.has(sink)) sink(event, payload);
