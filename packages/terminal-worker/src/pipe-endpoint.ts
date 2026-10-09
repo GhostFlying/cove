@@ -314,11 +314,21 @@ class WorkerPipeCore {
       if (record.role === role && record.phase !== "parked") count++;
     return role === "ordinary"
       ? count < this.#hello!.effectiveBudgets.pendingWorkerCommands
-      : role === "route"
-        ? count === 0 &&
-          this.#extraResponseItems === 0 &&
-          ![...this.#pending.values()].some((record) => record.role === "rejection")
-        : count === 0;
+      : count === 0;
+  }
+
+  // The one slot for a reply nobody reserved a class for: a BUSY outside the ordinary window
+  // or a duplicate-ID error. It also waits for route control to be idle, as it always has.
+  // Route control itself does not wait for this slot: ordinary BUSY replies may legally be
+  // refilled without pause, and a parked unsubscribe that had to wait for a moment with none
+  // outstanding could be starved past its runtime deadline. Reply bytes stay bounded either
+  // way, because every control reply still passes #replyCapacity or is deferred.
+  #sharedReplySlotAvailable(): boolean {
+    return (
+      this.#slotAvailable("route") &&
+      this.#extraResponseItems === 0 &&
+      ![...this.#pending.values()].some((record) => record.role === "rejection")
+    );
   }
 
   #routeRecords(): number {
@@ -500,7 +510,7 @@ class WorkerPipeCore {
         outstanding.phase === "parked" &&
         this.#extraResponseItems === 0 &&
         ![...this.#pending.values()].some((record) => record.role === "rejection");
-      if (!parkedConflictSlot && !this.#slotAvailable("route")) {
+      if (!parkedConflictSlot && !this.#sharedReplySlotAvailable()) {
         void this.shutdown("duplicate-response-capacity");
         return false;
       }
@@ -563,7 +573,7 @@ class WorkerPipeCore {
     return true;
   }
 
-  // A BUSY reply normally takes the slot route control uses, one at a time. An ordinary
+  // A BUSY reply normally takes the shared reply slot, one at a time. An ordinary
   // command refused only for reply bytes (its output lane is backed up) is one of the
   // runtime's pendingWorkerCommands, though: the runtime may legally have that many ordinary
   // commands outstanding while a route command or an earlier BUSY is unsettled. So its
@@ -581,7 +591,7 @@ class WorkerPipeCore {
   }
 
   #rejectBusy(command: PipeCommand): boolean {
-    if (!this.#slotAvailable("route") && !this.#ordinaryRejectionFits(command)) {
+    if (!this.#sharedReplySlotAvailable() && !this.#ordinaryRejectionFits(command)) {
       void this.shutdown("rejection-slot-exhausted");
       return false;
     }
