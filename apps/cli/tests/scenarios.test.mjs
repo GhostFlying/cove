@@ -1,7 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -16,6 +15,7 @@ import { createSessionClient, readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { createScreenView, parsePreview } from "./screen-view.mjs";
 import { stopServer } from "./server-process.mjs";
+import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
 import { createTappedClient } from "./wire-tap.mjs";
 
 // Every scenario drives the compiled `cove` executable, which spawns the compiled server.
@@ -183,68 +183,10 @@ async function expectScreenMatchesServer(client, run, controller, screen) {
   return { local, server };
 }
 
-// A process that sends DA (ESC[c) and CPR (ESC[6n) to its terminal and records every byte it
-// reads back until the typed line `done`. In "wait" mode it asks after the typed line `go`;
-// in "now" mode it asks at once. `<out>.seen` appears once both replies have arrived.
-const QUERY_PROBE = String.raw`import { writeFileSync } from "node:fs";
-const [mode, out] = process.argv.slice(2);
-process.stdin.setRawMode(true);
-let received = "";
-let asked = false;
-let seen = false;
-const ask = () => {
-  asked = true;
-  received = "";
-  process.stdout.write("\x1b[c\x1b[6n");
-};
-process.stdin.on("data", (chunk) => {
-  received += chunk.toString("latin1");
-  if (!asked) {
-    if (received.includes("go\r")) ask();
-    return;
-  }
-  if (!seen && /\x1b\[\?[\d;]*c/.test(received) && /\x1b\[\d+;\d+R/.test(received)) {
-    seen = true;
-    writeFileSync(out + ".seen", "");
-    process.stdout.write("replies-seen\r\n");
-  }
-  const end = received.indexOf("done\r");
-  if (end >= 0) {
-    writeFileSync(out, JSON.stringify(received.slice(0, end)));
-    process.exit(0);
-  }
-});
-process.stdout.write("query-probe-ready\r\n");
-if (mode === "now") ask();
-`;
-
-// Exactly one primary DA reply and one CPR reply, in query order, then `rest`.
-const QUERY_REPLIES_THEN = (rest) =>
-  new RegExp(String.raw`^\u001b\[\?[\d;]*c\u001b\[\d+;\d+R` + rest + "$");
-
 async function createQueryProbe(mode) {
-  const script = join(fixture.directory, "query-probe.mjs");
-  const out = join(fixture.directory, `query-probe-${mode}.json`);
-  await writeFile(script, QUERY_PROBE);
-  const run = await coveJson(
-    "terminal",
-    "create",
-    "--cwd",
-    fixture.directory,
-    "--",
-    process.execPath,
-    script,
-    mode,
-    out,
-  );
-  return {
-    run,
-    out,
-    async received() {
-      await waitFor("the probe's report", () => existsSync(out));
-      return JSON.parse(await readFile(out, "utf8"));
-    },
-  };
+  const probe = await writeQueryProbe(fixture.directory, mode);
+  const run = await coveJson("terminal", "create", "--cwd", fixture.directory, "--", ...probe.argv);
+  return { run, ...probe };
 }
 
 describe("H1 operator scenarios over the compiled server and CLI", () => {
@@ -381,7 +323,7 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       [H, W].every(({ recording }) => recording.text().includes("query-probe-ready")),
     );
     await focusAndType(H.controller, "go\r");
-    await waitFor("the probe to see both replies", () => existsSync(`${probe.out}.seen`));
+    await waitFor("the probe to see both replies", probe.seen);
     // Both views have parsed the queries, which precede this line in the output.
     await waitFor("both views to parse the queries", () =>
       [H, W].every(({ recording }) => recording.text().includes("replies-seen")),
@@ -400,7 +342,7 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
   test("S4 the server answers DA and CPR exactly once with no client attached", async () => {
     const probe = await createQueryProbe("now");
     // No client is connected while the probe asks.
-    await waitFor("the probe to see both replies", () => existsSync(`${probe.out}.seen`));
+    await waitFor("the probe to see both replies", probe.seen);
     const holder = await connectTapped();
     const H = await attach(holder.client, probe.run, "s4-late", createScreenView());
     // The baseline carries the earlier screen; installing it must not answer again.
