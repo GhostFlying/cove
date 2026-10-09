@@ -147,14 +147,16 @@ export class RendererFallback<Terminal, Addon> {
     // reported by a retired or already released addon is stale.
     if (this.disposed || this.current !== owner || owner.addon !== addon) return;
     this.release(owner);
-    attempt(() => this.bindings.refresh(owner.terminal));
-    this.setActive("dom");
+    // Commit the transition, including the retry timer, before notifying: a listener may dispose
+    // the view, and dispose must find the timer to cancel it.
     if (this.policy === "webgl") {
       this.policy = "retry-pending";
       this.retryTimer = this.bindings.setTimer(() => this.retry(), this.retryDelayMs);
     } else {
       this.policy = "dom";
     }
+    attempt(() => this.bindings.refresh(owner.terminal));
+    this.setActive("dom");
   }
 
   private retry(): void {
