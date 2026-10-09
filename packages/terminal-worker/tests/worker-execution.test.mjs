@@ -667,6 +667,33 @@ test("registered execution entry preserves the first-slice facade and rejects W2
   }
 });
 
+test("a signaled leader reports the signal name and no exit code in its exit fact and status", async () => {
+  const facts = [];
+  const { execution, item } = await start({}, M0_LIMITS, (fact) => facts.push(fact));
+  try {
+    // node-pty reports a SIGHUP-killed leader as exit code 0 with signal number 1.
+    item.observer.onExit({ exitCode: 0, signal: 1 });
+    const status = await execution.execute(command("status"));
+    expect(status.runStatus).toMatchObject({ status: "exited", exitCode: null, signal: "SIGHUP" });
+    expect(facts.at(-1).event).toMatchObject({ type: "exit", exitCode: null, signal: "SIGHUP" });
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("an ordinary leader exit with a zero signal reports its exit code and no signal", async () => {
+  const facts = [];
+  const { execution, item } = await start({}, M0_LIMITS, (fact) => facts.push(fact));
+  try {
+    item.observer.onExit({ exitCode: 7, signal: 0 });
+    const status = await execution.execute(command("status"));
+    expect(status.runStatus).toMatchObject({ status: "exited", exitCode: 7, signal: null });
+    expect(facts.at(-1).event).toMatchObject({ type: "exit", exitCode: 7, signal: null });
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
 test("queued control holds later callback bytes unsequenced through synchronous native resize", async () => {
   const facts = [];
   const { execution, item } = await start(

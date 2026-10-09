@@ -1,3 +1,4 @@
+import { constants } from "node:os";
 import * as pty from "node-pty";
 import type { RetainedBytesLease } from "@cove/terminal-engine";
 import type {
@@ -62,6 +63,27 @@ export interface NativeSpawnSpec {
 export interface NativeExit {
   readonly exitCode: number;
   readonly signal?: number;
+}
+
+// First name wins for aliases that share a number (SIGABRT/SIGIOT, SIGIO/SIGPOLL).
+const signalNames = new Map<number, string>();
+for (const [name, value] of Object.entries(constants.signals))
+  if (!signalNames.has(value)) signalNames.set(value, name);
+
+/**
+ * Converts a native leader exit to the run facts the protocol reports.
+ *
+ * node-pty reports `signal: 0` for an ordinary exit and, for a leader killed by a
+ * signal, the signal number alongside a meaningless `exitCode: 0`. A process ends
+ * either by exiting or by a signal, never both: a signaled exit has a null exit
+ * code and the conventional signal name (or the decimal number if unnamed).
+ */
+export function reportedExit(exit: NativeExit): {
+  exitCode: number | null;
+  signal: string | null;
+} {
+  if (!exit.signal) return { exitCode: exit.exitCode, signal: null };
+  return { exitCode: null, signal: signalNames.get(exit.signal) ?? String(exit.signal) };
 }
 
 export type NativePtyFault =

@@ -27,7 +27,7 @@ import type {
   NativeSpawnSpec,
   NativeStopResult,
 } from "./native-pty.js";
-import { boundedNativeCause, boundedNativeStopResult } from "./native-pty.js";
+import { boundedNativeCause, boundedNativeStopResult, reportedExit } from "./native-pty.js";
 
 const OUTPUT_CHUNK_BYTES = 65_536;
 const INGRESS_RECORD_BYTES = 64;
@@ -449,8 +449,7 @@ class RunSessionCore {
       type: "exit",
       run: this.#run,
       seq: this.#receivedSeq + 1,
-      exitCode: exit.exitCode,
-      signal: exit.signal === undefined ? null : String(exit.signal),
+      ...reportedExit(exit),
     };
     try {
       this.#pending.push({ kind: "fact", fact: { event }, retireIngress: () => lease.release() });
@@ -848,8 +847,7 @@ class RunSessionCore {
             type: "exit",
             run: this.#run,
             seq: ++this.#receivedSeq,
-            exitCode: item.exit.exitCode,
-            signal: item.exit.signal === undefined ? null : String(item.exit.signal),
+            ...reportedExit(item.exit),
           };
           await this.#applyFact({ event });
         }
