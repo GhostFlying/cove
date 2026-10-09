@@ -104,6 +104,19 @@ function open(client, run, viewId, recording = createRecordingView()) {
   return { controller: opened.value, recording };
 }
 
+// The server may refuse a focus with BUSY when it is momentarily out of command capacity, as
+// it can be on a loaded machine. That refusal is definite (not accepted), and the protocol's
+// answer is to back off and retry, which is what a client page would do; anything else fails.
+async function takeFocus(controller) {
+  for (let attempt = 0; ; attempt++) {
+    const focus = await controller.requestFocus();
+    const busy =
+      !focus.ok && focus.error.kind === "BUSY" && focus.error.acceptance === "not-accepted";
+    if (!busy || attempt === 20) return focus;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 async function typeText(controller, text) {
   const sent = await controller.sendInput({ source: "keyboard", bytes: encoder.encode(text) });
   expect(sent).toMatchObject({ ok: true, value: { unknownBytes: 0, notSentBytes: 0 } });
@@ -160,7 +173,7 @@ test("a second terminal on the connection keeps working after the server retires
   );
   for (const { controller } of [A, B]) {
     controller.setInputTarget(true, true);
-    expect(await controller.requestFocus()).toMatchObject({ ok: true });
+    expect(await takeFocus(controller)).toMatchObject({ ok: true });
   }
 
   // Hold only A's events, so A neither parses nor acknowledges them, then make A's run flood.
@@ -230,7 +243,7 @@ test("a second terminal on the connection keeps working after the server retires
   // takes input again.
   expect(await A.controller.attach()).toMatchObject({ ok: true });
   expect(A.controller.snapshot().subscription.subscriptionId).not.toBe(retired.subscriptionId);
-  expect(await A.controller.requestFocus()).toMatchObject({ ok: true });
+  expect(await takeFocus(A.controller)).toMatchObject({ ok: true });
   await typeText(A.controller, "back-again\r");
   await waitFor("input on the reattached view", () =>
     A.recording.text().includes("echo:back-again"),
