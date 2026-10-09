@@ -1,0 +1,32 @@
+{
+  "name": "@cove/cli",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "bin": {
+    "cove": "./dist/main.js"
+  },
+  "exports": {
+    "./node-ports": {
+      "types": "./dist/node-ports.d.ts",
+      "import": "./dist/node-ports.js"
+    },
+    "./session": {
+      "types": "./dist/session.d.ts",
+      "import": "./dist/session.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm build && pnpm --dir ../.. exec vitest run --project cli",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@cove/client": "workspace:*",
+    "@cove/protocol": "workspace:*",
+    "@cove/server": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2"
+  }
+}

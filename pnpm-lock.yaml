@@ -213,6 +213,22 @@ importers:
         specifier: 5.0.2
         version: 5.0.2(@types/node@26.6.2)(vite@8.3.1(@types/node@26.6.2))
 
+  apps/cli:
+    dependencies:
+      '@cove/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@cove/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@cove/server':
+        specifier: workspace:*
+        version: link:../server
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.2
+        version: 26.6.2
+
   apps/server:
     dependencies:
       '@cove/protocol':
