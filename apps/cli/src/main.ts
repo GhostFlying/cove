@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { constants } from "node:os";
+import { constants, homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { CallOutcome, Client } from "@cove/client";
 import { M0_LIMITS } from "@cove/protocol/budgets";
@@ -275,15 +275,18 @@ async function exists(path: string): Promise<boolean> {
 }
 
 // The rendezvous record carries no pid, so a record cannot be traced back to the process
-// that published it. Instead `server start` holds an exclusive lock beside the run directory
-// from its existence check until readiness is announced: while the lock is held no other
+// that published it. Instead `server start` holds an exclusive lock from its existence check until readiness is announced: while the lock is held no other
 // CLI start can spawn a server for this path, so a record that appears after our check was
 // published by our child. Without it two concurrent starts both pass the check and the loser
 // announces the winner's record while its own child fails to link the path and exits. A
 // crashed CLI can leave the lock behind; that is reported rather than silently broken,
-// because breaking a live start's lock would reintroduce the race.
+// because breaking a live start's lock would reintroduce the race. The lock lives in a
+// CLI-owned directory keyed by the canonical rendezvous path, because the server contract
+// does not require the rendezvous directory's parent to be writable.
 async function acquireStartLock(path: string): Promise<() => Promise<void>> {
-  const lock = `${dirname(path)}.start.lock`;
+  const locks = join(homedir(), ".cove", "m0", "locks");
+  await mkdir(locks, { recursive: true, mode: 0o700 });
+  const lock = join(locks, `${createHash("sha256").update(path).digest("hex")}.lock`);
   let handle;
   try {
     handle = await open(lock, "wx", 0o600);
