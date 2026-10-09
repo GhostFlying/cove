@@ -121,9 +121,9 @@ function open(client, run, viewId) {
   return opened.value;
 }
 
-// The public client refuses attach after 256 retired subscriptions on one connection (a
-// client-side window handled separately), so the per-connection server cap is crossed with a
-// minimal raw terminal connection that only correlates command results.
+// The per-connection server cap is crossed with a minimal raw terminal connection that only
+// correlates command results, so this measures the server alone; the public client's own
+// connection lifetime is covered by client-lifetime.test.mjs.
 async function rawConnection(record) {
   const socket = new WebSocket(`${record.endpoint.replace("http", "ws")}${LOCAL_PATHS.terminal}`);
   socket.binaryType = "arraybuffer";
@@ -245,8 +245,8 @@ test("one connection attaches and detaches past the old per-connection route cap
   });
 }, 120_000);
 
-// The public client's 256-retired window is per connection, so the run's controlling
-// subscriptions are spread over several sequential connections.
+// The run's controlling subscriptions are spread over several sequential connections, as
+// reloads and reconnects spread them, so the per-run counters see many connections.
 test("one run grants control to more subscriptions than the old per-run counter cap", async () => {
   const run = await createRun("exec cat >/dev/null");
   const PER_CONNECTION = 200;
