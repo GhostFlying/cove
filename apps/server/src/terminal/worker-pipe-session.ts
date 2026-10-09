@@ -537,6 +537,7 @@ export class WorkerPipeSession {
             )!.active = true;
           }
           this.settle(value.requestId);
+          if (command.type === "unsubscribe") this.forgetRoute(command.subscription);
           pending.resolve(value);
         } else if (value.type === "terminal-event") {
           const run = this.runs.get(value.run.runId);
@@ -571,6 +572,30 @@ export class WorkerPipeSession {
       this.releaseClosedRecords();
     }
     return consumed;
+  }
+
+  // A route is dropped once its unsubscribe settled, whatever the outcome. Keeping inactive
+  // routes until the pipe closed made the whole worker refuse every attach with BUSY after
+  // maxRuns × subscriptionsPerConnection lifetime subscriptions. An inactive route only
+  // filters events, and an absent route filters them identically, so a worker that still
+  // emits for an uncertain unsubscribe stays fenced. Subscription refs are never reused, so
+  // no later subscribe can need the record; a subscribe or recover still pending for the
+  // same ref (close racing an attach) keeps it, because its accepted result activates it.
+  private forgetRoute(ref: SubscriptionRef): void {
+    const index = this.routes.findIndex((entry) => sameSubscriptionRef(entry.ref, ref));
+    const route = this.routes[index];
+    if (
+      !route ||
+      route.active ||
+      [...this.pending.values()].some(
+        (entry) =>
+          (entry.command.type === "subscribe" || entry.command.type === "recover") &&
+          sameSubscriptionRef(entry.command.subscription, ref),
+      )
+    )
+      return;
+    this.routes.splice(index, 1);
+    route.lease.release();
   }
 
   tick(): void {
@@ -650,10 +675,17 @@ export class WorkerPipeSession {
     for (const item of [...this.handed]) this.release(item);
   }
 
-  snapshot(): { pending: number; identities: number; queuedBytes: number; physicalBytes: number } {
+  snapshot(): {
+    pending: number;
+    identities: number;
+    routes: number;
+    queuedBytes: number;
+    physicalBytes: number;
+  } {
     return {
       pending: this.pending.size,
       identities: this.identities.size,
+      routes: this.routes.length,
       queuedBytes: this.queuedBytes,
       physicalBytes: this.physicalBytes,
     };
