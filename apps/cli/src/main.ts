@@ -103,18 +103,26 @@ function sleep(ms: number): Promise<void> {
 }
 
 // Writes are acknowledged once the server records the operation; poll its receipt until it
-// reaches a terminal state so the command reports what actually happened to the run.
+// reaches a terminal state so the command reports what actually happened to the run. The
+// write was accepted, so every polling failure must still name the operation and point at
+// its read-only receipt; the caller must never be left to guess or resend.
 async function settle(client: Client, initial: OperationRecord): Promise<OperationRecord> {
+  const id = initial.operationId;
+  const inspect = `inspect it with \`cove operation get ${id}\``;
   let operation = initial;
   const deadline = Date.now() + OPERATION_WAIT_MS;
   while (operation.state === "accepted" || operation.state === "running") {
     if (Date.now() > deadline)
-      throw new Error(
-        `operation ${operation.operationId} is still ${operation.state}; ` +
-          `inspect it with \`cove operation get ${operation.operationId}\``,
-      );
+      throw new Error(`operation ${id} was accepted and is still ${operation.state}; ${inspect}`);
     await sleep(POLL_MS);
-    operation = unwrap("operation.get", await client.getOperation(operation.operationId)).operation;
+    try {
+      operation = unwrap("operation.get", await client.getOperation(id)).operation;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `operation ${id} was accepted, but polling its state failed (${detail}); ${inspect}`,
+      );
+    }
   }
   return operation;
 }
