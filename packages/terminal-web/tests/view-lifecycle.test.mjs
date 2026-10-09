@@ -644,3 +644,15 @@ test("V1-L11 measures the largest grid the renderer fits and keeps it after appl
   );
   expect(wrong).toEqual([]);
 });
+
+test("V1-L12 releases the WebGL context of an xterm retired by a baseline or by disposal", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.webglRelease()),
+  );
+  // Without WebGL2 the view draws with the DOM renderer and owns no context.
+  expect(result).toEqual(
+    result.webgl2
+      ? { webgl2: true, replaced: [true], disposed: [true] }
+      : { webgl2: false, replaced: [], disposed: [] },
+  );
+});

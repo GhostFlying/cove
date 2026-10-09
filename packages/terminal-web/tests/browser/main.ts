@@ -714,6 +714,28 @@ const fixture = {
       container.style.height = "";
     }
   },
+  // The live WebGL contexts in the terminal; the addon's 2D link layer canvas has none.
+  webglContexts() {
+    return [...container.querySelectorAll("canvas")]
+      .map((canvas) => canvas.getContext("webgl2"))
+      .filter((gl): gl is WebGL2RenderingContext => gl !== null);
+  },
+  // Whether retiring an xterm, by a fresh baseline and by disposing the view, releases its WebGL
+  // context rather than leaving it to garbage collection.
+  async webglRelease() {
+    await initialize();
+    await ready(encoder.encode("FIRST"));
+    const replaced = this.webglContexts();
+    await baseline([encoder.encode("SECOND")]);
+    const disposed = this.webglContexts();
+    view!.dispose();
+    view = undefined;
+    return {
+      webgl2: offersWebgl2,
+      replaced: replaced.map((gl) => gl.isContextLost()),
+      disposed: disposed.map((gl) => gl.isContextLost()),
+    };
+  },
   async attemptConstructionFailure() {
     const original = Terminal.prototype.open;
     Terminal.prototype.open = () => {

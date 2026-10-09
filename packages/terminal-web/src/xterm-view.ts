@@ -65,36 +65,46 @@ const terminalOptions = (geometry: Geometry): ITerminalOptions & ITerminalInitOn
 const defaultRenderer = (): XtermRenderer =>
   typeof WebGL2RenderingContext === "function" ? "webgl" : "dom";
 
-// The WebGL addon offers no public handle on its canvas. The canvas it inserts is found by
+// The WebGL addon offers no public handle on its context. The canvases it inserts are found by
 // difference instead of through private fields, so its GPU context can be released on disposal.
-const webglCanvases = new WeakMap<WebglAddon, HTMLCanvasElement>();
+// It inserts two: a 2D canvas for the link layer, first, and the WebGL canvas. Only a canvas
+// already holding a WebGL2 context returns one from getContext("webgl2"); the 2D canvas returns
+// null, so asking each new canvas picks out the right one whatever the insertion order.
+const webglSurfaces = new WeakMap<
+  WebglAddon,
+  { canvas: HTMLCanvasElement; gl: WebGL2RenderingContext }
+>();
 
 function loadWebglAddon(terminal: Terminal, addon: WebglAddon): void {
   const before = new Set(terminal.element?.querySelectorAll("canvas") ?? []);
   try {
     terminal.loadAddon(addon);
   } finally {
-    // Also record a canvas from an activation that threw half way, so disposal releases it.
-    const canvas = [...(terminal.element?.querySelectorAll("canvas") ?? [])].find(
-      (candidate) => !before.has(candidate),
-    );
-    if (canvas) webglCanvases.set(addon, canvas);
+    // Also record a context from an activation that threw half way, so disposal releases it.
+    for (const canvas of terminal.element?.querySelectorAll("canvas") ?? []) {
+      if (before.has(canvas)) continue;
+      const gl = canvas.getContext("webgl2");
+      if (gl) {
+        webglSurfaces.set(addon, { canvas, gl });
+        break;
+      }
+    }
   }
 }
 
 function disposeWebglAddon(addon: WebglAddon): void {
-  const canvas = webglCanvases.get(addon);
-  webglCanvases.delete(addon);
+  const surface = webglSurfaces.get(addon);
+  webglSurfaces.delete(addon);
   try {
     addon.dispose();
   } finally {
     // xterm removes the canvas but leaves its context to garbage collection. Every baseline
     // rebuilds the xterm, so release the context now rather than let dead contexts accumulate
     // towards the browser's active-context limit, which evicts the oldest context when reached.
-    if (canvas) {
-      canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
-      canvas.width = 0;
-      canvas.height = 0;
+    if (surface) {
+      surface.gl.getExtension("WEBGL_lose_context")?.loseContext();
+      surface.canvas.width = 0;
+      surface.canvas.height = 0;
     }
   }
 }

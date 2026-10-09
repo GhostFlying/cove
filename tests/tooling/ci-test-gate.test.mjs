@@ -87,7 +87,7 @@ function report() {
 function growingViewReport() {
   const viewSuites = requiredSuites.filter((suite) => suite.project === "terminal-web");
   const files = viewSuites.map((suite) => suite.file);
-  const caseCount = (suiteIndex) => [7, 6, 11][suiteIndex];
+  const caseCount = (suiteIndex) => [7, 6, 12][suiteIndex];
   const discovered = viewSuites.flatMap((suite, suiteIndex) =>
     Array.from({ length: caseCount(suiteIndex) }, (_, index) => ({
       projectName: suite.project,
@@ -97,8 +97,8 @@ function growingViewReport() {
   );
   const execution = {
     success: true,
-    numTotalTests: 24,
-    numPassedTests: 24,
+    numTotalTests: 25,
+    numPassedTests: 25,
     numFailedTests: 0,
     numPendingTests: 0,
     numTodoTests: 0,
@@ -248,7 +248,7 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   for (const name of ["view-input", "view-recovery", "view-lifecycle"]) {
     const file = `packages/terminal-web/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
-    const minimumTests = name === "view-lifecycle" ? 11 : 6;
+    const minimumTests = name === "view-lifecycle" ? 12 : 6;
     expect(suite).toMatchObject({ project: "terminal-web", minimumTests });
     expect(files).toContain(file);
     expect(() => verifyDiscovery([], [file], [suite])).toThrow(
@@ -726,8 +726,8 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
 test("view evidence follows validated passing case growth above three suite floors", () => {
   const { viewSuites, files, discovered, execution } = growingViewReport();
   const inventory = verifyInventory(discovered, execution, files, viewSuites);
-  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 11]);
-  expect(viewEvidenceCases(execution, inventory)).toHaveLength(24);
+  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 12]);
+  expect(viewEvidenceCases(execution, inventory)).toHaveLength(25);
 });
 
 test("diagnostic dispatch requires exact branch, SHA, mode and allowlisted source", () => {
@@ -927,7 +927,7 @@ test("view evidence still rejects missing, short, pending, and mismatched suites
       files,
       viewSuites,
     ),
-  ).toThrow(/discovered 0 tests; needs 11/);
+  ).toThrow(/discovered 0 tests; needs 12/);
   expect(() =>
     verifyInventory(
       discovered.filter(
