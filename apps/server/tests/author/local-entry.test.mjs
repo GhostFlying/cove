@@ -4114,14 +4114,18 @@ describe("D passive production local entry", () => {
       } finally {
         for (const claim of claims) claim?.release();
       }
-      for (const invalidOrigin of ["null", "http://127.0.0.1:32125", [origin, origin]]) {
+      // inject() folds an array header into one comma-joined value rather than
+      // repeating the raw header line, so the server sees a single unapproved
+      // Origin here. Genuinely repeated raw Origin lines are malformed (400) and
+      // are covered through actualHeaders() in D-A22.
+      for (const invalidOrigin of ["null", "http://127.0.0.1:32125", `${origin}, ${origin}`]) {
         const response = await local.app.inject({
           method: "POST",
           url: "/rpc",
           headers: { ...business, origin: invalidOrigin },
           payload: utf8(statusCall),
         });
-        expect(response.statusCode).toBe(invalidOrigin instanceof Array ? 400 : 403);
+        expect(response.statusCode).toBe(403);
         expect(response.headers["access-control-allow-origin"]).toBeUndefined();
         expect(response.headers["access-control-expose-headers"]).toBeUndefined();
       }
