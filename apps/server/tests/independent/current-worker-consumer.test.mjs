@@ -123,7 +123,9 @@ describe("W2 current server and public client", () => {
         run: rig.run,
         status: "transfer",
         version: first.version,
+        previewId: firstServiceResult.previewId,
       });
+      assert.equal(typeof firstServiceResult.previewId, "string");
       try {
         await untilTurn(
           () => rig.runtime.previews.snapshot().active === 0,

@@ -190,12 +190,14 @@ export function publishPreview(
   fence: DeliveryFence,
 ): TerminalResult | null {
   const picture = reader.picture;
+  const transfer = knownVersion !== picture.version;
   const reply: TerminalResult = {
     type: "preview-result",
     requestId,
     run: picture.run,
-    status: knownVersion === picture.version ? "unchanged" : "transfer",
+    status: transfer ? "transfer" : "unchanged",
     version: picture.version,
+    ...(transfer ? { previewId } : {}),
   };
   if (picture.stale || !fence.current()) return null;
   if (reply.status === "transfer") {

@@ -337,6 +337,30 @@ test("result correlation rejects stale request, run, subscription and input sequ
     expect(validateTerminalResultForCommand(command, changed)).toBe(false);
 });
 
+test("a preview result names its transfer exactly when it reports one", () => {
+  // Preview events carry no request ID, so the result's previewId is what binds a transfer to
+  // its request; without it a late transfer could complete a newer request for the same run.
+  const unchanged = {
+    type: "preview-result",
+    requestId: "q1",
+    run,
+    status: "unchanged",
+    version: 4,
+  };
+  const transfer = { ...unchanged, status: "transfer", previewId: "p1" };
+  expect(validateTerminalFrame(frame(2), unchanged).ok).toBe(true);
+  expect(validateTerminalFrame(frame(2), transfer).ok).toBe(true);
+  expect(validateTerminalFrame(frame(2), { ...unchanged, previewId: "p1" })).toMatchObject({
+    ok: false,
+    error: { code: "INVALID_METADATA" },
+  });
+  const { previewId: _omitted, ...anonymous } = transfer;
+  expect(validateTerminalFrame(frame(2), anonymous)).toMatchObject({
+    ok: false,
+    error: { code: "INVALID_METADATA" },
+  });
+});
+
 test("control and cumulative acknowledgment results bind original epoch or sequence", () => {
   const fields = { requestId: "q1", run, subscription };
   for (const type of ["blur", "resize", "appearance"]) {
