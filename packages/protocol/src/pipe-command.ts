@@ -12,6 +12,12 @@ import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { ControlHolderSchema, TerminalEventSchema } from "./terminal-events.js";
 
 export const PIPE_VERSION = 2;
+// Route-control commands (applied-ack, baseline-progress, unsubscribe) a runtime may have
+// outstanding on one worker pipe at once, across all connections. The worker executes them one
+// at a time in arrival order and queues the rest up to this bound; the runtime never sends more,
+// so a worker that receives more treats it as a protocol violation and fails closed. Both sides
+// read this one constant so the sender's window can never exceed the receiver's queue.
+export const PIPE_ROUTE_CONTROL_COMMANDS = 4;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };

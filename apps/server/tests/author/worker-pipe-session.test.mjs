@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError } from "@cove/protocol/errors";
-import { encodePipeFrame } from "@cove/protocol/pipe";
+import {
+  PIPE_ROUTE_CONTROL_COMMANDS,
+  createPipeDecoder,
+  encodePipeFrame,
+} from "@cove/protocol/pipe";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { WorkerPipeSession } from "../../dist/terminal/worker-pipe-session.js";
@@ -273,6 +277,52 @@ describe("bounded worker pipe session", () => {
     await Promise.all([held, status, stop, progress]);
     f.session.transportReleased();
     expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("keeps route control within the worker's window and queues unsubscribe in order", async () => {
+    const f = fixture();
+    f.start();
+    // Request IDs of the route-control commands handed to the transport, in write order.
+    const written = () =>
+      f.writes.slice(1).map(({ data }) => {
+        const read = createPipeDecoder().read(data);
+        return JSON.parse(codec.decode(read.frames[0].metadata)).requestId;
+      });
+    const route = (index) =>
+      index % 2
+        ? f.command("baseline-progress", `route-${index}`, {
+            subscription,
+            baselineId: "baseline",
+            lastParsedOrdinal: index,
+          })
+        : f.command("applied-ack", `route-${index}`, { subscription, appliedSeq: index });
+    const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => route(index));
+    const results = window.map((command) => f.session.request(command));
+    expect(written()).toEqual(window.map((command) => command.requestId));
+    // Past the window, ordinary progress is refused before it is written, never sent for the
+    // worker to queue: the worker treats more than the window as a protocol violation.
+    const overflow = await f.session.request(route(PIPE_ROUTE_CONTROL_COMMANDS));
+    expect(overflow.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    // Unsubscribe is never refused for a full window; it waits unsent, in arrival order.
+    const first = f.command("unsubscribe", "unsubscribe-first", { subscription });
+    const second = f.command("unsubscribe", "unsubscribe-second", {
+      subscription: { ...subscription, subscriptionId: "other" },
+    });
+    const unsubscribed = [first, second].map((command) => f.session.requestUnsubscribe(command));
+    expect(written()).toHaveLength(PIPE_ROUTE_CONTROL_COMMANDS);
+    // Each reply frees one slot, and only then is the oldest waiting unsubscribe written.
+    f.session.receive(f.reply(window[0]));
+    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([first.requestId]);
+    f.session.receive(f.reply(window[1]));
+    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([
+      first.requestId,
+      second.requestId,
+    ]);
+    for (const command of [...window.slice(2), first, second]) f.session.receive(f.reply(command));
+    for (const result of await Promise.all([...results, ...unsubscribed]))
+      expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
+    expect(f.lost()).toBe(0);
   });
 
   it("activates same-chunk events only after synchronous result-marker admission", async () => {
