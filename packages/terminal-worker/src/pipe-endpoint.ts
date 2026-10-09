@@ -6,6 +6,7 @@ import {
   HEADER_BYTES,
   MAX_FRAME_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_VERSION,
   createPipeDecoder,
   encodePipeFrame,
@@ -113,7 +114,11 @@ class WorkerPipeCore {
   readonly #pending = new Map<string, RequestRecord>();
   readonly #unsettledFrames = new Set<OutboundFrame>();
   readonly #deferredControl: RequestRecord[] = [];
-  #parkedRouteControl: Uint8Array | undefined;
+  // Route-control frames that arrived while the single route slot was taken, in arrival
+  // order. Each is an exact-size metadata copy charged to ingress until admitted. The runtime
+  // keeps at most PIPE_ROUTE_CONTROL_COMMANDS route commands outstanding, so together with
+  // the executing or still-unsettled one this never exceeds that bound.
+  readonly #parkedRouteControl: Uint8Array[] = [];
   #parkedRouteBytes = 0;
   #controlCursor = 0;
   readonly #closedPromise: Promise<WorkerPipeClose>;
@@ -204,7 +209,7 @@ class WorkerPipeCore {
     this.#activeChunk = undefined;
     this.#outbound.length = 0;
     this.#deferredControl.length = 0;
-    this.#parkedRouteControl = undefined;
+    this.#parkedRouteControl.length = 0;
     this.#parkedRouteBytes = 0;
     this.#queuedBytes = 0;
     for (const frame of this.#unsettledFrames) {
@@ -314,6 +319,12 @@ class WorkerPipeCore {
           this.#extraResponseItems === 0 &&
           ![...this.#pending.values()].some((record) => record.role === "rejection")
         : count === 0;
+  }
+
+  #routeRecords(): number {
+    let count = 0;
+    for (const record of this.#pending.values()) if (record.role === "route") count++;
+    return count;
   }
 
   #controlAccountedBytes(): number {
@@ -506,13 +517,21 @@ class WorkerPipeCore {
       return true;
     }
     const role = this.#role(command);
-    if (role === "route" && !this.#slotAvailable(role)) {
+    // Route control runs one command at a time, end to end, in arrival order. A later one
+    // parks while the slot is taken, and also behind any already parked one so it cannot
+    // overtake it. The runtime's window is PIPE_ROUTE_CONTROL_COMMANDS outstanding commands,
+    // counted until it receives each reply; this worker holds each record until that reply's
+    // write callback, which runs before the runtime can have read the reply. So a record
+    // count past the window means the runtime broke the contract, and the pipe fails closed.
+    if (role === "route" && (!this.#slotAvailable(role) || this.#parkedRouteControl.length)) {
+      const metadata = frame.metadata.slice();
       if (
-        this.#parkedRouteControl ||
+        this.#routeRecords() >= PIPE_ROUTE_CONTROL_COMMANDS ||
         frame.payload.byteLength !== 0 ||
         (this.#activeChunk?.buffer.byteLength ?? 0) +
           this.#decoderStorageBound() +
-          frame.metadata.buffer.byteLength >
+          this.#parkedRouteBytes +
+          metadata.byteLength >
           this.#hello.effectiveBudgets.pipeQueuedBytes
       ) {
         void this.shutdown("route-control-ingress-capacity");
@@ -525,8 +544,8 @@ class WorkerPipeCore {
         phase: "parked",
         frames: new Set(),
       });
-      this.#parkedRouteControl = frame.metadata;
-      this.#parkedRouteBytes = frame.metadata.buffer.byteLength;
+      this.#parkedRouteControl.push(metadata);
+      this.#parkedRouteBytes += metadata.byteLength;
       return true;
     }
     if (!this.#slotAvailable(role)) return this.#rejectBusy(command);
@@ -808,11 +827,12 @@ class WorkerPipeCore {
     this.#execution?.deliveryCapacity?.();
   }
 
+  // Admits only the oldest parked frame; it takes the slot, so the next waits for its settlement.
   #admitParkedRoute(): void {
-    const raw = this.#parkedRouteControl;
+    const raw = this.#parkedRouteControl[0];
     if (!raw || !this.#slotAvailable("route") || this.#state !== "ready") return;
-    this.#parkedRouteControl = undefined;
-    this.#parkedRouteBytes = 0;
+    this.#parkedRouteControl.shift();
+    this.#parkedRouteBytes -= raw.byteLength;
     let decoded: unknown;
     try {
       decoded = JSON.parse(textDecoder.decode(raw));

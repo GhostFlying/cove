@@ -253,6 +253,7 @@ export {
   composeSpawnPayload,
   validateSpawnPayload,
   PIPE_VERSION,
+  PIPE_ROUTE_CONTROL_COMMANDS,
 } from "./pipe-command.js";
 export type {
   PipeMetadata,

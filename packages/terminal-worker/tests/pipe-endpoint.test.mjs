@@ -8,6 +8,7 @@ import {
   HEADER_BYTES,
   MAX_METADATA_BYTES,
   MAX_FRAME_BYTES,
+  PIPE_ROUTE_CONTROL_COMMANDS,
   composeSpawnPayload,
   createPipeDecoder,
   encodePipeFrame,
@@ -97,7 +98,7 @@ function coalescedAtCap(cap, prefixFrameBytes) {
 
 function createHarness(config = {}) {
   const input = new PassThrough();
-  const chunks = [];
+  const chunks = config.chunks ?? [];
   const output = config.output ?? new PassThrough();
   output.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
   const calls = [];
@@ -946,6 +947,146 @@ test("W2 O recover leaves X available and parks one next X until the prior write
     parkedRequests: 0,
   });
   await h.pipe.shutdown("test-complete");
+});
+
+// A Writable that hands every write callback to the test, so a reply stays physically
+// unsettled (and its request outstanding) until the test releases it.
+function heldOutput() {
+  const callbacks = [];
+  const chunks = [];
+  const output = new Writable({
+    highWaterMark: 1024 * 1024,
+    write(chunk, _encoding, callback) {
+      chunks.push(Buffer.from(chunk));
+      callbacks.push(callback);
+    },
+  });
+  return { output, callbacks, chunks };
+}
+
+function routeControl(index) {
+  const fields = [
+    { type: "applied-ack", appliedSeq: index },
+    { type: "baseline-progress", baselineId: "b", lastParsedOrdinal: index },
+    { type: "unsubscribe" },
+  ][index % 3];
+  return { ...fields, worker, run, subscription, requestId: `route-${index}` };
+}
+
+async function routeHarness(execute, budgets = M0_LIMITS) {
+  const held = heldOutput();
+  const h = createHarness({ output: held.output, chunks: held.chunks, execute });
+  h.input.write(encode({ ...hello, effectiveBudgets: budgets }));
+  held.callbacks.shift()();
+  await tick();
+  return { h, held };
+}
+
+test("route control up to the shared window queues in arrival order behind one executing command", async () => {
+  const { h, held } = await routeHarness();
+  const commands = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+    routeControl(index),
+  );
+  // The runtime may have this many outstanding at once; they can reach the worker in one read.
+  h.input.write(Buffer.concat(commands.map((command) => encode(command))));
+  await tick();
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["route-0"]);
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    outstandingRequests: PIPE_ROUTE_CONTROL_COMMANDS,
+    parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS - 1,
+  });
+  // Each reply's write callback frees the slot for exactly the next parked command.
+  for (let index = 1; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
+    held.callbacks.shift()();
+    await tick();
+    expect(h.calls.map(({ command }) => command.requestId)).toEqual(
+      commands.slice(0, index + 1).map((command) => command.requestId),
+    );
+    expect(h.pipe.snapshot()).toMatchObject({
+      state: "ready",
+      parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS - 1 - index,
+    });
+  }
+  held.callbacks.shift()();
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    outstandingRequests: 0,
+    parkedRequests: 0,
+  });
+  expect(h.frames().map((frame) => frame.requestId)).toEqual([
+    undefined,
+    ...commands.map((command) => command.requestId),
+  ]);
+  await h.pipe.shutdown("test-complete");
+});
+
+test("the full route window waits behind an outstanding BUSY rejection", async () => {
+  let settleOrdinary;
+  // One ordinary slot, so a second preview earns a BUSY rejection. Until that reply's write
+  // callback the rejection holds the slot route control shares, so every route command parks.
+  const { h, held } = await routeHarness(
+    (command) =>
+      command.type === "preview-refresh"
+        ? new Promise((resolve) => {
+            settleOrdinary = resolve;
+          })
+        : Promise.resolve({
+            type: "error",
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+            error: domainError("CAPABILITY_UNAVAILABLE"),
+          }),
+    { ...M0_LIMITS, pendingWorkerCommands: 1 },
+  );
+  const preview = { type: "preview-refresh", worker, run, requestId: "preview" };
+  h.input.write(Buffer.concat([encode(preview), encode({ ...preview, requestId: "busy" })]));
+  await tick();
+  expect(h.frames().at(-1)).toMatchObject({ requestId: "busy", error: { kind: "BUSY" } });
+  const commands = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+    routeControl(index),
+  );
+  h.input.write(Buffer.concat(commands.map((command) => encode(command))));
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS,
+  });
+  // Settling the BUSY reply admits the oldest; the rest follow one callback at a time.
+  for (let index = 0; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
+    held.callbacks.shift()();
+    await tick();
+    expect(h.calls.slice(1).map(({ command }) => command.requestId)).toEqual(
+      commands.slice(0, index + 1).map((command) => command.requestId),
+    );
+  }
+  expect(h.pipe.snapshot().state).toBe("ready");
+  settleOrdinary({
+    type: "error",
+    worker,
+    run,
+    requestId: "preview",
+    commandType: "preview-refresh",
+    error: domainError("CAPABILITY_UNAVAILABLE"),
+  });
+  await h.pipe.shutdown("test-complete");
+});
+
+test("route control beyond the shared window is a protocol violation and fails closed", async () => {
+  const { h } = await routeHarness();
+  const commands = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS + 1 }, (_, index) =>
+    routeControl(index),
+  );
+  h.input.write(Buffer.concat(commands.map((command) => encode(command))));
+  const closed = await h.pipe.closed;
+  expect(closed.reason).toBe("route-control-ingress-capacity");
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["route-0"]);
+  expect(closed.uncertainRequestIds).toEqual(
+    commands.slice(0, PIPE_ROUTE_CONTROL_COMMANDS).map((command) => command.requestId),
+  );
 });
 
 test("ordinary response reservations stop before spending the control reserve", async () => {

@@ -8,6 +8,7 @@ import {
   MAX_FRAME_BYTES,
   MAX_READ_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_ROUTE_CONTROL_COMMANDS,
   type PipeCommand,
   type PipeMetadata,
   type PipeEvent,
@@ -267,7 +268,7 @@ export class WorkerPipeSession {
 
   private promoteProgress(): void {
     if (this.closed) return;
-    while (this.waitingProgress.length && this.progressCount() < 4) {
+    while (this.waitingProgress.length && this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS) {
       const item = this.waitingProgress.shift()!;
       item.request!.admitted = true;
       this.queue.push(item);
@@ -301,7 +302,8 @@ export class WorkerPipeSession {
       role === "ordinary"
         ? this.composition.budgets.pendingWorkerCommands
         : role === "progress"
-          ? 4
+          ? // The worker's route-control queue bound; exceeding it shuts the worker down.
+            PIPE_ROUTE_CONTROL_COMMANDS
           : 1;
     if ((!waitForProgress && count >= cap) || this.identities.size >= this.options.identityLimit)
       return Promise.resolve(this.error(command, "BUSY"));

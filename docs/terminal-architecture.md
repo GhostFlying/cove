@@ -157,6 +157,8 @@ Node 控制进程：认证、连接、授权及转发
 worker 仍是输出/resize 等终端事件顺序的仲裁方，命令执行结果通过带关联身份的应答确认。
 帧编码待定：需带类型、运行/订阅身份、长度和适用的序号，限制单帧及排队字节；快照和大段输入分块。
 当前操作者相关工作优先，优先级只调整不同终端/请求间尚未发送的工作，不打乱同一终端事件顺序。
+同一 worker 的路由控制命令（applied-ack、baseline-progress、unsubscribe）由 worker 按到达顺序逐条执行；
+runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CONTROL_COMMANDS`，超出即协议违规、worker 失败关闭。
 
 进程池可从 devbox 已测的 4 个子进程起步，作为配置与验证起点，不是固定容量承诺。
 node-pty 官方明确不保证 worker_threads 安全，PTY 并行采用子进程。
