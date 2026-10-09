@@ -1,9 +1,9 @@
 import { Terminal } from "@xterm/xterm";
-import { createXtermTerminalView } from "@cove/terminal-web/xterm-view";
+import { createXtermTerminalView, type XtermTerminalView } from "@cove/terminal-web/xterm-view";
 import { QUERY_SUPPORT, type Appearance, type Geometry } from "@cove/protocol/profile";
 import type { BaselineDescriptor, TerminalEvent } from "@cove/protocol/terminal";
 import type { DomainError } from "@cove/protocol/errors";
-import type { FocusIntent, InputIntent, TerminalView } from "@cove/protocol/view";
+import type { FocusIntent, InputIntent } from "@cove/protocol/view";
 // This authored JavaScript fixture is retained from Q1 and deliberately consumed without copying
 // it into V1. Its runtime shape is narrowed immediately below.
 // @ts-expect-error The historical fixture intentionally has no TypeScript declaration.
@@ -18,6 +18,13 @@ const queryCases = historicalQueryCases as Array<{
 }>;
 
 const encoder = new TextEncoder();
+// The view defaults to WebGL2 where the browser offers it, so these suites run under WebGL in a
+// browser with WebGL2 and under the DOM fallback otherwise.
+const offersWebgl2 = (() => {
+  const gl = document.createElement("canvas").getContext("webgl2");
+  gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  return Boolean(gl);
+})();
 const container = document.querySelector<HTMLElement>("#terminal")!;
 const originalTerminalOpen = Terminal.prototype.open;
 const captureOpenedTerminal = (terminal: Terminal, element: HTMLElement) => {
@@ -40,7 +47,7 @@ const appearance: Appearance = {
   palette: [{ index: 1, rgb: "cccc/0000/0000" }],
 };
 
-let view: TerminalView | undefined;
+let view: XtermTerminalView | undefined;
 let generation = 0;
 let inputs: InputIntent[] = [];
 let focuses: FocusIntent[] = [];
@@ -214,6 +221,8 @@ function evidence() {
       modes: capturedTerminal ? { ...capturedTerminal.modes } : undefined,
     },
     measurement: view?.measureGrid(),
+    renderer: view?.renderer,
+    webgl2: offersWebgl2,
   };
 }
 

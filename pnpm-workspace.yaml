@@ -5,6 +5,7 @@ packages:
 catalog:
   "@xterm/headless": 6.0.0
   "@xterm/addon-serialize": 0.14.0
+  "@xterm/addon-webgl": 0.19.0
   "@xterm/xterm": 6.0.0
   node-pty: 1.1.0
   zod: 4.6.5

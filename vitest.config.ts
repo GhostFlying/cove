@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
@@ -88,9 +88,20 @@ export default defineConfig({
       },
       {
         test: {
+          name: "terminal-web-unit",
+          environment: "node",
+          include: ["packages/terminal-web/tests/unit/**/*.test.mjs"],
+          testTimeout: 15_000,
+        },
+      },
+      {
+        test: {
           name: "terminal-web",
           environment: "node",
           include: ["packages/terminal-web/tests/**/*.test.mjs"],
+          // Browser-free unit tests run in their own project: this one carries per-case browser
+          // cleanup evidence for exactly the three V1 browser suites.
+          exclude: [...configDefaults.exclude, "packages/terminal-web/tests/unit/**"],
           testTimeout: 45_000,
           maxWorkers: 1,
         },

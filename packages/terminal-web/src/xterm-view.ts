@@ -1,3 +1,4 @@
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { M0_LIMITS } from "@cove/protocol/budgets";
@@ -30,7 +31,60 @@ import {
 import { xtermTheme } from "./xterm-appearance.js";
 import { attachInputOrigin, type InputOriginAttachment } from "./xterm-input-origin.js";
 import { XtermParseOperation } from "./xterm-parse-operation.js";
+import { RendererFallback, type XtermRenderer } from "./xterm-renderer.js";
 import { measureTerminalGrid } from "./xterm-view-geometry.js";
+
+export type { XtermRenderer } from "./xterm-renderer.js";
+
+export interface XtermTerminalViewOptions {
+  // Defaults to "webgl" when the browser exposes WebGL2 and to "dom" otherwise. "webgl" is a
+  // preference: a failed load or a repeated context loss still falls back to the DOM renderer.
+  renderer?: XtermRenderer;
+}
+
+// The renderer is a private drawing choice of this view. It is exposed read-only for diagnostics
+// and tests; controllers and the protocol must not depend on it.
+export interface XtermTerminalView extends TerminalView {
+  readonly renderer: XtermRenderer;
+  onRendererChange(listener: (renderer: XtermRenderer) => void): { dispose(): void };
+}
+
+const defaultRenderer = (): XtermRenderer =>
+  typeof WebGL2RenderingContext === "function" ? "webgl" : "dom";
+
+// The WebGL addon offers no public handle on its canvas. The canvas it inserts is found by
+// difference instead of through private fields, so its GPU context can be released on disposal.
+const webglCanvases = new WeakMap<WebglAddon, HTMLCanvasElement>();
+
+function loadWebglAddon(terminal: Terminal, addon: WebglAddon): void {
+  const before = new Set(terminal.element?.querySelectorAll("canvas") ?? []);
+  try {
+    terminal.loadAddon(addon);
+  } finally {
+    // Also record a canvas from an activation that threw half way, so disposal releases it.
+    const canvas = [...(terminal.element?.querySelectorAll("canvas") ?? [])].find(
+      (candidate) => !before.has(candidate),
+    );
+    if (canvas) webglCanvases.set(addon, canvas);
+  }
+}
+
+function disposeWebglAddon(addon: WebglAddon): void {
+  const canvas = webglCanvases.get(addon);
+  webglCanvases.delete(addon);
+  try {
+    addon.dispose();
+  } finally {
+    // xterm removes the canvas but leaves its context to garbage collection. Every baseline
+    // rebuilds the xterm, so release the context now rather than let dead contexts accumulate
+    // towards the browser's active-context limit, which evicts the oldest context when reached.
+    if (canvas) {
+      canvas.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  }
+}
 
 type ViewState = "new" | "initialized" | "installing" | "ready" | "failed" | "disposed";
 type Listener<T> = (value: T) => void;
@@ -115,7 +169,10 @@ function cleanupAll(actions: Array<() => void>): unknown[] {
   return errors;
 }
 
-export function createXtermTerminalView(container: HTMLElement): TerminalView {
+export function createXtermTerminalView(
+  container: HTMLElement,
+  options: XtermTerminalViewOptions = {},
+): XtermTerminalView {
   let state: ViewState = "new";
   let backend: Backend | undefined;
   let viewGeneration = -1;
@@ -133,6 +190,23 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
   const inputs = new ListenerSet<InputIntent>();
   const focuses = new ListenerSet<FocusIntent>();
   const failures = new ListenerSet<DomainError>();
+  const rendererChanges = new ListenerSet<XtermRenderer>();
+  // Renderer trouble never fails the view: it degrades to the DOM renderer, which draws the same
+  // model. See xterm-renderer.ts for the fallback state machine.
+  const renderers = new RendererFallback<Terminal, WebglAddon>(
+    options.renderer ?? defaultRenderer(),
+    {
+      createAddon: () => new WebglAddon(),
+      loadAddon: loadWebglAddon,
+      onContextLoss: (addon, listener) => addon.onContextLoss(listener),
+      clearTextureAtlas: (addon) => addon.clearTextureAtlas(),
+      disposeAddon: disposeWebglAddon,
+      refresh: (terminal) => terminal.refresh(0, Math.max(0, terminal.rows - 1)),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    },
+    (renderer) => rendererChanges.emit(renderer),
+  );
   const register = <T>(listeners: ListenerSet<T>, listener: Listener<T>) => {
     if (state === "disposed") throw domainError("RESYNC_REQUIRED");
     return listeners.add(listener);
@@ -189,6 +263,7 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     return cleanupAll([
       () => retired.tracker.dispose(),
       () => retired.origin.dispose(),
+      () => renderers.detach(retired.terminal),
       () => retired.terminal.dispose(),
     ]);
   };
@@ -256,6 +331,9 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
         if (targetIncarnation === incarnation && effectivelyFocused) publishFocus(false);
       });
       terminal.element?.setAttribute("data-cove-terminal-view", "xterm-dom-v1");
+      // Load the renderer last: it cannot fail construction, and a construction failure above
+      // must not leave a GPU context behind.
+      renderers.attach(terminal);
       return { terminal, origin, tracker, incarnation: targetIncarnation };
     } catch (error) {
       const primary = asDomainError(error);
@@ -458,6 +536,7 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
         try {
           if (visible) {
             element.removeAttribute("hidden");
+            renderers.reveal();
             current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
           } else {
             element.setAttribute("hidden", "");
@@ -476,13 +555,22 @@ export function createXtermTerminalView(container: HTMLElement): TerminalView {
     onFocusIntent: (listener) => register(focuses, listener),
     onFailure: (listener) => register(failures, listener),
 
+    get renderer(): XtermRenderer {
+      return renderers.active;
+    },
+    onRendererChange: (listener) => register(rendererChanges, listener),
+
     dispose(): void {
       if (state === "disposed") return;
       state = "disposed";
+      // Dispose the renderer policy first: it cancels a pending retry and releases the addon
+      // without publishing a renderer change to listeners that are about to be cleared.
+      renderers.dispose();
       const cleanup = disposeBackend();
       inputs.clear();
       focuses.clear();
       failures.clear();
+      rendererChanges.clear();
       if (cleanup.length) throw new AggregateError(cleanup, "Terminal view cleanup failed");
     },
   };

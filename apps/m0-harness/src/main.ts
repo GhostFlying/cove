@@ -13,9 +13,12 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import type { RunRef } from "@cove/protocol/identity";
 import { DEFAULT_APPEARANCE, type Geometry } from "@cove/protocol/profile";
 import type { OperationRecord, RunRecord } from "@cove/protocol/rpc";
-import type { TerminalView } from "@cove/protocol/view";
-import { createXtermTerminalView } from "@cove/terminal-web/xterm-view";
-import { takeConnectionInfo, type ConnectionInfo } from "./fragment.js";
+import {
+  createXtermTerminalView,
+  type XtermTerminalView,
+  type XtermTerminalViewOptions,
+} from "@cove/terminal-web/xterm-view";
+import { readRendererChoice, takeConnectionInfo, type ConnectionInfo } from "./fragment.js";
 
 const BUILD_VERSION = "m0-harness-0.0.0";
 const OPERATION_WAIT_MS = 30_000;
@@ -106,7 +109,7 @@ function estimateGrid(): Geometry {
 interface OpenTerminal {
   readonly run: RunRef;
   readonly controller: TerminalController;
-  readonly view: TerminalView;
+  readonly view: XtermTerminalView;
   readonly disposables: { dispose(): void }[];
   // The last grid this client asked for, by focus or resize, so one size is requested once.
   requested?: Geometry;
@@ -125,6 +128,7 @@ interface OpenTerminal {
 }
 
 let info: ConnectionInfo;
+let viewOptions: XtermTerminalViewOptions = {};
 let client: Client;
 let current: OpenTerminal | undefined;
 let runs: RunRecord[] = [];
@@ -185,6 +189,8 @@ function renderTerminalStatus(entry: OpenTerminal): void {
       `${snapshot.appliedGeometry.geometry.cols}×${snapshot.appliedGeometry.geometry.rows}`,
     );
   parts.push(snapshot.controlEpoch === undefined ? "viewing" : "controlling");
+  // Diagnostic only: the active renderer is the view's private choice and may fall back to DOM.
+  parts.push(`renderer ${entry.view.renderer}`);
   if (snapshot.execution.status === "exited") {
     const { exitCode, signal } = snapshot.execution;
     parts.push(
@@ -195,6 +201,7 @@ function renderTerminalStatus(entry: OpenTerminal): void {
   terminalStatus.textContent = parts.join(" · ");
   terminalStatus.dataset.phase = snapshot.phase;
   terminalStatus.dataset.execution = snapshot.execution.status;
+  terminalStatus.dataset.renderer = entry.view.renderer;
 }
 
 function phaseLabel(snapshot: TerminalSnapshot): string {
@@ -253,7 +260,7 @@ async function openRun(run: RunRef): Promise<void> {
     return;
   closeCurrent();
   clearError();
-  const view = createXtermTerminalView(terminalHost);
+  const view = createXtermTerminalView(terminalHost, viewOptions);
   const opened = client.openTerminal({
     run,
     viewId: `harness-${crypto.randomUUID()}`,
@@ -312,6 +319,11 @@ async function openRun(run: RunRef): Promise<void> {
       renderTerminalStatus(entry);
     }),
     view.onFailure((error) => showError(`Terminal view failed: ${describe(error)}`)),
+    // A renderer fallback changes the cell metrics, so the grid that fits may change too.
+    view.onRendererChange(() => {
+      renderTerminalStatus(entry);
+      syncSize(entry);
+    }),
   );
   renderTerminalStatus(entry);
   const attached = await entry.controller.attach();
@@ -443,7 +455,14 @@ function start(): void {
     showError(taken);
     return;
   }
+  const choice = readRendererChoice(location);
+  if (typeof choice === "string") {
+    connectionLabel.textContent = "not configured";
+    showError(choice);
+    return;
+  }
   info = taken;
+  viewOptions = choice;
   client = createClient({
     expectedServerId: info.serverId,
     expectedRelayInstanceId: info.instance,

@@ -265,14 +265,14 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   }
 });
 
-test("terminal-web package test runs both registered probe and view projects", async () => {
+test("terminal-web package test runs its registered unit, probe and view projects", async () => {
   const pkg = JSON.parse(
     await readFile(resolve(root, "packages/terminal-web/package.json"), "utf8"),
   );
   const projects = [...pkg.scripts.test.matchAll(/(?:^|\s)--project\s+(\S+)/g)].map(
     (match) => match[1],
   );
-  expect(projects).toEqual(["terminal-web-probes", "terminal-web"]);
+  expect(projects).toEqual(["terminal-web-unit", "terminal-web-probes", "terminal-web"]);
 });
 
 test("browser cleanup evidence reset removes stale cases and binds the current source", async () => {
