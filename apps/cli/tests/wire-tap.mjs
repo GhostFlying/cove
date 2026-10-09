@@ -42,8 +42,11 @@ export function createTappedClient(record) {
     // Outbound messages withheld from the server, and the test's choice of which to withhold.
     heldOutbound: [],
     outboundHold: undefined,
-    // Hold inbound terminal frames instead of handing them to the client.
-    pause() {
+    holds: () => true,
+    // Hold inbound terminal frames instead of handing them to the client. `holds` picks the
+    // frames to hold, e.g. one subscription's events; the others still reach the client.
+    pause(holds = () => true) {
+      tap.holds = holds;
       tap.paused = true;
     },
     // Hand held frames to the client one macrotask apart so the client parses at its own
@@ -171,7 +174,8 @@ export function createTappedClient(record) {
             return;
           }
           tap.inbound.push(...frames);
-          if (tap.paused) tap.held.push({ callbacks, bytes: bytes.slice(), connection });
+          if (tap.paused && frames.some((frame) => tap.holds(frame)))
+            tap.held.push({ callbacks, bytes: bytes.slice(), connection });
           else callbacks.onBinary(bytes);
         },
         onClose() {
