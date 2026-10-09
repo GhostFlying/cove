@@ -266,10 +266,12 @@ export class TerminalControl {
     this.restoredGeneration = viewGeneration;
     if (!carried || !this.wantsFocus || this.exited || !sameSubscriptionRef(carried.ref, ref))
       return;
-    // An older epoch at B means the grant's own fact is still ahead in the ordered stream and
-    // will be applied normally. The same epoch must still name this subscription.
+    // An older epoch at B is acceptable only while the grant's own fact is still ahead (B < A):
+    // it is then applied from the ordered stream and checked like any grant. An older epoch at or
+    // after A contradicts the grant and drops it. The same epoch must still name this
+    // subscription, at or after A.
     const kept =
-      canonical.epoch < carried.epoch ||
+      (canonical.epoch < carried.epoch && atSeq < carried.atSeq) ||
       (canonical.epoch === carried.epoch && heldBy(ref, canonical) && atSeq >= carried.atSeq);
     const latest = this.observed!;
     if (

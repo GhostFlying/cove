@@ -47,7 +47,7 @@ function decodeCommand(bytes) {
   };
 }
 
-function view(onApply) {
+function view(onApply, onBeginBaseline) {
   const focusListeners = new Set();
   const inputListeners = new Set();
   const failureListeners = new Set();
@@ -56,7 +56,9 @@ function view(onApply) {
   let disposed = 0;
   const terminalView = {
     initialize: async () => {},
-    beginBaseline: async () => {},
+    beginBaseline: async (descriptor) => {
+      onBeginBaseline?.(descriptor);
+    },
     writeBaselineChunk: async () => {},
     finishBaseline: async () => {},
     applyEvent: async (event) => {
@@ -143,6 +145,7 @@ async function harness({
   scheduler,
   onCommand,
   onApply,
+  onBeginBaseline,
   autoOpen = true,
   holdAcks = false,
 } = {}) {
@@ -297,7 +300,7 @@ async function harness({
     },
   });
   expect((await client.connect()).ok).toBe(true);
-  const mounted = view(onApply);
+  const mounted = view(onApply, onBeginBaseline);
   if (!autoOpen) return { client, peer, mounted };
   const opened = client.openTerminal({
     run,
@@ -637,12 +640,12 @@ describe("client control authority", () => {
       peer.event({ type: "control", run, seq: 2, epoch: 1, holder: self, geometry: larger });
     }
 
-    async function recoverWith(peer, control) {
+    async function recoverWith(peer, control, atSeq = 2) {
       await settle();
       const recover = peer.commands.findLast(({ command }) => command.type === "recover").command;
       expect(recover).toMatchObject({ reason: "resize-context" });
-      peer.result(recover, { mode: "baseline", atSeq: 2 });
-      peer.baseline(2, { baselineId: "baseline-2", grid: larger, control });
+      peer.result(recover, { mode: "baseline", atSeq });
+      peer.baseline(atSeq, { baselineId: "baseline-2", grid: larger, control });
       await settle();
     }
 
@@ -676,6 +679,7 @@ describe("client control authority", () => {
         inputReady: true,
         controlEpoch: 1,
         appliedGeometry: { geometry: larger, atSeq: 2 },
+        appliedAuthority: { epoch: 1, holder: self, atSeq: 2 },
       });
       // Recovery regained the server's recorded authority without asking for focus again.
       expect(focusCount(peer)).toBe(1);
@@ -705,6 +709,86 @@ describe("client control authority", () => {
       expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
       expect(controller.snapshot()).toMatchObject({ inputReady: true, controlEpoch: 1 });
       expect(focusCount(peer)).toBe(1);
+    });
+
+    test("an older baseline epoch keeps the grant while its fact is still ahead, then waits for its ACK", async () => {
+      const { controller, peer } = await harness({ holdAcks: true });
+      while (peer.releaseAck());
+      controller.setInputTarget(true, true);
+      let resolved = false;
+      const pending = controller.requestFocus(larger).then((outcome) => {
+        resolved = true;
+        return outcome;
+      });
+      peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
+      peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
+      // The baseline was captured between the resize and the grant (B = 1 < A = 2).
+      await recoverWith(peer, { epoch: 0, holder: null }, 1);
+      expect(resolved).toBe(false);
+      expect(controller.snapshot()).toMatchObject({ phase: "ready", controlEpoch: 1 });
+      peer.event({ type: "control", run, seq: 2, epoch: 1, holder: self, geometry: larger });
+      await settle();
+      // Applied but its covering ACK is still behind the held one: not yet usable for input.
+      expect(controller.snapshot().inputReady).toBe(true);
+      expect(resolved).toBe(false);
+      while (peer.releaseAck()) await settle();
+      expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+      expect(controller.snapshot().appliedAuthority).toMatchObject({ epoch: 1, holder: self });
+      expect(focusCount(peer)).toBe(1);
+    });
+
+    test("an older baseline epoch at or after the grant's seq drops the grant", async () => {
+      expect(await dropCarriedGrant({ epoch: 0, holder: null })).toBe(1);
+    });
+
+    test("a view cannot rewrite the baseline authority that decides reinstatement", async () => {
+      const { controller, peer } = await harness({
+        onBeginBaseline: (descriptor) => {
+          try {
+            descriptor.control.epoch = 1;
+          } catch {
+            /* frozen */
+          }
+          try {
+            descriptor.control.holder = self;
+          } catch {
+            /* frozen */
+          }
+          try {
+            descriptor.control = { epoch: 1, holder: self };
+          } catch {
+            /* frozen */
+          }
+        },
+      });
+      controller.setInputTarget(true, true);
+      const pending = controller.requestFocus(larger);
+      peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
+      grantFacts(peer);
+      await recoverWith(peer, { epoch: 2, holder: other });
+      expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+      const snapshot = controller.snapshot();
+      expect(snapshot).toMatchObject({
+        inputReady: false,
+        appliedAuthority: { epoch: 2, holder: other, atSeq: 2 },
+      });
+      expect(snapshot.controlEpoch).toBeUndefined();
+    });
+
+    test("a focus whose resize never arrives settles as a timeout within the recovery budget", async () => {
+      const scheduler = clock();
+      const { controller, peer } = await harness({ scheduler });
+      controller.setInputTarget(true, true);
+      let outcome;
+      void controller.requestFocus(larger).then((value) => (outcome = value));
+      peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
+      await settle();
+      scheduler.advance(M0_LIMITS.recoveryDeadlineMs - 1);
+      await settle();
+      expect(outcome).toBeUndefined();
+      scheduler.advance(1);
+      await settle();
+      expect(outcome).toMatchObject({ ok: false, error: { reason: "timeout" } });
     });
 
     // Returns how many focus commands were sent: recovery must not have asked again.

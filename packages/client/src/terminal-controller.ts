@@ -582,6 +582,7 @@ export class RoutedTerminalController implements TerminalController {
     if (!valid()) return { ok: false, error: localError("invalid-state") };
     let settled = false;
     let receipt: TerminalOutcome<TerminalControlReceipt> | undefined;
+    let acceptedAtMs = 0;
     const handle = (outcome: CommandOutcome): void => {
       if (settled) return;
       settled = true;
@@ -604,6 +605,7 @@ export class RoutedTerminalController implements TerminalController {
           this.releaseStaleFocus(ref, outcome.result.epoch);
         receipt = { ok: false, error: localError("invalid-state") };
       } else {
+        acceptedAtMs = this.host.scheduler.nowMs();
         receipt = {
           ok: true,
           value: { epoch: outcome.result.epoch, atSeq: outcome.result.atSeq },
@@ -631,15 +633,20 @@ export class RoutedTerminalController implements TerminalController {
     // Resolve only once the grant is usable or lost, so input sent after a successful focus is
     // not caught by the recovery that the focus's own resize triggers (that recovery still
     // cancels input queued before it). The wait is keyed on the requested grid because the focus
-    // result can arrive before the resize fact. The ordered facts start the recovery and its
-    // deadline ends it, so no timer is added; a focus at the applied grid keeps resolving on its
-    // result as before.
-    if (
-      granted.ok &&
-      (resizes || this.phase !== "ready") &&
-      !(await this.waitForFocusSettled(ref, binding, view, granted.value.epoch))
-    )
-      return { ok: false, error: localError("invalid-state") };
+    // result can arrive before the resize fact. A stalled downlink or view could keep that fact
+    // from ever arriving, so the whole wait spends the recovery deadline budget from the moment
+    // the result was accepted and then reports the grant as unknown rather than hanging. A focus
+    // at the applied grid keeps resolving on its result as before.
+    if (granted.ok && (resizes || this.phase !== "ready")) {
+      const settledFocus = await this.waitForFocusSettled(
+        ref,
+        binding,
+        view,
+        granted.value.epoch,
+        acceptedAtMs,
+      );
+      if (settledFocus !== "usable") return { ok: false, error: localError(settledFocus) };
+    }
     return granted;
   }
 
@@ -648,16 +655,22 @@ export class RoutedTerminalController implements TerminalController {
     binding: NegotiatedConnection,
     view: TerminalView,
     epoch: number,
-  ): Promise<boolean> {
+    acceptedAtMs: number,
+  ): Promise<"usable" | "invalid-state" | "timeout"> {
     return new Promise((resolve) => {
       let settled = false;
       let state: Disposable | undefined;
-      const finish = (ready: boolean): void => {
+      let timer: Disposable | undefined;
+      const finish = (outcome: "usable" | "invalid-state" | "timeout"): void => {
         if (settled) return;
         settled = true;
+        this.authorityWatchers.delete(watcher);
         safeDispose(state);
-        resolve(ready);
+        safeDispose(timer);
+        resolve(outcome);
       };
+      // Usable, not merely ready: the grant's covering ACK must already be handed to the uplink,
+      // otherwise input sent right after the focus would still wait behind the fence.
       const check = (): void => {
         if (
           this.ref !== ref ||
@@ -668,15 +681,33 @@ export class RoutedTerminalController implements TerminalController {
           this.phase === "idle" ||
           !this.control.keepsGrant(epoch)
         )
-          finish(false);
+          finish("invalid-state");
         else if (
           this.phase === "ready" &&
-          this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) === epoch
+          this.control.epoch === epoch &&
+          this.grantUsable(ref, this.viewGeneration)
         )
-          finish(true);
+          finish("usable");
       };
+      const watcher = (): void => check();
+      this.authorityWatchers.add(watcher);
       state = this.onState(check);
-      if (settled) safeDispose(state);
+      const budget = Math.min(
+        binding.effectiveBudgets.recoveryDeadlineMs,
+        M0_LIMITS.recoveryDeadlineMs,
+      );
+      try {
+        timer = this.host.scheduler.setTimer(
+          Math.max(0, budget - (this.host.scheduler.nowMs() - acceptedAtMs)),
+          () => finish("timeout"),
+        );
+      } catch {
+        finish("invalid-state");
+      }
+      if (settled) {
+        safeDispose(state);
+        safeDispose(timer);
+      }
       check();
     });
   }
@@ -1464,6 +1495,17 @@ export class RoutedTerminalController implements TerminalController {
           subscription: identityCopy(descriptor.subscription),
           captureGeometry: Object.freeze({ ...descriptor.captureGeometry }),
           currentGeometry: Object.freeze({ ...descriptor.currentGeometry }),
+          // The controller reads this authority again at baseline-end to decide whether a carried
+          // grant is reinstated, so the view gets its own frozen copy and cannot rewrite it.
+          control: Object.freeze({
+            epoch: descriptor.control.epoch,
+            holder: descriptor.control.holder
+              ? Object.freeze({
+                  ...descriptor.control.holder,
+                  connection: Object.freeze({ ...descriptor.control.holder.connection }),
+                })
+              : null,
+          }),
           coverage: Object.freeze({
             normal: Object.freeze({ ...descriptor.coverage.normal }),
             alternate: Object.freeze({ ...descriptor.coverage.alternate }),
@@ -1513,7 +1555,10 @@ export class RoutedTerminalController implements TerminalController {
       this.retainedModel = true;
       this.retainedGeometry = Object.freeze({ ...this.baseline.currentGeometry });
       this.appliedGeometry = geometryFact(this.baseline.currentGeometry, event.atSeq);
-      this.appliedAuthority = null;
+      // The baseline proves the authority at its atSeq; epoch 0 means control was never granted.
+      const authority = this.baseline.control;
+      this.appliedAuthority =
+        authority.epoch > 0 ? authorityFact(authority.epoch, authority.holder, event.atSeq) : null;
       this.control.restore(
         this.baseline.control,
         event.atSeq,
