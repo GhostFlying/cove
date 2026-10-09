@@ -231,6 +231,9 @@ importers:
       '@types/node':
         specifier: 26.6.2
         version: 26.6.2
+      playwright:
+        specifier: 'catalog:'
+        version: 1.63.0
 
   apps/m0-harness:
     dependencies:
