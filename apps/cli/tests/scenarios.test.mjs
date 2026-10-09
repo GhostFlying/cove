@@ -136,12 +136,23 @@ while IFS= read -r line; do
   case "$1" in
     size) printf 'size-%s:%s\n' "$2" "$(stty size)" ;;
     burst) i=$2; while [ "$i" -le "$3" ]; do printf 'seq-%05d\n' "$i"; i=$((i+1)); done; printf 'burst-%s-done\n' "$3" ;;
-    flood) awk -v n="$2" 'BEGIN { for (i = 1; i <= n; i++) printf "flood-%06d-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n", i }' | cat; printf 'flood-%s-done\n' "$2" ;;
+    flood) awk -v a="$2" -v b="$3" 'BEGIN { for (i = a; i <= b; i++) printf "flood-%06d-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n", i }' | cat; printf 'flood-%s-done\n' "$3" ;;
     alt-enter) printf '\033[?1049h\033[H\033[2Jalt-screen-%s\n' "$2" ;;
     alt-exit) printf '\033[?1049lnormal-again-%s\n' "$2" ;;
     *) printf 'echo:%s\n' "$line" ;;
   esac
 done`;
+
+// The numbers of the `flood` lines in a stream, in the order they appear.
+const floodNumbers = (text) =>
+  [...text.matchAll(/flood-(\d{6})-abcdefghij/g)].map((match) => Number(match[1]));
+
+// The first position where `numbers` is not exactly 1..count, or null when it is.
+function firstOutOfSequence(numbers, count) {
+  for (let index = 0; index < Math.max(numbers.length, count); index++)
+    if (numbers[index] !== index + 1) return { index, found: numbers[index] };
+  return null;
+}
 
 async function connectTapped() {
   const tapped = createTappedClient(fixture.record);
@@ -508,7 +519,7 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(after.local).toEqual(B.recording.screen());
   });
 
-  test("S7 the server evicts a client that stops consuming while a healthy client keeps working", async () => {
+  test("S7 the server retires a slow client's subscription while a healthy client keeps working", async () => {
     const run = await createRun(PROBE);
     const slow = await connectTapped();
     const healthy = await connectTapped();
@@ -526,30 +537,58 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     // neither parses nor acknowledges, and the server's backlog for it grows past the limit.
     const evicted = S.controller.snapshot().subscription;
     slow.tap.pause();
-    await typeText(H.controller, "flood 20000\r");
+    const slowAppliedSeq = S.controller.snapshot().appliedSeq;
+    await typeText(H.controller, "flood 1 20000\r");
+    // Probe the server with a hand-built acknowledgement on the old subscription: once the
+    // server has retired it, it refuses it with RESYNC_REQUIRED, whatever the client does.
     await waitFor(
-      "the flood on the healthy view",
+      "the server to retire the slow subscription",
+      async () => {
+        const ack = await slow.tap.inject({
+          type: "applied-ack",
+          run: evicted.run,
+          subscription: evicted,
+          appliedSeq: slowAppliedSeq,
+        });
+        return ack.metadata.type === "error" && ack.metadata.error.kind === "RESYNC_REQUIRED";
+      },
+      30_000,
+    );
+    const healthyAtEviction = floodNumbers(H.recording.text()).length;
+    await waitFor(
+      "the first flood on the healthy view",
       () => H.recording.text().includes("flood-20000-done"),
       30_000,
     );
-    // Once evicted, the server refuses the old subscription's acknowledgements.
-    await waitFor("the server to evict the slow subscription", async () => {
-      const ack = await slow.tap.inject({
-        type: "applied-ack",
-        run: evicted.run,
-        subscription: evicted,
-        appliedSeq: S.controller.snapshot().appliedSeq,
-      });
-      return ack.metadata.type === "error" && ack.metadata.error.kind === "RESYNC_REQUIRED";
-    });
 
-    // Meanwhile the healthy client still types, refocuses and receives output.
+    // While the slow client is still held, the healthy client types, produces more output,
+    // refocuses and keeps receiving every line.
     await typeText(H.controller, "during-eviction\r");
-    await waitFor("input during the eviction", () =>
-      H.recording.text().includes("echo:during-eviction"),
+    await typeText(H.controller, "flood 20001 25000\r");
+    await waitFor(
+      "the whole flood on the healthy view",
+      () => H.recording.text().includes("flood-25000-done"),
+      30_000,
     );
+    expect(H.recording.text()).toContain("echo:during-eviction");
     await focusAndType(H.controller, "refocused\r");
     await waitFor("input after refocusing", () => H.recording.text().includes("echo:refocused"));
+    expect(slow.tap.paused).toBe(true);
+    expect(S.controller.snapshot().appliedSeq).toBe(slowAppliedSeq);
+    const flood = floodNumbers(H.recording.text());
+    expect(flood.length).toBeGreaterThan(healthyAtEviction);
+    expect(firstOutOfSequence(flood, 25_000)).toBeNull();
+    // The server sent the retired subscription nothing produced after the retirement.
+    const evictedOutput = slow.tap.inbound
+      .filter(
+        (frame) =>
+          frame.metadata.type === "run-event" &&
+          frame.metadata.subscription.subscriptionId === evicted.subscriptionId,
+      )
+      .map((frame) => new TextDecoder().decode(frame.payload))
+      .join("");
+    expect(evictedOutput).not.toContain("echo:during-eviction");
+    expect(Math.max(0, ...floodNumbers(evictedOutput))).toBeLessThanOrEqual(20_000);
     // terminal.get reads the server's periodically refreshed run record, so wait for it.
     const holder = H.controller.snapshot().subscription;
     await waitFor("the run record to name the healthy holder", async () => {
