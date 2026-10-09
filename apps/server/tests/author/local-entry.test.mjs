@@ -2716,6 +2716,140 @@ describe("D passive production local entry", () => {
       expect(process.snapshot().directlyOwnedLeaderExited).toBe(true);
     });
   });
+  it("D-A14b worker stdout beyond one decoder read budget is resubmitted in order without losing contact", async () => {
+    await withApp(async ({ core }) => {
+      const child = new EventEmitter();
+      child.pid = 125;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      const workerRef = {
+        serverId: identity.serverId,
+        relayInstanceId: identity.relayInstanceId,
+        workerId: "burst",
+        workerIncarnationId: "birth",
+      };
+      const run = {
+        serverId: identity.serverId,
+        relayInstanceId: identity.relayInstanceId,
+        runId: "burst",
+      };
+      const subscription = {
+        run,
+        connection: { connectionId: "connection", generation: 0 },
+        subscriptionId: "subscription",
+        viewId: "view",
+      };
+      const frame = (kind, value, payload = new Uint8Array()) =>
+        encodePipeFrame(kind, utf8(value), payload).value;
+      const output = (seq, payload) =>
+        frame(
+          3,
+          {
+            type: "terminal-event",
+            worker: workerRef,
+            run,
+            subscription,
+            terminal: { type: "output", run, seq },
+          },
+          payload,
+        );
+      const decoder = createPipeDecoder();
+      child.stdin.on("data", (bytes) => {
+        for (const item of decoder.read(bytes).frames) {
+          const metadata = JSON.parse(Buffer.from(item.metadata).toString());
+          if (metadata.type === "hello") {
+            child.stdout.write(frame(2, { ...metadata, type: "ready" }));
+            continue;
+          }
+          expect(metadata.type).toBe("subscribe");
+          child.stdout.write(
+            frame(2, {
+              type: "result",
+              worker: workerRef,
+              run,
+              requestId: metadata.requestId,
+              commandType: "subscribe",
+              outcome: "accepted",
+              recoveryMode: "baseline",
+              atSeq: 0,
+            }),
+          );
+        }
+      });
+      child.stdin.on("finish", () => {
+        child.stdin.destroy();
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+      });
+      const worker = new WorkerProcess(
+        core.runtime,
+        workerRef,
+        () => 0,
+        () => child,
+      );
+      worker.start();
+      await worker.ready;
+      expect(worker.session.registerRun(run)).toBe(true);
+      const seen = [];
+      worker.session.onEvent((event, payload) =>
+        seen.push([event.terminal.seq, payload.byteLength]),
+      );
+      const subscribed = await worker.session.request(
+        {
+          type: "subscribe",
+          requestId: "subscribe",
+          worker: workerRef,
+          run,
+          subscription,
+          atSeq: 0,
+        },
+        new Uint8Array(),
+        () => true,
+      );
+      expect(subscribed.outcome).toBe("accepted");
+
+      // One read carrying far more than MAX_READ_FRAMES small frames, then one whose bytes
+      // exceed MAX_READ_BYTES; each arrives as a single stdout chunk.
+      const many = Array.from({ length: 200 }, (_, index) =>
+        output(index + 1, new Uint8Array([65])),
+      );
+      const large = Array.from({ length: 40 }, (_, index) =>
+        output(201 + index, new Uint8Array(16 * 1024).fill(66)),
+      );
+      expect(Buffer.concat(large).byteLength).toBeGreaterThan(256 * 1024);
+      // The small-frame chunk is a view into an 8 MiB backing store: the retained remainder
+      // must be right-sized, not pin (or be accounted as less than) the whole read buffer.
+      const manyBytes = Buffer.concat(many);
+      const backing = new ArrayBuffer(8 * 1024 * 1024);
+      new Uint8Array(backing).set(manyBytes, 1024);
+      const retained = [];
+      child.stdout.on("data", (chunk) => {
+        retained.push([chunk.byteLength, worker.snapshot().ingressRetainedBytes]);
+      });
+      child.stdout.write(Buffer.from(backing, 1024, manyBytes.byteLength));
+      child.stdout.write(Buffer.concat(large));
+      const deadline = Date.now() + 5_000;
+      while (seen.length < 240 && Date.now() < deadline)
+        await new Promise((resolve) => setImmediate(resolve));
+      expect(seen).toEqual([
+        ...many.map((_, index) => [index + 1, 1]),
+        ...large.map((_, index) => [201 + index, 16 * 1024]),
+      ]);
+      expect(worker.snapshot().contact).toBe("live");
+      expect(child.stdout.isPaused()).toBe(false);
+      expect(retained[0][0]).toBe(manyBytes.byteLength);
+      expect(retained[0][1]).toBeGreaterThan(0);
+      expect(retained[0][1]).toBeLessThan(manyBytes.byteLength);
+      expect(worker.snapshot().ingressRetainedBytes).toBe(0);
+
+      // A genuine decode fault still loses contact.
+      child.stdout.write(new Uint8Array(16));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(worker.snapshot().contact).toBe("unverifiable");
+      expect((await worker.close()).status).toBe("exited");
+    });
+  });
   it("D-A15 rendezvous publishes complete restricted bytes and preserves a replaced foreign file", async () => {
     const dir = await mkdtemp(join(await realpath(tmpdir()), "cove-entry-author-"));
     const path = join(dir, "rendezvous");
