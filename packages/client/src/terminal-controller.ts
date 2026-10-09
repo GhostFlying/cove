@@ -225,6 +225,15 @@ export class RoutedTerminalController implements TerminalController {
   private drainingToken = -1;
   private ackInFlight = false;
   private pendingAck: number | undefined;
+  // The server admits input, resize and appearance under a grant only after it has processed an
+  // applied-ack covering max(control boundary, grant atSeq) for this subscription. Applying the
+  // grant fact locally is not enough: acks are serialized, so a fresh grant's covering ack can
+  // still be waiting behind an earlier one. fenceSeq is the highest boundary seq this client knows
+  // the server fences on; handedAckSeq is the highest ack already handed to the ordered uplink.
+  // A granted command sent after handedAckSeq >= fenceSeq follows its covering ack on the lane.
+  private fenceSeq = 0;
+  private handedAckSeq = 0;
+  private readonly ackWatchers = new Set<() => void>();
   // Geometry carried by the pending or accepted focus request (updated by granted resizes), so
   // a repeated focus intent with the same grid can be recognized as adding nothing.
   private focusGeometry: Geometry | undefined;
@@ -775,9 +784,11 @@ export class RoutedTerminalController implements TerminalController {
     let inFlightBytes = 0;
     try {
       await prior;
-      if (
+      // Re-check after every wait: the wait settles on a later microtask, and a newly applied
+      // control fact can raise the fence again before this turn resumes.
+      while (
         (this.control.pendingIntent === intent || this.control.epoch !== undefined) &&
-        !this.control.ready(ref, generation, this.appliedSeq)
+        !this.grantUsable(ref, generation)
       ) {
         const ready = await this.waitForInputAuthority(ref, token, generation, intent);
         if (!ready) return reject(localError("invalid-state"));
@@ -884,14 +895,22 @@ export class RoutedTerminalController implements TerminalController {
           finish(false);
           return;
         }
-        if (this.control.ready(ref, generation, this.appliedSeq)) {
+        if (this.grantUsable(ref, generation)) {
           finish(true);
           return;
         }
         if (this.control.pendingIntent === undefined && this.control.epoch === undefined)
           finish(false);
       };
-      listener = this.onState(check);
+      const watcher = (): void => check();
+      this.ackWatchers.add(watcher);
+      const state = this.onState(check);
+      listener = {
+        dispose: () => {
+          this.ackWatchers.delete(watcher);
+          state.dispose();
+        },
+      };
       try {
         timer = this.host.scheduler.setTimer(5_000, () => finish(false));
       } catch {
@@ -900,6 +919,17 @@ export class RoutedTerminalController implements TerminalController {
       if (settled) safeDispose(timer);
       check();
     });
+  }
+
+  private grantUsable(ref: SubscriptionRef, generation: number): boolean {
+    return (
+      this.control.ready(ref, generation, this.appliedSeq) &&
+      this.handedAckSeq >= Math.max(this.fenceSeq, this.control.grantAtSeq ?? 0)
+    );
+  }
+
+  private raiseFence(seq: number): void {
+    if (seq > this.fenceSeq) this.fenceSeq = seq;
   }
 
   private async sendGrantedControl(
@@ -911,8 +941,25 @@ export class RoutedTerminalController implements TerminalController {
     const binding = this.host.binding();
     const token = this.token;
     const generation = this.viewGeneration;
-    const epoch = ref ? this.control.currentEpoch(ref, generation, this.appliedSeq) : null;
-    if (!ref || !binding || this.phase !== "ready" || epoch === null)
+    const intent = this.control.intentVersion;
+    if (!ref || !binding || this.phase !== "ready")
+      return { ok: false, error: localError("invalid-state") };
+    // Like input, a granted command must follow the applied-ack that covers the grant fence.
+    while (
+      this.control.currentEpoch(ref, generation, this.appliedSeq) !== null &&
+      !this.grantUsable(ref, generation)
+    ) {
+      if (!(await this.waitForInputAuthority(ref, token, generation, intent)))
+        return { ok: false, error: localError("invalid-state") };
+    }
+    const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
+    if (
+      epoch === null ||
+      this.token !== token ||
+      this.ref !== ref ||
+      this.host.binding() !== binding ||
+      this.phase !== "ready"
+    )
       return { ok: false, error: localError("invalid-state") };
     const requestId = this.host.lane.nextRequestId(this.host.generation());
     if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
@@ -937,15 +984,13 @@ export class RoutedTerminalController implements TerminalController {
         this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
     );
     const receipt = this.controlReceipt(result, `${type}-result`);
-    // A granted resize changes the grid that a repeated focus intent is compared with.
-    if (
-      receipt.ok &&
-      this.token === token &&
-      this.ref === ref &&
-      "geometry" in value &&
-      this.control.epoch === epoch
-    )
-      this.focusGeometry = Object.freeze({ ...value.geometry });
+    if (receipt.ok && this.token === token && this.ref === ref) {
+      // The server moved its control boundary to this result; later granted commands wait for
+      // the ack that covers it.
+      this.raiseFence(receipt.value.atSeq);
+      if ("geometry" in value && this.control.epoch === epoch)
+        this.focusGeometry = Object.freeze({ ...value.geometry });
+    }
     return receipt;
   }
 
@@ -1120,6 +1165,8 @@ export class RoutedTerminalController implements TerminalController {
     this.retainedModel = this.retainedModel && !!this.ref;
     this.ackInFlight = false;
     this.pendingAck = undefined;
+    this.fenceSeq = 0;
+    this.handedAckSeq = 0;
     this.progressInFlight = false;
     this.pendingProgress = undefined;
     let resolve!: (result: TerminalOutcome<TerminalReady>) => void;
@@ -1410,6 +1457,7 @@ export class RoutedTerminalController implements TerminalController {
     if (item.token !== this.token) return;
     this.appliedSeq = factSeq;
     this.provenSeq = Math.max(this.provenSeq, factSeq);
+    if (factType === "control" || factType === "resize") this.raiseFence(factSeq);
     if (factType === "control") {
       const applied = this.control.apply(fact);
       if (applied) {
@@ -1494,7 +1542,10 @@ export class RoutedTerminalController implements TerminalController {
         { type: "applied-ack", requestId, run: this.run, subscription: ref, appliedSeq: seq },
         5_000,
         () => {
-          if (token === this.token) onHandoff?.();
+          if (token !== this.token) return;
+          if (seq > this.handedAckSeq) this.handedAckSeq = seq;
+          onHandoff?.();
+          for (const watcher of [...this.ackWatchers]) watcher();
         },
         handle,
       )
@@ -1626,6 +1677,8 @@ export class RoutedTerminalController implements TerminalController {
     this.appliedAuthority = null;
     this.ackInFlight = false;
     this.pendingAck = undefined;
+    this.fenceSeq = 0;
+    this.handedAckSeq = 0;
     this.progressInFlight = false;
     this.pendingProgress = undefined;
     try {

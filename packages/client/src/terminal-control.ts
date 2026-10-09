@@ -65,6 +65,10 @@ export class TerminalControl {
     return this.grant?.epoch;
   }
 
+  get grantAtSeq(): number | undefined {
+    return this.grant?.atSeq;
+  }
+
   // True while this subscription's accepted grant is still the newest control fact it has seen,
   // whether or not the grant fact has been applied yet. Unlike ready(), this does not require the
   // grant to be usable for input; it only says that asking for focus again would add nothing.
