@@ -276,8 +276,34 @@ export function createXtermTerminalView(
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
       clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     },
-    (renderer) => rendererChanges.emit(renderer),
+    () => announceRenderer(),
   );
+  // Renderer changes are announced only between view transitions. The fallback reports changes
+  // synchronously from attach and detach, which run in the middle of initialize, a baseline's
+  // backend replacement and a fatal retirement. A listener may reenter the view (initialize a
+  // newer generation, dispose it), and doing that halfway through a transition let the
+  // resumed transition overwrite and leak the listener's successor. So every transition runs
+  // inside `transition`, and once the outermost one has committed, listeners get the renderer
+  // that is active then, only if it differs from what they last saw. Retiring one WebGL xterm
+  // and attaching the next is therefore no change at all.
+  let transitionDepth = 0;
+  let announced = renderers.active;
+  function announceRenderer(): void {
+    if (transitionDepth > 0 || state === "disposed") return;
+    const current = renderers.active;
+    if (current === announced) return;
+    announced = current;
+    rendererChanges.emit(current);
+  }
+  const transition = <T>(step: () => T): T => {
+    transitionDepth++;
+    try {
+      return step();
+    } finally {
+      transitionDepth--;
+      announceRenderer();
+    }
+  };
   const register = <T>(listeners: ListenerSet<T>, listener: Listener<T>) => {
     if (state === "disposed") throw domainError("RESYNC_REQUIRED");
     return listeners.add(listener);
@@ -339,7 +365,10 @@ export function createXtermTerminalView(
     ]);
   };
 
-  const retireFatal = (error: unknown, targetIncarnation = incarnation): unknown => {
+  const retireFatal = (error: unknown, targetIncarnation = incarnation): unknown =>
+    transition(() => retireFatalNow(error, targetIncarnation));
+
+  const retireFatalNow = (error: unknown, targetIncarnation: number): unknown => {
     const failure = asDomainError(error);
     if (
       state === "disposed" ||
@@ -408,9 +437,10 @@ export function createXtermTerminalView(
       ]);
       throw combineErrors(primary, cleanup, "Terminal construction and cleanup failed");
     }
-    // Attaching the renderer notifies renderer-change listeners synchronously, and a listener may
-    // dispose or reinitialize the view. Either way this xterm no longer belongs to the view:
-    // retire it here rather than install it and revive a disposed view or replace a successor.
+    // Renderer changes are announced only after the enclosing transition commits, but opening an
+    // xterm and attaching its input and renderer still run foreign code synchronously. If anything
+    // in it disposed or reinitialized the view, this xterm no longer belongs to the view: retire
+    // it here rather than install it and revive a disposed view or replace a successor.
     if (state === "disposed" || targetIncarnation !== incarnation) {
       const cleanup = cleanupAll([
         () => built.tracker.dispose(),
@@ -439,7 +469,9 @@ export function createXtermTerminalView(
     return backend;
   };
 
-  const replaceBackend = () => {
+  const replaceBackend = () => transition(replaceBackendNow);
+
+  const replaceBackendNow = () => {
     const cleanup = disposeBackend();
     if (cleanup.length) {
       const failure = domainError("RECOVERY_UNAVAILABLE");
@@ -470,39 +502,43 @@ export function createXtermTerminalView(
     pristine = false;
   };
 
+  const initializeNow = (input: ViewInitialization): void => {
+    if (state === "disposed") throw domainError("RESYNC_REQUIRED");
+    if (input.profile !== PROFILE || input.encoding !== BASELINE_ENCODING)
+      throw domainError("PROFILE_UNSUPPORTED");
+    assertGeometry(input.geometry);
+    const nextTheme = xtermTheme(input.appearance);
+    void nextTheme;
+    assertGeneration(input.viewGeneration);
+    if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
+      throw domainError("RESYNC_REQUIRED");
+    const cleanup = disposeBackend();
+    if (cleanup.length) {
+      const failure = domainError("RECOVERY_UNAVAILABLE");
+      publishFailure(failure, true);
+      throw combineErrors(failure, cleanup, "Terminal initialization cleanup failed");
+    }
+    viewGeneration = input.viewGeneration;
+    geometry = { ...input.geometry };
+    proposedGeometry = geometry;
+    appearance = input.appearance;
+    effectivelyFocused = false;
+    focusSeq = 0;
+    failurePublishedFor = -1;
+    // As in replaceBackend, a failure retires only this construction's incarnation.
+    const target = incarnation + 1;
+    try {
+      backend = constructBackend(geometry, appearance);
+    } catch (error) {
+      failAndRetire(error, target);
+    }
+    pristine = true;
+    state = "initialized";
+  };
+
   return {
     async initialize(input: ViewInitialization): Promise<void> {
-      if (state === "disposed") throw domainError("RESYNC_REQUIRED");
-      if (input.profile !== PROFILE || input.encoding !== BASELINE_ENCODING)
-        throw domainError("PROFILE_UNSUPPORTED");
-      assertGeometry(input.geometry);
-      const nextTheme = xtermTheme(input.appearance);
-      void nextTheme;
-      assertGeneration(input.viewGeneration);
-      if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
-        throw domainError("RESYNC_REQUIRED");
-      const cleanup = disposeBackend();
-      if (cleanup.length) {
-        const failure = domainError("RECOVERY_UNAVAILABLE");
-        publishFailure(failure, true);
-        throw combineErrors(failure, cleanup, "Terminal initialization cleanup failed");
-      }
-      viewGeneration = input.viewGeneration;
-      geometry = { ...input.geometry };
-      proposedGeometry = geometry;
-      appearance = input.appearance;
-      effectivelyFocused = false;
-      focusSeq = 0;
-      failurePublishedFor = -1;
-      // As in replaceBackend, a failure retires only this construction's incarnation.
-      const target = incarnation + 1;
-      try {
-        backend = constructBackend(geometry, appearance);
-      } catch (error) {
-        failAndRetire(error, target);
-      }
-      pristine = true;
-      state = "initialized";
+      transition(() => initializeNow(input));
     },
 
     async beginBaseline(descriptor: BaselineDescriptor): Promise<void> {
