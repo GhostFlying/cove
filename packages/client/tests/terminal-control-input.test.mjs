@@ -586,10 +586,11 @@ describe("client control authority", () => {
     expect(resizeCommand).toMatchObject({ type: "resize", epoch: 1, geometry: nextGeometry });
     expect(mounted.applied.filter((event) => event.type === "resize")).toHaveLength(0);
     peer.result(resizeCommand, { epoch: 1, atSeq: 2 });
-    expect((await resize).ok).toBe(true);
-    expect(mounted.applied.filter((event) => event.type === "resize")).toHaveLength(0);
-    peer.event({ type: "resize", run, seq: 2, geometry: nextGeometry, requiresBaseline: false });
     await settle();
+    expect(mounted.applied.filter((event) => event.type === "resize")).toHaveLength(0);
+    // A resize to another grid resolves once its fact is applied and the grant usable again.
+    peer.event({ type: "resize", run, seq: 2, geometry: nextGeometry, requiresBaseline: false });
+    expect((await resize).ok).toBe(true);
     expect(mounted.applied.filter((event) => event.type === "resize")).toHaveLength(1);
     const appearance = { ...DEFAULT_APPEARANCE, background: "1111/2222/3333" };
     const update = controller.updateAppearance(appearance);
@@ -1687,13 +1688,15 @@ describe("input right after a focus grant (Issue #21)", () => {
     const resize = controller.requestResize(resized);
     await settle();
     peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
-    expect((await resize).ok).toBe(true);
+    await settle();
     type(controller, mounted, 1, "x", resized);
     await settle();
     expect(ofType(peer, "focus")).toHaveLength(1);
     expect(ofType(peer, "input")).toHaveLength(0);
     peer.event({ type: "resize", run, seq: 2, geometry: resized, requiresBaseline: false });
     await settle();
+    // The resize resolves once the ack covering its fact is handed off, as the input does.
+    expect((await resize).ok).toBe(true);
     const input = ofType(peer, "input")[0];
     expect(input).toBeDefined();
     const ack = peer.commands.findIndex(
@@ -1722,12 +1725,12 @@ describe("input right after a focus grant (Issue #21)", () => {
     expect(ofType(peer, "focus")).toHaveLength(1);
     expect(ofType(peer, "input")).toHaveLength(0);
     peer.result(resizeCommand.command, { epoch: 1, atSeq: 2 });
-    expect((await resize).ok).toBe(true);
     await settle();
     // The result moved the server's fence to seq 2; input still waits for that fact's ack.
     expect(ofType(peer, "input")).toHaveLength(0);
     peer.event({ type: "resize", run, seq: 2, geometry: resized, requiresBaseline: false });
     await settle();
+    expect((await resize).ok).toBe(true);
     const ack = peer.commands.findIndex(
       ({ command }) => command.type === "applied-ack" && command.appliedSeq >= 2,
     );
@@ -1796,5 +1799,100 @@ describe("input right after a focus grant (Issue #21)", () => {
     expect(delivered.join("")).toBe("ab");
     expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true]);
     expect(controller.snapshot().controlEpoch).toBe(3);
+  });
+});
+
+describe("a resize to another grid and the recovery it triggers", () => {
+  const larger = { cols: 100, rows: 30 };
+  const self = { connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId };
+  const other = { connection, viewId: "view-2", subscriptionId: "subscription-9" };
+  const ofType = (peer, type) => peer.commands.filter(({ command }) => command.type === type);
+
+  // Serve the resize-context recovery a grid change started, ending in a baseline at atSeq.
+  async function serveRecovery(peer, atSeq, control) {
+    await settle();
+    const recover = ofType(peer, "recover").at(-1).command;
+    expect(recover).toMatchObject({ reason: "resize-context" });
+    peer.result(recover, { mode: "baseline", atSeq });
+    peer.baseline(atSeq, { baselineId: `baseline-${atSeq}`, grid: larger, control });
+    await settle();
+  }
+
+  function track(promise) {
+    const tracked = { settled: false };
+    tracked.promise = promise.then((outcome) => {
+      tracked.settled = true;
+      return outcome;
+    });
+    return tracked;
+  }
+
+  test("a resize to another grid resolves once its recovery reinstates the grant", async () => {
+    const { controller, peer } = await harness();
+    await grant(controller, peer);
+    const resize = track(controller.requestResize(larger));
+    await settle();
+    peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
+    peer.event({ type: "resize", run, seq: 2, geometry: larger, requiresBaseline: true });
+    await settle();
+    // The result alone does not resolve it: the recovery its own resize triggered is running.
+    expect(resize.settled).toBe(false);
+    expect(controller.snapshot().phase).not.toBe("ready");
+    await serveRecovery(peer, 2, { epoch: 1, holder: self });
+    expect(await resize.promise).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+    expect(controller.snapshot()).toMatchObject({
+      phase: "ready",
+      inputReady: true,
+      controlEpoch: 1,
+      appliedGeometry: { geometry: larger },
+    });
+    // Input sent right after the resize resolved is sent under the reinstated grant.
+    const sent = controller.sendInput({ source: "keyboard", bytes: encoder.encode("x") });
+    await settle();
+    const input = ofType(peer, "input").at(-1).command;
+    expect(input).toMatchObject({ epoch: 1 });
+    peer.result(input, { epoch: 1, inputSeq: input.inputSeq, status: "written", writtenBytes: 1 });
+    expect(await sent).toMatchObject({ ok: true, value: { writtenBytes: 1, notSentBytes: 0 } });
+    expect(ofType(peer, "focus")).toHaveLength(1);
+  });
+
+  test("a resize whose recovery loses the grant fails instead of reporting success", async () => {
+    const { controller, peer } = await harness();
+    await grant(controller, peer);
+    const resize = controller.requestResize(larger);
+    await settle();
+    peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
+    peer.event({ type: "resize", run, seq: 2, geometry: larger, requiresBaseline: true });
+    await serveRecovery(peer, 3, { epoch: 2, holder: other });
+    expect(await resize).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", inputReady: false });
+  });
+
+  test("a resize whose recovery never completes settles within the recovery budget", async () => {
+    const scheduler = clock();
+    const { controller, peer } = await harness({ scheduler });
+    await grant(controller, peer);
+    const resize = track(controller.requestResize(larger));
+    await settle();
+    peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
+    peer.event({ type: "resize", run, seq: 2, geometry: larger, requiresBaseline: true });
+    await settle();
+    scheduler.advance(M0_LIMITS.recoveryDeadlineMs - 1);
+    await settle();
+    expect(resize.settled).toBe(false);
+    scheduler.advance(1);
+    expect(await resize.promise).toMatchObject({ ok: false });
+  });
+
+  test("a resize at the applied grid still resolves on its result", async () => {
+    const { controller, peer } = await harness();
+    await grant(controller, peer);
+    const resize = controller.requestResize(geometry);
+    await settle();
+    peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
+    expect(await resize).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
   });
 });

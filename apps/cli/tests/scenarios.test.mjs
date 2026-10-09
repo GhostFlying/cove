@@ -739,6 +739,17 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       return record.controlHolder?.subscriptionId === holder.subscriptionId;
     });
 
+    // Still while the slow client is held: a resize to a new grid sends the healthy client
+    // through a baseline recovery. requestResize resolves only once the grant is usable again,
+    // so input typed right after it reaches the PTY. (The new baseline repeats screen text in
+    // the recording, which is why this follows the flood checks above.)
+    expect(await H.controller.requestResize({ cols: 100, rows: 30 })).toMatchObject({ ok: true });
+    await typeText(H.controller, "size during-eviction\r");
+    await waitFor("the resized PTY", () =>
+      H.recording.text().includes("size-during-eviction:30 100"),
+    );
+    expect(slow.tap.paused).toBe(true);
+
     // When the slow client catches up, its stale subscription is refused and it attaches
     // again from a new baseline.
     await slow.tap.resume();

@@ -660,7 +660,7 @@ export class RoutedTerminalController implements TerminalController {
     // the result was accepted and then reports the grant as unknown rather than hanging. A focus
     // at the applied grid keeps resolving on its result as before.
     if (granted.ok && (resizes || this.phase !== "ready")) {
-      const settledFocus = await this.waitForFocusSettled(
+      const settledFocus = await this.waitForGrantSettled(
         ref,
         binding,
         view,
@@ -672,7 +672,7 @@ export class RoutedTerminalController implements TerminalController {
     return granted;
   }
 
-  private waitForFocusSettled(
+  private waitForGrantSettled(
     ref: SubscriptionRef,
     binding: NegotiatedConnection,
     view: TerminalView,
@@ -758,7 +758,25 @@ export class RoutedTerminalController implements TerminalController {
   async requestResize(geometry: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>> {
     const parsed = GeometrySchema.safeParse(geometry);
     if (!parsed.success) return { ok: false, error: localError("invalid-request") };
-    return this.sendGrantedControl("resize", { geometry: parsed.data });
+    const ref = this.ref;
+    const binding = this.host.binding();
+    const view = this.view;
+    // Every M0 grid change requires a baseline, so a resize to another grid sends this client
+    // through a resize-context recovery that carries the grant and cancels input queued before
+    // it. Like a resizing focus, resolve only once the grant is usable again or lost, so input
+    // sent right after a successful resize reaches the PTY; the wait spends the recovery deadline
+    // budget from the result. A resize at the applied grid resolves on its result.
+    const resizes = !sameGrid(this.appliedGeometry?.geometry, parsed.data);
+    const receipt = await this.sendGrantedControl("resize", { geometry: parsed.data });
+    if (!receipt.ok || !ref || !binding || (!resizes && this.phase === "ready")) return receipt;
+    const settled = await this.waitForGrantSettled(
+      ref,
+      binding,
+      view,
+      receipt.value.epoch,
+      this.host.scheduler.nowMs(),
+    );
+    return settled === "usable" ? receipt : { ok: false, error: localError(settled) };
   }
 
   async updateAppearance(appearance: Appearance): Promise<TerminalOutcome<TerminalControlReceipt>> {
