@@ -318,7 +318,38 @@ export class ControlArbiter {
       run.running = false;
       if (this.disposed && !run.queue.length) this.release(run);
       else if (run.queue[0]?.ready) void this.drain(run);
+      else this.prune(run);
     }
+  }
+  // Retired subscription state is released once nothing can still read it, so a run
+  // admits an unbounded lifetime of controlling subscriptions; the counter cap in admit()
+  // bounds only live ones. Keeping every retired counter until the run was released made a
+  // long-lived terminal refuse control with BUSY after authenticatedSockets ×
+  // subscriptionsPerConnection reattaches.
+  //
+  // Dropping a retired counter is safe because:
+  // - Its own late commands never reach it again. Subscription refs are server-minted and
+  //   never reused (connection generation plus a per-connection sequence), and a retired
+  //   route fails context.current() before admit() looks up a counter. So the focus/input
+  //   monotonic proof and grantEpoch only matter while the subscription is live.
+  // - Stale grants of other subscriptions are refused against run.boundary (epoch plus
+  //   complete holder), which is monotonic per run, not against retired counters.
+  // - A queued job holds its counter directly and late perform() results go through that
+  //   reference, so a counter is dropped only after its last job left the queue.
+  // - A pending holder release (cleanup "pending") still needs the counter's releaseId and
+  //   worker, so it is kept until cleanup settles; "unknown" already marked the run
+  //   uncertain, which forces a fresh status read before the next decision.
+  private prune(run: Run): void {
+    if (this.disposed || run.running || this.runs.get(run.ref.runId) !== run) return;
+    for (const [id, counter] of run.counters)
+      if (
+        counter.retired &&
+        counter.cleanup !== "pending" &&
+        !run.queue.some((job) => job.counter === counter)
+      ) {
+        run.counters.delete(id);
+        counter.lease.release();
+      }
   }
   private current(job: ControlJob): boolean {
     const placement = this.runtime.pool.get(job.command.run);

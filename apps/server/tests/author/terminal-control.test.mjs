@@ -397,6 +397,59 @@ describe("private shared terminal control and binary input", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+  // Regression: retired subscription counters used to stay until the run was released, so
+  // a run refused every new controlling subscription with BUSY after authenticatedSockets ×
+  // subscriptionsPerConnection of them over its lifetime (4 here, 512 by default).
+  it("takes control from far more retired subscriptions than the per-run counter cap", async () => {
+    const f = fixture({ authenticatedSockets: 2, subscriptionsPerConnection: 2 });
+    const a = f.connect("a");
+    const w = f.connect("w");
+    try {
+      const watcher = (await f.attach(w, 0, "watcher-attach")).subscription;
+      expect(await focus(f, w, watcher, "watcher-focus")).toMatchObject({ epoch: 1 });
+      let retired;
+      for (let index = 1; index <= 12; index++) {
+        const ref = (await f.attach(a, 0, `attach-${index}`)).subscription;
+        expect(await focus(f, a, ref, `focus-${index}`, 1, index)).toMatchObject({
+          type: "focus-result",
+          epoch: index + 1,
+        });
+        const detached = a.service.handle(command("detach", ref, `detach-${index}`));
+        await turns();
+        const emitted = f.pipeWrites.map((x) => decode(x.data, true).metadata);
+        const release = controls(f).at(-1);
+        expect(release).toMatchObject({ holder: null, expectedEpoch: index + 1 });
+        f.session.receive(f.reply(release, { atSeq: index }));
+        f.session.receive(
+          f.reply(
+            emitted.findLast(
+              (x) =>
+                x.type === "unsubscribe" && x.subscription.subscriptionId === ref.subscriptionId,
+            ),
+          ),
+        );
+        expect((await detached).type).toBe("detach-result");
+        await turns();
+        // Only the live watcher's counter remains.
+        expect(f.arbiter.snapshot(run.runId)).toMatchObject({ counters: 1, cleanup: 0 });
+        retired = ref;
+      }
+      const writes = f.pipeWrites.length;
+      // A retired subscription is refused before the arbiter.
+      expect(
+        (await a.service.handle(command("focus", retired, "late-focus", { focusSeq: 2, geometry })))
+          .error.kind,
+      ).toBe("STALE_CONNECTION");
+      // A live subscription's stale grant is still refused by the run's monotonic epoch.
+      expect(
+        (await w.service.handle(command("blur", watcher, "stale-blur", { epoch: 1 }))).error.kind,
+      ).toBe("STALE_CONTROL");
+      expect(f.pipeWrites).toHaveLength(writes);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
   it("rejects oversized full backing and exhausted epoch without business effects or leaked reservations", async () => {
     const f = fixture();
     const a = f.connect();
