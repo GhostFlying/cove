@@ -192,6 +192,7 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 3 },
   { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 1 },
+  { project: "cli", file: "apps/cli/tests/request-identity-cap.test.mjs", minimumTests: 1 },
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   {
