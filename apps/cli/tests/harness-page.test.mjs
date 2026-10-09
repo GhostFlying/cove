@@ -328,7 +328,8 @@ async function waitForSteadyControl(page) {
 
 // Where the last cell of the grid and the last glyphs of the first two rows end, against the
 // right edge of the area a user can see: the host's content box, short of xterm's vertical
-// scrollbar, which overlays the right edge of the terminal.
+// scrollbar, which overlays the right edge of the terminal. Also the screen's size and the space
+// available to it in both directions, and the grid the status bar reports.
 const fitGeometry = (page) =>
   page.evaluate(() => {
     const host = document.getElementById("terminal");
@@ -338,9 +339,15 @@ const fitGeometry = (page) =>
       box.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
     const scrollbar = host.querySelector(".xterm .scrollbar.vertical")?.getBoundingClientRect();
     const visibleRight = Math.min(contentRight, scrollbar?.width ? scrollbar.left : Infinity);
+    const visibleBottom =
+      box.bottom - parseFloat(style.borderBottomWidth) - parseFloat(style.paddingBottom);
     const screen = host.querySelector(".xterm-screen").getBoundingClientRect();
     const screenRight = screen.right;
-    const screenWidth = screen.width;
+    const [cols, rows] = document
+      .getElementById("terminal-status")
+      .textContent.match(/(\d+)×(\d+)/)
+      .slice(1)
+      .map(Number);
     const glyphRights = [...host.querySelectorAll(".xterm-rows > div")].slice(0, 2).map((row) => {
       const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
       let last;
@@ -353,7 +360,14 @@ const fitGeometry = (page) =>
       range.setEnd(last, end);
       return range.getBoundingClientRect().right;
     });
-    return { visibleRight, screenRight, screenWidth, glyphRights };
+    return {
+      visibleRight,
+      screenRight,
+      glyphRights,
+      grid: { cols, rows },
+      screen: { width: screen.width, height: screen.height },
+      available: { width: visibleRight - screen.left, height: visibleBottom - screen.top },
+    };
   });
 
 // `renderer` adds the harness's renderer query parameter in front of the printed fragment;
@@ -594,12 +608,32 @@ test("the measured grid fits the visible terminal at several window sizes and pi
       return result.screenRight > limit || result.glyphRights.some((right) => right > limit);
     });
     expect(clipped).toEqual([]);
-    // The grid is also the largest that fits: the space left beside it is narrower than a cell.
-    // The screen is cols whole cells rounded to a CSS pixel, so one pixel absorbs that rounding.
+    // The grid is also the largest that fits, and measuring it again keeps it. xterm 6 renders
+    // `count` cells as round(deviceCell * count / ratio) CSS px. The page does not expose the
+    // device cell, but the screen's drawn size bounds it: round(deviceCell * count / ratio) equals
+    // that size, so deviceCell < (size + 0.5) * ratio / count. A grid misses a column or row only
+    // if one more would fit even with the largest device cell that bound allows; a valid maximal
+    // grid is never rejected. V1-L11 checks maximality exactly against the renderer's own cell.
+    const extent = (count, deviceCell, ratio) => Math.round((deviceCell * count) / ratio);
+    const fitsOneMore = (count, size, available, ratio) =>
+      extent(count + 1, ((size + 0.5) * ratio) / count, ratio) <= available;
     const short = results.filter(
       (result) =>
-        result.visibleRight - result.screenRight >= result.screenWidth / result.cols - 1 ||
-        result.remeasuredCols !== result.cols,
+        result.grid.cols !== result.cols ||
+        result.remeasuredCols !== result.cols ||
+        result.screen.height > result.available.height + 0.5 / result.deviceScaleFactor ||
+        fitsOneMore(
+          result.grid.cols,
+          result.screen.width,
+          result.available.width,
+          result.deviceScaleFactor,
+        ) ||
+        fitsOneMore(
+          result.grid.rows,
+          result.screen.height,
+          result.available.height,
+          result.deviceScaleFactor,
+        ),
     );
     expect(short).toEqual([]);
   });
