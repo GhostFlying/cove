@@ -48,10 +48,28 @@ async function startServer(directory) {
   }
 }
 
-async function closeBrowser(browser) {
-  if ((await within(browser.close(), 10_000)) !== "timeout") return;
-  // A hung close must not leave Chromium running after the test.
-  browser.process()?.kill("SIGKILL");
+// Chromium is launched as a BrowserServer so this test owns its process: a client-side
+// Browser from launch() exposes no process handle to kill when close hangs.
+async function closeChromium(chromiumServer, browser) {
+  if (browser)
+    await within(
+      browser.close().catch(() => {}),
+      5_000,
+    );
+  const closed = await within(
+    chromiumServer.close().then(
+      () => "closed",
+      () => "failed",
+    ),
+    10_000,
+  );
+  if (closed === "closed") return;
+  const child = chromiumServer.process();
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise((done) => child.once("exit", done));
+  child.kill("SIGKILL");
+  if ((await within(exited, 5_000)) === "timeout")
+    throw new Error(`Chromium ${child.pid} survived SIGKILL`);
 }
 
 test("the harness page creates a terminal, takes typed input and renders its output", async () => {
@@ -59,8 +77,10 @@ test("the harness page creates a terminal, takes typed input and renders its out
   // reached through a symlinked ancestor.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-harness-")));
   let server;
+  let chromiumServer;
   let browser;
   let stopped;
+  let failure;
   try {
     server = await startServer(directory);
     const url = server.report.harness;
@@ -73,7 +93,8 @@ test("the harness page creates a terminal, takes typed input and renders its out
     // Playwright reads its browser location when it is first loaded.
     process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
     const { chromium } = await import("playwright");
-    browser = await chromium.launch({ headless: true, timeout: 15_000 });
+    chromiumServer = await chromium.launchServer({ headless: true, timeout: 15_000 });
+    browser = await chromium.connect(chromiumServer.wsEndpoint(), { timeout: 10_000 });
     const page = await browser.newPage({ viewport: { width: 1000, height: 640 } });
     page.setDefaultTimeout(15_000);
     const pageErrors = [];
@@ -119,16 +140,26 @@ test("the harness page creates a terminal, takes typed input and renders its out
     }
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
-  } finally {
-    try {
-      if (browser) await closeBrowser(browser);
-    } finally {
-      try {
-        if (server) stopped = await stopServer(server.wrapper, server.exited, server.report.pid);
-      } finally {
-        await rm(directory, { recursive: true, force: true });
-      }
-    }
+  } catch (error) {
+    failure = error;
   }
+  // Every cleanup step runs even when an earlier one fails, and the test's own failure is
+  // reported in preference to any cleanup failure.
+  const cleanupErrors = [];
+  const attempt = async (step) => {
+    try {
+      await step();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+  };
+  if (chromiumServer) await attempt(() => closeChromium(chromiumServer, browser));
+  if (server)
+    await attempt(async () => {
+      stopped = await stopServer(server.wrapper, server.exited, server.report.pid);
+    });
+  await attempt(() => rm(directory, { recursive: true, force: true }));
+  if (failure) throw failure;
+  if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "harness test cleanup failed");
   expect(stopped).toBe(0);
 });
