@@ -63,6 +63,15 @@ export class WorkerPipeSession {
   private readonly hello: Extract<PipeMetadata, { type: "hello" }>;
   private readonly decoder = createPipeDecoder();
   private readonly arena: ByteReservation;
+  // Request identities of commands still awaiting their worker reply. An identity
+  // lives exactly as long as its pending entry: it is released when the reply
+  // arrives or when contact loss settles the request. Every server caller mints
+  // these IDs from a monotonic per-owner counter (the control-release ID is only
+  // resent after a not-accepted BUSY), so an executed ID is never issued again and
+  // retaining it would only exhaust identityLimit (formerly wedging the whole worker
+  // with BUSY after identityLimit lifetime requests). identityLimit therefore
+  // bounds concurrent in-flight requests, never the lifetime total. Duplicate
+  // in-flight IDs are still refused, and a reply for a settled ID still loses contact.
   private readonly identities = new Map<string, ByteReservation>();
   private readonly pending = new Map<string, Pending>();
   private readonly queue: Outgoing[] = [];
@@ -527,7 +536,7 @@ export class WorkerPipeSession {
               sameSubscriptionRef(entry.ref, command.subscription),
             )!.active = true;
           }
-          this.pending.delete(value.requestId);
+          this.settle(value.requestId);
           pending.resolve(value);
         } else if (value.type === "terminal-event") {
           const run = this.runs.get(value.run.runId);
@@ -607,7 +616,7 @@ export class WorkerPipeSession {
           pending.sent,
         ),
       );
-    this.pending.clear();
+    for (const requestId of [...this.pending.keys()]) this.settle(requestId);
     for (const route of this.routes) {
       route.active = false;
       route.lease.release();
@@ -618,6 +627,13 @@ export class WorkerPipeSession {
     this.listeners.clear();
     this.releaseClosedRecords();
     this.options.contactLost?.(this.worker);
+  }
+
+  // Settlement ends both the correlation and its identity; see `identities`.
+  private settle(requestId: string): void {
+    this.pending.delete(requestId);
+    this.identities.get(requestId)?.release();
+    this.identities.delete(requestId);
   }
 
   private releaseClosedRecords(): void {
