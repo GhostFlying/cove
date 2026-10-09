@@ -82,6 +82,10 @@ function transferKey(key: string, previewId: string): string {
 }
 
 // Preview events have no requestId: an unseen old transfer requires a run fence after uncertainty.
+// A pending preview binds to a transfer only through the previewId its transfer result names. A
+// transfer that is not that one (for example a duplicate of one evicted from the recent window,
+// which is otherwise indistinguishable from this request's) fails the preview as an invalid
+// response rather than completing it with another request's picture.
 export class TerminalPreview {
   private readonly pending = new Map<string, PendingPreview>();
   private readonly provisional = new Map<string, symbol>();
@@ -251,7 +255,12 @@ export class TerminalPreview {
   private process(pending: PendingPreview, event: PreviewEvent, bytes: Uint8Array): void {
     const transfer = pending.transfer;
     if (event.type === "preview-start") {
-      if (transfer || event.vtBytes > this.binding()!.effectiveBudgets.previewBytesPerRun) {
+      // At most one transfer per request, and it must be the one the result names if that came first.
+      if (
+        transfer ||
+        (pending.result && pending.result.previewId !== event.previewId) ||
+        event.vtBytes > this.binding()!.effectiveBudgets.previewBytesPerRun
+      ) {
         this.fail(pending, "invalid-response");
         return;
       }
@@ -338,6 +347,10 @@ export class TerminalPreview {
       this.finish(pending, { ok: true, status: "unchanged", version: result.version });
       return;
     }
+    if (pending.transfer && pending.transfer.previewId !== result.previewId) {
+      this.fail(pending, "invalid-response");
+      return;
+    }
     pending.result = result;
     this.complete(pending);
   }
@@ -346,7 +359,11 @@ export class TerminalPreview {
     const transfer = pending.transfer;
     const result = pending.result;
     if (!transfer || !transfer.ended || !result) return;
-    if (transfer.version !== result.version || !transfer.bytes) {
+    if (
+      transfer.previewId !== result.previewId ||
+      transfer.version !== result.version ||
+      !transfer.bytes
+    ) {
       this.fail(pending, "invalid-response");
       return;
     }

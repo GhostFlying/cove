@@ -213,7 +213,7 @@ test("client public-contract suites reject missing and short discovery", async (
     ["terminal-recovery", 45],
     ["terminal-state", 11],
     ["terminal-control-input", 33],
-    ["terminal-budgets-preview", 29],
+    ["terminal-budgets-preview", 33],
     ["terminal-lifecycle", 4],
   ]) {
     const file = `packages/client/tests/${name}.test.mjs`;
