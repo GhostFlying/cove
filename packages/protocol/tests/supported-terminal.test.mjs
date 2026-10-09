@@ -46,6 +46,7 @@ const descriptor = {
   atSeq: 3,
   captureGeometry: { cols: 12, rows: 4 },
   currentGeometry: { cols: 12, rows: 4 },
+  control: { epoch: 0, holder: null },
   coverage: {
     normal: {
       historyLines: 3,
@@ -355,6 +356,25 @@ test("control and cumulative acknowledgment results bind original epoch or seque
       { type: "applied-ack-result", ...fields, appliedSeq: 5 },
     ),
   ).toBe(false);
+});
+
+test("baseline descriptor carries the control authority at its atSeq", () => {
+  const holder = {
+    connection: { connectionId: "c", generation: 1 },
+    viewId: "v",
+    subscriptionId: "sub",
+  };
+  const { control, ...withoutControl } = descriptor;
+  expect(control).toEqual({ epoch: 0, holder: null });
+  expect(validateBaselineDescriptor(withoutControl)).toBeNull();
+  expect(
+    validateBaselineDescriptor({ ...descriptor, control: { epoch: 3, holder } }),
+  ).toMatchObject({ control: { epoch: 3, holder } });
+  expect(
+    validateBaselineDescriptor({ ...descriptor, control: { epoch: 3, holder: null } }),
+  ).not.toBeNull();
+  // Epoch 0 means control was never granted, so it cannot name a holder.
+  expect(validateBaselineDescriptor({ ...descriptor, control: { epoch: 0, holder } })).toBeNull();
 });
 
 test("baseline descriptor binds N, geometry, both buffers and budgeted normal history", () => {

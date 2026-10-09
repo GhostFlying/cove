@@ -337,6 +337,7 @@ export class RecoverySubscriptions {
         captureGeometry: baseline.captureGeometry,
         currentGeometry: baseline.currentGeometry,
         coverage: baseline.coverage,
+        control: baseline.control,
         vtBytes: baseline.vt.byteLength,
         tailBytes: baseline.tail.byteLength,
         chunkCount,

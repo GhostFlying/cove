@@ -13,7 +13,7 @@ import {
   type Geometry,
   type RecoveryCoverage,
 } from "@cove/protocol/profile";
-import { RunEventSchema, type RunEvent } from "@cove/protocol/terminal";
+import { RunEventSchema, type BaselineControl, type RunEvent } from "@cove/protocol/terminal";
 import { createLogicalGridCheckpoint } from "./logical-grid-checkpoint.js";
 import { BoundedRecoveryTail } from "./recovery-checkpoint.js";
 import { createScreenPreview } from "./terminal-preview.js";
@@ -60,6 +60,8 @@ export interface EngineBaseline {
   readonly captureGeometry: Geometry;
   readonly currentGeometry: Geometry;
   readonly coverage: RecoveryCoverage;
+  // Control authority after the fact at atSeq, taken in the same model turn as the screen.
+  readonly control: BaselineControl;
   readonly vt: Uint8Array;
   readonly tail: Uint8Array;
   readonly appearance: Appearance;
@@ -146,6 +148,9 @@ export class TerminalModel {
   #peakAccountedBytes = 0;
   #admittedGeometry: Geometry;
   #presence = false;
+  // The last ordered control fact's authority. The model applies control facts in seq order with
+  // every other fact, so the value read in a capture turn is exactly the authority at parsedSeq.
+  #control: BaselineControl = { epoch: 0, holder: null };
   #currentOutputSeq: number | null = null;
   #disposed = false;
   #fenced = false;
@@ -268,6 +273,7 @@ export class TerminalModel {
             if (present !== this.#presence && this.#terminal.modes.sendFocusMode)
               this.#query.emitFocus(present);
             this.#presence = present;
+            this.#control = { epoch: event.epoch, holder: structuredClone(event.holder) };
           }
           this.#parsedSeq = event.seq;
           if (
@@ -391,6 +397,7 @@ export class TerminalModel {
             captureGeometry: { ...checkpoint.geometry },
             currentGeometry: { cols: this.#terminal.cols, rows: this.#terminal.rows },
             coverage: structuredClone(checkpoint.coverage),
+            control: structuredClone(this.#control),
             vt: checkpoint.vt.slice(),
             tail: this.#tail.snapshot(),
             appearance: structuredClone(checkpoint.appearance),

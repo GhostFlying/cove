@@ -2,6 +2,8 @@ import { expect, test } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
   model,
+  control,
+  holder,
   output,
   resize,
   utf8,
@@ -48,6 +50,27 @@ test("R01 empty seq-0 checkpoint has complete public transfer metadata", async (
       captureGeometry: { cols: 12, rows: 4 },
       currentGeometry: { cols: 12, rows: 4 },
     });
+    expect(assertTransfer(capture.baseline)).toBe(true);
+  } finally {
+    engine.dispose();
+  }
+});
+
+test("R01b a baseline carries the control authority after the fact at its atSeq", async () => {
+  const engine = model();
+  try {
+    expect((await engine.captureBaseline()).baseline.control).toEqual({ epoch: 0, holder: null });
+    expect((await engine.apply(control(1, holder(1)))).ok).toBe(true);
+    expect((await engine.apply(output(2), utf8("x"))).ok).toBe(true);
+    let capture = await engine.captureBaseline();
+    expect(capture.baseline).toMatchObject({ atSeq: 2, control: { epoch: 1, holder: holder(1) } });
+    // A blur keeps the epoch and clears the holder; a later grant raises the epoch.
+    expect((await engine.apply({ ...control(3, null), epoch: 1 })).ok).toBe(true);
+    capture = await engine.captureBaseline();
+    expect(capture.baseline).toMatchObject({ atSeq: 3, control: { epoch: 1, holder: null } });
+    expect((await engine.apply(control(4, holder(2)))).ok).toBe(true);
+    capture = await engine.captureBaseline();
+    expect(capture.baseline).toMatchObject({ atSeq: 4, control: { epoch: 4, holder: holder(2) } });
     expect(assertTransfer(capture.baseline)).toBe(true);
   } finally {
     engine.dispose();

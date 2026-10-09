@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ConnectionRefSchema,
   OpaqueIdSchema,
   RunRefSchema,
   SequenceSchema,
@@ -17,6 +18,21 @@ import {
 } from "./profile.js";
 import { M0_LIMITS } from "./budgets.js";
 
+export const ControlHolderSchema = z.object({
+  connection: ConnectionRefSchema,
+  viewId: OpaqueIdSchema,
+  subscriptionId: OpaqueIdSchema,
+});
+
+// Control authority as of the baseline's atSeq. A baseline subsumes every fact up to atSeq,
+// including control facts, so without this a recovering client cannot learn who held control
+// at the point where its ordered stream resumes. Epoch 0 means control was never granted.
+export const BaselineControlSchema = z.object({
+  epoch: SequenceSchema,
+  holder: ControlHolderSchema.nullable(),
+});
+export type BaselineControl = z.infer<typeof BaselineControlSchema>;
+
 export const BaselineDescriptorSchema = z.object({
   baselineId: OpaqueIdSchema,
   run: RunRefSchema,
@@ -28,6 +44,7 @@ export const BaselineDescriptorSchema = z.object({
   captureGeometry: GeometrySchema,
   currentGeometry: GeometrySchema,
   coverage: RecoveryCoverageSchema,
+  control: BaselineControlSchema,
   vtBytes: z.number().int().min(1).max(M0_LIMITS.baselineVtBytes),
   tailBytes: z.number().int().min(0).max(M0_LIMITS.baselineTailBytes),
   chunkCount: z.number().int().min(1).max(M0_LIMITS.baselineChunks),
@@ -80,6 +97,7 @@ export function validateBaselineDescriptor(
   const value = parsed.data;
   if (
     value.checkpointSeq > value.atSeq ||
+    (value.control.epoch === 0 && value.control.holder !== null) ||
     !sameSubscriptionRef(value.subscription, { ...value.subscription, run: value.run })
   )
     return null;

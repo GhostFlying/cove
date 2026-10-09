@@ -90,6 +90,7 @@ test("W2 replay falls back across requiresBaseline but accepts after-floor and o
             atSeq: 4,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -193,6 +194,7 @@ test("W2 memory-pressure eviction preserves pinned ownership and makes a gap req
             atSeq: 3,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -277,6 +279,7 @@ test("W2 replay eviction cannot retire an installed route's unacknowledged deliv
             atSeq: 0,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -356,6 +359,7 @@ test("W2 baseline frame table refuses tiny worker headroom before retaining fram
             atSeq: 0,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -406,6 +410,7 @@ test("W2 maximum 129-chunk baseline retains its table lease until route shutdown
             atSeq: 0,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -465,6 +470,7 @@ test("W2 sent-ledger denial fences before enqueue and releases post-N ownership"
             atSeq: 0,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -535,6 +541,7 @@ test("W2 large baseline advances beyond 256 KiB credit only after exact parsed p
     atSeq: 0,
     captureGeometry: { cols: 12, rows: 4 },
     currentGeometry: { cols: 12, rows: 4 },
+    control: { epoch: 0, holder: null },
     coverage: {
       normal: {
         historyLines: 0,
@@ -675,6 +682,7 @@ test("W2 reentrant unsubscribe fences producer before an enqueued frame can comm
             atSeq: 0,
             captureGeometry: { cols: 12, rows: 4 },
             currentGeometry: { cols: 12, rows: 4 },
+            control: { epoch: 0, holder: null },
             coverage: {
               normal: {
                 historyLines: 0,
@@ -776,6 +784,7 @@ test("W2 one slow route overflows without hiding a healthy peer's exact live fac
           atSeq: 0,
           captureGeometry: { cols: 12, rows: 4 },
           currentGeometry: { cols: 12, rows: 4 },
+          control: { epoch: 0, holder: null },
           coverage: {
             normal: {
               historyLines: 0,
@@ -883,6 +892,7 @@ test("W2 scheduler defers a fourth legal frame before the 256 KiB turn boundary"
               atSeq: 0,
               captureGeometry: { cols: 12, rows: 4 },
               currentGeometry: { cols: 12, rows: 4 },
+              control: { epoch: 0, holder: null },
               coverage: {
                 normal: {
                   historyLines: 0,

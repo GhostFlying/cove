@@ -1420,7 +1420,7 @@ test("W2 retained and current suites reject missing, short, duplicate and unknow
     ["terminal-worker", "packages/terminal-worker/tests/worker-preview.test.mjs", 5],
     ["terminal-worker", "packages/terminal-worker/tests/worker-recovery-clock.test.mjs", 3],
     ["terminal-worker", "packages/terminal-worker/tests/worker-recovery-reservations.test.mjs", 5],
-    ["terminal-worker", "packages/terminal-worker/tests/worker-recovery.test.mjs", 8],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-recovery.test.mjs", 9],
     ["terminal-worker", "packages/terminal-worker/tests/independent/current-recovery.test.mjs", 13],
     ["terminal-worker", "packages/terminal-worker/tests/independent/current-preview.test.mjs", 7],
     [

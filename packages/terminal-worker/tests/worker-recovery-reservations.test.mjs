@@ -59,6 +59,7 @@ function baseline() {
       atSeq: 0,
       captureGeometry: { cols: 12, rows: 4 },
       currentGeometry: { cols: 12, rows: 4 },
+      control: { epoch: 0, holder: null },
       coverage: {
         normal: {
           historyLines: 0,
