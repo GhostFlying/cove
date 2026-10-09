@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { request } from "node:http";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -13,7 +14,9 @@ import {
 import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { createSessionClient, readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
+import { createScreenView } from "./screen-view.mjs";
 import { stopServer } from "./server-process.mjs";
+import { createTappedClient } from "./wire-tap.mjs";
 
 // Every scenario drives the compiled `cove` executable, which spawns the compiled server.
 const cli = resolve(import.meta.dirname, "../dist/main.js");
@@ -95,8 +98,7 @@ async function connectClient() {
   return client;
 }
 
-async function attach(client, run, viewId) {
-  const recording = createRecordingView();
+async function attach(client, run, viewId, recording = createRecordingView()) {
   const opened = client.openTerminal({
     run,
     viewId,
@@ -111,12 +113,89 @@ async function attach(client, run, viewId) {
 
 async function focusAndType(controller, text) {
   controller.setInputTarget(true, true);
-  expect(await controller.requestFocus()).toMatchObject({ ok: true });
-  const sent = await controller.sendInput({ source: "keyboard", bytes: encoder.encode(text) });
+  const grant = await controller.requestFocus();
+  expect(grant).toMatchObject({ ok: true });
+  await typeText(controller, text);
+  return grant.value;
+}
+
+async function typeText(controller, text, source = "keyboard") {
+  const sent = await controller.sendInput({ source, bytes: encoder.encode(text) });
   expect(sent).toMatchObject({ ok: true, value: { unknownBytes: 0, notSentBytes: 0 } });
 }
 
 const ECHO_LOOP = 'printf "loop-ready\\n"; while read line; do printf "echo:%s\\n" "$line"; done';
+
+async function connectTapped() {
+  const tapped = createTappedClient(fixture.record);
+  fixture.clients.push(tapped.client);
+  expect((await tapped.client.connect()).ok).toBe(true);
+  return tapped;
+}
+
+// A process that sends DA (ESC[c) and CPR (ESC[6n) to its terminal and records every byte it
+// reads back until the typed line `done`. In "wait" mode it asks after the typed line `go`;
+// in "now" mode it asks at once. `<out>.seen` appears once both replies have arrived.
+const QUERY_PROBE = String.raw`import { writeFileSync } from "node:fs";
+const [mode, out] = process.argv.slice(2);
+process.stdin.setRawMode(true);
+let received = "";
+let asked = false;
+let seen = false;
+const ask = () => {
+  asked = true;
+  received = "";
+  process.stdout.write("\x1b[c\x1b[6n");
+};
+process.stdin.on("data", (chunk) => {
+  received += chunk.toString("latin1");
+  if (!asked) {
+    if (received.includes("go\r")) ask();
+    return;
+  }
+  if (!seen && /\x1b\[\?[\d;]*c/.test(received) && /\x1b\[\d+;\d+R/.test(received)) {
+    seen = true;
+    writeFileSync(out + ".seen", "");
+    process.stdout.write("replies-seen\r\n");
+  }
+  const end = received.indexOf("done\r");
+  if (end >= 0) {
+    writeFileSync(out, JSON.stringify(received.slice(0, end)));
+    process.exit(0);
+  }
+});
+process.stdout.write("query-probe-ready\r\n");
+if (mode === "now") ask();
+`;
+
+// Exactly one primary DA reply and one CPR reply, in query order, then `rest`.
+const QUERY_REPLIES_THEN = (rest) =>
+  new RegExp(String.raw`^\u001b\[\?[\d;]*c\u001b\[\d+;\d+R` + rest + "$");
+
+async function createQueryProbe(mode) {
+  const script = join(fixture.directory, "query-probe.mjs");
+  const out = join(fixture.directory, `query-probe-${mode}.json`);
+  await writeFile(script, QUERY_PROBE);
+  const run = await coveJson(
+    "terminal",
+    "create",
+    "--cwd",
+    fixture.directory,
+    "--",
+    process.execPath,
+    script,
+    mode,
+    out,
+  );
+  return {
+    run,
+    out,
+    async received() {
+      await waitFor("the probe's report", () => existsSync(out));
+      return JSON.parse(await readFile(out, "utf8"));
+    },
+  };
+}
 
 describe("H1 operator scenarios over the compiled server and CLI", () => {
   test("S1 create from the CLI, attach, focus, type, see output and observe the exit code", async () => {
@@ -238,6 +317,49 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       recording.events.some((event) => event.type === "appearance"),
     );
     expect(controller.snapshot().controlEpoch).toBe((await focus).value.epoch);
+  });
+
+  test("S4 the server answers DA and CPR exactly once while two clients watch", async () => {
+    const probe = await createQueryProbe("wait");
+    const holder = await connectTapped();
+    const watcher = await connectTapped();
+    // Both views parse with xterm, which would emit its own DA/CPR replies; a client must
+    // never forward those, so the process sees only the server model's replies.
+    const H = await attach(holder.client, probe.run, "s4-holder", createScreenView());
+    const W = await attach(watcher.client, probe.run, "s4-watcher", createScreenView());
+    await waitFor("the probe on both views", () =>
+      [H, W].every(({ recording }) => recording.text().includes("query-probe-ready")),
+    );
+    await focusAndType(H.controller, "go\r");
+    await waitFor("the probe to see both replies", () => existsSync(`${probe.out}.seen`));
+    // Both views have parsed the queries, which precede this line in the output.
+    await waitFor("both views to parse the queries", () =>
+      [H, W].every(({ recording }) => recording.text().includes("replies-seen")),
+    );
+    // Real keyboard and paste input still arrives, after the replies and unaltered.
+    await typeText(H.controller, "kbd-1");
+    await typeText(H.controller, "paste-2", "paste");
+    await typeText(H.controller, "done\r");
+    expect(await probe.received()).toMatch(QUERY_REPLIES_THEN("kbd-1paste-2"));
+    // On the wire, the clients sent only what was typed.
+    const holderRef = H.controller.snapshot().subscription;
+    expect(holder.tap.sentInput(holderRef.subscriptionId)).toBe("go\rkbd-1paste-2done\r");
+    expect(watcher.tap.outbound.filter((frame) => frame.metadata.type === "input")).toEqual([]);
+  });
+
+  test("S4 the server answers DA and CPR exactly once with no client attached", async () => {
+    const probe = await createQueryProbe("now");
+    // No client is connected while the probe asks.
+    await waitFor("the probe to see both replies", () => existsSync(`${probe.out}.seen`));
+    const holder = await connectTapped();
+    const H = await attach(holder.client, probe.run, "s4-late", createScreenView());
+    // The baseline carries the earlier screen; installing it must not answer again.
+    await waitFor("the recovered screen", () => H.recording.text().includes("replies-seen"));
+    await focusAndType(H.controller, "done\r");
+    expect(await probe.received()).toMatch(QUERY_REPLIES_THEN(""));
+    expect(holder.tap.sentInput(H.controller.snapshot().subscription.subscriptionId)).toBe(
+      "done\r",
+    );
   });
 
   test("S8 a wrong protocol version is refused on both channels without touching a live PTY", async () => {

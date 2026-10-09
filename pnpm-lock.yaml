@@ -231,6 +231,9 @@ importers:
       '@types/node':
         specifier: 26.6.2
         version: 26.6.2
+      '@xterm/headless':
+        specifier: 'catalog:'
+        version: 6.0.0
       playwright:
         specifier: 'catalog:'
         version: 1.63.0
