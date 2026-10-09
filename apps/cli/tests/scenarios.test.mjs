@@ -168,6 +168,68 @@ async function reattach(tapped, attached) {
   expect(await attached.controller.attach()).toMatchObject({ ok: true });
 }
 
+function rejectionKind(reply) {
+  expect(reply.metadata.type).toBe("error");
+  return reply.metadata.error.kind;
+}
+
+// Every size change makes each attached controller run its own baseline recovery, and output
+// reaching one client says nothing about another's. Before a handoff or a hand-built command,
+// wait until this controller is ready at the expected geometry and epoch and the server has
+// answered an applied-ack covering everything it applied; until then requestFocus() refuses
+// locally and the server may answer RESYNC_REQUIRED instead of the rejection under test.
+async function waitForSettled(label, { controller }, tap, geometry, epoch) {
+  try {
+    await settledWait(label, controller, tap, geometry, epoch);
+  } catch (error) {
+    // Metadata only: frame payloads may carry terminal content.
+    const brief = ({ metadata: { type, requestId, appliedSeq, atSeq, seq, epoch, error } }) => ({
+      type,
+      requestId,
+      appliedSeq,
+      atSeq,
+      seq,
+      epoch,
+      error,
+    });
+    const { phase, appliedSeq, appliedGeometry, appliedAuthority, controlEpoch, inputReady } =
+      controller.snapshot();
+    throw new Error(
+      `${error.message}; expected ${JSON.stringify({ geometry, epoch })}; snapshot ${JSON.stringify(
+        { phase, appliedSeq, appliedGeometry, appliedAuthority, controlEpoch, inputReady },
+      )}; last outbound ${JSON.stringify(tap.outbound.slice(-8).map(brief))}; last inbound ${JSON.stringify(
+        tap.inbound.slice(-12).map(brief),
+      )}`,
+      { cause: error },
+    );
+  }
+}
+
+async function settledWait(label, controller, tap, geometry, epoch) {
+  await waitFor(`${label} to settle`, () => {
+    const snapshot = controller.snapshot();
+    if (
+      snapshot.phase !== "ready" ||
+      snapshot.appliedGeometry?.geometry.cols !== geometry.cols ||
+      snapshot.appliedGeometry?.geometry.rows !== geometry.rows ||
+      snapshot.appliedAuthority?.epoch !== epoch
+    )
+      return false;
+    const acked = new Set(
+      tap.inbound
+        .filter((frame) => frame.metadata.type === "applied-ack-result")
+        .map((frame) => frame.metadata.requestId),
+    );
+    return tap.outbound.some(
+      ({ metadata }) =>
+        metadata.type === "applied-ack" &&
+        metadata.subscription.subscriptionId === snapshot.subscription.subscriptionId &&
+        metadata.appliedSeq >= snapshot.appliedSeq &&
+        acked.has(metadata.requestId),
+    );
+  });
+}
+
 // Compare the client's rendered screen with the server model's preview at the same seq. The
 // caller makes the run quiescent first, so the two converge on one seq.
 async function expectScreenMatchesServer(client, run, controller, screen) {
@@ -309,6 +371,95 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       recording.events.some((event) => event.type === "appearance"),
     );
     expect(controller.snapshot().controlEpoch).toBe((await focus).value.epoch);
+  });
+
+  test("S3 the PTY size follows the focus holder and the server rejects spectator and stale input", async () => {
+    const run = await createRun(PROBE);
+    const a = await connectTapped();
+    const b = await connectTapped();
+    const spectator = await connectTapped();
+    // Each client measures a different grid, so the PTY size names whoever applied it.
+    const A = await attach(a.client, run, "s3-a", createRecordingView({ cols: 100, rows: 30 }));
+    const B = await attach(b.client, run, "s3-b", createRecordingView({ cols: 90, rows: 25 }));
+    const C = await attach(
+      spectator.client,
+      run,
+      "s3-c",
+      createRecordingView({ cols: 110, rows: 35 }),
+    );
+    await waitFor("the probe on every view", () =>
+      [A, B, C].every(({ recording }) => recording.text().includes("probe-ready")),
+    );
+
+    const aSize = { cols: 100, rows: 30 };
+    const bSize = { cols: 90, rows: 25 };
+    // Taking focus at a new grid makes every connection, the new holder's included, recover
+    // its baseline. Each step waits for the clients it uses next to settle, so focus requests,
+    // typed input and hand-built commands never race a recovery.
+    const handoff = async (handle, tap, size, text) => {
+      handle.controller.setInputTarget(true, true);
+      const grant = await handle.controller.requestFocus();
+      expect(grant).toMatchObject({ ok: true });
+      await waitForSettled("the new holder", handle, tap, size, grant.value.epoch);
+      await typeText(handle.controller, text);
+      return grant.value;
+    };
+    const firstGrant = await handoff(A, a.tap, aSize, "size a1\r");
+    await waitFor("A's size", () => C.recording.text().includes("size-a1:30 100"));
+    await waitForSettled("B after A's resize", B, b.tap, aSize, firstGrant.epoch);
+    const bGrant = await handoff(B, b.tap, bSize, "size b1\r");
+    await waitFor("B's size", () => C.recording.text().includes("size-b1:25 90"));
+    await waitForSettled("A after B's resize", A, a.tap, bSize, bGrant.epoch);
+    const aGrant = await handoff(A, a.tap, aSize, "size a2\r");
+    await waitFor("A's size again", () => C.recording.text().includes("size-a2:30 100"));
+    expect(aGrant.epoch).toBeGreaterThan(bGrant.epoch);
+    await waitForSettled("B after A's second resize", B, b.tap, aSize, aGrant.epoch);
+    await waitForSettled("the spectator", C, spectator.tap, aSize, aGrant.epoch);
+
+    // A spectator cannot resize: locally it holds no grant, and a hand-built resize under the
+    // current epoch is refused by the server.
+    expect(await C.controller.requestResize({ cols: 110, rows: 35 })).toMatchObject({ ok: false });
+    const cRef = C.controller.snapshot().subscription;
+    const spectatorResize = await spectator.tap.inject({
+      type: "resize",
+      run: cRef.run,
+      subscription: cRef,
+      epoch: aGrant.epoch,
+      geometry: { cols: 110, rows: 35 },
+    });
+    expect(rejectionKind(spectatorResize)).toBe("STALE_CONTROL");
+
+    // Spectator input under the current epoch, and B's input under its superseded epoch, are
+    // refused and never written.
+    const spectatorInput = await spectator.tap.inject(
+      { type: "input", run: cRef.run, subscription: cRef, epoch: aGrant.epoch, inputSeq: 1 },
+      encoder.encode("spectator-bytes\r"),
+    );
+    expect(rejectionKind(spectatorInput)).toBe("STALE_CONTROL");
+    const bRef = B.controller.snapshot().subscription;
+    const bInputs = b.tap.outbound.filter((frame) => frame.metadata.type === "input");
+    const staleInput = await b.tap.inject(
+      {
+        type: "input",
+        run: bRef.run,
+        subscription: bRef,
+        epoch: bGrant.epoch,
+        inputSeq: Math.max(...bInputs.map((frame) => frame.metadata.inputSeq)) + 1,
+      },
+      encoder.encode("stale-bytes\r"),
+    );
+    expect(rejectionKind(staleInput)).toBe("STALE_CONTROL");
+
+    // The PTY applies inputs in order, so once the holder's later line is echoed any
+    // accepted spectator or stale bytes would already be visible.
+    await typeText(A.controller, "size a3\r");
+    await waitFor("the holder's later line", () => C.recording.text().includes("size-a3:30 100"));
+    for (const { recording } of [A, B, C]) {
+      expect(recording.text()).not.toContain("spectator-bytes");
+      expect(recording.text()).not.toContain("stale-bytes");
+    }
+    // The spectator never sent input of its own.
+    expect(spectator.tap.sentInput(cRef.subscriptionId)).toBe("");
   });
 
   test("S4 the server answers DA and CPR exactly once while two clients watch", async () => {
