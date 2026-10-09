@@ -180,18 +180,21 @@ async function harness({
     event(event) {
       this.emit(3, { type: "run-event", subscription: currentRef, event });
     },
-    baseline(atSeq = 0) {
+    baseline(
+      atSeq = 0,
+      { baselineId = "baseline-1", grid = geometry, control = { epoch: 0, holder: null } } = {},
+    ) {
       const descriptor = {
-        baselineId: "baseline-1",
+        baselineId,
         run,
         subscription: currentRef,
         profile: PROFILE,
         encoding: BASELINE_ENCODING,
         checkpointSeq: atSeq,
         atSeq,
-        captureGeometry: geometry,
-        currentGeometry: geometry,
-        control: { epoch: 0, holder: null },
+        captureGeometry: grid,
+        currentGeometry: grid,
+        control,
         coverage: {
           normal: {
             historyLines: 0,
@@ -212,7 +215,7 @@ async function harness({
           type: "baseline-chunk",
           run,
           subscription: currentRef,
-          baselineId: "baseline-1",
+          baselineId,
           ordinal: 0,
         },
         new Uint8Array([65]),
@@ -221,7 +224,7 @@ async function harness({
         type: "baseline-end",
         run,
         subscription: currentRef,
-        baselineId: "baseline-1",
+        baselineId,
         chunkCount: 1,
         totalBytes: 1,
         atSeq,
@@ -619,6 +622,116 @@ describe("client control authority", () => {
       geometry,
     });
     expect(peer.commands.filter(({ command: item }) => item.type === "focus")).toHaveLength(2);
+  });
+
+  describe("a focus that resizes the PTY and the baseline recovery it triggers", () => {
+    const larger = { cols: 100, rows: 30 };
+    const self = { connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId };
+    const other = { connection, viewId: "view-2", subscriptionId: "subscription-9" };
+    const focusCount = (peer) =>
+      peer.commands.filter(({ command }) => command.type === "focus").length;
+
+    // The worker emits the grid change as a resize that requires a baseline, then the grant.
+    function grantFacts(peer) {
+      peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
+      peer.event({ type: "control", run, seq: 2, epoch: 1, holder: self, geometry: larger });
+    }
+
+    async function recoverWith(peer, control) {
+      await settle();
+      const recover = peer.commands.findLast(({ command }) => command.type === "recover").command;
+      expect(recover).toMatchObject({ reason: "resize-context" });
+      peer.result(recover, { mode: "baseline", atSeq: 2 });
+      peer.baseline(2, { baselineId: "baseline-2", grid: larger, control });
+      await settle();
+    }
+
+    test("the baseline's matching authority reinstates the grant and input sent after focus succeeds", async () => {
+      const { controller, peer } = await harness();
+      controller.setInputTarget(true, true);
+      let resolved = false;
+      const pending = controller.requestFocus(larger).then((outcome) => {
+        resolved = true;
+        return outcome;
+      });
+      const focus = peer.commands.at(-1).command;
+      peer.result(focus, { epoch: 1, atSeq: 2 });
+      grantFacts(peer);
+      await settle();
+      // The focus waits for the recovery its own resize triggered rather than resolving into it.
+      expect(resolved).toBe(false);
+      expect(controller.snapshot().phase).not.toBe("ready");
+      // Input staged during the recovery is still cancelled, as for every recovery.
+      expect(
+        await controller.sendInput({ source: "keyboard", bytes: encoder.encode("early") }),
+      ).toMatchObject({
+        ok: false,
+        error: { reason: "invalid-state" },
+        value: { notSentBytes: 5 },
+      });
+      await recoverWith(peer, { epoch: 1, holder: self });
+      expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+      expect(controller.snapshot()).toMatchObject({
+        phase: "ready",
+        inputReady: true,
+        controlEpoch: 1,
+        appliedGeometry: { geometry: larger, atSeq: 2 },
+      });
+      // Recovery regained the server's recorded authority without asking for focus again.
+      expect(focusCount(peer)).toBe(1);
+      const sent = controller.sendInput({ source: "keyboard", bytes: encoder.encode("x\r") });
+      await settle();
+      const input = peer.commands.at(-1).command;
+      expect(input).toMatchObject({ type: "input", epoch: 1 });
+      peer.result(input, {
+        epoch: 1,
+        inputSeq: input.inputSeq,
+        status: "written",
+        writtenBytes: 2,
+      });
+      expect(await sent).toMatchObject({ ok: true, value: { writtenBytes: 2, notSentBytes: 0 } });
+    });
+
+    test("a focus result that arrives during the recovery is carried to the baseline", async () => {
+      const { controller, peer } = await harness();
+      controller.setInputTarget(true, true);
+      const pending = controller.requestFocus(larger);
+      const focus = peer.commands.at(-1).command;
+      grantFacts(peer);
+      await settle();
+      expect(controller.snapshot().phase).not.toBe("ready");
+      peer.result(focus, { epoch: 1, atSeq: 2 });
+      await recoverWith(peer, { epoch: 1, holder: self });
+      expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+      expect(controller.snapshot()).toMatchObject({ inputReady: true, controlEpoch: 1 });
+      expect(focusCount(peer)).toBe(1);
+    });
+
+    // Returns how many focus commands were sent: recovery must not have asked again.
+    async function dropCarriedGrant(control) {
+      const { controller, peer } = await harness();
+      controller.setInputTarget(true, true);
+      const pending = controller.requestFocus(larger);
+      peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
+      grantFacts(peer);
+      await recoverWith(peer, control);
+      expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+      const snapshot = controller.snapshot();
+      expect(snapshot).toMatchObject({ phase: "ready", inputReady: false });
+      expect(snapshot.controlEpoch).toBeUndefined();
+      expect(
+        await controller.sendInput({ source: "keyboard", bytes: encoder.encode("x") }),
+      ).toMatchObject({ ok: false, value: { notSentBytes: 1 } });
+      return focusCount(peer);
+    }
+
+    test("another focus before the baseline drops the carried grant", async () => {
+      expect(await dropCarriedGrant({ epoch: 2, holder: other })).toBe(1);
+    });
+
+    test("a blur before the baseline drops the carried grant", async () => {
+      expect(await dropCarriedGrant({ epoch: 1, holder: null })).toBe(1);
+    });
   });
 
   test("binary input is copied exactly and waits for an applied focus grant", async () => {

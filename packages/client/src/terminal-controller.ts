@@ -237,8 +237,9 @@ export class RoutedTerminalController implements TerminalController {
   // when it performs one, so a granted command sent behind it on the lane would be fenced on a seq
   // this client cannot know until the result arrives. Later granted commands wait until it settles
   // and its result's covering ack has been handed off. A resize whose fact requires a baseline
-  // (every grid change in M0) triggers resize-context recovery, which resets the grant; held
-  // input then fails with a reported invalid-state rather than being carried across recovery.
+  // (every grid change in M0) triggers resize-context recovery, which carries only the grant to
+  // the baseline's authority check; held input fails with a reported invalid-state rather than
+  // being carried across recovery.
   private grantedControlsInFlight = 0;
   // Wakes authority waits on changes that publish() does not report (ack handoff, control settle).
   private readonly authorityWatchers = new Set<() => void>();
@@ -419,7 +420,11 @@ export class RoutedTerminalController implements TerminalController {
     const operation = this.beginOperation(binding, "recover", resumeGeometry);
     if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
     if (operation.settled) return operation.promise;
-    this.control.resetForRecovery();
+    // A resize-context recovery follows a grid change this subscription may have caused by its
+    // own focus; the server keeps it as holder, so the grant is carried to the baseline's verdict
+    // (see TerminalControl.suspendForRecovery). Other reasons start from no authority.
+    if (reason === "resize-context") this.control.suspendForRecovery();
+    else this.control.resetForRecovery();
     this.host.lane.cancelUnsent(ref, ["focus", "blur", "resize", "appearance", "input"]);
     this.host.lane.cancelUnsentControl(ref);
     this.publish();
@@ -557,16 +562,23 @@ export class RoutedTerminalController implements TerminalController {
     const intent = this.control.beginFocus();
     if (intent === null) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     this.focusGeometry = Object.freeze({ ...checked.data });
+    // The worker's model admits a control fact only at its current grid, so a focus at a grid
+    // other than the applied one is preceded by a resize fact, and every M0 resize requires a
+    // baseline: this client will recover before it can apply the grant's own fact.
+    const resizes = !sameGrid(this.appliedGeometry?.geometry, checked.data);
     this.host.lane.cancelUnsent(ref, ["focus", "input"]);
     this.publish();
+    // A recovery that starts before the result arrives keeps the focus as carried rather than
+    // pending (TerminalControl.suspendForRecovery), so its result is still accepted.
     const valid = (): boolean =>
-      this.token === token &&
-      this.viewGeneration === generation &&
       this.view === view &&
       this.ref === ref &&
       this.host.binding() === binding &&
-      this.phase === "ready" &&
-      this.control.pendingIntent === intent;
+      ((this.token === token &&
+        this.viewGeneration === generation &&
+        this.phase === "ready" &&
+        this.control.pendingIntent === intent) ||
+        this.control.carriesFocus(intent));
     if (!valid()) return { ok: false, error: localError("invalid-state") };
     let settled = false;
     let receipt: TerminalOutcome<TerminalControlReceipt> | undefined;
@@ -615,7 +627,58 @@ export class RoutedTerminalController implements TerminalController {
       valid,
     );
     handle(outcome);
-    return receipt!;
+    const granted = receipt!;
+    // Resolve only once the grant is usable or lost, so input sent after a successful focus is
+    // not caught by the recovery that the focus's own resize triggers (that recovery still
+    // cancels input queued before it). The wait is keyed on the requested grid because the focus
+    // result can arrive before the resize fact. The ordered facts start the recovery and its
+    // deadline ends it, so no timer is added; a focus at the applied grid keeps resolving on its
+    // result as before.
+    if (
+      granted.ok &&
+      (resizes || this.phase !== "ready") &&
+      !(await this.waitForFocusSettled(ref, binding, view, granted.value.epoch))
+    )
+      return { ok: false, error: localError("invalid-state") };
+    return granted;
+  }
+
+  private waitForFocusSettled(
+    ref: SubscriptionRef,
+    binding: NegotiatedConnection,
+    view: TerminalView,
+    epoch: number,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let state: Disposable | undefined;
+      const finish = (ready: boolean): void => {
+        if (settled) return;
+        settled = true;
+        safeDispose(state);
+        resolve(ready);
+      };
+      const check = (): void => {
+        if (
+          this.ref !== ref ||
+          this.view !== view ||
+          this.host.binding() !== binding ||
+          this.phase === "disposed" ||
+          this.phase === "unavailable" ||
+          this.phase === "idle" ||
+          !this.control.keepsGrant(epoch)
+        )
+          finish(false);
+        else if (
+          this.phase === "ready" &&
+          this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) === epoch
+        )
+          finish(true);
+      };
+      state = this.onState(check);
+      if (settled) safeDispose(state);
+      check();
+    });
   }
 
   async blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>> {
@@ -1451,6 +1514,14 @@ export class RoutedTerminalController implements TerminalController {
       this.retainedGeometry = Object.freeze({ ...this.baseline.currentGeometry });
       this.appliedGeometry = geometryFact(this.baseline.currentGeometry, event.atSeq);
       this.appliedAuthority = null;
+      this.control.restore(
+        this.baseline.control,
+        event.atSeq,
+        this.run,
+        this.baseline.currentGeometry,
+        this.ref,
+        this.viewGeneration,
+      );
       this.baseline = undefined;
       this.commit(operation);
       return;
@@ -1509,6 +1580,7 @@ export class RoutedTerminalController implements TerminalController {
           operation.resumeGeometry.geometry,
           operation.resumeGeometry.atSeq,
         );
+      this.control.finishRecovery();
       this.phase = "ready";
       this.retainedModel = true;
       this.autoRecoveryUsed = false;
