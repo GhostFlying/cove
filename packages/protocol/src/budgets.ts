@@ -3,8 +3,10 @@ import { HEADER_BYTES, MAX_FRAME_BYTES, MAX_METADATA_BYTES } from "./provisional
 
 export const M0_LIMITS = Object.freeze({
   maxRuns: 128,
-  maxCols: 120,
-  maxRows: 40,
+  // Wide enough for real agent TUIs on large displays. Ordinary printable content at
+  // this grid with full history still fits the 8 MiB baseline (about 0.7 MB of cells).
+  maxCols: 500,
+  maxRows: 200,
   historyLines: 1000,
   listPage: 128,
   baselineVtBytes: 8 * 1024 * 1024,

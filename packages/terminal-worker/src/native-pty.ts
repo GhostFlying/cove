@@ -1,5 +1,6 @@
 import { constants } from "node:os";
 import * as pty from "node-pty";
+import { M0_LIMITS } from "@cove/protocol/budgets";
 import type { RetainedBytesLease } from "@cove/terminal-engine";
 import type {
   BoundedPtyCleanupResult,
@@ -1247,10 +1248,10 @@ function validGeometry(cols: number, rows: number): boolean {
   return (
     Number.isSafeInteger(cols) &&
     cols >= 2 &&
-    cols <= 120 &&
+    cols <= M0_LIMITS.maxCols &&
     Number.isSafeInteger(rows) &&
     rows >= 2 &&
-    rows <= 40
+    rows <= M0_LIMITS.maxRows
   );
 }
 
@@ -1268,7 +1269,9 @@ function normalizeExit(value: unknown): NativeExit | undefined {
 
 function validateGeometry(cols: number, rows: number): void {
   if (!validGeometry(cols, rows)) {
-    throw new RangeError("PTY geometry must be within 2..120 columns and 2..40 rows");
+    throw new RangeError(
+      `PTY geometry must be within 2..${M0_LIMITS.maxCols} columns and 2..${M0_LIMITS.maxRows} rows`,
+    );
   }
 }
 

@@ -20,6 +20,8 @@ import { createScreenPreview } from "./terminal-preview.js";
 import { TerminalQueryResponder } from "./terminal-query-responder.js";
 import { assertPinnedRecoveryPackages, readPrivateRecoveryState } from "./xterm-recovery-state.js";
 
+const PREVIEW_MAX_CELLS = 120 * 40;
+
 export type EngineErrorCode = "invalid" | "capacity" | "disposed" | "faulted";
 export type EngineResult<T> =
   | { readonly ok: true; readonly value: T }
@@ -414,6 +416,11 @@ export class TerminalModel {
       async () => {
         if (this.#disposed) return { status: "disposed", reason: "Terminal model disposed" };
         if (this.#fault) return { status: "faulted", reason: this.#fault };
+        // The preview scratch reservation charges 512 bytes per cell, sized for the original
+        // 120x40 grid. Larger grids would reserve most of the shared worker budget on every
+        // refresh and could starve recovery checkpoints, so they report no preview instead.
+        if (this.#terminal.cols * this.#terminal.rows > PREVIEW_MAX_CELLS)
+          return { status: "unavailable", reason: "Current-screen preview exceeds grid cap" };
         const scratchBytes =
           this.#budgets.previewBytesPerRun + 512 * this.#terminal.cols * this.#terminal.rows + 256;
         const scratchLease = this.#reserveRetainedBytes?.(scratchBytes);

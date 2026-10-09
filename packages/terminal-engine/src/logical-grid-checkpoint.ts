@@ -1,4 +1,5 @@
 import type { Terminal } from "@xterm/headless";
+import { M0_LIMITS } from "@cove/protocol/budgets";
 import { absolutePosition, cellAttr, sameAttr, savedState, sgr } from "./terminal-state-vt.js";
 import {
   readPrivateRecoveryState,
@@ -20,7 +21,9 @@ export interface LogicalGridCheckpoint {
 }
 
 const BASELINE_CAP = 8 * 1024 * 1024;
-const CELL_CAP = 2 * 120 * (1040 + 40);
+// Two passes (emptiness check, render) over the widest normal buffer (history + rows)
+// plus the alternate buffer; equals the original 2*120*(1040+40) at 120x40.
+const CELL_CAP = 2 * M0_LIMITS.maxCols * (M0_LIMITS.historyLines + 2 * M0_LIMITS.maxRows);
 const encoder = new TextEncoder();
 
 function currentModes(modes: Terminal["modes"], cursorHidden: boolean): string {
@@ -89,9 +92,9 @@ export function createLogicalGridCheckpoint(
     !Number.isSafeInteger(terminal.cols) ||
     !Number.isSafeInteger(terminal.rows) ||
     terminal.cols < 1 ||
-    terminal.cols > 120 ||
+    terminal.cols > M0_LIMITS.maxCols ||
     terminal.rows < 1 ||
-    terminal.rows > 40
+    terminal.rows > M0_LIMITS.maxRows
   )
     throw new Error("Logical-grid geometry exceeds profile");
   const state = readPrivateRecoveryState(terminal);

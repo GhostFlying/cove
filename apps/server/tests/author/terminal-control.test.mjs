@@ -499,7 +499,7 @@ describe("private shared terminal control and binary input", () => {
       expect(
         (
           await a.service.handle(
-            command("resize", ar, "oversize", { epoch: 1, geometry: { cols: 121, rows: 25 } }),
+            command("resize", ar, "oversize", { epoch: 1, geometry: { cols: 501, rows: 25 } }),
           )
         ).error.kind,
       ).toBe("CAPABILITY_UNAVAILABLE");
