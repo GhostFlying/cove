@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, realpath } from "node:fs/promises";
+import { access, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, resolve } from "node:path";
 import type { CallOutcome, Client } from "@cove/client";
@@ -263,19 +263,63 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+// The rendezvous record carries no pid, so a record cannot be traced back to the process
+// that published it. Instead `server start` holds an exclusive lock beside the run directory
+// from its existence check until readiness is announced: while the lock is held no other
+// CLI start can spawn a server for this path, so a record that appears after our check was
+// published by our child. Without it two concurrent starts both pass the check and the loser
+// announces the winner's record while its own child fails to link the path and exits. A
+// crashed CLI can leave the lock behind; that is reported rather than silently broken,
+// because breaking a live start's lock would reintroduce the race.
+async function acquireStartLock(path: string): Promise<() => Promise<void>> {
+  const lock = `${dirname(path)}.start.lock`;
+  let handle;
+  try {
+    handle = await open(lock, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw new Error(
+      `${lock} exists; another \`cove server start\` is in progress. ` +
+        "Remove the file if no such command is running.",
+    );
+  }
+  const owned = await handle.stat();
+  try {
+    await handle.writeFile(`${process.pid}\n`, "utf8");
+  } finally {
+    await handle.close();
+  }
+  return async () => {
+    // Remove only the lock this process created, never one an operator replaced.
+    try {
+      const current = await lstat(lock);
+      if (current.dev === owned.dev && current.ino === owned.ino) await unlink(lock);
+    } catch {
+      /* Already gone. */
+    }
+  };
+}
+
 async function waitForRendezvous(path: string, child: ChildProcess) {
-  let exited = false;
-  child.once("exit", () => (exited = true));
+  const running = () => child.exitCode === null && child.signalCode === null;
+  let failed = false;
+  child.once("error", () => (failed = true));
   const deadline = Date.now() + RENDEZVOUS_WAIT_MS;
   while (Date.now() < deadline) {
-    if (exited) throw new Error("cove-server exited before publishing its rendezvous");
+    if (failed || !running())
+      throw new Error("cove-server exited before publishing its rendezvous");
     if (await exists(path)) {
+      let record;
       try {
-        return await readRendezvous(path);
+        record = await readRendezvous(path);
       } catch {
         // The server links a complete file atomically; a failed read is a foreign file.
         throw new Error(`Unexpected rendezvous content at ${path}`);
       }
+      // A child that already exited cannot own the record it would be announced with.
+      if (failed || !running())
+        throw new Error("cove-server exited before its rendezvous could be confirmed");
+      return record;
     }
     await sleep(50);
   }
@@ -288,42 +332,50 @@ async function serverStart(args: Arguments): Promise<number> {
     throw new UsageError("server start takes no arguments");
   const port = integerFlag(args, "--port", 0);
   const path = await prepareRendezvousPath(resolveRendezvousPath(flag(args, "--rendezvous")));
-  if (await exists(path))
-    throw new Error(
-      `${path} already exists; another server may be running. ` +
-        "Stop it, or remove the file if that server is gone.",
-    );
   const origins = args.flags.get("--origin") ?? [];
-  const child = spawn(
-    process.execPath,
-    [
-      await serverEntry(),
-      ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", String(port)],
-      ...["--rendezvous", path],
-      ...origins.flatMap((origin) => ["--origin", origin]),
-    ],
-    { stdio: ["ignore", "inherit", "inherit"] },
-  );
-  const exit = new Promise<number>((done) => {
-    child.once("error", () => done(1));
-    child.once("exit", (code, signal) => done(code ?? (signal ? 1 : 0)));
-  });
-  // The server retires its rendezvous and PTYs on SIGINT/SIGTERM; forward them instead of
-  // dying first so the operator's Ctrl-C always reaches an orderly shutdown.
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal));
+  const entry = await serverEntry();
+  const releaseLock = await acquireStartLock(path);
+  let exit: Promise<number>;
   try {
-    const record = await waitForRendezvous(path, child);
-    print({
-      endpoint: record.endpoint,
-      serverId: record.serverId,
-      relayInstanceId: record.relayInstanceId,
-      rendezvous: path,
-      pid: child.pid,
+    if (await exists(path))
+      throw new Error(
+        `${path} already exists; another server may be running. ` +
+          "Stop it, or remove the file if that server is gone.",
+      );
+    const child = spawn(
+      process.execPath,
+      [
+        entry,
+        ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", String(port)],
+        ...["--rendezvous", path],
+        ...origins.flatMap((origin) => ["--origin", origin]),
+      ],
+      { stdio: ["ignore", "inherit", "inherit"] },
+    );
+    exit = new Promise<number>((done) => {
+      child.once("error", () => done(1));
+      child.once("exit", (code, signal) => done(code ?? (signal ? 1 : 0)));
     });
-  } catch (error) {
-    child.kill("SIGTERM");
-    await exit;
-    throw error;
+    // The server retires its rendezvous and PTYs on SIGINT/SIGTERM; forward them instead of
+    // dying first so the operator's Ctrl-C always reaches an orderly shutdown.
+    for (const signal of ["SIGINT", "SIGTERM"] as const)
+      process.on(signal, () => child.kill(signal));
+    try {
+      const record = await waitForRendezvous(path, child);
+      print({
+        endpoint: record.endpoint,
+        serverId: record.serverId,
+        relayInstanceId: record.relayInstanceId,
+        rendezvous: path,
+        pid: child.pid,
+      });
+    } catch (error) {
+      child.kill("SIGTERM");
+      await exit;
+      throw error;
+    }
+  } finally {
+    await releaseLock();
   }
   return exit;
 }
