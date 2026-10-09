@@ -2011,6 +2011,42 @@ describe("resize and focus around a resize-context recovery", () => {
     expect(ofType(peer, "focus")).toHaveLength(1);
   });
 
+  test("a deferred focus superseded by an observer of its own begin is never sent", async () => {
+    const { controller, peer } = await recovering();
+    const first = controller.requestFocus(larger);
+    await settle();
+    // White-box trigger: act on the publication right after the deferred focus has begun (its
+    // intent is pending), before it is handed to the lane. The observer synchronously starts
+    // another resize-context recovery, which carries that intent, and requests a newer focus,
+    // which defers behind the recovery.
+    let acted = false;
+    let second;
+    const observer = controller.onState(() => {
+      if (acted || controller.control.pendingIntent === undefined) return;
+      acted = true;
+      void controller.recover("resize-context");
+      second = controller.requestFocus(larger);
+    });
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    observer.dispose();
+    expect(second).toBeDefined();
+    // The second recovery started, and no focus went out: not the older one, which would
+    // otherwise follow the recover with its stale intent, nor the newer one, which waits.
+    await settle();
+    expect(controller.snapshot().phase).not.toBe("ready");
+    expect(ofType(peer, "recover")).toHaveLength(2);
+    expect(ofType(peer, "focus")).toHaveLength(0);
+    expect(await first).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    await serveRecovery(peer, 2, { epoch: 0, holder: null });
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    const command = ofType(peer, "focus")[0].command;
+    peer.result(command, { epoch: 1, atSeq: 3 });
+    expect(await second).toEqual({ ok: true, value: { epoch: 1, atSeq: 3 } });
+  });
+
   test("a deferred focus is cancelled when the view is replaced", async () => {
     const { controller, peer } = await recovering();
     const focus = controller.requestFocus(larger);
