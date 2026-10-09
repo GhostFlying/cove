@@ -125,6 +125,10 @@ function identityCopy(ref: SubscriptionRef): SubscriptionRef {
   });
 }
 
+function sameGrid(a: Geometry | undefined, b: Geometry | undefined): boolean {
+  return !!a && !!b && a.cols === b.cols && a.rows === b.rows;
+}
+
 function geometryFact(geometry: Geometry, atSeq: number): TerminalAppliedGeometry {
   return Object.freeze({ geometry: Object.freeze({ ...geometry }), atSeq });
 }
@@ -221,6 +225,9 @@ export class RoutedTerminalController implements TerminalController {
   private drainingToken = -1;
   private ackInFlight = false;
   private pendingAck: number | undefined;
+  // Geometry carried by the pending or accepted focus request (updated by granted resizes), so
+  // a repeated focus intent with the same grid can be recognized as adding nothing.
+  private focusGeometry: Geometry | undefined;
   private progressInFlight = false;
   private pendingProgress: number | undefined;
   private autoRecoveryUsed = false;
@@ -532,6 +539,7 @@ export class RoutedTerminalController implements TerminalController {
       return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     const intent = this.control.beginFocus();
     if (intent === null) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+    this.focusGeometry = Object.freeze({ ...checked.data });
     this.host.lane.cancelUnsent(ref, ["focus", "input"]);
     this.publish();
     const valid = (): boolean =>
@@ -928,7 +936,17 @@ export class RoutedTerminalController implements TerminalController {
         this.phase === "ready" &&
         this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
     );
-    return this.controlReceipt(result, `${type}-result`);
+    const receipt = this.controlReceipt(result, `${type}-result`);
+    // A granted resize changes the grid that a repeated focus intent is compared with.
+    if (
+      receipt.ok &&
+      this.token === token &&
+      this.ref === ref &&
+      "geometry" in value &&
+      this.control.epoch === epoch
+    )
+      this.focusGeometry = Object.freeze({ ...value.geometry });
+    return receipt;
   }
 
   private controlReceipt(
@@ -1758,6 +1776,19 @@ export class RoutedTerminalController implements TerminalController {
       if (intent.focused) {
         if (!this.control.hostForeground) return;
         this.control.setTarget(true, true);
+        // The view re-announces focus before every deliberate input. While this subscription is
+        // already acquiring or holding control, another focus request would only mint a new epoch
+        // (and a new ack fence) per keystroke and supersede the request that the pending input is
+        // waiting on. Input staged now rides the pending or current grant. The view reports the
+        // grid it has applied, so an intent at the applied grid or at the grid already requested
+        // (focus or granted resize still settling) proposes nothing new.
+        if (
+          ref &&
+          (this.control.pendingIntent !== undefined || this.control.holds(ref, generation)) &&
+          (sameGrid(this.focusGeometry, intent.geometry) ||
+            sameGrid(this.appliedGeometry?.geometry, intent.geometry))
+        )
+          return;
         void this.requestFocus(intent.geometry);
       } else {
         void this.blur();

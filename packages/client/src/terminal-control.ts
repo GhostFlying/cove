@@ -65,6 +65,22 @@ export class TerminalControl {
     return this.grant?.epoch;
   }
 
+  // True while this subscription's accepted grant is still the newest control fact it has seen,
+  // whether or not the grant fact has been applied yet. Unlike ready(), this does not require the
+  // grant to be usable for input; it only says that asking for focus again would add nothing.
+  holds(ref: SubscriptionRef, viewGeneration: number): boolean {
+    const grant = this.grant;
+    const observed = this.observed;
+    return (
+      this.wantsFocus &&
+      !this.exited &&
+      !!grant &&
+      sameSubscriptionRef(grant.ref, ref) &&
+      grant.viewGeneration === viewGeneration &&
+      (!observed || (observed.epoch === grant.epoch && heldBy(ref, observed)))
+    );
+  }
+
   beginFocus(): number | null {
     if (!this.wantsFocus || this.exited) return null;
     const next = nextCounter(this.intent);

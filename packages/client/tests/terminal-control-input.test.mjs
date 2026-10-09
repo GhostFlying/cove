@@ -1289,3 +1289,43 @@ describe("client control authority", () => {
     });
   });
 });
+
+describe("input right after a focus grant (Issue #21)", () => {
+  const type = (controller, mounted, focusSeq, text, keyGeometry = geometry) => {
+    // Mirrors the xterm view: every deliberate input is preceded by a focus intent.
+    const viewGeneration = controller.snapshot().viewGeneration;
+    mounted.focus({ viewGeneration, focusSeq, focused: true, geometry: keyGeometry });
+    mounted.input({ viewGeneration, source: "keyboard", bytes: encoder.encode(text) });
+  };
+  const ofType = (peer, type) => peer.commands.filter(({ command }) => command.type === type);
+
+  test("repeated focus intents while holding control keep the epoch; a new grid refocuses", async () => {
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const text = "abc";
+    [...text].forEach((key, index) => type(controller, mounted, index + 1, key));
+    await settle();
+    for (let index = 0; index < text.length; index++) {
+      const entry = ofType(peer, "input")[index];
+      expect(entry.command.epoch).toBe(1);
+      expect(decoder.decode(entry.payload)).toBe(text[index]);
+      peer.result(entry.command, {
+        epoch: 1,
+        inputSeq: entry.command.inputSeq,
+        status: "written",
+        writtenBytes: 1,
+      });
+      await settle();
+    }
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(controller.snapshot().controlEpoch).toBe(1);
+    mounted.focus({
+      viewGeneration: controller.snapshot().viewGeneration,
+      focusSeq: 10,
+      focused: true,
+      geometry: { cols: 100, rows: 30 },
+    });
+    expect(ofType(peer, "focus")).toHaveLength(2);
+    expect(ofType(peer, "focus")[1].command.geometry).toEqual({ cols: 100, rows: 30 });
+  });
+});
