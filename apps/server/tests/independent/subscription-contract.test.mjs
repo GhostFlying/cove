@@ -227,22 +227,36 @@ describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
     });
   });
 
-  test("F06-03 request identity exhaustion refuses cap+1 and duplicate proof stays retained", async () => {
-    await usingRig({ requestLimit: 1 }, async (rig) => {
+  // Contract change: settled request IDs no longer count against requestLimit forever.
+  // The limit bounds in-flight IDs plus a FIFO window of recently settled IDs, so reuse
+  // within the window is still refused but a long-lived connection never exhausts.
+  test("F06-03 request identities reject in-flight and recent reuse without lifetime exhaustion", async () => {
+    await usingRig({ requestLimit: 2 }, async (rig) => {
       const attached = await attach(rig);
       const before = rig.commands.length;
       const retained = rig.account.snapshot().total;
       expect((await rig.service.handle(attached.command)).error.kind).toBe("COUNTER_EXHAUSTED");
-      expect(
-        (
-          await rig.service.handle(
-            rig.routeCommand("applied-ack", attached.subscription, { appliedSeq: 3 }),
-          )
-        ).error.kind,
-      ).toBe("BUSY");
       expect(rig.commands.length).toBe(before);
       expect(rig.account.snapshot().total).toBe(retained);
-      expect(rig.service.snapshot().identities).toBe(1);
+
+      // A duplicate of an in-flight ID is refused before it reaches the worker.
+      const held = rig.routeCommand("applied-ack", attached.subscription, { appliedSeq: 3 });
+      const pending = rig.service.handle(held);
+      const dispatched = rig.lastCommand("applied-ack");
+      expect((await rig.service.handle(held)).error.kind).toBe("COUNTER_EXHAUSTED");
+      rig.accept(dispatched);
+      expect((await pending).type).toBe("applied-ack-result");
+      await turns();
+      expect((await rig.service.handle(held)).error.kind).toBe("COUNTER_EXHAUSTED");
+
+      // Far more than requestLimit settled requests still succeed; the window stays bounded.
+      for (let index = 0; index < 8; index++) {
+        const reply = await commandReply(rig, attached.subscription, "applied-ack", {
+          appliedSeq: 3,
+        });
+        expect(reply.type).toBe("applied-ack-result");
+      }
+      expect(rig.service.snapshot()).toMatchObject({ identities: 2, pending: 0 });
     });
   });
 
