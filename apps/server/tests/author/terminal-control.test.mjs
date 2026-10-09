@@ -83,6 +83,31 @@ describe("private shared terminal control and binary input", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+  it("judges a focus pipelined behind an applied-ack after that ack settles", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const attached = a.service.handle(a.attach("attach", 0));
+      f.session.receive(f.reply(f.latest(), { recoveryMode: "replay", atSeq: 1 }));
+      const ref = (await attached).subscription;
+      f.session.receive(f.output(ref, 1));
+      // The client pipelines the ack that installs the route and the focus in one turn.
+      const ack = a.service.handle(command("applied-ack", ref, "ack-1", { appliedSeq: 1 }));
+      const focused = a.service.handle(command("focus", ref, "focus", { focusSeq: 1, geometry }));
+      await turns();
+      expect(f.latest().type).toBe("applied-ack");
+      f.session.receive(f.reply());
+      expect(await ack).toMatchObject({ type: "applied-ack-result", appliedSeq: 1 });
+      await initialStatus(f);
+      const sent = f.latest();
+      expect(sent).toMatchObject({ type: "set-control", holder: holder(ref) });
+      f.session.receive(f.reply(sent, { atSeq: 1 }));
+      expect(await focused).toMatchObject({ type: "focus-result", epoch: 1, atSeq: 1 });
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
   it("serializes same-run focus by accepted order with one same-grid command and no fabricated status", async () => {
     const f = fixture();
     const a = f.connect("a");

@@ -355,6 +355,7 @@ export class TerminalSubscriptions {
               credit.appliedSeq >= Math.max(route!.credit!.atSeq, atSeq)
             );
           },
+          earlierPending: () => route!.queue.length > 0,
         },
         payload,
       );
