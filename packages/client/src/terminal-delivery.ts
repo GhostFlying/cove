@@ -129,18 +129,24 @@ export class TerminalLane {
 
   // The server checks focusSeq and inputSeq against counters it keeps per subscription, so
   // the client keys both per subscription too and releases them when the subscription retires
-  // (a recovery keeps the same ref and its counters).
-  nextFocusSeq(ref: SubscriptionRef): number | null {
-    const key = routeKey(ref);
-    const next = nextCounter(this.focusSequences.get(key) ?? 0);
-    if (next !== null) this.focusSequences.set(key, next);
-    return next;
+  // (a recovery keeps the same ref, its route and its counters). A counter exists only while
+  // its ref is routed: an allocation for a ref that is not (already retired, for example by a
+  // detach reentering from the injected request-ID supplier just before) returns undefined and
+  // creates nothing, so no counter can outlive the cleanup in retire(). null still means the
+  // counter is exhausted.
+  nextFocusSeq(ref: SubscriptionRef): number | null | undefined {
+    return this.nextSeq(this.focusSequences, ref);
   }
 
-  nextInputSeq(ref: SubscriptionRef): number | null {
+  nextInputSeq(ref: SubscriptionRef): number | null | undefined {
+    return this.nextSeq(this.inputSequences, ref);
+  }
+
+  private nextSeq(counters: Map<string, number>, ref: SubscriptionRef): number | null | undefined {
     const key = routeKey(ref);
-    const next = nextCounter(this.inputSequences.get(key) ?? 0);
-    if (next !== null) this.inputSequences.set(key, next);
+    if (!this.routes.has(key)) return undefined;
+    const next = nextCounter(counters.get(key) ?? 0);
+    if (next !== null) counters.set(key, next);
     return next;
   }
 

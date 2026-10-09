@@ -209,7 +209,11 @@ async function harness(onCommand = () => {}, schedulerOverride, budgets = {}, co
       encode: (value) => encoder.encode(value),
       decodeFatal: (bytes) => decoder.decode(bytes),
     },
-    createOpaqueId: () => `request-${++request}`,
+    // `peer.onOpaqueId` lets a test reenter the client from inside the injected ID supplier.
+    createOpaqueId: () => {
+      peer.onOpaqueId?.();
+      return `request-${++request}`;
+    },
     scheduler: schedulerOverride ?? {
       nowMs: () => 0,
       setTimer: () => ({ dispose() {} }),
@@ -2310,6 +2314,98 @@ describe("public terminal subscription and recovery", () => {
       expect((await controller.detach()).ok).toBe(true);
     }
     expect(peer.commands.filter((command) => command.type === "input")).toHaveLength(300);
+    expect(client.terminalLane.focusSequences.size).toBe(0);
+    expect(client.terminalLane.inputSequences.size).toBe(0);
+    expect(client.snapshot().status).toBe("connected");
+    controller.dispose();
+    client.dispose();
+  });
+
+  test("a detach reentering from the ID supplier leaves no counter for the retired ref", async () => {
+    let serial = 0;
+    let seq = 3;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        serial++;
+        reply(
+          command,
+          peer,
+          subscription(command.viewId, `subscription-${serial}`),
+          "baseline",
+          seq,
+        );
+      } else if (command.type === "focus") {
+        seq++;
+        peer.emit(2, {
+          type: "focus-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          epoch: serial,
+          atSeq: seq,
+        });
+        peer.emit(3, {
+          type: "run-event",
+          subscription: command.subscription,
+          event: {
+            type: "control",
+            run,
+            seq,
+            epoch: serial,
+            holder: {
+              connection,
+              viewId: command.subscription.viewId,
+              subscriptionId: command.subscription.subscriptionId,
+            },
+            geometry,
+          },
+        });
+      } else if (command.type === "detach")
+        peer.emit(2, {
+          type: "detach-result",
+          requestId: command.requestId,
+          run,
+          subscription: command.subscription,
+          detached: true,
+        });
+      else settleControl(command, peer);
+    });
+    const controller = client.openTerminal({
+      run,
+      viewId: "reentrant",
+      view: view().terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    }).value;
+    controller.setInputTarget(true, true);
+    const attach = async () => {
+      const attached = controller.attach();
+      baselineTo(peer, subscription("reentrant", `subscription-${serial}`), seq);
+      expect((await attached).ok).toBe(true);
+    };
+    // The next request ID the controller asks for detaches it first, from inside the supplier.
+    let detached;
+    const detachOnNextId = () => {
+      peer.onOpaqueId = () => {
+        peer.onOpaqueId = undefined;
+        detached = controller.detach();
+      };
+    };
+    for (let index = 0; index < 150; index++) {
+      await attach();
+      expect((await controller.requestFocus()).ok).toBe(true);
+      await settle();
+      detachOnNextId();
+      const sent = await controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
+      expect(sent.ok).toBe(false);
+      expect((await detached).ok).toBe(true);
+
+      await attach();
+      detachOnNextId();
+      expect((await controller.requestFocus()).ok).toBe(false);
+      expect((await detached).ok).toBe(true);
+    }
+    expect(peer.commands.filter((command) => command.type === "input")).toHaveLength(0);
+    expect(peer.commands.filter((command) => command.type === "focus")).toHaveLength(150);
     expect(client.terminalLane.focusSequences.size).toBe(0);
     expect(client.terminalLane.inputSequences.size).toBe(0);
     expect(client.snapshot().status).toBe("connected");
