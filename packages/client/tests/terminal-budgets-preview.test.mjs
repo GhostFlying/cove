@@ -113,13 +113,15 @@ async function harness({
           emit(kind, metadata, payload) {
             callbacks.onBinary(frame(kind, metadata, payload));
           },
-          result(sent, status, version) {
+          // A transfer result names the transfer it completes; an unchanged one carries no ID.
+          result(sent, status, version, previewId) {
             this.emit(2, {
               type: "preview-result",
               requestId: sent.requestId,
               run: sent.run,
               status,
               version,
+              ...(status === "transfer" ? { previewId } : {}),
             });
           },
           transfer(previewId, version, bytes, targetRun = run) {
@@ -192,9 +194,9 @@ describe("client preview transaction", () => {
       const backing = new Uint8Array(1024 * 1024);
       backing.set([0xff, 0x00, 0x1b, 0x5b], 100);
       const bytes = backing.subarray(100, 104);
-      if (order === "result-first") h.peer.result(sent, "transfer", 8);
+      if (order === "result-first") h.peer.result(sent, "transfer", 8, "preview-1");
       h.peer.transfer("preview-1", 8, bytes);
-      if (order === "events-first") h.peer.result(sent, "transfer", 8);
+      if (order === "events-first") h.peer.result(sent, "transfer", 8, "preview-1");
       const outcome = await promise;
       backing.fill(0);
       expect(outcome).toMatchObject({
@@ -215,7 +217,7 @@ describe("client preview transaction", () => {
   test("result-first public request retains its logical lane slot until transfer completion", async () => {
     const h = await harness();
     const pending = h.client.getPreview(run);
-    h.peer.result(h.commands.at(-1), "transfer", 1);
+    h.peer.result(h.commands.at(-1), "transfer", 1, "held");
     // Counter observation is white-box; request and result use the public compiled path.
     expect(h.client.terminalLane.pendingCount).toBe(1);
     h.peer.transfer("held", 1, new Uint8Array([1]));
@@ -228,7 +230,7 @@ describe("client preview transaction", () => {
   test("result-first held slot retires once on deadline and on client disposal", async () => {
     const expired = await harness();
     const first = expired.client.getPreview(run);
-    expired.peer.result(expired.commands.at(-1), "transfer", 1);
+    expired.peer.result(expired.commands.at(-1), "transfer", 1, "held");
     expect(expired.client.terminalLane.pendingCount).toBe(1);
     expired.scheduler.advance(5_000);
     expect(await first).toMatchObject({ ok: false, error: { reason: "timeout" } });
@@ -238,7 +240,7 @@ describe("client preview transaction", () => {
 
     const disposed = await harness();
     const second = disposed.client.getPreview(run);
-    disposed.peer.result(disposed.commands.at(-1), "transfer", 1);
+    disposed.peer.result(disposed.commands.at(-1), "transfer", 1, "held");
     expect(disposed.client.terminalLane.pendingCount).toBe(1);
     disposed.client.dispose();
     expect(await second).toMatchObject({ ok: false, error: { reason: "disposed" } });
@@ -270,7 +272,7 @@ describe("client preview transaction", () => {
       error: { reason: "capacity" },
     });
     expect(h.commands).toHaveLength(1);
-    h.peer.result(h.commands[0], "transfer", 2);
+    h.peer.result(h.commands[0], "transfer", 2, "preview-2");
     h.peer.transfer("preview-2", 2, new Uint8Array([42]));
     expect((await first).ok).toBe(true);
     h.client.dispose();
@@ -293,10 +295,10 @@ describe("client preview transaction", () => {
     const second = h.client.getPreview(other);
     const [firstCommand, secondCommand] = h.commands;
     h.peer.transfer("first", 2, new Uint8Array([1]));
-    h.peer.result(firstCommand, "transfer", 3);
+    h.peer.result(firstCommand, "transfer", 3, "first");
     expect(await first).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
     h.peer.transfer("second", 4, new Uint8Array([2]), other);
-    h.peer.result(secondCommand, "transfer", 4);
+    h.peer.result(secondCommand, "transfer", 4, "second");
     expect(await second).toMatchObject({ ok: true, status: "transfer", version: 4 });
     expect(h.client.snapshot().status).toBe("connected");
     expect(await h.client.getPreview(run)).toMatchObject({
@@ -312,7 +314,7 @@ describe("client preview transaction", () => {
     const first = h.client.getPreview(run);
     const second = h.client.getPreview(other);
     const [firstCommand, secondCommand] = h.commands;
-    h.peer.result(secondCommand, "transfer", 2);
+    h.peer.result(secondCommand, "transfer", 2, "second");
     h.peer.emit(3, {
       type: "preview-start",
       run,
@@ -338,7 +340,7 @@ describe("client preview transaction", () => {
       atSeq: 7,
       totalBytes: 1,
     });
-    h.peer.result(firstCommand, "transfer", 1);
+    h.peer.result(firstCommand, "transfer", 1, "first");
     expect([...((await first).bytes ?? [])]).toEqual([1]);
     expect([...((await second).bytes ?? [])]).toEqual([2]);
     expect(h.client.terminalLane.pendingCount).toBe(0);
@@ -429,6 +431,7 @@ describe("client preview transaction", () => {
       run,
       status: "transfer",
       version: 1,
+      previewId: "never-transferred",
     });
     expect(h.client.snapshot().status).toBe("incompatible");
     expect(await pending).toMatchObject({ ok: false, error: { reason: "transport" } });
@@ -442,6 +445,7 @@ describe("client preview transaction", () => {
       run: { ...run, runId: "other" },
       status: "transfer",
       version: 1,
+      previewId: "never-transferred",
     });
     expect(wrongRun.client.snapshot().status).toBe("incompatible");
     expect(await other).toMatchObject({ ok: false, error: { reason: "transport" } });
@@ -462,6 +466,7 @@ describe("client preview transaction", () => {
       run,
       status: "transfer",
       version: 2,
+      previewId: "never-transferred",
     });
     expect(h.client.snapshot().status).toBe("incompatible");
     h.client.dispose();
@@ -491,9 +496,9 @@ describe("client preview transaction", () => {
     const h = await harness();
     const pending = h.client.getPreview(run);
     const sent = h.commands.at(-1);
-    h.peer.result(sent, "transfer", 1);
+    h.peer.result(sent, "transfer", 1, "duplicate");
     expect(h.client.terminalLane.pendingCount).toBe(1);
-    h.peer.result(sent, "transfer", 1);
+    h.peer.result(sent, "transfer", 1, "duplicate");
     expect(await pending).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
     expect(h.client.terminalLane.pendingCount).toBe(0);
     expect(h.client.snapshot().status).toBe("connected");
@@ -516,7 +521,7 @@ describe("client preview transaction", () => {
     old.transfer("late-old", 3, new Uint8Array([1]));
     expect(h.commands).toHaveLength(2);
     h.peer.transfer("fresh", 4, new Uint8Array([2]));
-    h.peer.result(h.commands.at(-1), "transfer", 4);
+    h.peer.result(h.commands.at(-1), "transfer", 4, "fresh");
     expect(await next).toMatchObject({ ok: true, status: "transfer", version: 4 });
     h.client.dispose();
   });
@@ -540,7 +545,7 @@ describe("client preview transaction", () => {
     const h = await harness();
     const first = h.client.getPreview(run);
     h.peer.transfer("old-complete", 1, new Uint8Array([1]));
-    h.peer.result(h.commands.at(-1), "transfer", 1);
+    h.peer.result(h.commands.at(-1), "transfer", 1, "old-complete");
     expect((await first).ok).toBe(true);
     expect(h.client.terminalPreview.retiredCount).toBe(1);
     const second = h.client.getPreview(run);
@@ -550,7 +555,7 @@ describe("client preview transaction", () => {
     expect(h.client.terminalPreview.retiredCount).toBe(1);
     expect(h.client.terminalPreview.quarantined.size).toBe(1);
     h.peer.transfer("old-complete", 1, new Uint8Array([1]));
-    h.peer.result(h.commands[0], "transfer", 1);
+    h.peer.result(h.commands[0], "transfer", 1, "old-complete");
     expect(h.client.snapshot().status).toBe("connected");
     h.client.dispose();
   });
@@ -574,7 +579,7 @@ describe("client preview transaction", () => {
     const completed = await harness();
     const pending = completed.client.getPreview(run);
     completed.peer.transfer("completed", 1, new Uint8Array([1]));
-    completed.peer.result(completed.commands.at(-1), "transfer", 1);
+    completed.peer.result(completed.commands.at(-1), "transfer", 1, "completed");
     expect((await pending).ok).toBe(true);
     completed.peer.transfer("completed", 1, new Uint8Array([1]));
     expect(completed.client.snapshot().status).toBe("connected");
@@ -593,7 +598,7 @@ describe("client preview transaction", () => {
     for (let index = 0; index < 300; index++) {
       const pending = h.client.getPreview(run);
       h.peer.transfer(`preview-${index}`, index + 1, new Uint8Array([index % 256]));
-      h.peer.result(h.commands.at(-1), "transfer", index + 1);
+      h.peer.result(h.commands.at(-1), "transfer", index + 1, `preview-${index}`);
       expect((await pending).ok).toBe(true);
     }
     const unchanged = h.client.getPreview(run, 300);
@@ -604,11 +609,11 @@ describe("client preview transaction", () => {
     expect(h.scheduler.active).toBe(0);
     // A duplicate of a recent reply or transfer stays local ...
     h.peer.transfer("preview-299", 300, new Uint8Array([299 % 256]));
-    h.peer.result(h.commands[299], "transfer", 300);
+    h.peer.result(h.commands[299], "transfer", 300, "preview-299");
     h.peer.result(h.commands[300], "unchanged", 300);
     expect(h.client.snapshot().status).toBe("connected");
     // ... while one evicted from the window is as unrouteable as a never-issued reply.
-    h.peer.result(h.commands[0], "transfer", 1);
+    h.peer.result(h.commands[0], "transfer", 1, "preview-0");
     expect(h.client.snapshot().status).toBe("incompatible");
     h.client.dispose();
   });
@@ -630,7 +635,7 @@ describe("client preview transaction", () => {
     expect(await nested).toMatchObject({ ok: false, error: { reason: "capacity" } });
     expect(h.commands).toHaveLength(1);
     h.peer.transfer("outer", 1, new Uint8Array([1]));
-    h.peer.result(h.commands[0], "transfer", 1);
+    h.peer.result(h.commands[0], "transfer", 1, "outer");
     expect((await outer).ok).toBe(true);
     expect(h.client.terminalPreview.provisional.size).toBe(0);
     h.client.dispose();
@@ -703,7 +708,7 @@ describe("client preview transaction", () => {
     const bytes = new Uint8Array(M0_LIMITS.previewBytesPerRun).fill(65);
     const first = h.client.getPreview(run);
     h.peer.transfer("maximum", 1, bytes);
-    h.peer.result(h.commands.at(-1), "transfer", 1);
+    h.peer.result(h.commands.at(-1), "transfer", 1, "maximum");
     expect((await first).bytes.byteLength).toBe(M0_LIMITS.previewBytesPerRun);
     h.client.dispose();
 
@@ -745,7 +750,7 @@ describe("client preview transaction", () => {
     const h = await harness({
       onSend(sent, peer) {
         peer.transfer("inline", 2, new Uint8Array([5]));
-        peer.result(sent, "transfer", 2);
+        peer.result(sent, "transfer", 2, "inline");
       },
     });
     expect(await h.client.getPreview(run)).toMatchObject({ ok: true, status: "transfer" });
@@ -830,7 +835,7 @@ describe("client preview transaction", () => {
     };
     const pending = h.client.getPreview(run);
     h.peer.transfer("reentry", 1, new Uint8Array([1]));
-    h.peer.result(h.commands.at(-1), "transfer", 1);
+    h.peer.result(h.commands.at(-1), "transfer", 1, "reentry");
     expect(await pending).toMatchObject({ ok: true, status: "transfer" });
     expect(reentered).toBe(true);
     expect(h.client.snapshot().status).toBe("disposed");
@@ -863,7 +868,7 @@ describe("client preview transaction", () => {
     const pending = h.client.getPreview(run);
     opened.value.dispose();
     h.peer.transfer("after-view-disposal", 1, new Uint8Array([9]));
-    h.peer.result(h.commands.at(-1), "transfer", 1);
+    h.peer.result(h.commands.at(-1), "transfer", 1, "after-view-disposal");
     expect(await pending).toMatchObject({ ok: true, status: "transfer" });
     expect(h.commands.map((value) => value.type)).toEqual(["preview"]);
     expect(h.client.snapshot().status).toBe("connected");

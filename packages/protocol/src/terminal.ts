@@ -167,7 +167,12 @@ export function validateTerminalFrame(
             : null;
   if (!parsed?.success) return failure("INVALID_METADATA");
   const value = parsed.data;
-  if (!payloadAllowed(value, frame.kind, frame.payload) || !matchingRefs(value, connection))
+  if (
+    !payloadAllowed(value, frame.kind, frame.payload) ||
+    !matchingRefs(value, connection) ||
+    (value.type === "preview-result" &&
+      (value.status === "transfer") !== (value.previewId !== undefined))
+  )
     return failure("INVALID_METADATA");
   return { ok: true, value };
 }

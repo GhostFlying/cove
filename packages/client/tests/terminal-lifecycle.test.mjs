@@ -87,7 +87,14 @@ describe("lane residual bounds — explicitly white-box compiled branch", () => 
       const requestId = `preview-${index}`;
       completedResults.push(lane.send({ type: "preview", requestId, run }, 5_000));
       lane.receive(
-        resultFrame({ type: "preview-result", requestId, run, status: "transfer", version: 1 }),
+        resultFrame({
+          type: "preview-result",
+          requestId,
+          run,
+          status: "transfer",
+          version: 1,
+          previewId: `p-${requestId}`,
+        }),
         connection,
       );
     }

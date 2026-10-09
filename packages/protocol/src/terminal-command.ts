@@ -142,6 +142,10 @@ export const TerminalResultSchema = z.discriminatedUnion("type", [
     ...correlated,
     status: z.enum(["unchanged", "transfer"]),
     version: SequenceSchema,
+    // Names the transfer this result completes; required exactly when status is "transfer"
+    // (checked by validateTerminalFrame). Preview events carry no request ID, so this is what
+    // binds a transfer to its request.
+    previewId: OpaqueIdSchema.optional(),
   }),
 ]);
 export type TerminalResult = z.infer<typeof TerminalResultSchema>;
