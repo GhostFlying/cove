@@ -548,17 +548,13 @@ export class TerminalSubscriptions {
   }
 
   // Moves a settled ID from the in-flight set into the recent window, evicting the oldest.
+  // Only the window size evicts: byte pressure must never shrink the promised refusal
+  // window, so without capacity the ID is remembered unaccounted (still bounded by
+  // requestLimit) rather than displacing a newer one.
   private settleId(requestId: string): void {
     if (!this.externalIds.delete(requestId) || this.closed) return;
     while (this.settledIds.size >= this.options.requestLimit) this.evictSettledId();
-    let lease = this.composition.bytes.reserve(256);
-    while (!lease && this.settledIds.size) {
-      this.evictSettledId();
-      lease = this.composition.bytes.reserve(256);
-    }
-    // Without capacity the ID is remembered unaccounted rather than forgotten: the window
-    // stays bounded by requestLimit either way.
-    this.settledIds.set(requestId, lease);
+    this.settledIds.set(requestId, this.composition.bytes.reserve(256));
   }
 
   private evictSettledId(): void {

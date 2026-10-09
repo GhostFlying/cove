@@ -260,6 +260,37 @@ describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
     });
   });
 
+  test("F06-03b byte pressure never shrinks the recent request-ID window", async () => {
+    await usingRig({ requestLimit: 2 }, async (rig) => {
+      const attached = await attach(rig);
+      // Exhaust ordinary capacity; applied-acks still run on the control reserve.
+      const account = rig.account.snapshot();
+      const room = Math.min(
+        account.limit - account.total,
+        account.limit - account.controlReserve - account.ordinary,
+      );
+      const pressure = rig.account.reserve(room);
+      expect(pressure).not.toBeNull();
+      try {
+        const ack = (requestId) => ({
+          ...rig.routeCommand("applied-ack", attached.subscription, { appliedSeq: 3 }),
+          requestId,
+        });
+        for (const requestId of ["ack-a", "ack-b"]) {
+          const pending = rig.service.handle(ack(requestId));
+          rig.accept(rig.lastCommand("applied-ack"));
+          expect((await pending).type).toBe("applied-ack-result");
+          await turns();
+        }
+        // Both IDs sit inside the requestLimit window, so both reuses are refused.
+        expect((await rig.service.handle(ack("ack-a"))).error.kind).toBe("COUNTER_EXHAUSTED");
+        expect((await rig.service.handle(ack("ack-b"))).error.kind).toBe("COUNTER_EXHAUSTED");
+      } finally {
+        pressure.release();
+      }
+    });
+  });
+
   test("F07-01 absent resume requests baseline and valid full resume maps exact cursor", async () => {
     await usingRig({}, async (rig) => {
       const absent = await attach(rig, { offered: null, mode: "baseline", atSeq: 9 });
