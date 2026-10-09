@@ -16,6 +16,7 @@ const browsersPath =
   resolve(import.meta.dirname, "../../../packages/terminal-web/.cache/playwright");
 
 const MARKER = "cove-harness-ok";
+const SECOND_MARKER = "cove-harness-dom";
 
 async function startServer(directory) {
   const env = {
@@ -154,6 +155,104 @@ const waitForRow = (page, text) =>
     text,
   );
 
+// Whether this Chromium offers WebGL2 at all. Headless CI Chromium may draw it in software
+// (SwiftShader) or not offer it; without it the view must report the DOM fallback.
+const offersWebgl2 = (page) =>
+  page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    const gl = canvas.getContext("webgl2");
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+    return Boolean(gl);
+  });
+
+const rendererOf = (page) =>
+  page.evaluate(() => document.getElementById("terminal-status")?.dataset.renderer);
+
+async function openNewTerminal(page) {
+  await page.click("#new-terminal");
+  await page.waitForFunction(
+    () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+  );
+  await page.waitForSelector("#terminal .xterm-screen");
+}
+
+// Prints `marker` on a red background (palette index 1). The typed command line itself has no
+// red, so red pixels on screen prove that output was drawn, whichever renderer drew it.
+async function printMarker(page, marker) {
+  await page.keyboard.type(`printf '\\033[41m%s\\033[0m\\n' ${marker}`);
+  await page.keyboard.press("Enter");
+}
+
+// Counts pixels of the terminal host close to the harness palette red, rgb(204, 0, 0), in a
+// real screenshot: what the compositor shows rather than what a renderer claims to have drawn.
+async function redPixels(page) {
+  const png = await page.locator("#terminal").screenshot();
+  return page.evaluate(async (base64) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${base64}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+    let count = 0;
+    for (let index = 0; index < data.length; index += 4)
+      if (data[index] > 150 && data[index + 1] < 60 && data[index + 2] < 60) count++;
+    return count;
+  }, png.toString("base64"));
+}
+
+async function waitForRedPixels(page, minimum = 200) {
+  let count = 0;
+  await waitFor(
+    "red marker pixels on screen",
+    async () => (count = await redPixels(page)) >= minimum,
+    15_000,
+  ).catch((error) => {
+    throw new Error(`${error.message} (last count ${count})`, { cause: error });
+  });
+}
+
+// Loses every live WebGL context drawn in the terminal, as a GPU reset would.
+const loseWebglContexts = (page) =>
+  page.evaluate(() => {
+    let lost = 0;
+    for (const canvas of document.querySelectorAll("#terminal canvas")) {
+      const gl = canvas.getContext("webgl2");
+      const extension = gl?.getExtension("WEBGL_lose_context");
+      if (!gl || gl.isContextLost() || !extension) continue;
+      extension.loseContext();
+      lost++;
+    }
+    return lost;
+  });
+
+// Records each distinct renderer the status bar reports from now on, so a short DOM interval
+// between a loss and its retry cannot be missed by polling.
+const recordRendererChanges = (page) =>
+  page.evaluate(() => {
+    const status = document.getElementById("terminal-status");
+    const changes = [];
+    let last = status.dataset.renderer;
+    new MutationObserver(() => {
+      if (status.dataset.renderer === last) return;
+      last = status.dataset.renderer;
+      changes.push(last);
+    }).observe(status, { attributes: true, attributeFilter: ["data-renderer"] });
+    window.coveRendererChanges = changes;
+  });
+
+const rendererChanges = (page) => page.evaluate(() => [...window.coveRendererChanges]);
+
+const waitForRendererChanges = (page, expected) =>
+  page.waitForFunction(
+    (wanted) => JSON.stringify(window.coveRendererChanges) === JSON.stringify(wanted),
+    expected,
+    { timeout: 15_000 },
+  );
+
 // A click takes control at the page's grid; a changed grid is recovered with a fresh baseline
 // and control is retaken, and input typed in between is refused. Wait until the status has
 // stayed attached and controlling for a while before typing.
@@ -205,12 +304,14 @@ const fitGeometry = (page) =>
     return { visibleRight, screenRight, glyphRights };
   });
 
-async function openConnectedPage({ server, page }) {
+// `renderer` adds the harness's renderer query parameter in front of the printed fragment;
+// without it the printed URL is opened exactly as the CLI printed it.
+async function openConnectedPage({ server, page }, renderer) {
   const url = server.report.harness;
   expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/#/);
   const secret = new URLSearchParams(new URL(url).hash.slice(1)).get("secret");
   expect(secret).toBeTruthy();
-  await page.goto(url);
+  await page.goto(renderer ? url.replace("/#", `/?renderer=${renderer}#`) : url);
   await page.waitForFunction(
     () => document.getElementById("connection")?.textContent === "connected",
   );
@@ -224,24 +325,90 @@ test("the harness page creates a terminal, takes typed input and renders its out
     expect(page.url()).not.toContain(secret);
     expect(await page.evaluate(() => location.href)).not.toContain(secret);
     expect(await page.evaluate(() => location.hash)).toBe("");
+    const webgl2 = await offersWebgl2(page);
 
-    await page.click("#new-terminal");
-    await page.waitForFunction(
-      () => document.getElementById("terminal-status")?.dataset.phase === "ready",
-    );
-    await page.waitForSelector("#terminal .xterm-rows");
+    await openNewTerminal(page);
+    // The printed URL names no renderer, so the view takes WebGL2 whenever the browser offers it.
+    expect(await rendererOf(page)).toBe(webgl2 ? "webgl" : "dom");
     await page.click("#terminal");
-    await page.keyboard.type(`echo ${MARKER}`);
-    await page.keyboard.press("Enter");
-    // The echoed output is its own row, distinct from the typed command line.
     try {
-      await page.waitForFunction(
-        (marker) =>
-          [...document.querySelectorAll("#terminal .xterm-rows > div")].some(
-            (row) => row.textContent.trim() === marker,
-          ),
-        MARKER,
-      );
+      await waitForSteadyControl(page);
+      await printMarker(page, MARKER);
+      await waitForRedPixels(page);
+      // The echoed output is its own row, distinct from the typed command line. Only the DOM
+      // renderer draws text into the DOM; the red pixels above show the WebGL renderer drew it.
+      if (!webgl2) await waitForRow(page, MARKER);
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+test("renderer=dom selects the DOM renderer, which renders typed output", async () => {
+  await withHarness(async ({ server, page, pageErrors }) => {
+    await openConnectedPage({ server, page }, "dom");
+    // The renderer parameter is not secret and stays in the address bar.
+    expect(await page.evaluate(() => location.search)).toBe("?renderer=dom");
+    await openNewTerminal(page);
+    expect(await rendererOf(page)).toBe("dom");
+    await page.click("#terminal");
+    try {
+      await waitForSteadyControl(page);
+      await printMarker(page, MARKER);
+      await waitForRow(page, MARKER);
+      await waitForRedPixels(page);
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(await rendererOf(page)).toBe("dom");
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+test("a lost WebGL context falls back to DOM, retries once, and stays on DOM after a second loss", async () => {
+  await withHarness(async ({ server, page, pageErrors }) => {
+    await openConnectedPage({ server, page }, "webgl");
+    const webgl2 = await offersWebgl2(page);
+    await openNewTerminal(page);
+    await page.click("#terminal");
+    try {
+      await waitForSteadyControl(page);
+      // A browser without WebGL2 must fall back on load and still render; there is no context
+      // to lose then.
+      expect(await rendererOf(page)).toBe(webgl2 ? "webgl" : "dom");
+      if (!webgl2) {
+        await printMarker(page, MARKER);
+        await waitForRow(page, MARKER);
+        await waitForRedPixels(page);
+        return;
+      }
+      await printMarker(page, MARKER);
+      await waitForRedPixels(page);
+      await recordRendererChanges(page);
+
+      // xterm waits up to three seconds for the browser to restore a lost context before it
+      // reports the loss; the view then drops to DOM and retries WebGL once after a delay.
+      expect(await loseWebglContexts(page)).toBe(1);
+      await waitForRendererChanges(page, ["dom", "webgl"]);
+      await waitForRedPixels(page);
+
+      expect(await loseWebglContexts(page)).toBe(1);
+      await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
+      // Well past the retry delay the view is still on DOM: the single retry was spent.
+      await page.waitForTimeout(1_500);
+      expect(await rendererChanges(page)).toEqual(["dom", "webgl", "dom"]);
+      expect(await page.locator("#terminal canvas").count()).toBe(0);
+      // The DOM renderer repainted the existing output and renders new output.
+      await waitForRow(page, MARKER);
+      // DOM cells measure differently from WebGL cells, so the page resizes the PTY to the DOM
+      // grid; wait for that recovery before typing.
+      await waitForSteadyControl(page);
+      await printMarker(page, SECOND_MARKER);
+      await waitForRow(page, SECOND_MARKER);
+      await waitForRedPixels(page);
     } catch (error) {
       throw await describePage(page, error);
     }
@@ -257,7 +424,10 @@ test("S4 the production view answers no terminal query and passes real keys and 
     // the server's replies may reach the process.
     const probe = await writeQueryProbe(directory, "wait");
     const run = await createRun(server.env, directory, probe.argv);
-    await openConnectedPage({ server, page });
+    // The DOM renderer's rows are this test's text oracle for its synchronization points; the
+    // WebGL renderer draws no text into the DOM. Query suppression is decided by the parser,
+    // not the renderer, and the V1 view query suites run under the default renderer.
+    await openConnectedPage({ server, page }, "dom");
     await page.click(`#runs button[data-run-id="${run.runId}"]`);
     await page.waitForFunction(
       () => document.getElementById("terminal-status")?.dataset.phase === "ready",
@@ -302,14 +472,17 @@ test("the measured grid fits the visible terminal at several window sizes and pi
   await withHarness(async ({ directory, server, browser }) => {
     const probe = await writeFitProbe(directory);
     const run = await createRun(server.env, directory, probe.argv);
+    // The two renderers measure cells differently: WebGL snaps a cell to whole device pixels.
     const layouts = [
-      { width: 1000, height: 640, deviceScaleFactor: 1 },
-      { width: 1003, height: 611, deviceScaleFactor: 1.25 },
-      { width: 1157, height: 700, deviceScaleFactor: 2 },
+      { width: 1000, height: 640, deviceScaleFactor: 1, renderer: "dom" },
+      { width: 1003, height: 611, deviceScaleFactor: 1.25, renderer: "dom" },
+      { width: 1157, height: 700, deviceScaleFactor: 2, renderer: "dom" },
+      { width: 1003, height: 611, deviceScaleFactor: 1.25, renderer: "webgl" },
+      { width: 1157, height: 700, deviceScaleFactor: 2, renderer: "webgl" },
     ];
     const results = [];
     for (const [index, layout] of layouts.entries()) {
-      const { width, height, deviceScaleFactor } = layout;
+      const { width, height, deviceScaleFactor, renderer } = layout;
       const context = await browser.newContext({
         viewport: { width, height },
         deviceScaleFactor,
@@ -319,7 +492,7 @@ test("the measured grid fits the visible terminal at several window sizes and pi
         page.setDefaultTimeout(15_000);
         const pageErrors = [];
         page.on("pageerror", (error) => pageErrors.push(error.message));
-        await openConnectedPage({ server, page });
+        await openConnectedPage({ server, page }, renderer);
         await page.click(`#runs button[data-run-id="${run.runId}"]`);
         await page.waitForFunction(
           () => document.getElementById("terminal-status")?.dataset.phase === "ready",
@@ -334,11 +507,15 @@ test("the measured grid fits the visible terminal at several window sizes and pi
             (cols) => document.getElementById("terminal-status")?.textContent.includes(`${cols}×`),
             printed.cols,
           );
-          // The probe printed at the grid the PTY had; the page shows that same grid.
-          await waitForRow(page, printed.ascii);
-          await waitForRow(page, printed.mixed);
+          // The probe printed at the grid the PTY had; the DOM renderer shows that same grid.
+          // WebGL draws no DOM text, so only its cell geometry is checked.
+          const active = await rendererOf(page);
+          if (active === "dom") {
+            await waitForRow(page, printed.ascii);
+            await waitForRow(page, printed.mixed);
+          }
           const geometry = await fitGeometry(page);
-          results.push({ ...layout, cols: printed.cols, ...geometry });
+          results.push({ ...layout, active, cols: printed.cols, ...geometry });
         } catch (error) {
           throw await describePage(page, error);
         }

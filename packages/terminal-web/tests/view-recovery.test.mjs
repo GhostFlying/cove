@@ -32,6 +32,8 @@ test("V1-R1 continues raw UTF-8 CSI OSC and DCS tails after every interior cut",
     }),
   );
   expect(results.length).toBeGreaterThan(8);
+  // The default renderer: WebGL wherever this Chromium offers WebGL2, else the DOM fallback.
+  expect(results[0].evidence.renderer).toBe(results[0].evidence.webgl2 ? "webgl" : "dom");
   for (const item of results) {
     expect(item.evidence.rows[0], `${JSON.stringify(item.sequence)} cut ${item.cut}`).toBe(
       item.expected.line,

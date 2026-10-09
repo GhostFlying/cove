@@ -42,7 +42,8 @@ function assertDependencyBoundary(
   if (engineManifest.dependencies["@cove/protocol"] !== "workspace:*")
     throw new Error("Engine protocol dependency lost workspace linkage");
   if (
-    Object.keys(webManifest.dependencies).sort().join() !== "@cove/protocol,@xterm/xterm" ||
+    Object.keys(webManifest.dependencies).sort().join() !==
+      "@cove/protocol,@xterm/addon-webgl,@xterm/xterm" ||
     webManifest.dependencies["@cove/protocol"] !== "workspace:*"
   )
     throw new Error("Web runtime dependency escaped browser boundary");

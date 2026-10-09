@@ -35,3 +35,17 @@ export function takeConnectionInfo(
     shell: value("shell"),
   };
 }
+
+export type RendererChoice = "webgl" | "dom";
+
+// The renderer choice is not secret, so it travels in the query string, which survives the
+// fragment removal above. Without it the view picks its own default, so the URL printed by
+// `cove server start --harness` needs no renderer parameter.
+export function readRendererChoice(
+  location: Pick<Location, "search">,
+): { renderer?: RendererChoice } | string {
+  const value = new URLSearchParams(location.search).get("renderer");
+  if (value === null) return {};
+  if (value === "webgl" || value === "dom") return { renderer: value };
+  return `Unknown renderer "${value}"; use renderer=webgl, renderer=dom or omit it.`;
+}
