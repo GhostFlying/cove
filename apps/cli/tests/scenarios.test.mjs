@@ -761,13 +761,28 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
           frame.metadata.error.kind === "RESYNC_REQUIRED",
       ),
     ).toBe(true);
-    // The client cannot release the evicted subscription, so it retires its connection;
-    // it reconnects and attaches from a new baseline.
-    await waitFor(
-      "the slow client to drop its connection",
-      () => slow.client.snapshot().status !== "connected",
-    );
-    await reattach(slow, S);
+    // Its detach of the evicted subscription is refused as well. That definite refusal ends
+    // only this subscription: the connection stays up and the same controller attaches again
+    // from a new baseline on it.
+    await waitFor("the refusal of the evicted subscription's detach", () => {
+      const detaches = new Set(
+        slow.tap.outbound
+          .filter(
+            (frame) =>
+              frame.metadata.type === "detach" &&
+              frame.metadata.subscription.subscriptionId === evicted.subscriptionId,
+          )
+          .map((frame) => frame.metadata.requestId),
+      );
+      return slow.tap.inbound.some(
+        (frame) =>
+          detaches.has(frame.metadata.requestId) &&
+          frame.metadata.type === "error" &&
+          frame.metadata.error.acceptance === "not-accepted",
+      );
+    });
+    expect(slow.client.snapshot().status).toBe("connected");
+    expect(await S.controller.attach()).toMatchObject({ ok: true });
     expect(S.controller.snapshot().subscription.subscriptionId).not.toBe(evicted.subscriptionId);
     expect(S.recording.events.filter((event) => event.type === "baseline-start")).toHaveLength(2);
     await waitFor("the new baseline", () => S.recording.screen().rows.includes("echo:refocused"));

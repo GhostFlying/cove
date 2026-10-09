@@ -2282,4 +2282,135 @@ describe("public terminal subscription and recovery", () => {
     b.dispose();
     client.dispose();
   });
+  async function retiredDetachFixture(detachError) {
+    const retiredByServer = new Set();
+    const refs = new Map();
+    const state = { atSeq: 3 };
+    let serial = 0;
+    const { client, peer } = await harness((command, peer) => {
+      if (command.type === "attach") {
+        // Like the server, mint a fresh subscription ID for every attach.
+        refs.set(command.viewId, subscription(command.viewId, `subscription-${++serial}`));
+        retiredByServer.delete(command.viewId);
+        reply(command, peer, refs.get(command.viewId), "baseline", state.atSeq);
+      } else if (command.type === "applied-ack" && retiredByServer.has(command.subscription.viewId))
+        // The server already retired this route: its ACKs and detach are refused.
+        peer.emit(4, {
+          type: "error",
+          requestId: command.requestId,
+          run,
+          commandType: "applied-ack",
+          error: domainError("RESYNC_REQUIRED"),
+        });
+      else if (command.type === "detach")
+        peer.emit(4, {
+          type: "error",
+          requestId: command.requestId,
+          run,
+          commandType: "detach",
+          error: detachError,
+        });
+      else settleControl(command, peer);
+    });
+    const views = { a: view(), b: view() };
+    const controllers = {};
+    for (const viewId of ["a", "b"]) {
+      controllers[viewId] = client.openTerminal({
+        run,
+        viewId,
+        view: views[viewId].terminalView,
+        initialAppearance: DEFAULT_APPEARANCE,
+      }).value;
+      const attached = controllers[viewId].attach();
+      baseline(peer, refs.get(viewId));
+      expect((await attached).ok).toBe(true);
+    }
+    const output = (viewId, seq, byte) =>
+      peer.emit(
+        3,
+        {
+          type: "run-event",
+          subscription: refs.get(viewId),
+          event: { type: "output", run, seq },
+        },
+        new Uint8Array([byte]),
+      );
+    const retire = async (viewId) => {
+      retiredByServer.add(viewId);
+      output(viewId, 4, 65);
+      await settle();
+    };
+    return { client, peer, refs, state, views, controllers, output, retire };
+  }
+
+  // The gate counts tests statically, so each refusal kind is its own test. Returns the still
+  // connected client and both controllers, the retired one attached again.
+  async function refuseDetachAfterServerRetirement(kind) {
+    const { client, peer, refs, state, views, controllers, output, retire } =
+      await retiredDetachFixture(domainError(kind));
+    await retire("a");
+    expect(peer.commands.filter((command) => command.type === "detach")).toHaveLength(1);
+    expect(controllers.a.snapshot()).toMatchObject({ phase: "unavailable" });
+    expect(client.snapshot().status).toBe("connected");
+    output("b", 4, 66);
+    await settle();
+    expect(controllers.b.snapshot()).toMatchObject({ phase: "ready", appliedSeq: 4 });
+    expect(views.b.facts).toContainEqual(["event", 4, [66]]);
+    expect(
+      peer.commands.some(
+        (command) =>
+          command.type === "applied-ack" &&
+          command.subscription.viewId === "b" &&
+          command.appliedSeq === 4,
+      ),
+    ).toBe(true);
+    // The definite refusal is final: nothing is resent for the retired subscription.
+    expect(peer.commands.filter((command) => command.type === "detach")).toHaveLength(1);
+    // The same rule holds for an explicit detach the server refuses.
+    expect(await controllers.b.detach()).toMatchObject({ ok: false, error: { kind } });
+    expect(client.snapshot().status).toBe("connected");
+    // The retired subscription's terminal can attach again on the same connection.
+    state.atSeq = 4;
+    const reattached = controllers.a.attach();
+    baselineTo(peer, refs.get("a"), 4);
+    expect((await reattached).ok).toBe(true);
+    return { client, controllers };
+  }
+
+  function dispose({ client, controllers }) {
+    controllers.a.dispose();
+    controllers.b.dispose();
+    client.dispose();
+  }
+
+  test("a STALE_CONNECTION refusal of the detach after server retirement ends only that subscription", async () => {
+    const fixture = await refuseDetachAfterServerRetirement("STALE_CONNECTION");
+    expect(fixture.client.snapshot().status).toBe("connected");
+    dispose(fixture);
+  });
+
+  test("a RESYNC_REQUIRED refusal of the detach after server retirement ends only that subscription", async () => {
+    const fixture = await refuseDetachAfterServerRetirement("RESYNC_REQUIRED");
+    expect(fixture.client.snapshot().status).toBe("connected");
+    dispose(fixture);
+  });
+
+  test("a BUSY refusal of the detach after server retirement ends only that subscription", async () => {
+    const fixture = await refuseDetachAfterServerRetirement("BUSY");
+    expect(fixture.client.snapshot().status).toBe("connected");
+    dispose(fixture);
+  });
+
+  test("an unknown detach result after server retirement still retires the connection", async () => {
+    const { client, peer, controllers, retire } = await retiredDetachFixture(
+      domainError("RESULT_UNKNOWN", "unknown"),
+    );
+    await retire("a");
+    expect(peer.commands.filter((command) => command.type === "detach")).toHaveLength(1);
+    expect(client.snapshot().status).toBe("unverifiable");
+    expect(controllers.b.snapshot().phase).toBe("unavailable");
+    controllers.a.dispose();
+    controllers.b.dispose();
+    client.dispose();
+  });
 });
