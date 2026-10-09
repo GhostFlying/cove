@@ -653,9 +653,9 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
   test("S3 a client takes focus right after another client's resize, while it recovers", async () => {
     const run = await createRun(PROBE);
     const resizer = await connectClient();
-    const watcher = await connectClient();
+    const watcher = await connectTapped();
     const R = await attach(resizer, run, "s3-resizer");
-    const W = await attach(watcher, run, "s3-watcher");
+    const W = await attach(watcher.client, run, "s3-watcher");
     await waitFor("the probe on both views", () =>
       [R, W].every(({ recording }) => recording.text().includes("probe-ready")),
     );
@@ -666,14 +666,23 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
 
     // The resize forces the watcher through a baseline recovery. The user clicks into the
     // watcher the moment that recovery starts; the test does not wait for it to finish.
+    // The watcher's frames are held from then until the resizer's resize has resolved: its
+    // focus, once sent, takes control from the resizer, and a resizer still waiting for its
+    // grant would then rightly report that grant lost. Holding the watcher pins the order in
+    // which the resizer keeps control through its own recovery and the watcher's focus follows.
     expect(W.controller.setInputTarget(true, true)).toMatchObject({ ok: true });
     let focus;
     const started = W.controller.onState((snapshot) => {
-      if (!focus && snapshot.phase !== "ready") focus = W.controller.requestFocus();
+      if (focus || snapshot.phase === "ready") return;
+      watcher.tap.pause();
+      focus = W.controller.requestFocus();
     });
     expect(await R.controller.requestResize({ cols: 100, rows: 30 })).toMatchObject({ ok: true });
     await waitFor("the watcher's recovery to start", () => focus !== undefined);
     started.dispose();
+    // Held, the watcher cannot have finished its recovery, so its focus has not been sent yet.
+    expect(W.controller.snapshot().phase).not.toBe("ready");
+    await watcher.tap.resume();
     expect(await focus).toMatchObject({ ok: true });
     // The watcher took control at its own 80x24 grid and types right away.
     await typeText(W.controller, "size after-focus\r");
