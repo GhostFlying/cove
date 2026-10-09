@@ -1368,6 +1368,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   const checkout = await mkdtemp(resolve(tmpdir(), "cove-ci-scan-"));
   temporaryDirectories.push(checkout);
   await mkdir(resolve(checkout, "tests/tooling"), { recursive: true });
+  await mkdir(resolve(checkout, "apps/cli/tests"), { recursive: true });
   await mkdir(resolve(checkout, "apps/server/tests/author"), { recursive: true });
   await mkdir(resolve(checkout, "apps/server/tests/independent"), { recursive: true });
   await mkdir(resolve(checkout, "tests/browser"), { recursive: true });
@@ -1380,6 +1381,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await mkdir(resolve(checkout, "packages/protocol/tests"), { recursive: true });
   await mkdir(resolve(checkout, "packages/client/tests"), { recursive: true });
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
+  await writeFile(resolve(checkout, "apps/cli/tests/scenarios.test.mjs"), "");
   await writeFile(resolve(checkout, "apps/server/tests/author/runtime.test.mjs"), "");
   await writeFile(resolve(checkout, "apps/server/tests/independent/contract.test.mjs"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
@@ -1393,6 +1395,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "packages/protocol/tests/metadata.test.mjs"), "");
   await writeFile(resolve(checkout, "packages/client/tests/contract.test.mjs"), "");
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
+    "apps/cli/tests/scenarios.test.mjs",
     "apps/server/tests/author/runtime.test.mjs",
     "apps/server/tests/independent/contract.test.mjs",
     "packages/client/tests/contract.test.mjs",

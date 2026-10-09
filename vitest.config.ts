@@ -30,6 +30,16 @@ export default defineConfig({
       },
       {
         test: {
+          name: "cli",
+          environment: "node",
+          include: ["apps/cli/tests/**/*.test.mjs"],
+          testTimeout: 60_000,
+          hookTimeout: 30_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "tooling",
           environment: "node",
           include: ["tests/tooling/**/*.test.{ts,mjs}"],

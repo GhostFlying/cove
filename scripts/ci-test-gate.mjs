@@ -190,6 +190,7 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
+  { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 3 },
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   {
@@ -1221,6 +1222,7 @@ async function testFilesIn(directory, prefix) {
 
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
   return Promise.all([
+    testFilesIn(join(checkoutRoot, "apps/cli/tests"), "apps/cli/tests"),
     testFilesIn(join(checkoutRoot, "apps/server/tests"), "apps/server/tests"),
     testFilesIn(join(checkoutRoot, "packages/client/tests"), "packages/client/tests"),
     testFilesIn(join(checkoutRoot, "packages/protocol/tests"), "packages/protocol/tests"),
