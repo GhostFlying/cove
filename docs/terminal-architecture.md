@@ -282,7 +282,8 @@ runtime 缓存不是第二份 headless 模型。已选持久化方案 A：首期
 
 已确认首版终端使用 xterm.js，mobile 使用 RN + WebView，桌面容器为 Electron。
 建议服务端配套使用 @xterm/headless，以减少两端终端行为差异，但不将其私有状态定义为 wire 契约。
-建议支持 WebGL2 加速与 DOM 降级；具体设备默认 renderer、移动输入/选区方案和依赖版本待验证。
+已确认浏览器 view 默认使用 WebGL2（`@xterm/addon-webgl` 0.19.0，对应 xterm 6.0.0），并以 DOM renderer 降级；
+context loss 策略见第 5 节。移动设备的默认 renderer、移动输入/选区方案仍待真机验证。
 Server/CLI 已选 TypeScript/Node.js，终端处理使用有界子进程池；恢复格式尚未确定。
 第 11 节保留选型研究，终端选择见第 11.10 节。
 
@@ -354,8 +355,25 @@ Host 的终端状态同样要有预算，不能将客户端的无限内存问题
 释放本地 view 后，本地游标不足以用于 delta-only 恢复，需要重新建立快照基线。
 
 WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到该版本支持的非 WebGL 后端，
-必要时只重建 view 并取快照，不重新创建 PTY。具体降级能力需要用所选版本验证。
+必要时只重建 view 并取快照，不重新创建 PTY。
 纯绘制故障也不能通过向 PTY 伪造 resize 或输入来碰运气恢复。
+
+已确认的浏览器 view 策略（`packages/terminal-web/src/xterm-renderer.ts`）：
+
+- `createXtermTerminalView` 的 renderer 选项为 `webgl` 或 `dom`；未指定时浏览器提供 WebGL2 即用 `webgl`，否则 `dom`。
+- WebGL addon 加载失败即降级到 DOM，并在该 view 的整个生命周期内保持 DOM。
+- 首次 context loss（xterm 先等待浏览器恢复约 3 秒才报告）：释放 addon、用 DOM renderer 重绘，
+  短暂延迟后重试 WebGL 一次；再次丢失或重试加载失败则该 view 永久留在 DOM。
+- 策略按 view 而非 xterm 实例保存：新基线重建 xterm 不会重置重试次数；等待重试期间新建的实例先用 DOM，
+  由重试升级当前实例。view 重新可见时重建 glyph atlas 并重绘；dispose 释放 addon、GPU context 和重试定时器。
+- 当前 renderer 只读暴露（`renderer`、`onRendererChange`），用于诊断与测试；controller 与协议不感知 renderer。
+- 两种 renderer 的 cell 宽度不同（WebGL 对齐设备像素），切换后 `measureGrid` 可能给出不同网格；
+  这是可见网格的真实变化，只有持有控制权的客户端按常规 resize 流程跟随，不用 resize 恢复绘制。
+- 网格测量取宿主内容区的小数宽度，扣除 xterm 叠加在右缘的纵向滚动条（xterm 6 默认 14px），并向下取整，
+  保证最后一列可见；与 `@xterm/addon-fit` 的预留方式一致。
+
+无头 Chromium（Playwright 1.63）通过 SwiftShader 提供 WebGL2，浏览器测试默认在 WebGL 下运行；
+没有 WebGL2 的环境由测试断言 DOM 降级。软件渲染结果不代表 GPU 性能。
 
 ## 6. 背压必须区分慢客户端与 host 过载
 
