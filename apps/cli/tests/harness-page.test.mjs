@@ -225,19 +225,22 @@ async function waitForRedPixels(page, minimum = 200) {
   });
 }
 
-// Loses every live WebGL context drawn in the terminal, as a GPU reset would.
-const loseWebglContexts = (page) =>
-  page.evaluate(() => {
-    let lost = 0;
+// Loses every live WebGL context drawn in the terminal, as a GPU reset would, and checks that
+// exactly `expected` contexts were live.
+async function loseWebglContexts(page, expected) {
+  const lost = await page.evaluate(() => {
+    let count = 0;
     for (const canvas of document.querySelectorAll("#terminal canvas")) {
       const gl = canvas.getContext("webgl2");
       const extension = gl?.getExtension("WEBGL_lose_context");
       if (!gl || gl.isContextLost() || !extension) continue;
       extension.loseContext();
-      lost++;
+      count++;
     }
-    return lost;
+    return count;
   });
+  if (lost !== expected) throw new Error(`lost ${lost} WebGL contexts, expected ${expected}`);
+}
 
 // Records each distinct renderer the status bar reports from now on, so a short DOM interval
 // between a loss and its retry cannot be missed by polling.
@@ -253,8 +256,6 @@ const recordRendererChanges = (page) =>
     }).observe(status, { attributes: true, attributeFilter: ["data-renderer"] });
     window.coveRendererChanges = changes;
   });
-
-const rendererChanges = (page) => page.evaluate(() => [...window.coveRendererChanges]);
 
 const waitForRendererChanges = (page, expected) =>
   page.waitForFunction(
@@ -328,7 +329,9 @@ async function openConnectedPage({ server, page }, renderer) {
   return secret;
 }
 
-test("the harness page creates a terminal, takes typed input and renders its output", async ({
+// One harness serves both the printed-URL check and the context-loss policy: every harness
+// start costs a server and a Chromium, and the macOS CI test budget is tight.
+test("the printed harness URL renders typed output with the default renderer and survives WebGL context loss", async ({
   task,
 }) => {
   await withHarness(async ({ server, page, pageErrors }) => {
@@ -340,98 +343,47 @@ test("the harness page creates a terminal, takes typed input and renders its out
     const webgl2 = await offersWebgl2(page, task);
 
     await openNewTerminal(page);
-    // The printed URL names no renderer, so the view takes WebGL2 whenever the browser offers it.
+    // The printed URL names no renderer, so the view takes WebGL2 whenever the browser offers it
+    // and otherwise reports the DOM fallback.
     expect(await rendererOf(page)).toBe(webgl2 ? "webgl" : "dom");
     await page.click("#terminal");
     try {
       await waitForSteadyControl(page);
       await printMarker(page, MARKER);
       await waitForRedPixels(page);
-      // The echoed output is its own row, distinct from the typed command line. Only the DOM
-      // renderer draws text into the DOM; the red pixels above show the WebGL renderer drew it.
-      if (!webgl2) await waitForRow(page, MARKER);
-    } catch (error) {
-      throw await describePage(page, error);
-    }
-    expect(await page.textContent("#error")).toBe("");
-    expect(pageErrors).toEqual([]);
-  });
-});
-
-test("renderer=dom selects the DOM renderer, which renders typed output", async () => {
-  await withHarness(async ({ server, page, pageErrors }) => {
-    await openConnectedPage({ server, page }, "dom");
-    // The renderer parameter is not secret and stays in the address bar.
-    expect(await page.evaluate(() => location.search)).toBe("?renderer=dom");
-    await openNewTerminal(page);
-    expect(await rendererOf(page)).toBe("dom");
-    await page.click("#terminal");
-    try {
-      await waitForSteadyControl(page);
-      await printMarker(page, MARKER);
-      await waitForRow(page, MARKER);
-      await waitForRedPixels(page);
-    } catch (error) {
-      throw await describePage(page, error);
-    }
-    expect(await rendererOf(page)).toBe("dom");
-    expect(await page.textContent("#error")).toBe("");
-    expect(pageErrors).toEqual([]);
-  });
-});
-
-test("a lost WebGL context falls back to DOM, retries once, and stays on DOM after a second loss", async ({
-  task,
-}) => {
-  await withHarness(async ({ server, page, pageErrors }) => {
-    await openConnectedPage({ server, page }, "webgl");
-    const webgl2 = await offersWebgl2(page, task);
-    await openNewTerminal(page);
-    await page.click("#terminal");
-    try {
-      await waitForSteadyControl(page);
-      // A browser without WebGL2 must fall back on load and still render; there is no context
-      // to lose then.
-      expect(await rendererOf(page)).toBe(webgl2 ? "webgl" : "dom");
-      if (!webgl2) {
-        await printMarker(page, MARKER);
-        await waitForRow(page, MARKER);
+      if (webgl2) {
+        await recordRendererChanges(page);
+        // xterm waits up to three seconds for the browser to restore a lost context before it
+        // reports the loss; the view then drops to DOM and retries WebGL once after a delay.
+        await loseWebglContexts(page, 1);
+        await waitForRendererChanges(page, ["dom", "webgl"]);
         await waitForRedPixels(page);
-        return;
+        await loseWebglContexts(page, 1);
+        await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
+        // Well past the retry delay the view is still on DOM: the single retry was spent.
+        await page.waitForTimeout(1_500);
+        await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
+        await page.waitForFunction(() => !document.querySelector("#terminal canvas"));
+        // DOM cells measure differently from WebGL cells, so the page resizes the PTY to the
+        // DOM grid; wait for that recovery before typing.
+        await waitForSteadyControl(page);
       }
-      await printMarker(page, MARKER);
-      await waitForRedPixels(page);
-      await recordRendererChanges(page);
-
-      // xterm waits up to three seconds for the browser to restore a lost context before it
-      // reports the loss; the view then drops to DOM and retries WebGL once after a delay.
-      expect(await loseWebglContexts(page)).toBe(1);
-      await waitForRendererChanges(page, ["dom", "webgl"]);
-      await waitForRedPixels(page);
-
-      expect(await loseWebglContexts(page)).toBe(1);
-      await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
-      // Well past the retry delay the view is still on DOM: the single retry was spent.
-      await page.waitForTimeout(1_500);
-      expect(await rendererChanges(page)).toEqual(["dom", "webgl", "dom"]);
-      expect(await page.locator("#terminal canvas").count()).toBe(0);
-      // The DOM renderer repainted the existing output and renders new output.
+      // The DOM renderer repainted the existing output and renders new output. The echoed
+      // output is its own row, distinct from the typed command line.
       await waitForRow(page, MARKER);
-      // DOM cells measure differently from WebGL cells, so the page resizes the PTY to the DOM
-      // grid; wait for that recovery before typing.
-      await waitForSteadyControl(page);
       await printMarker(page, SECOND_MARKER);
       await waitForRow(page, SECOND_MARKER);
       await waitForRedPixels(page);
     } catch (error) {
       throw await describePage(page, error);
     }
+    expect(await rendererOf(page)).toBe("dom");
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
   });
 });
 
-test("S4 the production view answers no terminal query and passes real keys and paste through", async () => {
+test("S4 the production view answers no terminal query and passes real keys and paste through, on renderer=dom", async () => {
   await withHarness(async ({ directory, server, page, pageErrors }) => {
     // The probe sends DA and CPR once it reads the typed line `go`, and reports every byte it
     // reads until `done`. The page's xterm parses those queries and would answer them; only
@@ -442,10 +394,13 @@ test("S4 the production view answers no terminal query and passes real keys and 
     // WebGL renderer draws no text into the DOM. Query suppression is decided by the parser,
     // not the renderer, and the V1 view query suites run under the default renderer.
     await openConnectedPage({ server, page }, "dom");
+    // The renderer parameter is not secret and stays in the address bar.
+    expect(await page.evaluate(() => location.search)).toBe("?renderer=dom");
     await page.click(`#runs button[data-run-id="${run.runId}"]`);
     await page.waitForFunction(
       () => document.getElementById("terminal-status")?.dataset.phase === "ready",
     );
+    expect(await rendererOf(page)).toBe("dom");
     await page.waitForSelector("#terminal .xterm-rows");
     try {
       // A click takes control at the page's grid; a size change is recovered and retaken.
