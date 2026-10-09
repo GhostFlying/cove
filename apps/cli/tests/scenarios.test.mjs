@@ -129,7 +129,9 @@ const ECHO_LOOP = 'printf "loop-ready\\n"; while read line; do printf "echo:%s\\
 // One shell probe drives S3–S7 through typed commands. Typed lines are echoed by the tty, so
 // every assertion matches the probe's reply format (`size-TAG:`, `seq-`, `burst-N-done`, ...)
 // rather than the command text itself. `flood` pipes through cat so the PTY sees large
-// writes and the flood arrives as a modest number of large output events.
+// writes and the flood arrives as a modest number of large output events. `flood-until`
+// floods without end until it reads the next typed line, so that line is certain to reach
+// the PTY mid-flood; tty echo is off meanwhile so no echo splits a flood line.
 const PROBE = String.raw`printf 'probe-ready\n'
 while IFS= read -r line; do
   set -- $line
@@ -137,6 +139,7 @@ while IFS= read -r line; do
     size) printf 'size-%s:%s\n' "$2" "$(stty size)" ;;
     burst) i=$2; while [ "$i" -le "$3" ]; do printf 'seq-%05d\n' "$i"; i=$((i+1)); done; printf 'burst-%s-done\n' "$3" ;;
     flood) awk -v a="$2" -v b="$3" 'BEGIN { for (i = a; i <= b; i++) printf "flood-%06d-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n", i }' | cat; printf 'flood-%s-done\n' "$3" ;;
+    flood-until) stty -echo; awk -v a="$2" 'BEGIN { for (i = a; ; i++) printf "flood-%06d-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz\n", i }' | cat & IFS= read -r stop; kill $!; wait; stty echo; printf '\nflood-stopped:%s\n' "$stop" ;;
     alt-enter) printf '\033[?1049h\033[H\033[2Jalt-screen-%s\n' "$2" ;;
     alt-exit) printf '\033[?1049lnormal-again-%s\n' "$2" ;;
     *) printf 'echo:%s\n' "$line" ;;
@@ -654,23 +657,33 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       30_000,
     );
 
-    // While the slow client is still held, the healthy client types, produces more output,
-    // refocuses and keeps receiving every line.
-    await typeText(H.controller, "during-eviction\r");
-    await typeText(H.controller, "flood 20001 25000\r");
+    // While the slow client is still held, the healthy client types two lines in the middle
+    // of a second flood, refocuses and keeps receiving every line. The flood only stops once
+    // the shell has read the first typed line.
+    await typeText(H.controller, "flood-until 20001\r");
     await waitFor(
-      "the whole flood on the healthy view",
-      () => H.recording.text().includes("flood-25000-done"),
+      "the open-ended flood on the healthy view",
+      () => floodNumbers(H.recording.text()).at(-1) > 21_000,
       30_000,
     );
-    expect(H.recording.text()).toContain("echo:during-eviction");
+    await typeText(H.controller, "during-eviction\r");
+    await typeText(H.controller, "second-during-eviction\r");
+    await waitFor(
+      "the typed line to stop the flood",
+      () => H.recording.text().includes("flood-stopped:during-eviction"),
+      30_000,
+    );
+    await waitFor("the second typed line", () =>
+      H.recording.text().includes("echo:second-during-eviction"),
+    );
     await focusAndType(H.controller, "refocused\r");
     await waitFor("input after refocusing", () => H.recording.text().includes("echo:refocused"));
     expect(slow.tap.paused).toBe(true);
     expect(S.controller.snapshot().appliedSeq).toBe(slowAppliedSeq);
     const flood = floodNumbers(H.recording.text());
     expect(flood.length).toBeGreaterThan(healthyAtEviction);
-    expect(firstOutOfSequence(flood, 25_000)).toBeNull();
+    expect(flood.length).toBeGreaterThan(21_000);
+    expect(firstOutOfSequence(flood, flood.length)).toBeNull();
     // The server sent the retired subscription nothing produced after the retirement.
     const evictedOutput = slow.tap.inbound
       .filter(
@@ -680,7 +693,8 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       )
       .map((frame) => new TextDecoder().decode(frame.payload))
       .join("");
-    expect(evictedOutput).not.toContain("echo:during-eviction");
+    expect(evictedOutput).not.toContain("flood-stopped:during-eviction");
+    expect(evictedOutput).not.toContain("echo:second-during-eviction");
     expect(Math.max(0, ...floodNumbers(evictedOutput))).toBeLessThanOrEqual(20_000);
     // terminal.get reads the server's periodically refreshed run record, so wait for it.
     const holder = H.controller.snapshot().subscription;
