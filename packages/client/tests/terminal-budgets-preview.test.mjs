@@ -587,20 +587,29 @@ describe("client preview transaction", () => {
     ambiguous.client.dispose();
   });
 
-  test("retirement ledger refuses its 257th transfer identity without eviction", async () => {
+  test("settled previews never exhaust the connection; their proof is a recent window", async () => {
     const h = await harness();
-    for (let index = 0; index < 256; index++) {
+    // A long-lived page polls one run far past the window: every preview must still be sent.
+    for (let index = 0; index < 300; index++) {
       const pending = h.client.getPreview(run);
-      h.peer.transfer(`preview-${index}`, index + 1, new Uint8Array([index]));
+      h.peer.transfer(`preview-${index}`, index + 1, new Uint8Array([index % 256]));
       h.peer.result(h.commands.at(-1), "transfer", index + 1);
       expect((await pending).ok).toBe(true);
     }
-    expect(await h.client.getPreview(run)).toMatchObject({
-      ok: false,
-      error: { reason: "capacity" },
-    });
-    expect(h.commands).toHaveLength(256);
+    const unchanged = h.client.getPreview(run, 300);
+    h.peer.result(h.commands.at(-1), "unchanged", 300);
+    expect(await unchanged).toMatchObject({ ok: true, status: "unchanged", version: 300 });
+    expect(h.commands).toHaveLength(301);
+    expect(h.client.terminalPreview.retiredCount).toBe(256);
     expect(h.scheduler.active).toBe(0);
+    // A duplicate of a recent reply or transfer stays local ...
+    h.peer.transfer("preview-299", 300, new Uint8Array([299 % 256]));
+    h.peer.result(h.commands[299], "transfer", 300);
+    h.peer.result(h.commands[300], "unchanged", 300);
+    expect(h.client.snapshot().status).toBe("connected");
+    // ... while one evicted from the window is as unrouteable as a never-issued reply.
+    h.peer.result(h.commands[0], "transfer", 1);
+    expect(h.client.snapshot().status).toBe("incompatible");
     h.client.dispose();
   });
 

@@ -58,7 +58,10 @@ interface PendingPreview {
   settled: boolean;
 }
 
-const RETIRED_PREVIEW_LIMIT = 256;
+// Runs that can each hold a fence at once: in-flight previews plus quarantined runs.
+const PREVIEW_FENCE_LIMIT = 256;
+// Recently settled previews whose reply was observed (see TerminalPreview.recent).
+const RECENT_PREVIEW_WINDOW = 256;
 const PREVIEW_DEADLINE_MS = 5_000;
 
 function localError(reason: LocalErrorReason): ClientError {
@@ -69,12 +72,33 @@ function runKey(run: RunRef): string {
   return JSON.stringify([run.serverId, run.relayInstanceId, run.runId]);
 }
 
+interface SettledPreview {
+  readonly key: string;
+  readonly previewId: string | undefined;
+}
+
+function transferKey(key: string, previewId: string): string {
+  return JSON.stringify([key, previewId]);
+}
+
 // Preview events have no requestId: an unseen old transfer requires a run fence after uncertainty.
 export class TerminalPreview {
   private readonly pending = new Map<string, PendingPreview>();
   private readonly provisional = new Map<string, symbol>();
-  private readonly retired = new Map<string, Set<string>>();
-  private readonly retiredRequests = new Map<string, string>();
+  // A preview settles cleanly only after its one reply (and, for a transfer, its whole
+  // transfer) has arrived, and the server sends each at most once, minting request and
+  // preview IDs that are never reused on a connection. Nothing legitimate can follow such a
+  // settlement, so this proof is not needed to fence anything: it only lets a duplicate of a
+  // recent reply or transfer stay local instead of invalidating the connection. It is
+  // therefore a FIFO window, never an admission cap; retaining every settled preview would
+  // refuse all previews once a long-lived connection had served the limit. After eviction a
+  // duplicate is unrouteable, which is what any reply or transfer never issued already is.
+  // Keyed by request ID in settlement order; `recentTransfers` indexes the same entries.
+  private readonly recent = new Map<string, SettledPreview>();
+  private readonly recentTransfers = new Set<string>();
+  // Uncertain runs stay fenced until the connection is replaced: their unseen transfer could
+  // otherwise be taken for a later preview's. Each fence is per run, so the limit is reached
+  // only by that many distinct runs with an uncertain preview, not by ordinary use.
   private readonly quarantined = new Map<string, string>();
   private retainedBytes = 0;
 
@@ -114,8 +138,7 @@ export class TerminalPreview {
       this.provisional.has(key) ||
       this.pending.size + this.provisional.size >= binding.effectiveBudgets.maxRuns ||
       this.pending.size + this.provisional.size >= M0_LIMITS.pendingWorkerCommands ||
-      this.pending.size + this.provisional.size + this.retiredCount + this.quarantined.size >=
-        RETIRED_PREVIEW_LIMIT
+      this.pending.size + this.provisional.size + this.quarantined.size >= PREVIEW_FENCE_LIMIT
     )
       return Promise.resolve({ ok: false, error: localError("capacity"), uncertain: false });
 
@@ -199,7 +222,8 @@ export class TerminalPreview {
 
   receive(event: PreviewEvent, bytes: Uint8Array): PreviewRoute {
     const key = runKey(event.run);
-    if (this.retired.get(key)?.has(event.previewId) || this.quarantined.has(key)) return "obsolete";
+    if (this.recentTransfers.has(transferKey(key, event.previewId)) || this.quarantined.has(key))
+      return "obsolete";
     const pending = this.pending.get(key);
     if (!pending || pending.settled || pending.generation !== this.generation())
       return "unrouteable";
@@ -217,7 +241,7 @@ export class TerminalPreview {
       return "active";
     }
     if (
-      this.retiredRequests.get(reply.requestId) === key ||
+      this.recent.get(reply.requestId)?.key === key ||
       this.quarantined.get(key) === reply.requestId
     )
       return "obsolete";
@@ -285,8 +309,8 @@ export class TerminalPreview {
         uncertain: pending.startedSend,
       });
     this.provisional.clear();
-    this.retired.clear();
-    this.retiredRequests.clear();
+    this.recent.clear();
+    this.recentTransfers.clear();
     this.quarantined.clear();
   }
 
@@ -346,19 +370,10 @@ export class TerminalPreview {
     pending.settled = true;
     this.pending.delete(pending.key);
     if (!outcome.ok && (outcome.uncertain || pending.transfer)) {
-      // Event IDs are subsumed by the run fence; older request IDs still need late-reply proof.
-      this.retired.delete(pending.key);
+      // The run fence subsumes this run's event IDs; recent request IDs age out as usual.
       this.quarantined.set(pending.key, pending.requestId);
-    } else {
-      if (pending.replyObserved) this.retiredRequests.set(pending.requestId, pending.key);
-      if (pending.transfer) {
-        let ids = this.retired.get(pending.key);
-        if (!ids) {
-          ids = new Set<string>();
-          this.retired.set(pending.key, ids);
-        }
-        ids.add(pending.transfer.previewId);
-      }
+    } else if (pending.replyObserved) {
+      this.remember(pending.requestId, pending.key, pending.transfer?.previewId);
     }
     if (pending.reservedBytes) {
       this.retainedBytes -= pending.reservedBytes;
@@ -376,7 +391,21 @@ export class TerminalPreview {
     pending.resolve(outcome);
   }
 
-  private get retiredCount(): number {
-    return this.retiredRequests.size;
+  private remember(requestId: string, key: string, previewId: string | undefined): void {
+    while (this.recent.size >= RECENT_PREVIEW_WINDOW) {
+      const oldest = this.recent.entries().next();
+      if (oldest.done) break;
+      this.recent.delete(oldest.value[0]);
+      const evicted = oldest.value[1];
+      if (evicted.previewId !== undefined)
+        this.recentTransfers.delete(transferKey(evicted.key, evicted.previewId));
+    }
+    this.recent.set(requestId, { key, previewId });
+    if (previewId !== undefined) this.recentTransfers.add(transferKey(key, previewId));
+  }
+
+  // The size of the recent window; tests observe that it stays bounded.
+  get retiredCount(): number {
+    return this.recent.size;
   }
 }
