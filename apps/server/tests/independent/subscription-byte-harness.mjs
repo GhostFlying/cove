@@ -134,7 +134,13 @@ export function assertOwnedTrace(trace, subscription) {
 
 export function descriptor(
   subscription,
-  { atSeq = 3, sizes = [3, 2], baselineId = "ind-baseline" } = {},
+  {
+    atSeq = 3,
+    sizes = [3, 2],
+    baselineId = "ind-baseline",
+    grid = geometry,
+    control = { epoch: 0, holder: null },
+  } = {},
 ) {
   return {
     baselineId,
@@ -144,9 +150,9 @@ export function descriptor(
     encoding: BASELINE_ENCODING,
     checkpointSeq: atSeq,
     atSeq,
-    captureGeometry: geometry,
-    currentGeometry: geometry,
-    control: { epoch: 0, holder: null },
+    captureGeometry: grid,
+    currentGeometry: grid,
+    control,
     coverage: {
       normal: {
         historyLines: 0,
