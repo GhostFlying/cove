@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import { encodePipeFrame } from "@cove/protocol/pipe";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
@@ -95,6 +96,65 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32) {
     },
     lost: () => lost,
   };
+}
+
+const RECLAIMED = { routes: 0, pending: 0, identities: 0, delivered: [], lost: 0 };
+async function racedOpener(order) {
+  const f = fixture();
+  f.start();
+  const delivered = [];
+  f.session.onEvent((event) => delivered.push(event.terminal.seq));
+  const subscribe = f.command("subscribe", "subscribe", { subscription, atSeq: 0 });
+  const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+  const unsubscribe = f.command("unsubscribe", "unsubscribe", { subscription });
+  const closed = f.session.request(unsubscribe);
+  const failOpener = () =>
+    f.session.receive(
+      frame({
+        type: "error",
+        worker,
+        run,
+        requestId: subscribe.requestId,
+        commandType: "subscribe",
+        error: domainError("RESYNC_REQUIRED"),
+      }),
+    );
+  const settleOpener = () =>
+    order === "unsubscribe-then-accepted-opener"
+      ? f.session.receive(f.reply(subscribe, { recoveryMode: "baseline", atSeq: 0 }))
+      : failOpener();
+  const settleUnsubscribe = () => f.session.receive(f.reply(unsubscribe));
+  const [first, second] = order.startsWith("unsubscribe")
+    ? [settleUnsubscribe, settleOpener]
+    : [settleOpener, settleUnsubscribe];
+  first();
+  // Whichever settles first leaves the record for the other to reclaim.
+  expect(f.session.snapshot().routes).toBe(1);
+  second();
+  await Promise.all([opened, closed]);
+  const settled = f.session.snapshot();
+  f.session.receive(
+    frame(
+      {
+        type: "terminal-event",
+        worker,
+        run,
+        subscription,
+        terminal: { type: "output", run, seq: 1 },
+      },
+      new Uint8Array([65]),
+    ),
+  );
+  const outcome = {
+    routes: settled.routes,
+    pending: settled.pending,
+    identities: settled.identities,
+    delivered,
+    lost: f.lost(),
+  };
+  f.session.loseContact();
+  f.session.transportReleased();
+  return outcome;
 }
 
 describe("bounded worker pipe session", () => {
@@ -383,6 +443,16 @@ describe("bounded worker pipe session", () => {
     f.session.loseContact();
     f.session.transportReleased();
   });
+
+  // A connection that closes while an attach's baseline capture runs can see the worker
+  // accept the unsubscribe before it fails or accepts the cancelled subscribe. The route
+  // must be reclaimed by whichever settles last, or each race leaks one route slot.
+  it("reclaims a raced route when the opener fails after the unsubscribe settled", async () =>
+    expect(await racedOpener("unsubscribe-then-failed-opener")).toEqual(RECLAIMED));
+  it("reclaims a raced route when the unsubscribe settles after the opener failed", async () =>
+    expect(await racedOpener("failed-opener-then-unsubscribe")).toEqual(RECLAIMED));
+  it("reclaims a raced route when the opener is accepted after the unsubscribe settled", async () =>
+    expect(await racedOpener("unsubscribe-then-accepted-opener")).toEqual(RECLAIMED));
 
   it("makes monotonic deadline loss unknown and ignores late disposed result", async () => {
     const f = fixture();

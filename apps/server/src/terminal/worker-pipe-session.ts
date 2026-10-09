@@ -55,7 +55,14 @@ type Outgoing = {
   request: Pending | undefined;
   owned: boolean;
 };
-type Route = { ref: SubscriptionRef; active: boolean; lease: ByteReservation };
+// `unsubscribed` records that an unsubscribe for the ref settled, so the route can be
+// reclaimed by whichever of that unsubscribe and the last pending opener settles last.
+type Route = {
+  ref: SubscriptionRef;
+  active: boolean;
+  unsubscribed: boolean;
+  lease: ByteReservation;
+};
 
 export class WorkerPipeSession {
   readonly worker: WorkerRef;
@@ -356,7 +363,12 @@ export class WorkerPipeSession {
           identityLease.release();
           return Promise.resolve(this.error(command, "BUSY"));
         }
-        route = { ref: structuredClone(snapshot.subscription), active: false, lease };
+        route = {
+          ref: structuredClone(snapshot.subscription),
+          active: false,
+          unsubscribed: false,
+          lease,
+        };
         this.routes.push(route);
         newRoute = true;
       }
@@ -537,7 +549,12 @@ export class WorkerPipeSession {
             )!.active = true;
           }
           this.settle(value.requestId);
-          if (command.type === "unsubscribe") this.forgetRoute(command.subscription);
+          if (
+            command.type === "unsubscribe" ||
+            command.type === "subscribe" ||
+            command.type === "recover"
+          )
+            this.forgetRoute(command.subscription, command.type === "unsubscribe");
           pending.resolve(value);
         } else if (value.type === "terminal-event") {
           const run = this.runs.get(value.run.runId);
@@ -574,19 +591,27 @@ export class WorkerPipeSession {
     return consumed;
   }
 
-  // A route is dropped once its unsubscribe settled, whatever the outcome. Keeping inactive
-  // routes until the pipe closed made the whole worker refuse every attach with BUSY after
-  // maxRuns × subscriptionsPerConnection lifetime subscriptions. An inactive route only
-  // filters events, and an absent route filters them identically, so a worker that still
-  // emits for an uncertain unsubscribe stays fenced. Subscription refs are never reused, so
-  // no later subscribe can need the record; a subscribe or recover still pending for the
-  // same ref (close racing an attach) keeps it, because its accepted result activates it.
-  private forgetRoute(ref: SubscriptionRef): void {
+  // A route is dropped once its unsubscribe settled, whatever the outcome, and no subscribe
+  // or recover for the same ref is still pending. Keeping inactive routes until the pipe
+  // closed made the whole worker refuse every attach with BUSY after maxRuns ×
+  // subscriptionsPerConnection lifetime subscriptions. An inactive route only filters
+  // events, and an absent route filters them identically, so a worker that still emits for
+  // an uncertain unsubscribe stays fenced. Subscription refs are never reused, so no later
+  // subscribe can need the record.
+  //
+  // The two settlements can arrive in either order: a connection closing while an attach's
+  // baseline capture runs can see the worker accept the unsubscribe first and fail the
+  // cancelled subscribe afterwards. So the unsubscribe only marks the route, and every
+  // settlement of an unsubscribe or an opener for the ref retries the release; the last one
+  // to settle reclaims it. An opener accepted after the unsubscribe does not revive the
+  // route: the ref was already withdrawn, and dropping it fences that producer's events.
+  private forgetRoute(ref: SubscriptionRef, unsubscribed: boolean): void {
     const index = this.routes.findIndex((entry) => sameSubscriptionRef(entry.ref, ref));
     const route = this.routes[index];
+    if (!route) return;
+    if (unsubscribed) route.unsubscribed = true;
     if (
-      !route ||
-      route.active ||
+      !route.unsubscribed ||
       [...this.pending.values()].some(
         (entry) =>
           (entry.command.type === "subscribe" || entry.command.type === "recover") &&
