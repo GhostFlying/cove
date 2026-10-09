@@ -132,6 +132,7 @@ const descriptorOf = (baseline, subscription = ref()) => ({
   atSeq: baseline.atSeq,
   captureGeometry: baseline.captureGeometry,
   currentGeometry: baseline.currentGeometry,
+  control: baseline.control,
   coverage: baseline.coverage,
   vtBytes: baseline.vt.length,
   tailBytes: baseline.tail.length,

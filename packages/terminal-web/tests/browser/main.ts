@@ -147,6 +147,7 @@ function descriptor(bytes: number, chunks = 1, tailBytes = 0): BaselineDescripto
     atSeq: 0,
     captureGeometry: currentGeometry,
     currentGeometry,
+    control: { epoch: 0, holder: null },
     coverage: {
       normal: {
         historyLines: 0,

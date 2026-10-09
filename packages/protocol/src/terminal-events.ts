@@ -1,7 +1,6 @@
 import { z } from "zod";
 import {
   type ConnectionRef,
-  ConnectionRefSchema,
   OpaqueIdSchema,
   RunRefSchema,
   SequenceSchema,
@@ -11,6 +10,7 @@ import {
 } from "./identity.js";
 import { AppearanceSchema, GeometrySchema } from "./profile.js";
 import {
+  ControlHolderSchema,
   BaselineChunkSchema,
   BaselineDescriptorSchema,
   BaselineEndSchema,
@@ -18,12 +18,8 @@ import {
 
 const run = { run: RunRefSchema };
 const ordered = { ...run, seq: SequenceSchema.min(1) };
-const holder = z.object({
-  connection: ConnectionRefSchema,
-  viewId: OpaqueIdSchema,
-  subscriptionId: OpaqueIdSchema,
-});
-export const ControlHolderSchema = holder;
+const holder = ControlHolderSchema;
+export { ControlHolderSchema };
 
 export const RunEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("output"), ...ordered }),

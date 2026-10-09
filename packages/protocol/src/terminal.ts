@@ -242,6 +242,7 @@ export type {
   TerminalEvent,
 } from "./terminal-events.js";
 export {
+  BaselineControlSchema,
   BaselineDescriptorSchema,
   BaselineStartSchema,
   BaselineChunkSchema,
@@ -249,7 +250,12 @@ export {
   validateBaselineDescriptor,
   validateBaselineTransfer,
 } from "./terminal-recovery.js";
-export type { BaselineDescriptor, BaselineChunk, BaselineEnd } from "./terminal-recovery.js";
+export type {
+  BaselineControl,
+  BaselineDescriptor,
+  BaselineChunk,
+  BaselineEnd,
+} from "./terminal-recovery.js";
 export {
   HEADER_BYTES,
   MAX_FRAME_BYTES,

@@ -599,6 +599,7 @@ test("CC-04 preview isolation preserves active controller and peer", async () =>
           atSeq: 1,
           captureGeometry: geometry,
           currentGeometry: geometry,
+          control: { epoch: 0, holder: null },
           coverage: {
             normal: {
               historyLines: 0,

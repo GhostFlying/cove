@@ -191,6 +191,7 @@ async function harness({
         atSeq,
         captureGeometry: geometry,
         currentGeometry: geometry,
+        control: { epoch: 0, holder: null },
         coverage: {
           normal: {
             historyLines: 0,

@@ -133,6 +133,7 @@ test("terminal fixture installs both-buffer checkpoint with exact tail and N plu
     atSeq: journey.baseline.atSeq,
     captureGeometry: profile.geometry,
     currentGeometry: profile.geometry,
+    control: { epoch: 0, holder: null },
     coverage: profile.coverage,
     vtBytes: journey.baseline.vt.length,
     tailBytes: journey.baseline.tail.length,

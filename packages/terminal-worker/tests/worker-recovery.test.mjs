@@ -538,6 +538,51 @@ test("W2 input is fenced before final baseline ACK and available after installat
   }
 });
 
+test("W2 a recovery baseline carries the control authority at its atSeq", async () => {
+  const { emitted, execution } = directHarness();
+  const holder = {
+    connection: subscription.connection,
+    viewId: subscription.viewId,
+    subscriptionId: subscription.subscriptionId,
+  };
+  try {
+    await spawnDirect(execution);
+    const first = await subscribeAndApply(execution, emitted, subscription);
+    expect(first.start.event.terminal.descriptor.control).toEqual({ epoch: 0, holder: null });
+    const grant = command("set-control", {
+      expectedEpoch: 0,
+      nextEpoch: 1,
+      holder,
+      geometry: { cols: 20, rows: 6 },
+    });
+    const granted = await execution.execute(grant);
+    expect(granted).toMatchObject({ outcome: "accepted" });
+    execution.responseSettled(grant.requestId);
+    const before = emitted.length;
+    // A resize-context recovery asks for a fresh baseline; it must report this holder at epoch 1.
+    const recover = command("recover", { subscription });
+    const marker = await execution.execute(recover);
+    expect(marker).toMatchObject({ outcome: "accepted", recoveryMode: "baseline" });
+    execution.markerEnqueued(recover, marker);
+    execution.responseSettled(recover.requestId);
+    for (let turn = 0; turn < 12; turn++) {
+      if (emitted.slice(before).some((item) => item.event.terminal.type === "baseline-start"))
+        break;
+      await tick();
+    }
+    const start = emitted
+      .slice(before)
+      .find((item) => item.event.terminal.type === "baseline-start");
+    expect(start.event.terminal.descriptor).toMatchObject({
+      atSeq: marker.atSeq,
+      currentGeometry: { cols: 20, rows: 6 },
+      control: { epoch: 1, holder },
+    });
+  } finally {
+    await execution.shutdown("finite-test");
+  }
+});
+
 test("W2 old transport-owned bytes precede same-ref recovery marker and new producer", async () => {
   const native = factory();
   const input = new PassThrough();

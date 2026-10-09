@@ -242,6 +242,7 @@ function descriptor(ref, atSeq = 3) {
     atSeq,
     captureGeometry: geometry,
     currentGeometry: geometry,
+    control: { epoch: 0, holder: null },
     coverage: {
       normal: {
         historyLines: 0,

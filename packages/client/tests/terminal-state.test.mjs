@@ -231,6 +231,7 @@ function baseline(peer, ref, currentGeometry = grid) {
     atSeq: 3,
     captureGeometry: currentGeometry,
     currentGeometry,
+    control: { epoch: 0, holder: null },
     coverage: {
       normal: {
         historyLines: 0,

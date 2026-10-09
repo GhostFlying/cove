@@ -211,6 +211,7 @@ export function syntheticBaseline(target, vtBytes = 1, tailBytes = 0, atSeq = 0)
     atSeq,
     captureGeometry: { cols: 12, rows: 4 },
     currentGeometry: { cols: 12, rows: 4 },
+    control: { epoch: 0, holder: null },
     coverage: {
       normal: {
         historyLines: 0,
