@@ -16,17 +16,26 @@ export function createNodeHttpPort(endpoint: string): HttpPort {
   const base = new URL(endpoint);
   return {
     post(request: HttpRequest, callbacks: HttpCallbacks): CancellationHandle {
-      let settled = false;
-      let sent = false;
+      // Non-delivery is proven only while the TCP connection is still being established:
+      // node:http buffers the body until connect, so no byte can have reached the server.
+      // From connect onward any byte may already be on the wire, so an interrupted request
+      // is "unknown"; a response proves "handed-off". Once settled, the reported disposition
+      // is final and a later cancel() repeats it rather than contradicting it.
+      let connected = false;
+      let responded = false;
+      let final: TransferDisposition | undefined;
+      const current = (): TransferDisposition =>
+        responded ? "handed-off" : connected ? "unknown" : "not-sent";
       const fail = (reason: "transport" | "response-too-large") => {
-        if (settled) return;
-        settled = true;
-        callbacks.onFailure({ disposition: sent ? "unknown" : "not-sent", reason });
+        if (final) return;
+        final = current();
+        callbacks.onFailure({ disposition: final, reason });
       };
       const req = httpRequest(
         new URL(request.path, base),
         { method: "POST", headers: { ...request.headers }, agent: false },
         (res) => {
+          responded = true;
           callbacks.onDisposition("handed-off");
           const chunks: Buffer[] = [];
           let total = 0;
@@ -40,8 +49,8 @@ export function createNodeHttpPort(endpoint: string): HttpPort {
             chunks.push(chunk);
           });
           res.on("end", () => {
-            if (settled) return;
-            settled = true;
+            if (final) return;
+            final = "handed-off";
             const headers: Record<string, string> = {};
             for (const [name, value] of Object.entries(res.headers))
               if (typeof value === "string") headers[name] = value;
@@ -56,16 +65,19 @@ export function createNodeHttpPort(endpoint: string): HttpPort {
           res.on("close", () => fail("transport"));
         },
       );
-      req.on("error", () => fail("transport"));
-      req.end(request.body, () => {
-        sent = true;
+      req.on("socket", (socket) => {
+        // agent: false always yields a fresh socket; treat an already-open one as written.
+        if (!socket.connecting) connected = true;
+        else socket.once("connect", () => (connected = true));
       });
+      req.on("error", () => fail("transport"));
+      req.end(request.body);
       return {
         cancel(): TransferDisposition {
-          if (settled) return "handed-off";
-          settled = true;
+          if (final) return final;
+          final = current();
           req.destroy();
-          return sent ? "unknown" : "not-sent";
+          return final;
         },
       };
     },
