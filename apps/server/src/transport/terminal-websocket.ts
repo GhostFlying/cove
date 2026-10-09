@@ -175,7 +175,9 @@ export class TerminalWebSocket {
                 socket.send(raw, (error) => {
                   if (!owned) return;
                   owned = false;
-                  settled(error);
+                  // `ws` reports a successful send as `null`; delivery treats any
+                  // defined value as a transport failure, so normalize it here.
+                  settled(error ?? undefined);
                   if (!error) delivery.drain();
                 });
                 return false;

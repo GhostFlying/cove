@@ -229,10 +229,10 @@ async function withWs(body, budgets = { ...M0_LIMITS }) {
       timer,
     );
     const peers = [];
-    const open = () => {
+    const open = (Carrier = Socket) => {
       const prepared = terminal.prepare(auth);
       expect(prepared.kind).toBe("accepted");
-      const socket = new Socket();
+      const socket = new Carrier();
       peers.push(socket);
       terminal.accept(socket, prepared.claim);
       return socket;
@@ -4368,6 +4368,42 @@ describe("D passive production local entry", () => {
         rpc: 0,
         protocol: 2,
       });
+    });
+  });
+});
+
+describe("H1 terminal carrier regressions", () => {
+  // `ws` acknowledges a successful send with `null`, not `undefined`.
+  class NullAckSocket extends Socket {
+    send(bytes, callback) {
+      this.sent.push(typeof bytes === "string" ? bytes : Buffer.from(bytes));
+      callback(null);
+    }
+  }
+  it("a null send acknowledgement is success and keeps the authenticated socket open", async () => {
+    await withWs(async ({ open }) => {
+      const peer = open(NullAckSocket);
+      peer.emit("message", utf8({ ...bootstrap, secret: identity.secret }), false);
+      const result = JSON.parse(peer.sent[0]);
+      expect(result.type).toBe("cove-bootstrap-result");
+      const attach = {
+        type: "attach",
+        requestId: "attach-missing",
+        run: {
+          serverId: identity.serverId,
+          relayInstanceId: identity.relayInstanceId,
+          runId: "not-created",
+        },
+        connection: result.connection,
+        viewId: "view",
+        profile: PROFILE,
+        encoding: BASELINE_ENCODING,
+      };
+      peer.emit("message", encodeTerminalFrame(1, utf8(attach), new Uint8Array()).value, true);
+      await new Promise((done) => setImmediate(done));
+      // The refusal reply was written and acknowledged; the connection stays usable.
+      expect(peer.sent).toHaveLength(2);
+      expect(peer.codes).toEqual([]);
     });
   });
 });
