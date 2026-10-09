@@ -244,7 +244,7 @@ M0 先将 CI/主分支保护作为显式任务，再随各能力补齐真实卡�
 
 - 干净环境构建并启动编译后的 server、worker、CLI，验证 exports 和原生模块加载。
 - macOS/Linux 的真实 PTY 输入输出、生命周期及任务资源清理。
-- 两客户端、唯一查询回复、恢复、history 裁剪后 resize、normal/alternate 切换。
+- [M0](milestones/m0.md) 的 S1–S8 场景（两客户端、唯一查询回复、恢复、normal/alternate 切换等）；history 裁剪后 resize 不作为 M0 门槛。
 - 协议版本不匹配时的明确拒绝。混合版本兼容 fixtures 推迟到首个正式版本号发布之后（2026-10-09 用户决策）。
 - 有界队列、慢端处理和顺序断言；性能测量记录环境，不把波动耗时作为未经校准的门槛。
 
