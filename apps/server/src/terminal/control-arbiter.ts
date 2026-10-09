@@ -33,6 +33,8 @@ export interface ControlRouteContext {
   readonly releaseId: string;
   current(): boolean;
   installed(atSeq?: number): boolean;
+  // True while earlier commands of the same subscription have not settled.
+  earlierPending(): boolean;
 }
 type Counter = {
   ref: SubscriptionRef;
@@ -134,7 +136,12 @@ export class ControlArbiter {
   ): ControlJob | DomainError {
     const budgets = this.composition.budgets;
     if (this.disposed || !context.current()) return domainError("STALE_CONNECTION");
-    if (!context.installed()) return domainError("RESYNC_REQUIRED");
+    // A client may pipeline baseline-progress/applied-ack and then a control command on
+    // one connection. Those earlier commands are what install the route, so judging
+    // installation at arrival would observe a state the client already moved past.
+    // The route queue runs commands in arrival order and perform() re-checks
+    // installation once every earlier command has settled.
+    if (!context.earlierPending() && !context.installed()) return domainError("RESYNC_REQUIRED");
     if (
       "geometry" in command &&
       (command.geometry.cols > budgets.maxCols || command.geometry.rows > budgets.maxRows)
