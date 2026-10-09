@@ -112,6 +112,9 @@ interface OpenTerminal {
   // This client changed the grid itself, so the recovery that follows must not cost it control.
   retakeAfterRecovery: boolean;
   lastPhase: TerminalSnapshot["phase"];
+  // Counts departures from "ready", so a failed request can tell whether a recovery
+  // superseded it or the server rejected it outright.
+  recoveries: number;
   inputNotice: string;
 }
 
@@ -214,12 +217,17 @@ function syncSize(entry: OpenTerminal): void {
   entry.requested = measured;
   entry.retakeAfterRecovery = true;
   entry.resizing = true;
+  const recoveries = entry.recoveries;
   void entry.controller.requestResize(measured).then((outcome) => {
     entry.resizing = false;
-    if (!outcome.ok && current === entry && !entry.retakeAfterRecovery) {
-      entry.inputNotice = `resize refused: ${describe(outcome.error)}`;
-      renderTerminalStatus(entry);
-    }
+    if (outcome.ok || current !== entry) return;
+    // A recovery that started meanwhile superseded this request; the retake after it settles
+    // the size. Otherwise the rejection was definite: show it and allow a later retry.
+    if (entry.recoveries !== recoveries) return;
+    delete entry.requested;
+    entry.retakeAfterRecovery = false;
+    entry.inputNotice = `resize refused: ${describe(outcome.error)}`;
+    renderTerminalStatus(entry);
   });
 }
 
@@ -261,6 +269,7 @@ async function openRun(run: RunRef): Promise<void> {
     operating: false,
     retakeAfterRecovery: false,
     lastPhase: "idle",
+    recoveries: 0,
     inputNotice: "",
   };
   current = entry;
@@ -274,6 +283,7 @@ async function openRun(run: RunRef): Promise<void> {
         entry.retakeAfterRecovery = false;
       }
       const enteredReady = snapshot.phase === "ready" && entry.lastPhase !== "ready";
+      if (entry.lastPhase === "ready" && snapshot.phase !== "ready") entry.recoveries++;
       entry.lastPhase = snapshot.phase;
       // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM
       // focus and this client's control. Restore DOM focus while the user operates here, and
@@ -314,7 +324,7 @@ async function openRun(run: RunRef): Promise<void> {
 // Take control with this view's measured grid so the PTY follows the operating client. The
 // focus carries the grid, so no separate resize is needed for it.
 function takeControl(entry: OpenTerminal): void {
-  if (current !== entry || entry.focusing) return;
+  if (current !== entry || entry.focusing || document.visibilityState !== "visible") return;
   const snapshot = entry.controller.snapshot();
   if (
     snapshot.phase !== "ready" ||
@@ -324,16 +334,20 @@ function takeControl(entry: OpenTerminal): void {
     return;
   const measured = entry.view.measureGrid();
   const applied = snapshot.appliedGeometry?.geometry;
-  if (!applied || !sameGeometry(applied, measured)) entry.retakeAfterRecovery = true;
+  const resizes = !applied || !sameGeometry(applied, measured);
+  if (resizes) entry.retakeAfterRecovery = true;
   entry.requested = measured;
   entry.focusing = true;
+  const recoveries = entry.recoveries;
   entry.controller.setInputTarget(true, true);
   void entry.controller.requestFocus(measured).then((outcome) => {
     entry.focusing = false;
     if (current !== entry) return;
     // A focus that changed the grid may be overtaken by the recovery it caused; the retake
-    // after that recovery then settles it.
-    if (!outcome.ok && !entry.retakeAfterRecovery) {
+    // after that recovery then settles it. Any other failure is reported and forgotten.
+    if (!outcome.ok && entry.recoveries === recoveries) {
+      delete entry.requested;
+      if (resizes) entry.retakeAfterRecovery = false;
       entry.inputNotice = `focus refused: ${describe(outcome.error)}`;
       renderTerminalStatus(entry);
     }
@@ -459,10 +473,15 @@ function start(): void {
   });
   document.addEventListener("visibilitychange", () => {
     const entry = current;
-    if (!entry || entry.controller.snapshot().phase !== "ready") return;
-    // A hidden page releases control; becoming visible again only re-enables taking it.
-    if (document.visibilityState !== "visible") entry.operating = false;
-    entry.controller.setInputTarget(document.visibilityState === "visible", false);
+    if (!entry || entry.controller.snapshot().phase === "disposed") return;
+    // Applies in every phase, including mid-recovery: a hidden page releases control and
+    // drops any pending retake; becoming visible again only re-enables taking control.
+    const visible = document.visibilityState === "visible";
+    if (!visible) {
+      entry.operating = false;
+      entry.retakeAfterRecovery = false;
+    }
+    entry.controller.setInputTarget(visible, false);
   });
   setInterval(() => void refreshRuns(), LIST_REFRESH_MS);
   void connect(false);
