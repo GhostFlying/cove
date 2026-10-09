@@ -135,7 +135,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
   const files = await readVitestOwnedTestFiles();
   const registrations = [
     ["author", "runtime-admission", 21],
-    ["author", "local-entry", 17],
+    ["author", "local-entry", 48],
     ["independent", "qualified-local-admission", 4],
     ["author", "worker-pipe-session", 11],
     ["author", "operation-receipts", 15],
@@ -973,7 +973,7 @@ test("local admission and RPC suite is mandatory with compiled cases", async () 
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/admission-rpc.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 17 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 22 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
