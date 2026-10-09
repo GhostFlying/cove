@@ -82,13 +82,22 @@ export class TerminalSubscriptions {
   private teardownActive = false;
   private backgroundTeardownActive = false;
   private progressInFlight = 0;
+  // Client request IDs are opaque, so the server cannot prove ordering. It rejects reuse
+  // of an in-flight ID and of one in a bounded FIFO window of recently settled IDs; the
+  // client mints a fresh ID per request, so an ID older than the window is never reused
+  // legitimately. requestLimit bounds in-flight IDs and the window, never the lifetime
+  // total: retaining every settled ID used to make a long-lived connection BUSY forever.
   private readonly externalIds = new Set<string>();
+  private readonly settledIds = new Map<string, ByteReservation | null>();
   private readonly previewAttempts = new Set<{
     current: boolean;
     cancel(): void;
     fence: DeliveryFence;
   }>();
-  private readonly requestLeases: ByteReservation[] = [];
+  // Leases of requests not yet removed from their route queue (or of in-flight
+  // previews). Each is released once its request leaves the queue, so they are bounded
+  // by pending work rather than accumulating for the connection's lifetime.
+  private readonly requestLeases = new Set<ByteReservation>();
   private readonly listener: { dispose(): void };
   private readonly arena: ByteReservation;
   private closedState = false;
@@ -240,7 +249,7 @@ export class TerminalSubscriptions {
     )
       return this.reject(command, "CAPABILITY_UNAVAILABLE");
     if (!this.composition.owns(command.run)) return this.reject(command, "INSTANCE_MISMATCH");
-    if (this.externalIds.has(command.requestId)) return this.reject(command, "COUNTER_EXHAUSTED");
+    if (this.knownId(command.requestId)) return this.reject(command, "COUNTER_EXHAUSTED");
     const control =
       command.type === "detach" ||
       command.type === "applied-ack" ||
@@ -381,7 +390,7 @@ export class TerminalSubscriptions {
       ...(domain ? { domain } : {}),
     };
     this.externalIds.add(command.requestId);
-    this.requestLeases.push(requestLease);
+    this.requestLeases.add(requestLease);
     this.requests.set(internalId, request);
     if (control) this.controlPending++;
     else this.ordinaryPending++;
@@ -424,7 +433,7 @@ export class TerminalSubscriptions {
       !previewId ||
       this.closed ||
       this.delivery.closed ||
-      this.externalIds.has(command.requestId) ||
+      this.knownId(command.requestId) ||
       this.externalIds.size >= this.options.requestLimit ||
       this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands
     ) {
@@ -432,7 +441,7 @@ export class TerminalSubscriptions {
       return this.reject(command, "COUNTER_EXHAUSTED");
     }
     this.externalIds.add(command.requestId);
-    this.requestLeases.push(lease);
+    this.requestLeases.add(lease);
     this.ordinaryPending++;
     this.inFlight++;
     const attempt = {
@@ -483,6 +492,8 @@ export class TerminalSubscriptions {
     } finally {
       this.ordinaryPending--;
       this.inFlight--;
+      this.settleId(command.requestId);
+      if (this.requestLeases.delete(lease)) lease.release();
       this.releaseClosedRecords();
     }
   }
@@ -500,7 +511,7 @@ export class TerminalSubscriptions {
         const request = route.queue[0]!;
         if (this.closed || route.phase === "retired") {
           this.finish(request, this.error(request.command, route.failure ?? "STALE_CONNECTION"));
-          route.queue.shift();
+          this.dequeue(route);
           continue;
         }
         const progress =
@@ -518,11 +529,43 @@ export class TerminalSubscriptions {
           this.flushTeardown();
           this.releaseClosedRecords();
         }
-        route.queue.shift();
+        this.dequeue(route);
       }
     } finally {
       route.running = false;
     }
+  }
+
+  // A request's lease covers its record while it is queued or executing, even after an
+  // early finish (tick/close may settle it before execute returns).
+  private dequeue(route: Route): void {
+    const request = route.queue.shift();
+    if (request && this.requestLeases.delete(request.lease)) request.lease.release();
+  }
+
+  private knownId(requestId: string): boolean {
+    return this.externalIds.has(requestId) || this.settledIds.has(requestId);
+  }
+
+  // Moves a settled ID from the in-flight set into the recent window, evicting the oldest.
+  private settleId(requestId: string): void {
+    if (!this.externalIds.delete(requestId) || this.closed) return;
+    while (this.settledIds.size >= this.options.requestLimit) this.evictSettledId();
+    let lease = this.composition.bytes.reserve(256);
+    while (!lease && this.settledIds.size) {
+      this.evictSettledId();
+      lease = this.composition.bytes.reserve(256);
+    }
+    // Without capacity the ID is remembered unaccounted rather than forgotten: the window
+    // stays bounded by requestLimit either way.
+    this.settledIds.set(requestId, lease);
+  }
+
+  private evictSettledId(): void {
+    const oldest = this.settledIds.entries().next();
+    if (oldest.done) return;
+    this.settledIds.delete(oldest.value[0]);
+    oldest.value[1]?.release();
   }
 
   private async execute(request: Request): Promise<void> {
@@ -833,6 +876,7 @@ export class TerminalSubscriptions {
     if (request.settled) return;
     request.settled = true;
     this.requests.delete(request.internalId);
+    this.settleId(request.command.requestId);
     if (request.control) this.controlPending--;
     else this.ordinaryPending--;
     if (
@@ -892,8 +936,10 @@ export class TerminalSubscriptions {
     }
     this.routes.clear();
     for (const lease of this.requestLeases) lease.release();
-    this.requestLeases.length = 0;
+    this.requestLeases.clear();
     this.externalIds.clear();
+    for (const lease of this.settledIds.values()) lease?.release();
+    this.settledIds.clear();
     this.previewAttempts.clear();
     this.arena.release();
   }
@@ -902,7 +948,7 @@ export class TerminalSubscriptions {
     return {
       routes: this.routes.size,
       active: [...this.routes.values()].filter((entry) => entry.phase !== "retired").length,
-      identities: this.externalIds.size,
+      identities: this.externalIds.size + this.settledIds.size,
       pending: this.requests.size,
       route: route
         ? {
