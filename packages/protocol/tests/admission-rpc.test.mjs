@@ -432,7 +432,7 @@ test("unframable create cannot acquire a canonical write intent", () => {
   expect(
     canonicalOperationIntent(
       "terminal.create",
-      { ...create, geometry: { cols: 121, rows: 24 } },
+      { ...create, geometry: { cols: 501, rows: 24 } },
       encoder,
     ),
   ).toBeNull();

@@ -160,3 +160,20 @@ test("R09 failed candidate under a small VT cap preserves the prior checkpoint a
     engine.dispose();
   }
 });
+
+test("R-max ordinary text at the maximum grid with full history still yields a baseline", async () => {
+  const { maxCols, maxRows, historyLines } = M0_LIMITS;
+  const engine = model({ geometry: { cols: maxCols, rows: maxRows } });
+  try {
+    const line = `${"H".repeat(maxCols - 1)}\r\n`;
+    const total = historyLines + maxRows + 10;
+    let seq = 0;
+    for (let start = 0; start < total; start += 64)
+      await engine.apply(output(++seq), utf8(line.repeat(Math.min(64, total - start))));
+    const capture = await engine.captureBaseline();
+    expect(capture.status).toBe("ready");
+    expect(capture.baseline.currentGeometry).toEqual({ cols: maxCols, rows: maxRows });
+  } finally {
+    engine.dispose();
+  }
+});

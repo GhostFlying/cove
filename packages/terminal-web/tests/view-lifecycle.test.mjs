@@ -265,9 +265,9 @@ test("V1-L3 measures unequal and hidden containers without changing authoritativ
   expect(result.structural.screenHeight).toBeGreaterThan(0);
   for (const value of [result.small.measurement, result.large.measurement]) {
     expect(value.cols).toBeGreaterThanOrEqual(2);
-    expect(value.cols).toBeLessThanOrEqual(120);
+    expect(value.cols).toBeLessThanOrEqual(500);
     expect(value.rows).toBeGreaterThanOrEqual(2);
-    expect(value.rows).toBeLessThanOrEqual(40);
+    expect(value.rows).toBeLessThanOrEqual(200);
   }
 });
 

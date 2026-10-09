@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { M0_LIMITS } from "./budgets.js";
 import { SequenceSchema } from "./identity.js";
 
 export const PROFILE = "pragmatic-logical-grid-v1" as const;
@@ -6,8 +7,8 @@ export const BASELINE_ENCODING = "vt-checkpoint-tail-v1" as const;
 export const ProfileSchema = z.literal(PROFILE);
 export const BaselineEncodingSchema = z.literal(BASELINE_ENCODING);
 export const GeometrySchema = z.object({
-  cols: z.number().int().min(2).max(120),
-  rows: z.number().int().min(2).max(40),
+  cols: z.number().int().min(2).max(M0_LIMITS.maxCols),
+  rows: z.number().int().min(2).max(M0_LIMITS.maxRows),
 });
 export type Geometry = z.infer<typeof GeometrySchema>;
 

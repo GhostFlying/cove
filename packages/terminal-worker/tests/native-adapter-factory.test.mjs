@@ -1100,15 +1100,15 @@ test("resize, pause, and resume use only the owned public PTY handle", async () 
     const { createNativePtyFactory } = await loadFactoryModule();
     const result = createNativePtyFactory(limits()).spawn(spec(), observer());
     expect(result.kind).toBe("created");
-    result.pty.resize(120, 40);
+    result.pty.resize(500, 200);
     result.pty.pause();
     result.pty.pause();
     result.pty.resume();
     result.pty.resume();
-    expect(first.terminal.resize).toHaveBeenCalledWith(120, 40);
+    expect(first.terminal.resize).toHaveBeenCalledWith(500, 200);
     expect(first.terminal.pause).toHaveBeenCalledTimes(1);
     expect(first.terminal.resume).toHaveBeenCalledTimes(1);
-    expect(() => result.pty.resize(121, 40)).toThrow(RangeError);
+    expect(() => result.pty.resize(501, 200)).toThrow(RangeError);
   });
 });
 

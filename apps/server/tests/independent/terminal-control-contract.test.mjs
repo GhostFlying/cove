@@ -366,7 +366,7 @@ describe("P2-B2 independent actual compiled control contracts", () => {
         ).toBe("error");
         const invalid =
           type === "resize"
-            ? { geometry: { cols: 121, rows: 30 } }
+            ? { geometry: { cols: 501, rows: 30 } }
             : { appearance: { palette: [{ index: 1, rgb: "bad" }] } };
         expect((await c.service.handle(r.command(type, ref, { epoch, ...invalid }))).type).toBe(
           "error",

@@ -126,7 +126,7 @@ test("P06 finite payload and geometry limits reject before mutating parser", asy
     expect(
       (await engine.apply(output(1), new Uint8Array(M0_LIMITS.baselineTailBytes + 1))).error.code,
     ).toBe("invalid");
-    expect((await engine.apply(resize(1, 121))).error.code).toBe("invalid");
+    expect((await engine.apply(resize(1, M0_LIMITS.maxCols + 1))).error.code).toBe("invalid");
     expect((await engine.apply(output(1), utf8("A"))).ok).toBe(true);
   } finally {
     engine.dispose();

@@ -228,3 +228,24 @@ test("V11 callback disposal stops detached baseline copies after reservation", a
   expect(result).not.toHaveProperty("baseline.vt");
   expect((await engine.captureBaseline()).status).toBe("disposed");
 });
+
+test("V12 preview above the 120x40 cell bound is unavailable without a scratch reservation", async () => {
+  const requests = [];
+  const engine = model({
+    reserveRetainedBytes(bytes) {
+      requests.push(bytes);
+      return { release() {} };
+    },
+  });
+  try {
+    await engine.apply(resize(1, 121, 40));
+    requests.length = 0;
+    const preview = await engine.capturePreview();
+    expect(preview.status).toBe("unavailable");
+    expect(requests.filter((bytes) => bytes >= M0_LIMITS.previewBytesPerRun)).toEqual([]);
+    await engine.apply(resize(2, 120, 40));
+    expect((await engine.capturePreview()).status).toBe("ready");
+  } finally {
+    engine.dispose();
+  }
+});
