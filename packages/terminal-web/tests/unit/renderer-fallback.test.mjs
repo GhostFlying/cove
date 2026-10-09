@@ -3,7 +3,7 @@ import { RendererFallback, WEBGL_RETRY_DELAY_MS } from "../../dist/src/xterm-ren
 
 // Fake addons and timers drive the per-view fallback state machine without a GPU. The browser
 // harness test covers the same transitions with the real WebGL addon.
-function rig({ preferred = "webgl", failLoads = 0 } = {}) {
+function rig({ preferred = "webgl", failLoads = 0, onChange } = {}) {
   const log = [];
   const addons = [];
   const timers = [];
@@ -48,7 +48,10 @@ function rig({ preferred = "webgl", failLoads = 0 } = {}) {
         timer.cleared = true;
       },
     },
-    (renderer) => changes.push(renderer),
+    (renderer) => {
+      changes.push(renderer);
+      onChange?.(renderer, renderers);
+    },
   );
   const loseContext = (addon) => {
     for (const listener of [...addon.lossListeners]) listener();
@@ -225,4 +228,17 @@ test("throwing addon and terminal calls still degrade to DOM", () => {
   expect(() => renderers.attach(terminal("a"))).not.toThrow();
   expect(renderers.active).toBe("dom");
   expect(changes).toEqual([]);
+});
+
+test("a listener that disposes on the loss notification leaves no retry timer behind", () => {
+  const { renderers, addons, timers, changes, loseContext } = rig({
+    onChange: (renderer, owner) => {
+      if (renderer === "dom") owner.dispose();
+    },
+  });
+  renderers.attach(terminal("a"));
+  loseContext(addons[0]);
+  expect(changes).toEqual(["webgl", "dom"]);
+  expect(timers.filter((timer) => !timer.cleared)).toEqual([]);
+  expect(addons).toHaveLength(1);
 });
