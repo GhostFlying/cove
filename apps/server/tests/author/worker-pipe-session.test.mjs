@@ -307,17 +307,33 @@ describe("bounded worker pipe session", () => {
     runMismatch.session.transportReleased();
   });
 
-  it("retains completed request identity and refuses reuse or identity cap plus one", async () => {
+  // Contract change: identityLimit bounds in-flight requests only. Callers mint worker
+  // request IDs from monotonic counters, so retaining settled IDs only exhausted the cap and
+  // made every later request on the worker BUSY for the life of the server.
+  it("refuses in-flight identity reuse and cap plus one but releases identities on settlement", async () => {
     const f = fixture({ ...M0_LIMITS }, 1);
     f.start();
-    const command = f.command("stop", "first", { operationId: "operation" });
-    const pending = f.session.request(command);
-    f.session.receive(f.reply(command, { operationId: "operation" }));
-    await pending;
-    expect((await f.session.request(command)).error.kind).toBe("COUNTER_EXHAUSTED");
+    const first = f.command("stop", "first", { operationId: "operation" });
+    const pending = f.session.request(first);
+    expect((await f.session.request(first)).error.kind).toBe("COUNTER_EXHAUSTED");
     expect((await f.session.request(f.command("status", "second"))).error.kind).toBe("BUSY");
-    expect(f.writes).toHaveLength(2);
+    f.session.receive(f.reply(first, { operationId: "operation" }));
+    expect((await pending).outcome).toBe("accepted");
+    expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
+    // Far more settled requests than identityLimit never exhaust the session.
+    for (let index = 0; index < 8; index++) {
+      const stop = f.command("stop", `stop-${index}`, { operationId: `operation-${index}` });
+      const result = f.session.request(stop);
+      f.session.receive(f.reply(stop, { operationId: `operation-${index}` }));
+      expect((await result).outcome).toBe("accepted");
+    }
+    expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
+    // Contact loss settles in-flight identities too.
+    const lost = f.session.request(f.command("status", "lost"));
+    expect(f.session.snapshot().identities).toBe(1);
     f.session.loseContact();
+    expect((await lost).error.kind).toBe("RESULT_UNKNOWN");
+    expect(f.session.snapshot().identities).toBe(0);
     f.session.transportReleased();
   });
 
