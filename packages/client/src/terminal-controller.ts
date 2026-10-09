@@ -326,8 +326,6 @@ export class RoutedTerminalController implements TerminalController {
         ? this.operation.promise
         : Promise.resolve(errorOutcome(localError("invalid-state")));
     if (this.ref) return Promise.resolve(errorOutcome(localError("invalid-state")));
-    if (this.host.lane.retiredCount >= 256)
-      return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
     const binding = this.host.binding();
     if (!binding) return Promise.resolve(errorOutcome(localError("invalid-state")));
     const requestId = this.host.lane.nextRequestId(this.host.generation());
@@ -1830,8 +1828,7 @@ export class RoutedTerminalController implements TerminalController {
       if (ref) {
         this.host.lane.cancelUnsent(ref, ["focus", "blur", "resize", "appearance", "input"]);
         this.host.lane.cancelUnsentControl(ref);
-        if (rememberRef && !this.host.lane.retire(ref) && this.currentConnection(ref))
-          this.host.retireConnection();
+        if (rememberRef) this.host.lane.retire(ref);
       }
     } finally {
       this.retiring = false;

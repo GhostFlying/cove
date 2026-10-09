@@ -2154,7 +2154,7 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
-  test("retired ref cap is shared by all controllers on the connection", async () => {
+  test("attach/detach cycles never exhaust the connection and retired refs stay fenced", async () => {
     let serial = 0;
     const { client, peer } = await harness((command, peer) => {
       if (command.type === "attach") {
@@ -2170,34 +2170,69 @@ describe("public terminal subscription and recovery", () => {
         });
       else settleControl(command, peer);
     });
+    const firstView = view();
     const first = client.openTerminal({
       run,
       viewId: "first",
-      view: view().terminalView,
+      view: firstView.terminalView,
       initialAppearance: DEFAULT_APPEARANCE,
     }).value;
+    const rendered = view();
     const second = client.openTerminal({
       run,
       viewId: "second",
-      view: view().terminalView,
+      view: rendered.terminalView,
       initialAppearance: DEFAULT_APPEARANCE,
     }).value;
-    for (let index = 0; index < 256; index++) {
+    for (let index = 0; index < 300; index++) {
       const attached = first.attach();
       baseline(peer, subscription("first", `subscription-${index + 1}`));
       expect((await attached).ok).toBe(true);
       expect((await first.detach()).ok).toBe(true);
     }
-    expect(await second.attach()).toMatchObject({
-      ok: false,
-      error: { kind: "COUNTER_EXHAUSTED" },
-    });
-    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(256);
+    const secondAttach = second.attach();
+    baseline(peer, subscription("second", "subscription-301"));
+    expect((await secondAttach).ok).toBe(true);
+    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(301);
+    expect(client.terminalLane.retiredCount).toBe(256);
+    expect(client.snapshot().status).toBe("connected");
+
+    // Late frames for retired refs, inside and beyond the recent window, reach no view.
+    const acks = () => peer.commands.filter((command) => command.type === "applied-ack").length;
+    const before = acks();
+    for (const id of ["subscription-1", "subscription-300"])
+      peer.emit(
+        3,
+        {
+          type: "run-event",
+          subscription: subscription("first", id),
+          event: { type: "output", run, seq: 4 },
+        },
+        new Uint8Array([88]),
+      );
+    await settle();
+    expect(acks()).toBe(before);
+    expect(firstView.facts.some((fact) => fact[0] === "event")).toBe(false);
+    expect(rendered.facts.some((fact) => fact[0] === "event")).toBe(false);
+    peer.emit(
+      3,
+      {
+        type: "run-event",
+        subscription: subscription("second", "subscription-301"),
+        event: { type: "output", run, seq: 4 },
+      },
+      new Uint8Array([65]),
+    );
+    await settle();
+    expect(second.snapshot().appliedSeq).toBe(4);
+    expect(rendered.facts).toContainEqual(["event", 4, [65]]);
+    expect(client.snapshot().status).toBe("connected");
     first.dispose();
     second.dispose();
     client.dispose();
   });
-  test("two active refs cannot overflow the last tombstone slot", async () => {
+
+  test("two active refs retire past the recent tombstone window without retiring the connection", async () => {
     let serial = 0;
     const { client, peer } = await harness((command, peer) => {
       if (command.type === "attach") {
@@ -2239,7 +2274,10 @@ describe("public terminal subscription and recovery", () => {
     expect((await bp).ok).toBe(true);
     expect((await a.detach()).ok).toBe(true);
     expect((await b.detach()).ok).toBe(true);
-    expect(client.snapshot().status).toBe("unverifiable");
+    expect(client.snapshot().status).toBe("connected");
+    const again = a.attach();
+    baseline(peer, subscription("a", "subscription-258"));
+    expect((await again).ok).toBe(true);
     a.dispose();
     b.dispose();
     client.dispose();
