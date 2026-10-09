@@ -714,8 +714,8 @@ const fixture = {
       container.style.height = "";
     }
   },
-  // Disposing the view from a renderer-change listener while it builds its xterm must not leave
-  // that xterm behind or revive the view.
+  // Disposing the view from the renderer-change listener notified by initialize must not leave
+  // the new xterm behind or revive the view.
   async disposeOnRendererChange() {
     view?.dispose();
     view = undefined;
@@ -746,6 +746,50 @@ const fixture = {
     };
     candidate.dispose();
     return result;
+  },
+  // A renderer-change listener that initializes a newer generation when it sees the DOM renderer,
+  // while an older initialize retires a WebGL backend. The retirement must not let the listener's
+  // successor be overwritten and leaked by the older initialize.
+  async reinitializeOnRendererChange() {
+    view?.dispose();
+    view = undefined;
+    container.replaceChildren();
+    const candidate = createXtermTerminalView(container);
+    const initializeAt = (viewGeneration: number) =>
+      candidate.initialize({
+        profile: "pragmatic-logical-grid-v1",
+        encoding: "vt-checkpoint-tail-v1",
+        geometry: { cols: 40, rows: 10 },
+        appearance,
+        viewGeneration,
+      });
+    const kindOf = (caught: unknown) => (caught as DomainError).kind ?? String(caught);
+    await initializeAt(++generation);
+    const seen: string[] = [];
+    let nested: Promise<string | undefined> | undefined;
+    candidate.onRendererChange((renderer) => {
+      seen.push(renderer);
+      if (renderer === "dom" && !nested)
+        nested = initializeAt(++generation).then(() => undefined, kindOf);
+    });
+    let error: string | undefined;
+    try {
+      await initializeAt(++generation);
+    } catch (caught) {
+      error = kindOf(caught);
+    }
+    const nestedError = await nested;
+    const roots = () => container.querySelectorAll("[data-cove-terminal-view]").length;
+    const ownedRoots = roots();
+    candidate.dispose();
+    return {
+      webgl2: offersWebgl2,
+      seen,
+      error,
+      nestedError,
+      ownedRoots,
+      rootsAfterDispose: roots(),
+    };
   },
   // The live WebGL contexts in the terminal; the addon's 2D link layer canvas has none.
   webglContexts() {

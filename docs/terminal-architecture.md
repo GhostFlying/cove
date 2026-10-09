@@ -367,6 +367,7 @@ WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到�
 - 策略按 view 而非 xterm 实例保存：新基线重建 xterm 不会重置重试次数；等待重试期间新建的实例先用 DOM，
   由重试升级当前实例。view 重新可见时重建 glyph atlas 并重绘；dispose 释放 addon、GPU context 和重试定时器。
 - 当前 renderer 只读暴露（`renderer`、`onRendererChange`），用于诊断与测试；controller 与协议不感知 renderer。
+- `onRendererChange` 只在视图状态转换（initialize、baseline 重建、致命退役）提交之后通知，且只报告与上次通知不同的当前 renderer；转换中途的 attach/detach 不会同步回调监听者，避免监听者重入视图而覆盖或泄漏其后继 xterm。
 - 两种 renderer 的 cell 宽度不同（WebGL 对齐设备像素），切换后 `measureGrid` 可能给出不同网格；
   这是可见网格的真实变化，只有持有控制权的客户端按常规 resize 流程跟随，不用 resize 恢复绘制。
 - 网格测量取宿主内容区的小数宽度，扣除 xterm 叠加在右缘的纵向滚动条（xterm 6 默认 14px），并向下取整，

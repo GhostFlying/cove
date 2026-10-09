@@ -657,15 +657,32 @@ test("V1-L12 releases the WebGL context of an xterm retired by a baseline or by 
   );
 });
 
-test("V1-L13 a view disposed by its renderer-change listener during initialize stays disposed", async () => {
+test("V1-L13 a view disposed by its renderer-change listener on initialize stays disposed", async () => {
   const result = await withViewPage(async (page) =>
     page.evaluate(() => window.coveView.disposeOnRendererChange()),
   );
-  // The initial WebGL notification arrives while the xterm is being built; without WebGL2 there
-  // is no notification and the view initializes normally.
+  // The initial WebGL notification arrives once initialize has committed, and the listener's
+  // dispose then retires the new xterm; without WebGL2 there is no notification and the view
+  // stays initialized.
   expect(result).toEqual(
     result.webgl2
-      ? { webgl2: true, changes: 1, error: "RESYNC_REQUIRED", ownedRoots: 0 }
+      ? { webgl2: true, changes: 1, error: undefined, ownedRoots: 0 }
       : { webgl2: false, changes: 0, error: undefined, ownedRoots: 1 },
   );
+});
+
+test("V1-L14 a renderer-change listener cannot interleave with a transition and leak its successor", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.reinitializeOnRendererChange()),
+  );
+  // Renderer changes are delivered only after a transition commits. Retiring one WebGL xterm and
+  // attaching the next is no change, so the listener is not called and nothing is overwritten.
+  expect(result).toEqual({
+    webgl2: result.webgl2,
+    seen: [],
+    error: undefined,
+    nestedError: undefined,
+    ownedRoots: 1,
+    rootsAfterDispose: 0,
+  });
 });
