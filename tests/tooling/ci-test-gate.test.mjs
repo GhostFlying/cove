@@ -135,7 +135,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
   const files = await readVitestOwnedTestFiles();
   const registrations = [
     ["author", "runtime-admission", 21],
-    ["author", "local-entry", 48],
+    ["author", "local-entry", 49],
     ["independent", "qualified-local-admission", 4],
     ["author", "worker-pipe-session", 11],
     ["author", "operation-receipts", 15],

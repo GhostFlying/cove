@@ -233,7 +233,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/local-entry.test.mjs",
-    minimumTests: 48,
+    minimumTests: 49,
   },
   {
     project: "server",

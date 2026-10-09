@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WorkerRef } from "@cove/protocol/identity";
+import { MAX_READ_BYTES } from "@cove/protocol/pipe";
 import { WorkerPipeSession } from "./worker-pipe-session.js";
 import type { LocalRuntime } from "./local-runtime.js";
 import type { LocalTimer } from "./local-runtime-clock.js";
@@ -121,17 +122,15 @@ export class WorkerProcess {
       this.session.loseContact();
     });
     child.stdout.on("data", (bytes: Buffer) => {
-      try {
-        const consumed = this.session.receive(bytes);
-        if (consumed !== bytes.byteLength && !this.session.closed) this.session.loseContact();
-        if (this.session.ready && !this.readySettled) {
-          this.readySettled = true;
-          this.readyResolve();
-        }
-      } catch {
-        this.fail("pipe");
-        this.session.loseContact();
+      if (this.session.closed) return;
+      // Defensive: a paused Readable should not emit, but never reorder behind a backlog.
+      if (this.ingress.length !== 0) {
+        this.queueIngress(child, bytes);
+        return;
       }
+      const consumed = this.receiveSlice(bytes);
+      if (consumed !== undefined && consumed < bytes.byteLength)
+        this.queueIngress(child, bytes.subarray(consumed));
     });
     child.stdout.once("end", () => this.session.loseContact());
     child.once("exit", () => {
@@ -151,6 +150,102 @@ export class WorkerProcess {
       void this.close();
     }
   }
+  // Ingress invariant: worker stdout bytes reach the session exactly once and in arrival
+  // order. FrameDecoder.read stops after MAX_READ_FRAMES or MAX_READ_BYTES ("budget") so one
+  // read cannot monopolise the event loop; whatever the session did not consume is still
+  // owned here, not a protocol fault. That remainder is resubmitted on a later turn while
+  // stdout stays paused, so the backlog never grows beyond the chunks already delivered and
+  // the pipe's own backpressure reaches the worker. A genuine decode or validation fault
+  // closes the session inside receive(), which drops the backlog.
+  //
+  // ingressBytes counts the backing stores actually kept alive, not the views into them: a
+  // small remainder view can pin a much larger read buffer, so every retained remainder is
+  // first copied into right-sized storage. The count only drops when an entry is released,
+  // because a partially consumed entry still pins its whole copy.
+  private readonly ingress: Uint8Array[] = [];
+  private ingressBytes = 0;
+  private ingressScheduled = false;
+
+  // Returns the consumed byte count, or undefined once contact is lost.
+  private receiveSlice(bytes: Uint8Array): number | undefined {
+    // The session refuses backings larger than one read budget so it never retains a
+    // hostile buffer; copy only the slice offered to this read.
+    const slice =
+      bytes.buffer.byteLength > MAX_READ_BYTES
+        ? new Uint8Array(bytes.subarray(0, MAX_READ_BYTES))
+        : bytes;
+    let consumed: number;
+    try {
+      consumed = this.session.receive(slice);
+    } catch {
+      this.fail("pipe");
+      this.session.loseContact();
+      return undefined;
+    }
+    if (this.session.ready && !this.readySettled) {
+      this.readySettled = true;
+      this.readyResolve();
+    }
+    if (this.session.closed) return undefined;
+    // An open session that made no progress on non-empty input can never drain it.
+    if (consumed === 0 && slice.byteLength !== 0) {
+      this.session.loseContact();
+      return undefined;
+    }
+    return consumed;
+  }
+
+  private queueIngress(child: ChildProcessWithoutNullStreams, bytes: Uint8Array): void {
+    // Check the cap before copying so an oversized remainder is never duplicated.
+    if (this.ingressBytes + bytes.byteLength > this.runtime.composition.budgets.pipeQueuedBytes) {
+      this.dropIngress(child);
+      this.session.loseContact();
+      return;
+    }
+    const owned = new Uint8Array(bytes);
+    this.ingress.push(owned);
+    this.ingressBytes += owned.buffer.byteLength;
+    child.stdout.pause();
+    if (this.ingressScheduled) return;
+    this.ingressScheduled = true;
+    setImmediate(() => this.pumpIngress(child));
+  }
+
+  // One budgeted read per turn; resume stdout only after the backlog is fully consumed.
+  private pumpIngress(child: ChildProcessWithoutNullStreams): void {
+    this.ingressScheduled = false;
+    const head = this.ingress[0];
+    if (!head || this.session.closed) {
+      this.dropIngress(child);
+      return;
+    }
+    const consumed = this.receiveSlice(head);
+    if (consumed === undefined) {
+      this.dropIngress(child);
+      return;
+    }
+    if (consumed < head.byteLength) {
+      this.ingress[0] = head.subarray(consumed);
+    } else {
+      this.ingress.shift();
+      this.ingressBytes -= head.buffer.byteLength;
+    }
+    if (this.ingress.length !== 0) {
+      this.ingressScheduled = true;
+      setImmediate(() => this.pumpIngress(child));
+      return;
+    }
+    child.stdout.resume();
+  }
+
+  // After contact loss nothing more is decoded; keep stdout flowing so the worker is never
+  // blocked on a full pipe while it is being shut down.
+  private dropIngress(child: ChildProcessWithoutNullStreams): void {
+    this.ingress.length = 0;
+    this.ingressBytes = 0;
+    child.stdout.resume();
+  }
+
   tick(): void {
     this.session.tick();
   }
@@ -220,6 +315,7 @@ export class WorkerProcess {
       writerClosed: this.writerClosed,
       directlyOwnedLeaderExited: this.leaderExited,
       firstError: this.firstError ?? null,
+      ingressRetainedBytes: this.ingressBytes,
     };
   }
 }
