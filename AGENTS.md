@@ -47,9 +47,10 @@ decisions without concrete evidence or a user request.
   disjoint files. Plans are short and live in the PR or Issue, not in separate
   per-task plan/result documents.
 - Each PR gets one full independent review from an agent that did not write it:
-  codex `gpt-6.1-sol` xhigh and/or local TraeX `gpt-5.6-sol` xhigh. Substantive
-  PRs use both in parallel; docs-only or test-expectation PRs use one. Reviewers
-  report all findings in one batch; fixes get a single delta re-review.
+  codex `gpt-6.1-sol` xhigh by default. Local TraeX `gpt-5.6-sol` xhigh is a
+  fallback when codex is unavailable, or an optional second reviewer for
+  high-risk protocol/recovery changes. Reviewers report all findings in one
+  batch; fixes get a single delta re-review.
 - Route local TraeX through `warmpool run -- traex ...` with explicit
   `gpt-5.6-sol` and xhigh reasoning effort. Do not use the delegation plugin.
   Warm hits are an optimization: dispatch through warmpool even when warm=0.
