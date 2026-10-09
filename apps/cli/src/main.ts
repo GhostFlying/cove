@@ -28,6 +28,16 @@ const RENDEZVOUS_WAIT_MS = 20_000;
 
 class UsageError extends Error {}
 
+// A failure that should end the CLI with a specific status, such as a server child's own.
+class StatusError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 interface Arguments {
   readonly words: string[];
   readonly flags: Map<string, string[]>;
@@ -374,8 +384,12 @@ async function serverStart(args: Arguments): Promise<number> {
         pid: child.pid,
       });
     } catch (error) {
+      // A child that ended on its own before readiness owns the status; one we stop here
+      // (timeout or foreign record) is a CLI failure and keeps the generic status.
+      const endedOnItsOwn = child.exitCode !== null || child.signalCode !== null;
       child.kill("SIGTERM");
-      await exit;
+      const status = await exit;
+      if (endedOnItsOwn && error instanceof Error) throw new StatusError(error.message, status);
       throw error;
     }
   } finally {
@@ -419,6 +433,7 @@ run(process.argv.slice(2)).then(
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`cove: ${message}\n`);
     if (error instanceof UsageError) process.stderr.write(`${USAGE}\n`);
-    process.exitCode = error instanceof UsageError ? 2 : 1;
+    process.exitCode =
+      error instanceof UsageError ? 2 : error instanceof StatusError ? error.status : 1;
   },
 );
