@@ -1802,7 +1802,7 @@ describe("input right after a focus grant (Issue #21)", () => {
   });
 });
 
-describe("a resize to another grid and the recovery it triggers", () => {
+describe("resize and focus around a resize-context recovery", () => {
   const larger = { cols: 100, rows: 30 };
   const self = { connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId };
   const other = { connection, viewId: "view-2", subscriptionId: "subscription-9" };
@@ -1894,5 +1894,93 @@ describe("a resize to another grid and the recovery it triggers", () => {
     await settle();
     peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
     expect(await resize).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+  });
+
+  // Another client's resize forces this one, which holds no grant, through a recovery.
+  async function recovering() {
+    const scheduler = clock();
+    const fixture = await harness({ scheduler });
+    fixture.controller.setInputTarget(true, true);
+    fixture.peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
+    await settle();
+    expect(fixture.controller.snapshot().phase).not.toBe("ready");
+    expect(ofType(fixture.peer, "recover")).toHaveLength(1);
+    return { ...fixture, scheduler };
+  }
+
+  test("a focus requested during a recovery is sent once the recovery reaches ready", async () => {
+    const { controller, peer } = await recovering();
+    const focus = track(controller.requestFocus(larger));
+    await settle();
+    // Deferred, not rejected, and the recovery itself sends no focus.
+    expect(focus.settled).toBe(false);
+    expect(ofType(peer, "focus")).toHaveLength(0);
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    const command = ofType(peer, "focus")[0].command;
+    expect(command).toMatchObject({ geometry: larger });
+    peer.result(command, { epoch: 1, atSeq: 2 });
+    expect(await focus.promise).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+    peer.event({ type: "control", run, seq: 2, epoch: 1, holder: self, geometry: larger });
+    await settle();
+    expect(controller.snapshot()).toMatchObject({ phase: "ready", inputReady: true });
+  });
+
+  test("a deferred focus is cancelled when the input target is unfocused", async () => {
+    const { controller, peer } = await recovering();
+    const focus = controller.requestFocus(larger);
+    await settle();
+    controller.setInputTarget(true, false);
+    expect(await focus).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    expect(ofType(peer, "focus")).toHaveLength(0);
+  });
+
+  test("a deferred focus is cancelled when the view is replaced", async () => {
+    const { controller, peer } = await recovering();
+    const focus = controller.requestFocus(larger);
+    await settle();
+    void controller.replaceView(view().terminalView);
+    expect(await focus).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(0);
+  });
+
+  test("a deferred focus fails when the recovery fails", async () => {
+    const { controller, peer } = await recovering();
+    const focus = controller.requestFocus(larger);
+    await settle();
+    const recover = ofType(peer, "recover")[0].command;
+    peer.emit(4, {
+      type: "error",
+      requestId: recover.requestId,
+      run,
+      commandType: "recover",
+      error: domainError("RESYNC_REQUIRED"),
+    });
+    expect(await focus).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    expect(controller.snapshot().phase).toBe("unavailable");
+    expect(ofType(peer, "focus")).toHaveLength(0);
+  });
+
+  test("a deferred focus gives up within the recovery budget", async () => {
+    const { controller, peer, scheduler } = await recovering();
+    const focus = track(controller.requestFocus(larger));
+    await settle();
+    scheduler.advance(M0_LIMITS.recoveryDeadlineMs - 1);
+    await settle();
+    expect(focus.settled).toBe(false);
+    scheduler.advance(1);
+    expect(await focus.promise).toMatchObject({ ok: false });
+    expect(ofType(peer, "focus")).toHaveLength(0);
   });
 });

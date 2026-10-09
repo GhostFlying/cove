@@ -650,6 +650,38 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(after.local).toEqual(B.recording.screen());
   });
 
+  test("S3 a client takes focus right after another client's resize, while it recovers", async () => {
+    const run = await createRun(PROBE);
+    const resizer = await connectClient();
+    const watcher = await connectClient();
+    const R = await attach(resizer, run, "s3-resizer");
+    const W = await attach(watcher, run, "s3-watcher");
+    await waitFor("the probe on both views", () =>
+      [R, W].every(({ recording }) => recording.text().includes("probe-ready")),
+    );
+    await focusAndType(R.controller, "size before\r");
+    await waitFor("the first size on the watcher", () =>
+      W.recording.text().includes("size-before:24 80"),
+    );
+
+    // The resize forces the watcher through a baseline recovery. The user clicks into the
+    // watcher the moment that recovery starts; the test does not wait for it to finish.
+    expect(W.controller.setInputTarget(true, true)).toMatchObject({ ok: true });
+    let focus;
+    const started = W.controller.onState((snapshot) => {
+      if (!focus && snapshot.phase !== "ready") focus = W.controller.requestFocus();
+    });
+    expect(await R.controller.requestResize({ cols: 100, rows: 30 })).toMatchObject({ ok: true });
+    await waitFor("the watcher's recovery to start", () => focus !== undefined);
+    started.dispose();
+    expect(await focus).toMatchObject({ ok: true });
+    // The watcher took control at its own 80x24 grid and types right away.
+    await typeText(W.controller, "size after-focus\r");
+    await waitFor("the watcher's size on the PTY", () =>
+      W.recording.text().includes("size-after-focus:24 80"),
+    );
+  });
+
   test("S7 the server retires a slow client's subscription while a healthy client keeps working", async () => {
     const run = await createRun(PROBE);
     const slow = await connectTapped();

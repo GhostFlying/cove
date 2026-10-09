@@ -543,6 +543,13 @@ export class RoutedTerminalController implements TerminalController {
 
   async requestFocus(geometry?: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>> {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
+    // A user's focus during a recovery (e.g. the baseline another client's resize forces on this
+    // one) is deferred, not rejected: it is sent once the recovery reaches ready. The recovery
+    // itself still never sends focus; this is the user's request, only delayed.
+    if (this.phase !== "ready" && this.operation?.kind === "recover") {
+      const deferred = await this.waitForRecoveryReady();
+      if (deferred !== "ready") return { ok: false, error: localError(deferred) };
+    }
     const ref = this.ref;
     const binding = this.host.binding();
     if (
@@ -670,6 +677,61 @@ export class RoutedTerminalController implements TerminalController {
       if (settledFocus !== "usable") return { ok: false, error: localError(settledFocus) };
     }
     return granted;
+  }
+
+  // Waits for the recovery in progress to reach ready for a deferred focus. It gives up when the
+  // input target is unfocused, the view is replaced, the subscription or connection changes, or
+  // the recovery fails, and after the recovery deadline budget measured from the request: a
+  // recovery has the same budget, so a longer wait could only outlive a failed one.
+  private waitForRecoveryReady(): Promise<"ready" | "invalid-state" | "timeout"> {
+    const ref = this.ref;
+    const binding = this.host.binding();
+    const view = this.view;
+    const operation = this.operation;
+    if (!ref || !binding || !operation || !this.control.wantsFocus)
+      return Promise.resolve("invalid-state");
+    return new Promise((resolve) => {
+      let settled = false;
+      let state: Disposable | undefined;
+      let timer: Disposable | undefined;
+      const finish = (outcome: "ready" | "invalid-state" | "timeout"): void => {
+        if (settled) return;
+        settled = true;
+        safeDispose(state);
+        safeDispose(timer);
+        resolve(outcome);
+      };
+      // Each baseline bumps viewGeneration, so the recovery being awaited changes it too; only a
+      // replaced view (which also clears the input target) cancels the deferred focus.
+      const check = (): void => {
+        if (
+          this.ref !== ref ||
+          this.view !== view ||
+          this.host.binding() !== binding ||
+          !this.control.wantsFocus ||
+          this.phase === "disposed" ||
+          this.phase === "unavailable" ||
+          this.phase === "idle" ||
+          (this.phase !== "ready" && this.operation !== operation)
+        )
+          finish("invalid-state");
+        else if (this.phase === "ready") finish("ready");
+      };
+      state = this.onState(check);
+      try {
+        timer = this.host.scheduler.setTimer(
+          Math.min(binding.effectiveBudgets.recoveryDeadlineMs, M0_LIMITS.recoveryDeadlineMs),
+          () => finish("timeout"),
+        );
+      } catch {
+        finish("invalid-state");
+      }
+      if (settled) {
+        safeDispose(state);
+        safeDispose(timer);
+      }
+      check();
+    });
   }
 
   private waitForGrantSettled(
