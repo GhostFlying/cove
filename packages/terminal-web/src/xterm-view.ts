@@ -1,5 +1,5 @@
 import { WebglAddon } from "@xterm/addon-webgl";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITerminalInitOnlyOptions, type ITerminalOptions } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { DomainErrorSchema, domainError, type DomainError } from "@cove/protocol/errors";
@@ -49,6 +49,19 @@ export interface XtermTerminalView extends TerminalView {
   onRendererChange(listener: (renderer: XtermRenderer) => void): { dispose(): void };
 }
 
+// Every option that affects cell metrics is shared with estimateXtermGrid.
+const terminalOptions = (geometry: Geometry): ITerminalOptions & ITerminalInitOnlyOptions => ({
+  cols: geometry.cols,
+  rows: geometry.rows,
+  scrollback: M0_LIMITS.historyLines,
+  convertEol: false,
+  cursorBlink: false,
+  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+  fontSize: 14,
+  lineHeight: 1,
+  letterSpacing: 0,
+});
+
 const defaultRenderer = (): XtermRenderer =>
   typeof WebGL2RenderingContext === "function" ? "webgl" : "dom";
 
@@ -83,6 +96,54 @@ function disposeWebglAddon(addon: WebglAddon): void {
       canvas.width = 0;
       canvas.height = 0;
     }
+  }
+}
+
+// The grid a view would measure in `container` before any view exists there, such as the size
+// for creating a terminal. It opens a hidden xterm with the view's options and, for WebGL, the
+// WebGL renderer, so it reads the same device cell the live view will, and a later measureGrid of
+// the live view returns this same grid unless the space or the renderer changed. Returns
+// undefined when the container cannot be measured.
+export function estimateXtermGrid(
+  container: HTMLElement,
+  options: XtermTerminalViewOptions = {},
+): Geometry | undefined {
+  const host = container.ownerDocument.createElement("div");
+  host.style.cssText =
+    "position:absolute;left:0;top:0;width:0;height:0;overflow:hidden;visibility:hidden";
+  let terminal: Terminal | undefined;
+  let addon: WebglAddon | undefined;
+  try {
+    container.append(host);
+    terminal = new Terminal(terminalOptions({ cols: 80, rows: 24 }));
+    terminal.open(host);
+    if ((options.renderer ?? defaultRenderer()) === "webgl") {
+      try {
+        addon = new WebglAddon();
+        loadWebglAddon(terminal, addon);
+      } catch {
+        // The live view falls back to DOM too; measure the DOM renderer's cells.
+        const failed = addon;
+        addon = undefined;
+        if (failed) disposeWebglAddon(failed);
+      }
+    }
+    const unmeasurable = { cols: 0, rows: 0 };
+    const grid = measureTerminalGrid(terminal, container, unmeasurable);
+    return grid === unmeasurable ? undefined : grid;
+  } catch {
+    return undefined;
+  } finally {
+    for (const release of [
+      () => addon && disposeWebglAddon(addon),
+      () => terminal?.dispose(),
+      () => host.remove(),
+    ])
+      try {
+        release();
+      } catch {
+        // An estimate never fails its caller; the hidden host is removed regardless.
+      }
   }
 }
 
@@ -296,15 +357,7 @@ export function createXtermTerminalView(
     let origin: InputOriginAttachment | undefined;
     try {
       terminal = new Terminal({
-        cols: targetGeometry.cols,
-        rows: targetGeometry.rows,
-        scrollback: M0_LIMITS.historyLines,
-        convertEol: false,
-        cursorBlink: false,
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-        fontSize: 14,
-        lineHeight: 1,
-        letterSpacing: 0,
+        ...terminalOptions(targetGeometry),
         theme: xtermTheme(targetAppearance),
       });
       origin = attachInputOrigin(

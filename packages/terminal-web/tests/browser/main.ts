@@ -1,5 +1,9 @@
 import { Terminal } from "@xterm/xterm";
-import { createXtermTerminalView, type XtermTerminalView } from "@cove/terminal-web/xterm-view";
+import {
+  createXtermTerminalView,
+  type XtermTerminalView,
+  type XtermTerminalViewOptions,
+} from "@cove/terminal-web/xterm-view";
 import { QUERY_SUPPORT, type Appearance, type Geometry } from "@cove/protocol/profile";
 import type { BaselineDescriptor, TerminalEvent } from "@cove/protocol/terminal";
 import type { DomainError } from "@cove/protocol/errors";
@@ -103,10 +107,13 @@ function retiredEvidence(
   };
 }
 
-async function initialize(geometry: Geometry = { cols: 40, rows: 10 }): Promise<void> {
+async function initialize(
+  geometry: Geometry = { cols: 40, rows: 10 },
+  options: XtermTerminalViewOptions = {},
+): Promise<void> {
   view?.dispose();
   container.replaceChildren();
-  view = createXtermTerminalView(container);
+  view = createXtermTerminalView(container, options);
   inputs = [];
   focuses = [];
   failures = [];
@@ -639,6 +646,72 @@ const fixture = {
       return "ok";
     } catch (error) {
       return (error as DomainError).kind ?? "unknown";
+    }
+  },
+  // Sweeps container widths just around the rendered width of a few column counts, at a forced
+  // device pixel ratio, and reports what the view measured, whether measuring again after
+  // applying that grid agrees, and the renderer's own rounded screen sizes for the grid and one
+  // more column or row. The scrollbar reservation is 14 px (xterm 6 default).
+  async fitSweep(renderer: "webgl" | "dom", ratio: number) {
+    const original = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    Object.defineProperty(window, "devicePixelRatio", { configurable: true, get: () => ratio });
+    try {
+      await initialize({ cols: 40, rows: 10 }, { renderer });
+      await ready();
+      const dimensions = () =>
+        (
+          capturedTerminal as unknown as {
+            _core: {
+              _renderService: {
+                dimensions: {
+                  device: { cell: { width: number; height: number } };
+                  css: { canvas: { width: number; height: number } };
+                };
+              };
+            };
+          }
+        )._core._renderService.dimensions;
+      const { width: cellWidth, height: cellHeight } = dimensions().device.cell;
+      const extent = (count: number, cell: number) => Math.round((cell * count) / ratio);
+      const results = [];
+      let seq = 1;
+      for (const columns of [31, 47, 64])
+        for (const delta of [-0.3, -0.05, 0, 0.05, 0.3, 0.55]) {
+          const available = { width: extent(columns, cellWidth) + delta, height: 0 };
+          available.height = extent(Math.floor(columns / 3), cellHeight) + delta;
+          container.style.width = `${available.width + 14}px`;
+          container.style.height = `${available.height}px`;
+          const first = view!.measureGrid();
+          await view!.applyEvent({
+            type: "resize",
+            run,
+            seq: seq++,
+            geometry: first,
+            requiresBaseline: false,
+          });
+          const second = view!.measureGrid();
+          const css = dimensions().css.canvas;
+          results.push({
+            renderer: view!.renderer,
+            ratio,
+            columns,
+            delta,
+            available,
+            first,
+            second,
+            screen: { width: css.width, height: css.height },
+            oneMore: {
+              width: extent(first.cols + 1, cellWidth),
+              height: extent(first.rows + 1, cellHeight),
+            },
+          });
+        }
+      return results;
+    } finally {
+      if (original) Object.defineProperty(window, "devicePixelRatio", original);
+      else delete (window as { devicePixelRatio?: number }).devicePixelRatio;
+      container.style.width = "";
+      container.style.height = "";
     }
   },
   async attemptConstructionFailure() {
