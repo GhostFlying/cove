@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, lstat, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { constants } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { CallOutcome, Client } from "@cove/client";
 import { M0_LIMITS } from "@cove/protocol/budgets";
@@ -354,7 +355,10 @@ async function serverStart(args: Arguments): Promise<number> {
     );
     exit = new Promise<number>((done) => {
       child.once("error", () => done(1));
-      child.once("exit", (code, signal) => done(code ?? (signal ? 1 : 0)));
+      // Report the server's own status; a signal death uses the shell's 128 + N convention.
+      child.once("exit", (code, signal) =>
+        done(code ?? (signal ? 128 + (constants.signals[signal] ?? 0) : 1)),
+      );
     });
     // The server retires its rendezvous and PTYs on SIGINT/SIGTERM; forward them instead of
     // dying first so the operator's Ctrl-C always reaches an orderly shutdown.
