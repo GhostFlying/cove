@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
@@ -4438,5 +4439,31 @@ describe("H1 RPC domain errors", () => {
         expect(error.data).not.toHaveProperty("subject");
       }
     });
+  });
+});
+
+describe("H1 server process hygiene", () => {
+  it("composing the application emits no Fastify deprecation warning", async () => {
+    // Fastify emits each deprecation once per process, so compose in a fresh one.
+    const script = `
+      const { createLocalApplication } = await import(${JSON.stringify(
+        new URL("../../dist/entry/main.js", import.meta.url).href,
+      )});
+      const local = createLocalApplication(${JSON.stringify(options)}, {
+        identity: ${JSON.stringify(identity)},
+      });
+      await local.app.ready();
+      await local.app.close();
+      local.disposeCore();
+    `;
+    const stderr = await new Promise((done, fail) =>
+      execFile(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        { timeout: 20_000 },
+        (error, _stdout, output) => (error ? fail(error) : done(output)),
+      ),
+    );
+    expect(stderr).not.toMatch(/FSTDEP|DeprecationWarning/);
   });
 });
