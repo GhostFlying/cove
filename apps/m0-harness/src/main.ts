@@ -15,6 +15,7 @@ import { DEFAULT_APPEARANCE, type Geometry } from "@cove/protocol/profile";
 import type { OperationRecord, RunRecord } from "@cove/protocol/rpc";
 import {
   createXtermTerminalView,
+  estimateXtermGrid,
   type XtermTerminalView,
   type XtermTerminalViewOptions,
 } from "@cove/terminal-web/xterm-view";
@@ -23,7 +24,6 @@ import { readRendererChoice, takeConnectionInfo, type ConnectionInfo } from "./f
 const BUILD_VERSION = "m0-harness-0.0.0";
 const OPERATION_WAIT_MS = 30_000;
 const LIST_REFRESH_MS = 2_000;
-const XTERM_SCROLLBAR_WIDTH = 14;
 
 const element = <T extends HTMLElement>(id: string): T => {
   const found = document.getElementById(id);
@@ -73,37 +73,12 @@ function describeCall(outcome: Exclude<CallOutcome<unknown>, { ok: true }>): str
 const sameGeometry = (left: Geometry, right: Geometry): boolean =>
   left.cols === right.cols && left.rows === right.rows;
 
-const clamp = (value: number, lower: number, upper: number): number =>
-  Math.max(lower, Math.min(upper, value));
-
-// Before any view exists there is no rendered cell to measure, so the first grid is estimated
-// from the same monospace font the view uses. The exact grid is applied once this client
-// takes focus, which re-measures through the view.
+// The grid for a new terminal. Before any view exists, a hidden xterm with the view's options and
+// renderer measures the same cells the live view will, so taking focus later does not resize the
+// PTY unless the space or the renderer really changed.
 function estimateGrid(): Geometry {
   if (current) return current.view.measureGrid();
-  const probe = document.createElement("span");
-  probe.textContent = "W".repeat(64);
-  probe.style.cssText =
-    "position:absolute;visibility:hidden;white-space:pre;line-height:normal;font-size:14px;" +
-    "font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
-  document.body.append(probe);
-  const box = probe.getBoundingClientRect();
-  probe.remove();
-  const style = getComputedStyle(terminalHost);
-  // Leave room for xterm's vertical scrollbar, which overlays the right edge (see the view's
-  // measureTerminalGrid), so the first grid is not wider than the visible area either.
-  const width =
-    terminalHost.clientWidth -
-    parseFloat(style.paddingLeft) -
-    parseFloat(style.paddingRight) -
-    XTERM_SCROLLBAR_WIDTH;
-  const height =
-    terminalHost.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-  if (!(box.width > 0 && box.height > 0 && width > 0 && height > 0)) return { cols: 80, rows: 24 };
-  return {
-    cols: clamp(Math.floor(width / (box.width / 64)), 2, M0_LIMITS.maxCols),
-    rows: clamp(Math.floor(height / box.height), 2, M0_LIMITS.maxRows),
-  };
+  return estimateXtermGrid(terminalHost, viewOptions) ?? { cols: 80, rows: 24 };
 }
 
 interface OpenTerminal {

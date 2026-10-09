@@ -534,6 +534,11 @@ export const requiredSuites = [
   },
   {
     project: "terminal-web-unit",
+    file: "packages/terminal-web/tests/unit/grid-fit.test.mjs",
+    minimumTests: 4,
+  },
+  {
+    project: "terminal-web-unit",
     file: "packages/terminal-web/tests/unit/renderer-fallback.test.mjs",
     minimumTests: 11,
   },
@@ -550,7 +555,7 @@ export const requiredSuites = [
   {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
-    minimumTests: 10,
+    minimumTests: 11,
   },
   {
     project: "terminal-worker",

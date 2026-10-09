@@ -299,7 +299,9 @@ const fitGeometry = (page) =>
       box.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
     const scrollbar = host.querySelector(".xterm .scrollbar.vertical")?.getBoundingClientRect();
     const visibleRight = Math.min(contentRight, scrollbar?.width ? scrollbar.left : Infinity);
-    const screenRight = host.querySelector(".xterm-screen").getBoundingClientRect().right;
+    const screen = host.querySelector(".xterm-screen").getBoundingClientRect();
+    const screenRight = screen.right;
+    const screenWidth = screen.width;
     const glyphRights = [...host.querySelectorAll(".xterm-rows > div")].slice(0, 2).map((row) => {
       const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
       let last;
@@ -312,7 +314,7 @@ const fitGeometry = (page) =>
       range.setEnd(last, end);
       return range.getBoundingClientRect().right;
     });
-    return { visibleRight, screenRight, glyphRights };
+    return { visibleRight, screenRight, screenWidth, glyphRights };
   });
 
 // `renderer` adds the harness's renderer query parameter in front of the printed fragment;
@@ -484,7 +486,20 @@ test("the measured grid fits the visible terminal at several window sizes and pi
             await waitForRow(page, printed.mixed);
           }
           const geometry = await fitGeometry(page);
-          results.push({ ...layout, active, cols: printed.cols, ...geometry });
+          // Measuring again at the applied grid must choose the same grid: the page re-measures
+          // on a window resize event, and a different answer would resize the PTY.
+          await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+          await page.waitForTimeout(300);
+          await waitForSteadyControl(page);
+          await page.keyboard.press("p");
+          const reprinted = await probe.nextPrint();
+          results.push({
+            ...layout,
+            active,
+            cols: printed.cols,
+            remeasuredCols: reprinted.cols,
+            ...geometry,
+          });
         } catch (error) {
           throw await describePage(page, error);
         }
@@ -500,6 +515,14 @@ test("the measured grid fits the visible terminal at several window sizes and pi
       return result.screenRight > limit || result.glyphRights.some((right) => right > limit);
     });
     expect(clipped).toEqual([]);
+    // The grid is also the largest that fits: the space left beside it is narrower than a cell.
+    // The screen is cols whole cells rounded to a CSS pixel, so one pixel absorbs that rounding.
+    const short = results.filter(
+      (result) =>
+        result.visibleRight - result.screenRight >= result.screenWidth / result.cols - 1 ||
+        result.remeasuredCols !== result.cols,
+    );
+    expect(short).toEqual([]);
   });
 });
 

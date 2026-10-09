@@ -613,3 +613,34 @@ test("V1-L6 repeatedly creates and disposes one owned DOM tree", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("V1-L11 measures the largest grid the renderer fits and keeps it after applying it", async () => {
+  const sweeps = await withViewPage(async (page) =>
+    page.evaluate(async () => {
+      const results = [];
+      for (const [renderer, ratio] of [
+        ["webgl", 1],
+        ["dom", 1],
+        ["webgl", 1.1],
+        ["dom", 1.25],
+        ["webgl", 2],
+      ])
+        results.push(...(await window.coveView.fitSweep(renderer, ratio)));
+      return results;
+    }),
+  );
+  expect(sweeps).toHaveLength(90);
+  // Each grid fits the space short of the scrollbar, one more column or row would not, and
+  // measuring again after applying it changes nothing.
+  const wrong = sweeps.filter(
+    (sweep) =>
+      sweep.screen.width > sweep.available.width ||
+      sweep.screen.height > sweep.available.height ||
+      sweep.oneMore.width <= sweep.available.width ||
+      sweep.oneMore.height <= sweep.available.height ||
+      sweep.second.cols !== sweep.first.cols ||
+      sweep.second.rows !== sweep.first.rows ||
+      sweep.first.cols !== (sweep.delta < 0 ? sweep.columns - 1 : sweep.columns),
+  );
+  expect(wrong).toEqual([]);
+});
