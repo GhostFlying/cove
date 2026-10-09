@@ -42,6 +42,9 @@ interface PendingCommand {
   settled: boolean;
 }
 
+// See TerminalLane.retiredRefs.
+const RECENT_RETIRED_REFS = 256;
+
 function localError(reason: LocalErrorReason): ClientError {
   return { category: "local", reason };
 }
@@ -82,6 +85,14 @@ export class TerminalLane {
     string,
     (event: ExternalTerminalEvent, bytes: Uint8Array) => void
   >();
+  // Late frames for a retired subscription are fenced by deleting its route: receive() drops
+  // every event whose ref has no route. These tombstones fence nothing further; they only let
+  // register() refuse a server that re-mints a ref this client just retired, so its old frames
+  // cannot reach the new subscriber. The server mints subscription IDs from a per-connection
+  // monotonic sequence and the key includes the connection generation, so a correct server
+  // never reuses one. A recent FIFO window is therefore enough, and it must never refuse:
+  // keeping every retired ref and refusing attach at a fixed count would stop a long-lived
+  // connection from attaching after that many attach/detach cycles.
   private readonly retiredRefs = new Set<string>();
   private readonly outbound: PendingCommand[] = [];
   private readonly heldPreviewReservations = new Set<string>();
@@ -250,12 +261,16 @@ export class TerminalLane {
     return true;
   }
 
-  retire(ref: SubscriptionRef): boolean {
+  retire(ref: SubscriptionRef): void {
     const key = routeKey(ref);
     this.routes.delete(key);
-    if (!this.retiredRefs.has(key) && this.retiredRefs.size >= 256) return false;
+    if (this.retiredRefs.has(key)) return;
+    while (this.retiredRefs.size >= RECENT_RETIRED_REFS) {
+      const oldest = this.retiredRefs.values().next();
+      if (oldest.done) break;
+      this.retiredRefs.delete(oldest.value);
+    }
     this.retiredRefs.add(key);
-    return true;
   }
 
   cancelUnsentControl(ref: SubscriptionRef): void {
