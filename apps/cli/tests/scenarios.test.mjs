@@ -150,6 +150,13 @@ async function connectTapped() {
   return tapped;
 }
 
+// Bring a client back after its connection was lost: a new connection, then a fresh attach
+// of the same controller, which installs a new baseline.
+async function reattach(tapped, attached) {
+  expect((await tapped.client.reconnect()).ok).toBe(true);
+  expect(await attached.controller.attach()).toMatchObject({ ok: true });
+}
+
 // Compare the client's rendered screen with the server model's preview at the same seq. The
 // caller makes the run quiescent first, so the two converge on one seq.
 async function expectScreenMatchesServer(client, run, controller, screen) {
@@ -443,6 +450,62 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(numbered(A.recording)).toEqual(expected);
     expect(numbered(B.recording)).toEqual(expected);
     await expectScreenMatchesServer(a.client, run, A.controller, A.recording);
+  });
+
+  test("S6 reconnecting inside and after the alternate screen restores the right buffer", async () => {
+    const run = await createRun(PROBE);
+    const a = await connectTapped();
+    const b = await connectTapped();
+    const A = await attach(a.client, run, "s6-a", createScreenView());
+    const B = await attach(b.client, run, "s6-b", createScreenView());
+    await waitFor("the probe on both views", () =>
+      [A, B].every(({ recording }) => recording.text().includes("probe-ready")),
+    );
+    await focusAndType(B.controller, "burst 1 30\r");
+    await waitFor("normal-screen output on A", () => A.recording.text().includes("burst-30-done"));
+    await typeText(B.controller, "alt-enter one\r");
+    await waitFor("A in the alternate screen", () => A.recording.screen().buffer === "alternate");
+
+    // Disconnect inside the alternate screen and miss output drawn there.
+    a.tap.disconnect();
+    await waitFor("A to notice the loss", () => A.controller.snapshot().phase === "unavailable");
+    await typeText(B.controller, "inside-alt\r");
+    await waitFor("output inside the alternate screen", () =>
+      B.recording.screen().rows.includes("echo:inside-alt"),
+    );
+    await reattach(a, A);
+    await waitFor("the recovered alternate screen", () =>
+      A.recording.screen().rows.includes("echo:inside-alt"),
+    );
+    const inside = await expectScreenMatchesServer(a.client, run, A.controller, A.recording);
+    expect(inside.local.buffer).toBe("alternate");
+    expect(inside.local.rows).toContain("alt-screen-one");
+    expect(inside.local.rows.some((row) => row.startsWith("seq-"))).toBe(false);
+    expect(inside.local).toEqual(B.recording.screen());
+
+    // Leaving the alternate screen restores the normal buffer on the recovered view.
+    await typeText(B.controller, "alt-exit one\r");
+    await waitFor("A back on the normal screen", () =>
+      A.recording.screen().rows.includes("normal-again-one"),
+    );
+    const left = await expectScreenMatchesServer(a.client, run, A.controller, A.recording);
+    expect(left.local.buffer).toBe("normal");
+    expect(left.local.rows).toContain("seq-00030");
+    expect(left.local).toEqual(B.recording.screen());
+
+    // Reconnecting after the exit shows the normal screen, with nothing of the alternate one.
+    a.tap.disconnect();
+    await waitFor("A to notice the loss", () => A.controller.snapshot().phase === "unavailable");
+    await reattach(a, A);
+    await waitFor("the recovered normal screen", () =>
+      A.recording.screen().rows.includes("normal-again-one"),
+    );
+    const after = await expectScreenMatchesServer(a.client, run, A.controller, A.recording);
+    expect(after.local.buffer).toBe("normal");
+    expect(after.local.rows).toContain("seq-00030");
+    expect(after.local.rows).not.toContain("alt-screen-one");
+    expect(after.local.rows).not.toContain("echo:inside-alt");
+    expect(after.local).toEqual(B.recording.screen());
   });
 
   test("S8 a wrong protocol version is refused on both channels without touching a live PTY", async () => {
