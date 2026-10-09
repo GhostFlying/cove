@@ -274,26 +274,29 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-// One server path must map to one lock even when spelled differently on a case-insensitive
-// filesystem, so key the lock by the on-disk spelling (native realpath) of the deepest
-// existing directory. Components that do not exist yet have no on-disk spelling and are
-// lowercased; on a case-sensitive filesystem that only serializes starts that differ by case.
+// One server path must map to one lock however it is spelled, and the key must not change
+// when the server creates the run directory mid-start. The parent of the run directory
+// already exists (the server creates only the final directory), so its native realpath
+// gives the on-disk spelling.
 async function lockKey(path: string): Promise<string> {
   const runDirectory = dirname(path);
-  const file = basename(path).toLowerCase();
+  let parent: string;
   try {
-    return join(await realpath(runDirectory), file);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return join(await realpath(dirname(runDirectory)), basename(runDirectory).toLowerCase(), file);
+    parent = await realpath(dirname(runDirectory));
+  } catch {
+    throw new Error(`Cannot resolve ${dirname(runDirectory)} for the server start lock`);
   }
+  // Lowercased so the key is stable across run-directory creation; on a case-sensitive
+  // filesystem case-only variants merely serialize their starts.
+  return `${parent}/${basename(runDirectory).toLowerCase()}/${basename(path).toLowerCase()}`;
 }
 
 // The rendezvous record carries no pid, so a record cannot be traced back to the process
-// that published it. Instead `server start` holds an exclusive lock from its existence check until readiness is announced: while the lock is held no other
-// CLI start can spawn a server for this path, so a record that appears after our check was
-// published by our child. Without it two concurrent starts both pass the check and the loser
-// announces the winner's record while its own child fails to link the path and exits. A
+// that published it. Instead `server start` holds an exclusive lock from its existence check
+// until readiness is announced: while the lock is held no other CLI start can spawn a server
+// for this path, so a record that appears after our check was published by our child.
+// Without it two concurrent starts both pass the check and the loser announces the winner's
+// record while its own child fails to link the path and exits. A
 // crashed CLI can leave the lock behind; that is reported rather than silently broken,
 // because breaking a live start's lock would reintroduce the race. The lock lives in a
 // CLI-owned directory keyed by the canonical rendezvous path, because the server contract
