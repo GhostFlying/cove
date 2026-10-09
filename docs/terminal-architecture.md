@@ -367,7 +367,17 @@ WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到�
 - 策略按 view 而非 xterm 实例保存：新基线重建 xterm 不会重置重试次数；等待重试期间新建的实例先用 DOM，
   由重试升级当前实例。view 重新可见时重建 glyph atlas 并重绘；dispose 释放 addon、GPU context 和重试定时器。
 - 当前 renderer 只读暴露（`renderer`、`onRendererChange`），用于诊断与测试；controller 与协议不感知 renderer。
-- `onRendererChange` 只在视图状态转换（initialize、baseline 重建、致命退役）提交之后通知，且只报告与上次通知不同的当前 renderer；转换中途的 attach/detach 不会同步回调监听者，避免监听者重入视图而覆盖或泄漏其后继 xterm。
+- 视图对重入的规则（监听者可能同步地 initialize 新一代或 dispose 视图）：
+  - `onRendererChange` 只在没有任何公开操作进行时投递：initialize、beginBaseline（到状态提交）、
+    baseline 分块与 finish、applyEvent、setAppearance、setVisibility，以及回调触发的致命退役，
+    异步操作直到其 settle；操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，操作结束后再投递。
+  - 投递串行且不嵌套：单一循环按监听者快照逐个投递当时的当前 renderer；投递期间发生的变化只排队，
+    若当前 renderer 已变，未送出的旧值被丢弃、所有监听者改收最新值，因此每个监听者最后收到的总是当前 renderer，
+    中途又变回的变化不通知。
+  - 每个操作在入口记录 epoch（initialize 与 dispose 推进），执行外部代码后的每个后续步骤都先检查；
+    epoch 已变或视图已 dispose 则以 `RESYNC_REQUIRED` 中止，绝不写入后继。
+  - failure、focus、input 监听者按设计同步调用，可重入视图：致命 failure 发布后该路径随即抛出；focus 发布后
+    输入路径重新检查所有权再发 input；其余发布都是所在操作的最后一步，之后不再写视图状态。
 - 两种 renderer 的 cell 宽度不同（WebGL 对齐设备像素），切换后 `measureGrid` 可能给出不同网格；
   这是可见网格的真实变化，只有持有控制权的客户端按常规 resize 流程跟随，不用 resize 恢复绘制。
 - 网格测量取宿主内容区的小数宽度，扣除 xterm 叠加在右缘的纵向滚动条（xterm 6 默认 14px），并向下取整，

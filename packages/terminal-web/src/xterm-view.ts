@@ -182,13 +182,23 @@ class ListenerSet<T> {
   }
 
   emit(value: T): void {
-    for (const listener of [...this.listeners]) {
-      try {
-        listener(value);
-      } catch {
-        // A consumer callback is outside the renderer incarnation. It must not recursively turn
-        // a valid input/failure notification into another renderer failure.
-      }
+    for (const listener of this.snapshot()) this.deliver(listener, value);
+  }
+
+  snapshot(): Array<Listener<T>> {
+    return [...this.listeners];
+  }
+
+  has(listener: Listener<T>): boolean {
+    return this.listeners.has(listener);
+  }
+
+  deliver(listener: Listener<T>, value: T): void {
+    try {
+      listener(value);
+    } catch {
+      // A consumer callback is outside the renderer incarnation. It must not recursively turn
+      // a valid input/failure notification into another renderer failure.
     }
   }
 
@@ -276,33 +286,70 @@ export function createXtermTerminalView(
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
       clearTimer: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
     },
-    () => announceRenderer(),
+    () => deliverRendererChanges(),
   );
-  // Renderer changes are announced only between view transitions. The fallback reports changes
-  // synchronously from attach and detach, which run in the middle of initialize, a baseline's
-  // backend replacement and a fatal retirement. A listener may reenter the view (initialize a
-  // newer generation, dispose it), and doing that halfway through a transition let the
-  // resumed transition overwrite and leak the listener's successor. So every transition runs
-  // inside `transition`, and once the outermost one has committed, listeners get the renderer
-  // that is active then, only if it differs from what they last saw. Retiring one WebGL xterm
-  // and attaching the next is therefore no change at all.
-  let transitionDepth = 0;
+  // Reentrancy rules. Listeners and other foreign code may call back into the view synchronously
+  // (initialize a newer generation, dispose it). The view stays consistent under that by three
+  // rules; docs/terminal-architecture.md records them and the PR records the audit of every
+  // callback site against them.
+  //
+  // 1. Renderer changes are delivered only between public operations. The fallback reports
+  //    changes synchronously from attach, detach, a failed load or a context loss, often halfway
+  //    through initialize, a baseline replacement or a fatal retirement. Every public operation
+  //    (and a retirement started by a callback) runs inside `operation`, async ones until they
+  //    settle, and delivery waits until no operation is running.
+  // 2. Delivery is serialized and never nested. One loop, which never runs inside itself,
+  //    delivers the renderer active when it looks, to a snapshot of the listeners, one at a time.
+  //    Whatever a listener does is only observed by the loop afterwards: if the renderer has
+  //    changed by then, the rest of the stale announcement is dropped and every listener gets the
+  //    current one. The last renderer each listener receives is therefore the current one, and
+  //    a change that is reverted before delivery is never announced.
+  // 3. Every operation is fenced with the epoch it started in. Initialize and dispose start a new
+  //    epoch; an operation that finds the epoch moved after a step that ran foreign code aborts
+  //    with RESYNC_REQUIRED and never writes into the successor.
+  let operationDepth = 0;
+  let delivering = false;
   let announced = renderers.active;
-  function announceRenderer(): void {
-    if (transitionDepth > 0 || state === "disposed") return;
-    const current = renderers.active;
-    if (current === announced) return;
-    announced = current;
-    rendererChanges.emit(current);
+  let owed: Array<Listener<XtermRenderer>> = [];
+  let epoch = 0;
+  function deliverRendererChanges(): void {
+    if (delivering) return;
+    delivering = true;
+    try {
+      while (state !== "disposed" && operationDepth === 0) {
+        if (renderers.active !== announced) {
+          announced = renderers.active;
+          owed = rendererChanges.snapshot();
+        }
+        const listener = owed.shift();
+        if (!listener) break;
+        if (rendererChanges.has(listener)) rendererChanges.deliver(listener, announced);
+      }
+    } finally {
+      delivering = false;
+    }
   }
-  const transition = <T>(step: () => T): T => {
-    transitionDepth++;
+  const operation = <T>(step: () => T): T => {
+    operationDepth++;
     try {
       return step();
     } finally {
-      transitionDepth--;
-      announceRenderer();
+      operationDepth--;
+      deliverRendererChanges();
     }
+  };
+  const asyncOperation = async <T>(step: () => Promise<T>): Promise<T> => {
+    operationDepth++;
+    try {
+      return await step();
+    } finally {
+      operationDepth--;
+      deliverRendererChanges();
+    }
+  };
+  const superseded = (entry: number): boolean => state === "disposed" || epoch !== entry;
+  const fence = (entry: number): void => {
+    if (superseded(entry)) throw domainError("RESYNC_REQUIRED");
   };
   const register = <T>(listeners: ListenerSet<T>, listener: Listener<T>) => {
     if (state === "disposed") throw domainError("RESYNC_REQUIRED");
@@ -366,7 +413,7 @@ export function createXtermTerminalView(
   };
 
   const retireFatal = (error: unknown, targetIncarnation = incarnation): unknown =>
-    transition(() => retireFatalNow(error, targetIncarnation));
+    operation(() => retireFatalNow(error, targetIncarnation));
 
   const retireFatalNow = (error: unknown, targetIncarnation: number): unknown => {
     const failure = asDomainError(error);
@@ -437,7 +484,7 @@ export function createXtermTerminalView(
       ]);
       throw combineErrors(primary, cleanup, "Terminal construction and cleanup failed");
     }
-    // Renderer changes are announced only after the enclosing transition commits, but opening an
+    // Renderer changes are delivered only after the enclosing operation ends, but opening an
     // xterm and attaching its input and renderer still run foreign code synchronously. If anything
     // in it disposed or reinitialized the view, this xterm no longer belongs to the view: retire
     // it here rather than install it and revive a disposed view or replace a successor.
@@ -469,9 +516,7 @@ export function createXtermTerminalView(
     return backend;
   };
 
-  const replaceBackend = () => transition(replaceBackendNow);
-
-  const replaceBackendNow = () => {
+  const replaceBackend = () => {
     const cleanup = disposeBackend();
     if (cleanup.length) {
       const failure = domainError("RECOVERY_UNAVAILABLE");
@@ -499,6 +544,7 @@ export function createXtermTerminalView(
       () => backend === current && current.incarnation === incarnation && state !== "disposed",
       (error) => retireFatal(error, current.incarnation),
     );
+    if (backend !== current) throw domainError("RESYNC_REQUIRED");
     pristine = false;
   };
 
@@ -512,12 +558,15 @@ export function createXtermTerminalView(
     assertGeneration(input.viewGeneration);
     if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
       throw domainError("RESYNC_REQUIRED");
+    const entry = ++epoch;
     const cleanup = disposeBackend();
     if (cleanup.length) {
       const failure = domainError("RECOVERY_UNAVAILABLE");
       publishFailure(failure, true);
       throw combineErrors(failure, cleanup, "Terminal initialization cleanup failed");
     }
+    // Retiring the old xterm ran its cleanup callbacks.
+    fence(entry);
     viewGeneration = input.viewGeneration;
     geometry = { ...input.geometry };
     proposedGeometry = geometry;
@@ -532,103 +581,118 @@ export function createXtermTerminalView(
     } catch (error) {
       failAndRetire(error, target);
     }
+    fence(entry);
     pristine = true;
     state = "initialized";
   };
 
   return {
-    async initialize(input: ViewInitialization): Promise<void> {
-      transition(() => initializeNow(input));
-    },
+    initialize: (input: ViewInitialization): Promise<void> =>
+      asyncOperation(async () => initializeNow(input)),
 
-    async beginBaseline(descriptor: BaselineDescriptor): Promise<void> {
-      if (state !== "initialized" && state !== "ready") throw domainError("RESYNC_REQUIRED");
-      if (parser.active) throw domainError("BUSY");
-      const checked = validateBaselineDescriptor(descriptor);
-      if (
-        !checked ||
-        checked.profile !== PROFILE ||
-        checked.encoding !== BASELINE_ENCODING ||
-        !sameGeometry(checked.captureGeometry, checked.currentGeometry) ||
-        !sameGeometry(checked.currentGeometry, geometry)
-      )
-        throw domainError("RESYNC_REQUIRED");
-      if (!pristine) replaceBackend();
-      requireBackend();
-      baseline = { descriptor: checked, chunks: 0, bytes: 0 };
-      state = "installing";
-    },
-
-    async writeBaselineChunk(bytes: Uint8Array): Promise<void> {
-      if (state !== "installing" || !baseline) throw domainError("RESYNC_REQUIRED");
-      if (parser.active) throw domainError("BUSY");
-      const nextBytes = baseline.bytes + bytes.byteLength;
-      const declaredBytes = baseline.descriptor.vtBytes + baseline.descriptor.tailBytes;
-      if (
-        bytes.byteLength < 1 ||
-        bytes.byteLength > MAX_PAYLOAD_BYTES ||
-        baseline.chunks >= baseline.descriptor.chunkCount ||
-        nextBytes > declaredBytes
-      )
-        throw domainError("RESYNC_REQUIRED");
-      await parse(bytes);
-      baseline.chunks++;
-      baseline.bytes = nextBytes;
-    },
-
-    async finishBaseline(): Promise<void> {
-      if (state !== "installing" || !baseline || parser.active)
-        throw domainError(parser.active ? "BUSY" : "RESYNC_REQUIRED");
-      if (
-        baseline.chunks !== baseline.descriptor.chunkCount ||
-        baseline.bytes !== baseline.descriptor.vtBytes + baseline.descriptor.tailBytes
-      )
-        throw domainError("RESYNC_REQUIRED");
-      baseline = undefined;
-      state = "ready";
-    },
-
-    async applyEvent(event: TerminalEvent, payload?: Uint8Array): Promise<void> {
-      if (state !== "ready") throw domainError("RESYNC_REQUIRED");
-      if (parser.active) throw domainError("BUSY");
-      if (!TerminalEventSchema.safeParse(event).success) throw domainError("RESYNC_REQUIRED");
-      if (event.type === "output") {
-        if (!payload || payload.byteLength < 1 || payload.byteLength > MAX_PAYLOAD_BYTES)
+    beginBaseline: (descriptor: BaselineDescriptor): Promise<void> =>
+      asyncOperation(async () => {
+        const entry = epoch;
+        if (state !== "initialized" && state !== "ready") throw domainError("RESYNC_REQUIRED");
+        if (parser.active) throw domainError("BUSY");
+        const checked = validateBaselineDescriptor(descriptor);
+        if (
+          !checked ||
+          checked.profile !== PROFILE ||
+          checked.encoding !== BASELINE_ENCODING ||
+          !sameGeometry(checked.captureGeometry, checked.currentGeometry) ||
+          !sameGeometry(checked.currentGeometry, geometry)
+        )
           throw domainError("RESYNC_REQUIRED");
-        await parse(payload);
-        return;
-      }
-      if (payload?.byteLength) throw domainError("RESYNC_REQUIRED");
-      const current = requireBackend();
-      if (event.type === "resize") {
-        if (event.requiresBaseline) throw domainError("RESYNC_REQUIRED");
-        if (!sameGeometry(event.geometry, geometry)) {
+        if (!pristine) {
+          replaceBackend();
+          fence(entry);
+        }
+        requireBackend();
+        baseline = { descriptor: checked, chunks: 0, bytes: 0 };
+        state = "installing";
+      }),
+
+    writeBaselineChunk: (bytes: Uint8Array): Promise<void> =>
+      asyncOperation(async () => {
+        const entry = epoch;
+        if (state !== "installing" || !baseline) throw domainError("RESYNC_REQUIRED");
+        if (parser.active) throw domainError("BUSY");
+        const nextBytes = baseline.bytes + bytes.byteLength;
+        const declaredBytes = baseline.descriptor.vtBytes + baseline.descriptor.tailBytes;
+        if (
+          bytes.byteLength < 1 ||
+          bytes.byteLength > MAX_PAYLOAD_BYTES ||
+          baseline.chunks >= baseline.descriptor.chunkCount ||
+          nextBytes > declaredBytes
+        )
+          throw domainError("RESYNC_REQUIRED");
+        const progress = baseline;
+        await parse(bytes);
+        fence(entry);
+        if (baseline !== progress) throw domainError("RESYNC_REQUIRED");
+        progress.chunks++;
+        progress.bytes = nextBytes;
+      }),
+
+    finishBaseline: (): Promise<void> =>
+      asyncOperation(async () => {
+        if (state !== "installing" || !baseline || parser.active)
+          throw domainError(parser.active ? "BUSY" : "RESYNC_REQUIRED");
+        if (
+          baseline.chunks !== baseline.descriptor.chunkCount ||
+          baseline.bytes !== baseline.descriptor.vtBytes + baseline.descriptor.tailBytes
+        )
+          throw domainError("RESYNC_REQUIRED");
+        baseline = undefined;
+        state = "ready";
+      }),
+
+    applyEvent: (event: TerminalEvent, payload?: Uint8Array): Promise<void> =>
+      asyncOperation(async () => {
+        const entry = epoch;
+        if (state !== "ready") throw domainError("RESYNC_REQUIRED");
+        if (parser.active) throw domainError("BUSY");
+        if (!TerminalEventSchema.safeParse(event).success) throw domainError("RESYNC_REQUIRED");
+        if (event.type === "output") {
+          if (!payload || payload.byteLength < 1 || payload.byteLength > MAX_PAYLOAD_BYTES)
+            throw domainError("RESYNC_REQUIRED");
+          await parse(payload);
+          return;
+        }
+        if (payload?.byteLength) throw domainError("RESYNC_REQUIRED");
+        const current = requireBackend();
+        if (event.type === "resize") {
+          if (event.requiresBaseline) throw domainError("RESYNC_REQUIRED");
+          if (!sameGeometry(event.geometry, geometry)) {
+            try {
+              current.terminal.resize(event.geometry.cols, event.geometry.rows);
+            } catch (error) {
+              failAndRetire(error, current.incarnation);
+            }
+            fence(entry);
+            geometry = { ...event.geometry };
+          }
+          return;
+        }
+        if (event.type === "control") {
+          if (!sameGeometry(event.geometry, geometry)) throw domainError("RESYNC_REQUIRED");
+          return;
+        }
+        if (event.type === "appearance") {
+          const theme = xtermTheme(event.appearance);
           try {
-            current.terminal.resize(event.geometry.cols, event.geometry.rows);
+            current.terminal.options.theme = theme;
           } catch (error) {
             failAndRetire(error, current.incarnation);
           }
-          geometry = { ...event.geometry };
+          fence(entry);
+          appearance = event.appearance;
+          return;
         }
-        return;
-      }
-      if (event.type === "control") {
-        if (!sameGeometry(event.geometry, geometry)) throw domainError("RESYNC_REQUIRED");
-        return;
-      }
-      if (event.type === "appearance") {
-        const theme = xtermTheme(event.appearance);
-        try {
-          current.terminal.options.theme = theme;
-        } catch (error) {
-          failAndRetire(error, current.incarnation);
-        }
-        appearance = event.appearance;
-        return;
-      }
-      if (event.type === "exit") return;
-      throw domainError("RESYNC_REQUIRED");
-    },
+        if (event.type === "exit") return;
+        throw domainError("RESYNC_REQUIRED");
+      }),
 
     measureGrid(): Geometry {
       if (!backend || state === "disposed") return { ...proposedGeometry };
@@ -636,42 +700,50 @@ export function createXtermTerminalView(
       return { ...proposedGeometry };
     },
 
-    setAppearance(nextAppearance: Appearance): void {
-      const theme = xtermTheme(nextAppearance);
-      const current = backend;
-      if (current && state !== "disposed" && state !== "failed") {
-        try {
-          current.terminal.options.theme = theme;
-        } catch (error) {
-          failAndRetire(error, current.incarnation);
-        }
-      }
-      appearance = nextAppearance;
-    },
-
-    setVisibility(nextVisible: boolean): void {
-      if (state === "disposed") return;
-      visible = nextVisible;
-      const element = backend?.terminal.element;
-      if (element) {
-        const current = backend!;
-        try {
-          if (visible) {
-            element.removeAttribute("hidden");
-            renderers.reveal();
-            current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
-          } else {
-            element.setAttribute("hidden", "");
-            if (effectivelyFocused) {
-              current.terminal.blur();
-              publishFocus(false);
-            }
+    setAppearance: (nextAppearance: Appearance): void =>
+      operation(() => {
+        const entry = epoch;
+        const theme = xtermTheme(nextAppearance);
+        const current = backend;
+        if (current && state !== "disposed" && state !== "failed") {
+          try {
+            current.terminal.options.theme = theme;
+          } catch (error) {
+            failAndRetire(error, current.incarnation);
           }
-        } catch (error) {
-          failAndRetire(error, current.incarnation);
         }
-      }
-    },
+        // A theme change runs xterm's own code; never hand this appearance to a successor.
+        if (superseded(entry)) return;
+        appearance = nextAppearance;
+      }),
+
+    setVisibility: (nextVisible: boolean): void =>
+      operation(() => {
+        if (state === "disposed") return;
+        const entry = epoch;
+        visible = nextVisible;
+        const element = backend?.terminal.element;
+        if (element) {
+          const current = backend!;
+          try {
+            if (visible) {
+              element.removeAttribute("hidden");
+              renderers.reveal();
+              current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
+            } else {
+              element.setAttribute("hidden", "");
+              if (effectivelyFocused) {
+                // Blurring runs the focus tracker, whose observers may replace or dispose the view.
+                current.terminal.blur();
+                if (superseded(entry)) return;
+                publishFocus(false);
+              }
+            }
+          } catch (error) {
+            failAndRetire(error, current.incarnation);
+          }
+        }
+      }),
 
     onInputIntent: (listener) => register(inputs, listener),
     onFocusIntent: (listener) => register(focuses, listener),
@@ -685,6 +757,7 @@ export function createXtermTerminalView(
     dispose(): void {
       if (state === "disposed") return;
       state = "disposed";
+      epoch++;
       // Dispose the renderer policy first: it cancels a pending retry and releases the addon
       // without publishing a renderer change to listeners that are about to be cleared.
       renderers.dispose();
