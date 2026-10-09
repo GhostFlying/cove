@@ -4407,3 +4407,36 @@ describe("H1 terminal carrier regressions", () => {
     });
   });
 });
+
+describe("H1 RPC domain errors", () => {
+  it("unknown runs and operations return their domain error instead of an internal error", async () => {
+    await withApp(async ({ core }) => {
+      const run = { serverId: identity.serverId, relayInstanceId: identity.relayInstanceId };
+      const calls = [
+        ["terminal.get", { run: { ...run, runId: "missing" } }, "RUN_NOT_FOUND"],
+        [
+          "operation.get",
+          { operationId: "missing", expectedRelayInstanceId: identity.relayInstanceId },
+          "OPERATION_NOT_FOUND",
+        ],
+        [
+          "terminal.stop",
+          {
+            operationId: "stop-missing",
+            expectedRelayInstanceId: identity.relayInstanceId,
+            run: { ...run, runId: "missing" },
+          },
+          "RUN_NOT_FOUND",
+        ],
+      ];
+      for (const [method, params, kind] of calls) {
+        const call = { jsonrpc: "2.0", id: method, method, params };
+        const { status, body } = await rpcBody(core, utf8(call));
+        expect(status).toBe(200);
+        const { error } = JSON.parse(body);
+        expect(error.data).toMatchObject({ kind, code: error.code });
+        expect(error.data).not.toHaveProperty("subject");
+      }
+    });
+  });
+});

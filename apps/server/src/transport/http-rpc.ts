@@ -95,15 +95,16 @@ const standard = (id: RpcId, code: keyof typeof STANDARD_RPC_MESSAGES) => ({
   id,
   error: { code, message: STANDARD_RPC_MESSAGES[code] },
 });
-const domain = (id: RpcId, error: DomainError) => ({
-  jsonrpc: "2.0" as const,
-  id,
-  error: {
-    code: ERROR_CODES[error.kind],
-    message: error.message,
-    data: { ...error, subject: undefined },
-  },
-});
+const domain = (id: RpcId, error: DomainError) => {
+  // RPC error data never carries the terminal input subject. Omit the key rather
+  // than setting it to undefined: response validation refuses undefined members.
+  const { subject: _subject, ...data } = error;
+  return {
+    jsonrpc: "2.0" as const,
+    id,
+    error: { code: ERROR_CODES[error.kind], message: error.message, data },
+  };
+};
 
 export async function dispatchLocalRpc(
   core: LocalCore,
