@@ -185,6 +185,100 @@ function workerWriteControl(core, mode) {
   };
 }
 
+// A fake worker child that answers hello and one subscribe, so a test can write arbitrary
+// coalesced output frames to the real WorkerProcess stdout ingress.
+async function startBurstWorker(core) {
+  const child = new EventEmitter();
+  child.pid = 125;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const workerRef = {
+    serverId: identity.serverId,
+    relayInstanceId: identity.relayInstanceId,
+    workerId: "burst",
+    workerIncarnationId: "birth",
+  };
+  const run = {
+    serverId: identity.serverId,
+    relayInstanceId: identity.relayInstanceId,
+    runId: "burst",
+  };
+  const subscription = {
+    run,
+    connection: { connectionId: "connection", generation: 0 },
+    subscriptionId: "subscription",
+    viewId: "view",
+  };
+  const frame = (kind, value, payload = new Uint8Array()) =>
+    encodePipeFrame(kind, utf8(value), payload).value;
+  const output = (seq, payload) =>
+    frame(
+      3,
+      {
+        type: "terminal-event",
+        worker: workerRef,
+        run,
+        subscription,
+        terminal: { type: "output", run, seq },
+      },
+      payload,
+    );
+  const decoder = createPipeDecoder();
+  child.stdin.on("data", (bytes) => {
+    for (const item of decoder.read(bytes).frames) {
+      const metadata = JSON.parse(Buffer.from(item.metadata).toString());
+      if (metadata.type === "hello") {
+        child.stdout.write(frame(2, { ...metadata, type: "ready" }));
+        continue;
+      }
+      expect(metadata.type).toBe("subscribe");
+      child.stdout.write(
+        frame(2, {
+          type: "result",
+          worker: workerRef,
+          run,
+          requestId: metadata.requestId,
+          commandType: "subscribe",
+          outcome: "accepted",
+          recoveryMode: "baseline",
+          atSeq: 0,
+        }),
+      );
+    }
+  });
+  child.stdin.on("finish", () => {
+    child.stdin.destroy();
+    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
+  });
+  const worker = new WorkerProcess(
+    core.runtime,
+    workerRef,
+    () => 0,
+    () => child,
+  );
+  worker.start();
+  await worker.ready;
+  expect(worker.session.registerRun(run)).toBe(true);
+  const seen = [];
+  worker.session.onEvent((event, payload) => seen.push([event.terminal.seq, payload.byteLength]));
+  const subscribed = await worker.session.request(
+    {
+      type: "subscribe",
+      requestId: "subscribe",
+      worker: workerRef,
+      run,
+      subscription,
+      atSeq: 0,
+    },
+    new Uint8Array(),
+    () => true,
+  );
+  expect(subscribed.outcome).toBe("accepted");
+  return { child, worker, seen, output };
+}
+
 class Socket extends EventEmitter {
   sent = [];
   codes = [];
@@ -2718,96 +2812,7 @@ describe("D passive production local entry", () => {
   });
   it("D-A14b worker stdout beyond one decoder read budget is resubmitted in order without losing contact", async () => {
     await withApp(async ({ core }) => {
-      const child = new EventEmitter();
-      child.pid = 125;
-      child.stdin = new PassThrough();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      const workerRef = {
-        serverId: identity.serverId,
-        relayInstanceId: identity.relayInstanceId,
-        workerId: "burst",
-        workerIncarnationId: "birth",
-      };
-      const run = {
-        serverId: identity.serverId,
-        relayInstanceId: identity.relayInstanceId,
-        runId: "burst",
-      };
-      const subscription = {
-        run,
-        connection: { connectionId: "connection", generation: 0 },
-        subscriptionId: "subscription",
-        viewId: "view",
-      };
-      const frame = (kind, value, payload = new Uint8Array()) =>
-        encodePipeFrame(kind, utf8(value), payload).value;
-      const output = (seq, payload) =>
-        frame(
-          3,
-          {
-            type: "terminal-event",
-            worker: workerRef,
-            run,
-            subscription,
-            terminal: { type: "output", run, seq },
-          },
-          payload,
-        );
-      const decoder = createPipeDecoder();
-      child.stdin.on("data", (bytes) => {
-        for (const item of decoder.read(bytes).frames) {
-          const metadata = JSON.parse(Buffer.from(item.metadata).toString());
-          if (metadata.type === "hello") {
-            child.stdout.write(frame(2, { ...metadata, type: "ready" }));
-            continue;
-          }
-          expect(metadata.type).toBe("subscribe");
-          child.stdout.write(
-            frame(2, {
-              type: "result",
-              worker: workerRef,
-              run,
-              requestId: metadata.requestId,
-              commandType: "subscribe",
-              outcome: "accepted",
-              recoveryMode: "baseline",
-              atSeq: 0,
-            }),
-          );
-        }
-      });
-      child.stdin.on("finish", () => {
-        child.stdin.destroy();
-        child.emit("exit", 0, null);
-        child.emit("close", 0, null);
-      });
-      const worker = new WorkerProcess(
-        core.runtime,
-        workerRef,
-        () => 0,
-        () => child,
-      );
-      worker.start();
-      await worker.ready;
-      expect(worker.session.registerRun(run)).toBe(true);
-      const seen = [];
-      worker.session.onEvent((event, payload) =>
-        seen.push([event.terminal.seq, payload.byteLength]),
-      );
-      const subscribed = await worker.session.request(
-        {
-          type: "subscribe",
-          requestId: "subscribe",
-          worker: workerRef,
-          run,
-          subscription,
-          atSeq: 0,
-        },
-        new Uint8Array(),
-        () => true,
-      );
-      expect(subscribed.outcome).toBe("accepted");
+      const { child, worker, seen, output } = await startBurstWorker(core);
 
       // One read carrying far more than MAX_READ_FRAMES small frames, then one whose bytes
       // exceed MAX_READ_BYTES; each arrives as a single stdout chunk.
@@ -2849,6 +2854,60 @@ describe("D passive production local entry", () => {
       expect(worker.snapshot().contact).toBe("unverifiable");
       expect((await worker.close()).status).toBe("exited");
     });
+  });
+  it("D-A14c retained worker ingress is reserved in the runtime byte account and fails closed", async () => {
+    const budgets = { ...M0_LIMITS, runtimeBytes: 2 * 1024 * 1024 };
+    await withApp(async ({ core }) => {
+      const account = core.runtime.composition.bytes;
+      const before = account.snapshot().total;
+      const { child, worker, seen, output } = await startBurstWorker(core);
+      const settle = async (count) => {
+        const deadline = Date.now() + 5_000;
+        while (seen.length < count && Date.now() < deadline)
+          await new Promise((resolve) => setImmediate(resolve));
+        expect(seen).toHaveLength(count);
+      };
+      // One ordinary read and a short pause let the session release its startup and subscribe
+      // bookkeeping, so the account is steady before the backlog is measured against it.
+      child.stdout.write(output(1, new Uint8Array([65])));
+      await settle(1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const idle = account.snapshot().total;
+      const pending = [];
+      child.stdout.on("data", () => {
+        pending.push([worker.snapshot().ingressRetainedBytes, account.snapshot().total]);
+      });
+
+      // A backlog the account can afford is charged while retained and released on drain.
+      const affordable = Buffer.concat(
+        Array.from({ length: 12 }, (_, index) => output(index + 2, new Uint8Array(32 * 1024))),
+      );
+      expect(affordable.byteLength).toBeGreaterThan(256 * 1024);
+      child.stdout.write(affordable);
+      await settle(13);
+      expect(pending[0][0]).toBeGreaterThan(0);
+      expect(pending[0][1]).toBe(idle + pending[0][0]);
+      expect(worker.snapshot().ingressRetainedBytes).toBe(0);
+      expect(account.snapshot().total).toBe(idle);
+      expect(worker.snapshot().contact).toBe("live");
+
+      // A backlog within pipeQueuedBytes but beyond the remaining runtime budget loses contact
+      // instead of retaining unaccounted memory.
+      const unaffordable = Buffer.concat(
+        Array.from({ length: 48 }, (_, index) => output(14 + index, new Uint8Array(64 * 1024))),
+      );
+      expect(unaffordable.byteLength).toBeLessThan(budgets.pipeQueuedBytes);
+      expect(unaffordable.byteLength).toBeGreaterThan(budgets.runtimeBytes);
+      child.stdout.write(unaffordable);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(worker.snapshot().contact).toBe("unverifiable");
+      expect(worker.snapshot().ingressRetainedBytes).toBe(0);
+      expect(seen.length).toBeLessThan(61);
+      expect((await worker.close()).status).toBe("exited");
+      // Everything the session and ingress held is released; only the pool's 4 KiB worker
+      // registration lease remains until the runtime itself is disposed.
+      expect(account.snapshot().total).toBe(before + 4096);
+    }, budgets);
   });
   it("D-A15 rendezvous publishes complete restricted bytes and preserves a replaced foreign file", async () => {
     const dir = await mkdtemp(join(await realpath(tmpdir()), "cove-entry-author-"));
