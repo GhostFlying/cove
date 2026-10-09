@@ -174,7 +174,10 @@ export function createTappedClient(record) {
             return;
           }
           tap.inbound.push(...frames);
-          if (tap.paused && frames.some((frame) => tap.holds(frame)))
+          // While paused, `holds` picks what to hold. A frame arriving while resume() is still
+          // handing over held ones queues behind them, so resuming never reorders the stream
+          // (e.g. a baseline's end before its start).
+          if (tap.paused ? frames.some((frame) => tap.holds(frame)) : tap.held.length > 0)
             tap.held.push({ callbacks, bytes: bytes.slice(), connection });
           else callbacks.onBinary(bytes);
         },
