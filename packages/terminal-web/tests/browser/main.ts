@@ -714,6 +714,39 @@ const fixture = {
       container.style.height = "";
     }
   },
+  // Disposing the view from a renderer-change listener while it builds its xterm must not leave
+  // that xterm behind or revive the view.
+  async disposeOnRendererChange() {
+    view?.dispose();
+    view = undefined;
+    container.replaceChildren();
+    const candidate = createXtermTerminalView(container);
+    let changes = 0;
+    candidate.onRendererChange(() => {
+      changes++;
+      candidate.dispose();
+    });
+    let error: string | undefined;
+    try {
+      await candidate.initialize({
+        profile: "pragmatic-logical-grid-v1",
+        encoding: "vt-checkpoint-tail-v1",
+        geometry: { cols: 40, rows: 10 },
+        appearance,
+        viewGeneration: ++generation,
+      });
+    } catch (caught) {
+      error = (caught as DomainError).kind ?? String(caught);
+    }
+    const result = {
+      webgl2: offersWebgl2,
+      changes,
+      error,
+      ownedRoots: container.querySelectorAll("[data-cove-terminal-view]").length,
+    };
+    candidate.dispose();
+    return result;
+  },
   // The live WebGL contexts in the terminal; the addon's 2D link layer canvas has none.
   webglContexts() {
     return [...container.querySelectorAll("canvas")]

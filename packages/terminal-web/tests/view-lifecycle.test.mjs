@@ -656,3 +656,16 @@ test("V1-L12 releases the WebGL context of an xterm retired by a baseline or by 
       : { webgl2: false, replaced: [], disposed: [] },
   );
 });
+
+test("V1-L13 a view disposed by its renderer-change listener during initialize stays disposed", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.disposeOnRendererChange()),
+  );
+  // The initial WebGL notification arrives while the xterm is being built; without WebGL2 there
+  // is no notification and the view initializes normally.
+  expect(result).toEqual(
+    result.webgl2
+      ? { webgl2: true, changes: 1, error: "RESYNC_REQUIRED", ownedRoots: 0 }
+      : { webgl2: false, changes: 0, error: undefined, ownedRoots: 1 },
+  );
+});
