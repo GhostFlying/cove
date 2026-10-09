@@ -1022,10 +1022,9 @@ test("route control up to the shared window queues in arrival order behind one e
   await h.pipe.shutdown("test-complete");
 });
 
-test("the full route window waits behind an outstanding BUSY rejection", async () => {
+test("the route window runs beside an outstanding BUSY rejection", async () => {
   let settleOrdinary;
-  // One ordinary slot, so a second preview earns a BUSY rejection. Until that reply's write
-  // callback the rejection holds the slot route control shares, so every route command parks.
+  // One ordinary slot, so a second preview earns a BUSY rejection whose reply stays unsettled.
   const { h, held } = await routeHarness(
     (command) =>
       command.type === "preview-refresh"
@@ -1045,24 +1044,25 @@ test("the full route window waits behind an outstanding BUSY rejection", async (
   const preview = { type: "preview-refresh", worker, run, requestId: "preview" };
   h.input.write(Buffer.concat([encode(preview), encode({ ...preview, requestId: "busy" })]));
   await tick();
-  expect(h.frames().at(-1)).toMatchObject({ requestId: "busy", error: { kind: "BUSY" } });
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 2 });
   const commands = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
     routeControl(index),
   );
   h.input.write(Buffer.concat(commands.map((command) => encode(command))));
   await tick();
+  // The unsettled BUSY does not hold route control back; the window queues behind route-0.
+  expect(h.calls.slice(1).map(({ command }) => command.requestId)).toEqual(["route-0"]);
   expect(h.pipe.snapshot()).toMatchObject({
     state: "ready",
-    parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS,
+    parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS - 1,
   });
-  // Settling the BUSY reply admits the oldest; the rest follow one callback at a time.
-  for (let index = 0; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
-    held.callbacks.shift()();
+  for (let turn = 0; turn < 16 && h.calls.length <= PIPE_ROUTE_CONTROL_COMMANDS; turn++) {
+    held.callbacks.shift()?.();
     await tick();
-    expect(h.calls.slice(1).map(({ command }) => command.requestId)).toEqual(
-      commands.slice(0, index + 1).map((command) => command.requestId),
-    );
   }
+  expect(h.calls.slice(1).map(({ command }) => command.requestId)).toEqual(
+    commands.map((command) => command.requestId),
+  );
   expect(h.pipe.snapshot().state).toBe("ready");
   settleOrdinary({
     type: "error",
@@ -1071,6 +1071,53 @@ test("the full route window waits behind an outstanding BUSY rejection", async (
     requestId: "preview",
     commandType: "preview-refresh",
     error: domainError("CAPABILITY_UNAVAILABLE"),
+  });
+  await h.pipe.shutdown("test-complete");
+});
+
+test("refilled ordinary BUSY replies never starve a queued unsubscribe", async () => {
+  // As in the reply-bytes test: 13 previews spend the ordinary reply bytes, so every later
+  // preview is refused for bytes alone, legally, within the ordinary window.
+  const budgets = {
+    ...M0_LIMITS,
+    pipeQueuedBytes: 69_648,
+    reservedControlBytes: 8_192,
+    pendingWorkerCommands: 32,
+  };
+  const { h, held } = await routeHarness(
+    (command) =>
+      command.type === "preview-refresh"
+        ? new Promise(() => {})
+        : Promise.resolve({
+            type: "result",
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+            outcome: "accepted",
+          }),
+    budgets,
+  );
+  let next = 0;
+  const preview = () => encode({ type: "preview-refresh", worker, run, requestId: `p-${next++}` });
+  h.input.write(Buffer.concat(Array.from({ length: 16 }, preview)));
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({ state: "ready", outstandingRequests: 16 });
+  const unsubscribe = routeControl(2);
+  h.input.write(encode(unsubscribe));
+  await tick();
+  // Each round settles the oldest unsettled reply and refills it with a new byte refusal, so
+  // BUSY replies stay outstanding throughout.
+  for (let round = 0; round < 30; round++) {
+    held.callbacks.shift()?.();
+    h.input.write(preview());
+    await tick();
+  }
+  expect(h.pipe.snapshot().state).toBe("ready");
+  expect(h.calls.map(({ command }) => command.requestId)).toContain(unsubscribe.requestId);
+  expect(h.frames().find((frame) => frame.requestId === unsubscribe.requestId)).toMatchObject({
+    type: "result",
+    outcome: "accepted",
   });
   await h.pipe.shutdown("test-complete");
 });
