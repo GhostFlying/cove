@@ -1425,4 +1425,53 @@ describe("input right after a focus grant (Issue #21)", () => {
     expect(ack).toBeGreaterThan(-1);
     expect(peer.commands.indexOf(input)).toBeGreaterThan(ack);
   });
+
+  test("input typed while a granted resize is in flight is held and delivered in order", async () => {
+    // The protocol allows a resize fact without a baseline requirement; that is the case where
+    // held input can continue under the same grant.
+    const { controller, peer, mounted } = await harness();
+    await grant(controller, peer);
+    const outcomes = [];
+    controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
+    const resized = { cols: 90, rows: 30 };
+    const resize = controller.requestResize(resized);
+    await settle();
+    const resizeCommand = ofType(peer, "resize")[0];
+    expect(resizeCommand).toBeDefined();
+    // The view still reports the applied grid while the resize is settling.
+    const text = "while-resizing";
+    [...text].forEach((key, index) => type(controller, mounted, index + 1, key));
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    expect(ofType(peer, "input")).toHaveLength(0);
+    peer.result(resizeCommand.command, { epoch: 1, atSeq: 2 });
+    expect((await resize).ok).toBe(true);
+    await settle();
+    // The result moved the server's fence to seq 2; input still waits for that fact's ack.
+    expect(ofType(peer, "input")).toHaveLength(0);
+    peer.event({ type: "resize", run, seq: 2, geometry: resized, requiresBaseline: false });
+    await settle();
+    const ack = peer.commands.findIndex(
+      ({ command }) => command.type === "applied-ack" && command.appliedSeq >= 2,
+    );
+    expect(ack).toBeGreaterThan(-1);
+    const delivered = [];
+    for (let index = 0; index < text.length; index++) {
+      const entry = ofType(peer, "input")[index];
+      expect(entry).toBeDefined();
+      expect(peer.commands.indexOf(entry)).toBeGreaterThan(ack);
+      delivered.push(decoder.decode(entry.payload));
+      peer.result(entry.command, {
+        epoch: 1,
+        inputSeq: entry.command.inputSeq,
+        status: "written",
+        writtenBytes: entry.payload.byteLength,
+      });
+      await settle();
+    }
+    expect(delivered.join("")).toBe(text);
+    expect(outcomes).toHaveLength(text.length);
+    expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
+    expect(controller.snapshot().controlEpoch).toBe(1);
+  });
 });

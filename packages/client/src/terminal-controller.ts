@@ -233,7 +233,15 @@ export class RoutedTerminalController implements TerminalController {
   // A granted command sent after handedAckSeq >= fenceSeq follows its covering ack on the lane.
   private fenceSeq = 0;
   private handedAckSeq = 0;
-  private readonly ackWatchers = new Set<() => void>();
+  // Granted resize/appearance requests not yet settled. The server moves its control boundary
+  // when it performs one, so a granted command sent behind it on the lane would be fenced on a seq
+  // this client cannot know until the result arrives. Later granted commands wait until it settles
+  // and its result's covering ack has been handed off. A resize whose fact requires a baseline
+  // (every grid change in M0) triggers resize-context recovery, which resets the grant; held
+  // input then fails with a reported invalid-state rather than being carried across recovery.
+  private grantedControlsInFlight = 0;
+  // Wakes authority waits on changes that publish() does not report (ack handoff, control settle).
+  private readonly authorityWatchers = new Set<() => void>();
   // Geometry carried by the pending or accepted focus request (updated by granted resizes), so
   // a repeated focus intent with the same grid can be recognized as adding nothing.
   private focusGeometry: Geometry | undefined;
@@ -903,11 +911,11 @@ export class RoutedTerminalController implements TerminalController {
           finish(false);
       };
       const watcher = (): void => check();
-      this.ackWatchers.add(watcher);
+      this.authorityWatchers.add(watcher);
       const state = this.onState(check);
       listener = {
         dispose: () => {
-          this.ackWatchers.delete(watcher);
+          this.authorityWatchers.delete(watcher);
           state.dispose();
         },
       };
@@ -924,6 +932,7 @@ export class RoutedTerminalController implements TerminalController {
   private grantUsable(ref: SubscriptionRef, generation: number): boolean {
     return (
       this.control.ready(ref, generation, this.appliedSeq) &&
+      this.grantedControlsInFlight === 0 &&
       this.handedAckSeq >= Math.max(this.fenceSeq, this.control.grantAtSeq ?? 0)
     );
   }
@@ -971,25 +980,38 @@ export class RoutedTerminalController implements TerminalController {
       epoch,
       ...value,
     } as TerminalCommand;
-    const result = await this.host.lane.send(
-      command,
-      5_000,
-      undefined,
-      undefined,
-      () =>
-        this.token === token &&
-        this.ref === ref &&
-        this.host.binding() === binding &&
-        this.phase === "ready" &&
-        this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
-    );
-    const receipt = this.controlReceipt(result, `${type}-result`);
-    if (receipt.ok && this.token === token && this.ref === ref) {
-      // The server moved its control boundary to this result; later granted commands wait for
-      // the ack that covers it.
-      this.raiseFence(receipt.value.atSeq);
-      if ("geometry" in value && this.control.epoch === epoch)
-        this.focusGeometry = Object.freeze({ ...value.geometry });
+    let receipt: TerminalOutcome<TerminalControlReceipt> = {
+      ok: false,
+      error: localError("invalid-state"),
+    };
+    this.grantedControlsInFlight++;
+    try {
+      const result = await this.host.lane.send(
+        command,
+        5_000,
+        undefined,
+        undefined,
+        () =>
+          this.token === token &&
+          this.ref === ref &&
+          this.host.binding() === binding &&
+          this.phase === "ready" &&
+          this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
+      );
+      receipt = this.controlReceipt(result, `${type}-result`);
+      if (receipt.ok && this.token === token && this.ref === ref) {
+        // The server moved its control boundary to this result; later granted commands wait for
+        // the ack that covers it, which also proves the result's fact has been applied.
+        this.raiseFence(receipt.value.atSeq);
+        if ("geometry" in value && this.control.epoch === epoch)
+          this.focusGeometry = Object.freeze({ ...value.geometry });
+      }
+    } finally {
+      // Raise the fence before releasing held commands so none slips out under the old one. A
+      // failed or unknown result leaves the fence as it was; a command then sent under a boundary
+      // the server did move is rejected and reported, never silently retried.
+      this.grantedControlsInFlight--;
+      for (const watcher of [...this.authorityWatchers]) watcher();
     }
     return receipt;
   }
@@ -1545,7 +1567,7 @@ export class RoutedTerminalController implements TerminalController {
           if (token !== this.token) return;
           if (seq > this.handedAckSeq) this.handedAckSeq = seq;
           onHandoff?.();
-          for (const watcher of [...this.ackWatchers]) watcher();
+          for (const watcher of [...this.authorityWatchers]) watcher();
         },
         handle,
       )

@@ -196,7 +196,7 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(after.controller.snapshot().execution.status).not.toBe("exited");
   });
 
-  test("S1 keys typed back-to-back right after a click all reach the PTY in order", async () => {
+  test("S1 keys typed right after a click and during a theme change all reach the PTY in order", async () => {
     const run = await createRun(ECHO_LOOP);
     const client = await connectClient();
     // Emit focus and input intents the way the xterm view does: each deliberate key is
@@ -243,6 +243,33 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([]);
     await waitFor("the echoed line", () => recording.text().includes(`echo:${line}`));
     // One click is one grant: per-key focus intents must not mint further epochs.
+    expect(controller.snapshot().controlEpoch).toBe((await focus).value.epoch);
+
+    // Change the theme mid-typing: keys typed while the granted appearance change settles are
+    // held behind its result and covering ack, not rejected, and still arrive in order.
+    const second = "typed-while-restyling-0123456789";
+    const secondKeys = [...`${second}\r`];
+    const half = secondKeys.length >> 1;
+    let focusSeq = keys.length;
+    const typeKey = (key) => {
+      const applied = controller.snapshot().appliedGeometry.geometry;
+      for (const listener of focusListeners)
+        listener({ viewGeneration, focusSeq: ++focusSeq, focused: true, geometry: applied });
+      for (const listener of inputListeners)
+        listener({ viewGeneration, source: "keyboard", bytes: encoder.encode(key) });
+    };
+    secondKeys.slice(0, half).forEach(typeKey);
+    const appearance = { ...DEFAULT_APPEARANCE, background: "1111/2222/3333" };
+    const restyle = controller.updateAppearance(appearance);
+    secondKeys.slice(half).forEach(typeKey);
+    expect(await restyle).toMatchObject({ ok: true });
+    const total = keys.length + secondKeys.length;
+    await waitFor("every input outcome", () => outcomes.length === total);
+    expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([]);
+    await waitFor("the second echoed line", () => recording.text().includes(`echo:${second}`));
+    await waitFor("the appearance fact", () =>
+      recording.events.some((event) => event.type === "appearance"),
+    );
     expect(controller.snapshot().controlEpoch).toBe((await focus).value.epoch);
   });
 
