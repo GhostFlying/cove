@@ -221,6 +221,9 @@ export class RoutedTerminalController implements TerminalController {
   private readonly control = new TerminalControl();
   private localFocusSequence = 0;
   private localFocusGeneration = 0;
+  // Identifies the latest focus request. A focus deferred across a recovery is sent only if no
+  // newer request was made meanwhile (see requestFocus).
+  private focusRequests = 0;
   private inputIntentSequence = 0;
   private retainedInputBytes = 0;
   private pendingInputIntents = 0;
@@ -546,8 +549,16 @@ export class RoutedTerminalController implements TerminalController {
     // A user's focus during a recovery (e.g. the baseline another client's resize forces on this
     // one) is deferred, not rejected: it is sent once the recovery reaches ready. The recovery
     // itself still never sends focus; this is the user's request, only delayed.
-    if (this.phase !== "ready" && this.operation?.kind === "recover") {
-      const deferred = await this.waitForRecoveryReady();
+    // While deferred, the request stays the user's current intent only until a newer focus
+    // request or any loss of the input target, including an unfocus followed by a refocus from a
+    // state observer before this continuation runs; either supersedes it. It is re-checked right
+    // before the focus is begun, because observers run between the ready wake-up and here.
+    const request = ++this.focusRequests;
+    const targetVersion = this.control.targetVersion;
+    const current = (): boolean =>
+      this.focusRequests === request && this.control.targetVersion === targetVersion;
+    if (this.recovering()) {
+      const deferred = await this.waitForRecoveryReady(current);
       if (deferred !== "ready") return { ok: false, error: localError(deferred) };
     }
     const ref = this.ref;
@@ -579,7 +590,8 @@ export class RoutedTerminalController implements TerminalController {
       this.view !== view ||
       this.ref !== ref ||
       this.host.binding() !== binding ||
-      this.phase !== "ready"
+      this.phase !== "ready" ||
+      !current()
     )
       return { ok: false, error: localError("invalid-state") };
     const requestId = this.host.lane.nextRequestId(this.host.generation());
@@ -679,11 +691,18 @@ export class RoutedTerminalController implements TerminalController {
     return granted;
   }
 
+  private recovering(): boolean {
+    return this.phase !== "ready" && this.operation?.kind === "recover";
+  }
+
   // Waits for the recovery in progress to reach ready for a deferred focus. It gives up when the
-  // input target is unfocused, the view is replaced, the subscription or connection changes, or
-  // the recovery fails, and after the recovery deadline budget measured from the request: a
-  // recovery has the same budget, so a longer wait could only outlive a failed one.
-  private waitForRecoveryReady(): Promise<"ready" | "invalid-state" | "timeout"> {
+  // request is superseded (`current` turns false), the input target is unfocused, the view is
+  // replaced, the subscription or connection changes, or the recovery fails, and after the
+  // recovery deadline budget measured from the request: a recovery has the same budget, so a
+  // longer wait could only outlive a failed one.
+  private waitForRecoveryReady(
+    current: () => boolean,
+  ): Promise<"ready" | "invalid-state" | "timeout"> {
     const ref = this.ref;
     const binding = this.host.binding();
     const view = this.view;
@@ -709,6 +728,7 @@ export class RoutedTerminalController implements TerminalController {
           this.view !== view ||
           this.host.binding() !== binding ||
           !this.control.wantsFocus ||
+          !current() ||
           this.phase === "disposed" ||
           this.phase === "unavailable" ||
           this.phase === "idle" ||
@@ -2057,7 +2077,9 @@ export class RoutedTerminalController implements TerminalController {
         view !== this.view ||
         ref !== this.ref ||
         intent.viewGeneration !== generation ||
-        this.phase !== "ready" ||
+        // An unfocus is honored during a recovery too, so it cancels a focus deferred across it
+        // (requestFocus); a focus intent waits for ready like any other view interaction.
+        (this.phase !== "ready" && (intent.focused || !this.recovering())) ||
         !Number.isSafeInteger(intent.focusSeq) ||
         intent.focusSeq < 1
       )

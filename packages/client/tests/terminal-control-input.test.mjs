@@ -1939,6 +1939,78 @@ describe("resize and focus around a resize-context recovery", () => {
     expect(ofType(peer, "focus")).toHaveLength(0);
   });
 
+  test("an unfocus from the view during a recovery cancels a deferred focus", async () => {
+    const { controller, peer, mounted } = await recovering();
+    const focus = controller.requestFocus(larger);
+    await settle();
+    mounted.focus({
+      viewGeneration: controller.snapshot().viewGeneration,
+      focusSeq: 1,
+      focused: false,
+      geometry,
+    });
+    expect(await focus).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    expect(controller.snapshot().phase).toBe("ready");
+    expect(ofType(peer, "focus")).toHaveLength(0);
+    // The view's unfocus cleared the input target, so focus is no longer wanted at all.
+    expect(await controller.requestFocus(larger)).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+  });
+
+  // A state observer acts on the ready snapshot before the deferred focus's continuation runs.
+  function onFirstReady(controller, act) {
+    let acted = false;
+    controller.onState((snapshot) => {
+      if (acted || snapshot.phase !== "ready") return;
+      acted = true;
+      act();
+    });
+  }
+
+  test("an unfocus and refocus at ready still cancel a deferred focus", async () => {
+    const { controller, peer } = await recovering();
+    const focus = controller.requestFocus(larger);
+    await settle();
+    onFirstReady(controller, () => {
+      controller.setInputTarget(true, false);
+      controller.setInputTarget(true, true);
+    });
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    expect(await focus).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    expect(ofType(peer, "focus")).toHaveLength(0);
+  });
+
+  test("a newer focus at ready supersedes a deferred one, which is never sent", async () => {
+    const { controller, peer } = await recovering();
+    const deferred = controller.requestFocus(larger);
+    await settle();
+    let newer;
+    onFirstReady(controller, () => {
+      newer = controller.requestFocus(larger);
+    });
+    await serveRecovery(peer, 1, { epoch: 0, holder: null });
+    expect(await deferred).toEqual({
+      ok: false,
+      error: { category: "local", reason: "invalid-state" },
+    });
+    // Only the newer request reaches the server, so no older focus follows it with a larger seq.
+    expect(ofType(peer, "focus")).toHaveLength(1);
+    const command = ofType(peer, "focus")[0].command;
+    peer.result(command, { epoch: 1, atSeq: 2 });
+    expect(await newer).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+    await settle();
+    expect(ofType(peer, "focus")).toHaveLength(1);
+  });
+
   test("a deferred focus is cancelled when the view is replaced", async () => {
     const { controller, peer } = await recovering();
     const focus = controller.requestFocus(larger);

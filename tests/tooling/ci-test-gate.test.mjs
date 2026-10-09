@@ -212,7 +212,7 @@ test("client public-contract suites reject missing and short discovery", async (
     ["compiled-client", 4],
     ["terminal-recovery", 46],
     ["terminal-state", 11],
-    ["terminal-control-input", 33],
+    ["terminal-control-input", 36],
     ["terminal-budgets-preview", 33],
     ["terminal-lifecycle", 4],
   ]) {

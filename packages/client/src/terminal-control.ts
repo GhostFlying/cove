@@ -69,11 +69,21 @@ export class TerminalControl {
   private carried: Grant | undefined;
   private carriedIntent: number | undefined;
   private restoredGeneration = 0;
+  // Counts every loss of the input target. A request made while the target was wanted is
+  // superseded by any later loss, even if the target is wanted again by the time it is checked.
+  private targetLosses = 0;
 
   setTarget(foreground: boolean, target: boolean): void {
     this.foreground = foreground;
     this.target = foreground && target;
-    if (!this.target) this.invalidate();
+    if (!this.target) {
+      this.targetLosses++;
+      this.invalidate();
+    }
+  }
+
+  get targetVersion(): number {
+    return this.targetLosses;
   }
 
   get wantsFocus(): boolean {
