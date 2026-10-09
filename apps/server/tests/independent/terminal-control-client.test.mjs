@@ -153,9 +153,10 @@ describe("P2-B2 independent actual compiled public consumer", () => {
       await b.drainAcks();
       expect(a.controller.snapshot().inputReady).toBe(true);
       expect(b.controller.snapshot().inputReady).toBe(false);
-      const granted = await b.focus({ grid: { cols: 100, rows: 30 }, atSeq: 12 });
-      r.control(a.ref, 7, 12, { cols: 100, rows: 30 }, holder(b.ref));
-      await a.drainAcks();
+      // The grid change reaches both subscriptions as resize 12 then control 13; each recovers
+      // from a baseline that reports b as holder at epoch 7.
+      const granted = await b.focus({ grid: { cols: 100, rows: 30 }, atSeq: 13 });
+      await a.resizeRecovery({ cols: 100, rows: 30 }, 13, { epoch: 7, holder: holder(b.ref) });
       expect(granted.pipe).toMatchObject({
         expectedEpoch: 6,
         nextEpoch: 7,
@@ -167,11 +168,11 @@ describe("P2-B2 independent actual compiled public consumer", () => {
       expect(a.controller.snapshot().appliedAuthority).toMatchObject({
         epoch: 7,
         holder: holder(b.ref),
-        atSeq: 12,
+        atSeq: 13,
       });
       expect(b.controller.snapshot().appliedGeometry).toMatchObject({
         geometry: { cols: 100, rows: 30 },
-        atSeq: 12,
+        atSeq: 13,
       });
       const before = r.count("set-control");
       await a.controller.blur();

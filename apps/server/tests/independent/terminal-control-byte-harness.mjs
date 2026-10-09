@@ -467,6 +467,8 @@ export async function connectConsumer(rig, c = rig.primary) {
       return pipe.subscription;
     },
     async focus({ grid = geometry, atSeq = 11, apply = true } = {}) {
+      const applied = controller.snapshot().appliedGeometry?.geometry ?? geometry;
+      const resizes = applied.cols !== grid.cols || applied.rows !== grid.rows;
       controller.setInputTarget(true, true);
       const start = rig.commands.length;
       const pending = controller.requestFocus(grid);
@@ -479,14 +481,48 @@ export async function connectConsumer(rig, c = rig.primary) {
       const pipe = rig.commands.slice(start).find((x) => x.type === "set-control");
       assert(pipe);
       rig.accept(pipe, { atSeq });
-      // A focus at a new grid resolves only once its grant is applied or lost, so the grant's
-      // ordered fact is delivered before the reply is awaited.
-      if (apply) {
-        rig.control(this.ref, pipe.nextEpoch, atSeq, grid);
-        await this.drainAcks();
+      if (!resizes) {
+        const reply = await pending;
+        if (apply) {
+          rig.control(this.ref, pipe.nextEpoch, atSeq, grid);
+          await this.drainAcks();
+        }
+        return { pending, reply, pipe };
       }
+      // Like the real worker, a grant at a new grid follows a resize that requires a baseline,
+      // and the result may reach the client before either fact. The client recovers; the
+      // baseline reports this holder at the grant epoch, and focus resolves once usable.
+      assert(apply, "a grid-changing grant is always applied by the worker");
+      await this.resizeRecovery(grid, atSeq, { epoch: pipe.nextEpoch, holder: holder(this.ref) });
       const reply = await pending;
       return { pending, reply, pipe };
+    },
+    // Delivers the worker's resize (atSeq - 1) and control (atSeq) facts for a grid change, then
+    // serves the resize-context recovery they trigger with a baseline carrying `control`.
+    async resizeRecovery(grid, atSeq, control) {
+      const recovers = rig.count("recover");
+      rig.session.receive(
+        rig.event(this.ref, {
+          type: "resize",
+          run,
+          seq: atSeq - 1,
+          geometry: grid,
+          requiresBaseline: true,
+        }),
+      );
+      rig.control(this.ref, control.epoch, atSeq, grid, control.holder);
+      await turns();
+      assert.equal(rig.count("recover"), recovers + 1, "resize did not trigger recovery");
+      const recover = rig.last("recover");
+      rig.accept(recover, { recoveryMode: "baseline", atSeq });
+      rig.emitBaseline(this.ref, {
+        atSeq,
+        grid,
+        control,
+        baselineId: `ind-resize-${atSeq}-${this.ref.subscriptionId}`,
+      });
+      await this.drainAcks();
+      await turns();
     },
     set ref(value) {
       this._ref = value;
