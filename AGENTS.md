@@ -19,9 +19,9 @@ decisions without concrete evidence or a user request.
 
 ## Plan and scope work
 
-- Write an implementation plan before coding. Record the task owner, objective,
-  base revision, checkout path, writable files, contract dependencies, validation
-  and exclusions. Use a task-specific file rather than a shared append-only plan.
+- Write a short implementation plan before coding: objective, writable files,
+  dependencies, validation and exclusions. Keep it in the Issue or PR description;
+  do not add per-task plan/result files under `docs/tasks`.
 - Work in the assigned checkout. Read local changes before editing; never use a
   similarly named checkout or another agent's absolute path as your own workspace.
 - Keep changes within the task. Coordinate an expanded file scope with the task
@@ -33,37 +33,32 @@ decisions without concrete evidence or a user request.
   then evaluate strengths, defects and fit against Cove's accepted design. Orca
   is comparative evidence, not authority; do not copy it without justification.
 - Treat this as long-running work: design documents retain accepted decisions and
-  rationale; task plans retain dependencies and acceptance; handoffs retain exact
-  state and next actions. Start by reading `docs/handoff.md` and the applicable
-  design/task documents instead of relying on conversation history. Update the
+  rationale; Issues/PRs retain plans, dependencies and acceptance; handoffs retain
+  exact state and next actions. Start by reading `docs/handoff.md` and the
+  applicable design documents instead of relying on conversation history. Update the
   handoff at ownership changes, blockers, integration and milestone review. Keep
   `docs/handoff.md` current-state only and at most 150 lines; link history in
   Issues/PRs, Git and controlled evidence rather than appending checkpoint dumps.
 
 ## Coordinate concurrent agents
 
-- The coordinator schedules against a reviewed milestone dependency graph and
-  tracks ownership, dependencies and gates only; delegate
-  documentation, integration, GitHub operations and conflict resolution to an
-  explicitly assigned non-plan owner. GPT-6 Astra high writes plans only.
-  For interactive non-plan work, allocate native GPT-6 Sol high or GPT-6 Luna
-  max by difficulty; native review uses a separate GPT-6 Sol high. Prefer local
-  TraeX GPT-5.6 Sol xhigh for self-contained non-plan work, including review.
-  Implementation, testing and review authors must remain independent.
+- The coordinator may implement critical-path work directly; it is not limited
+  to dispatching. Use helper agents only for genuinely independent work, with
+  disjoint files. Plans are short and live in the PR or Issue, not in separate
+  per-task plan/result documents.
+- Each PR gets one full independent review from an agent that did not write it:
+  codex `gpt-6.1-sol` xhigh and/or local TraeX `gpt-5.6-sol` xhigh. Substantive
+  PRs use both in parallel; docs-only or test-expectation PRs use one. Reviewers
+  report all findings in one batch; fixes get a single delta re-review.
 - Route local TraeX through `warmpool run -- traex ...` with explicit
-  `gpt-5.6-sol` and xhigh reasoning effort.
-  Do not use the delegation plugin. Warm hits are an optimization, not an
-  admission requirement: dispatch through warmpool even when warm=0 or no warm
-  session is selected; execution may queue briefly or start immediately. Record
-  routing and actual warm hits separately. Do not silently substitute
-  models or modify/restart shared pool services. Use `ssh devbox` for Linux work.
-- Limit active task agents and task worktrees to five each, including external
-  CLI/remote workers and test/review checkouts; obey lower runtime limits too.
-  Assign primary-checkout writes to one owner. Count nested dispatch centrally;
-  an agent may not start more workers without a coordinator allocation.
-- Record plans, dependency changes, conflicts, decisions and handoffs in task
-  documents and GitHub Issues/PRs. Record roles, models, effort, task identities,
-  dependency versions, PR head/base, verification evidence and blockers.
+  `gpt-5.6-sol` and xhigh reasoning effort. Do not use the delegation plugin.
+  Warm hits are an optimization: dispatch through warmpool even when warm=0.
+  Do not modify/restart shared pool services. Use `ssh devbox` for Linux work.
+- Start every review or helper task in a fresh session; do not reuse long-lived
+  owner sessions across tasks.
+- Record decisions, blockers and verification results in GitHub Issues/PRs.
+  The PR and its CI run are the evidence; do not maintain separate sealed
+  evidence directories for reproducible checks.
 - Escalate product/architecture/scope/acceptance decisions through the coordinator
   to the user with options and impact. Continue unrelated ready tasks. Milestone
   entry and transitions require explicit user review and permission; completing
@@ -74,8 +69,6 @@ decisions without concrete evidence or a user request.
 - Designate one writer per shared contract, root configuration, lockfile, database
   migration ordering, common registration/export entry point, and root AGENTS.md
   change. Agree on contract changes before consumers implement incompatible variants.
-- Do not treat a task-plan file as an atomic lock. Resolve overlapping ownership
-  through the coordinator; a stale plan is not permission to overwrite another task.
 - Never revert, clean, reset, stash or overwrite other contributors' work to make
   your task pass. Inspect unexpected changes and preserve them.
 - Stage only your owned changes. Do not commit another task's unfinished work or
