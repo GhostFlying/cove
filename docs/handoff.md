@@ -17,7 +17,7 @@ before resuming; history lives in Git, Issues and PRs (the long pre-takeover han
 
 - `origin/main` = `3d7349a` (PR #66 local entry merged 2026-10-09).
 - Server runs as `cove-server` (`apps/server/dist/entry/main.js`) with HTTP RPC
-  (`server.status`, `terminal.create|get|list|stop`) and the terminal WebSocket.
+  (`server.status`, `terminal.create|get|list|stop`, `operation.get`) and the terminal WebSocket.
 - `@cove/client` and `@cove/terminal-web` exist as libraries; there is no `apps/cli` and
   no end-to-end browser page yet.
 

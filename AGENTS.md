@@ -91,8 +91,8 @@ decisions without concrete evidence or a user request.
 - Use `p/luchengxuan/<milestone>-<issue>-<topic>` branches. Main is protected and
   linear: only GitHub rebase & merge, never squash, merge commits, direct pushes,
   force pushes or deletion. The empty-repository bootstrap is already complete.
-- An assigned integration owner may merge without per-PR user confirmation after
-  independent testing, independent review and all required CI checks succeed.
+- The coordinator may merge without per-PR user confirmation after all required
+  CI checks succeed and an independent review has no open findings.
   Missing, skipped, cancelled or pending evidence does not satisfy this gate.
   This authority does not grant deployments, releases or milestone transitions.
 - Review findings go back to the implementer. If a reviewer implements a fix,
@@ -187,11 +187,12 @@ decisions without concrete evidence or a user request.
   dependency. There is no first-run-success requirement. Do not blindly replay
   uncertain external commands or terminal input; establish state and safe replay.
 - Push a buildable task branch and open a draft PR early; run CI alongside local
-  acceptance. Mandatory local/native gates still precede merge and dependent work.
+  acceptance. CI is the merge gate; checks CI cannot run (real devices,
+  devbox) are listed in the PR and must pass before merge.
 - Do one complete independent PR review and batch all independently evaluable
   findings. Review corrections' delta and impact in the same PR context; broaden
-  review only when affected contracts or new evidence warrant it. Preserve
-  independent implementation, testing and review responsibilities.
+  review only when affected contracts or new evidence warrant it. The author
+  self-tests, CI is the independent test, and the reviewer must not be the author.
 - Use reproducible PR/CI/raw logs with exact revision and environment; give
   irreplaceable results special custody. Archive complete superseded evidence,
   including failures/UNKNOWN, only after active dependencies are resolved; never
