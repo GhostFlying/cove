@@ -407,6 +407,19 @@ describe("bounded server preview cache", () => {
     await cleaned(f);
   });
 
+  // identityLimit bounds concurrent refresh/transfer identities, never the lifetime total;
+  // a lifetime cap left every preview permanently stale after identityLimit refreshes.
+  it("author preview keeps refreshing past the identity limit", async () => {
+    const f = fixture({}, { identityLimit: 2 });
+    // Odd versions keep each status ahead of the cached picture, forcing a real transfer.
+    for (let version = 1; version <= 11; version += 2) {
+      expect(await f.capture(new Uint8Array([64 + version]), version)).toEqual({ ok: true });
+      expect(f.runtime.previews.snapshot().transferIds).toBe(0);
+    }
+    expect(f.runtime.previews.cache.getRecord(run).preview.version).toBe(11);
+    await cleaned(f);
+  });
+
   it("author preview close cancels waiter while shared refresh continues", async () => {
     const f = fixture();
     const c = f.connect();
