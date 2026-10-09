@@ -9,13 +9,13 @@ import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
 
 // Regression: the server used to keep every settled request identity until the worker or
-// connection closed, capped at 4096. A focused view over heavy output sends roughly one
-// applied-ack per event, so after ~4096 events every attach, create and ack on the whole
-// server failed with BUSY until restart. Each worker pipe identity is now released when its
-// request settles, and each connection keeps only in-flight IDs plus a bounded recent window.
+// connection closed, capped at 4096, after which every attach, create and ack on the whole
+// server failed with BUSY until restart. Each awaited input below is one settled request on
+// this connection and one worker pipe request, so the loop deterministically crosses both
+// old caps; the idle server's once-a-second preview status also keeps spending pipe IDs.
 const cli = resolve(import.meta.dirname, "../dist/main.js");
-// Well past the old 4096 lifetime cap; before the fix the wedge hit near 4500 events.
-const TARGET_APPLIED_SEQ = 12_000;
+const OLD_CAP = 4096;
+const REQUESTS = OLD_CAP + 200;
 
 let fixture;
 
@@ -107,25 +107,21 @@ function open(client, run, viewId) {
   return opened.value;
 }
 
-test("heavy output past the old request identity cap leaves attach and create available", async () => {
-  // Synthetic output only; no real terminal content.
-  const run = await createRun('i=0; while :; do i=$((i+1)); printf "line %d\\n" "$i"; done');
-  const holderClient = await connectClient();
-  const holder = open(holderClient, run, "holder");
+test("more settled requests than the old identity cap leave input, attach and create available", async () => {
+  // The run discards its input, so no terminal content is involved.
+  const run = await createRun("exec cat >/dev/null");
+  const client = await connectClient();
+  const holder = open(client, run, "holder");
   expect(await holder.attach()).toMatchObject({ ok: true });
   holder.setInputTarget(true, true);
   expect(await holder.requestFocus()).toMatchObject({ ok: true });
-
-  await waitFor(
-    "the focused view to apply events well past the old cap",
-    () => {
-      const phase = holder.snapshot().phase;
-      if (phase === "unavailable") throw new Error("the focused view lost its subscription");
-      return holder.snapshot().appliedSeq >= TARGET_APPLIED_SEQ;
-    },
-    120_000,
-  );
-  expect(holderClient.snapshot().status).toBe("connected");
+  const key = new TextEncoder().encode("x");
+  for (let index = 0; index < REQUESTS; index++) {
+    const sent = await holder.sendInput({ source: "keyboard", bytes: key });
+    if (!sent.ok || sent.value.unknownBytes !== 0 || sent.value.notSentBytes !== 0)
+      throw new Error(`input ${index} did not settle accepted: ${JSON.stringify(sent)}`);
+  }
+  expect(client.snapshot().status).toBe("connected");
 
   const probeClient = await connectClient();
   const probe = open(probeClient, run, "probe");
