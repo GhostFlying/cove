@@ -108,6 +108,37 @@ describe("private shared terminal control and binary input", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+  it("records a worker exit in the run registry before a subscriber publishes it", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const ref = (await f.attach(a)).subscription;
+      const seen = [];
+      a.onWrite((data) => {
+        const { metadata } = decode(data);
+        if (metadata.type === "run-event" && metadata.event.type === "exit")
+          seen.push(f.runtime.registry.get(run).status);
+      });
+      f.session.receive(
+        f.event(ref, { type: "exit", run, seq: 1, exitCode: null, signal: "SIGHUP" }),
+      );
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ status: "exited", exitCode: null, signal: "SIGHUP" });
+      // A later exited status from the worker refines the record; a live one cannot revive it.
+      f.runtime.registry.observe(f.runtime.pool.get(run).worker, {
+        ...seen[0],
+        receivedSeq: 1,
+        parsedSeq: 1,
+      });
+      expect(f.runtime.registry.get(run).status).toMatchObject({ status: "exited", parsedSeq: 1 });
+      expect(
+        f.runtime.registry.observe(f.runtime.pool.get(run).worker, { ...seen[0], status: "live" }),
+      ).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
   it("serializes same-run focus by accepted order with one same-grid command and no fabricated status", async () => {
     const f = fixture();
     const a = f.connect("a");
