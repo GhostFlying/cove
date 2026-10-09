@@ -420,6 +420,27 @@ describe("bounded server preview cache", () => {
     await cleaned(f);
   });
 
+  it("author preview connection drops settled attempts and keeps a bounded ID window", async () => {
+    const f = fixture();
+    expect(await f.capture()).toEqual({ ok: true });
+    const c = f.connect("connection", { requestLimit: 4 });
+    // Many more settled previews than requestLimit; none may be retained by the connection.
+    for (let index = 0; index < 12; index++) {
+      const pending = c.preview(`again-${index}`, 1);
+      await f.toPreview(pending, 1);
+      expect((await pending).status).toBe("unchanged");
+      // Acknowledge the published bytes so delivery capacity never gates the loop.
+      for (const write of c.writes.splice(0)) write.settled();
+      expect(c.service.snapshot()).toMatchObject({
+        previews: 0,
+        pending: 0,
+        identities: Math.min(index + 1, 4),
+      });
+    }
+    expect((await c.preview("again-11", 1)).error.kind).toBe("COUNTER_EXHAUSTED");
+    await cleaned(f);
+  });
+
   it("author preview close cancels waiter while shared refresh continues", async () => {
     const f = fixture();
     const c = f.connect();

@@ -494,6 +494,9 @@ export class TerminalSubscriptions {
       this.inFlight--;
       this.settleId(command.requestId);
       if (this.requestLeases.delete(lease)) lease.release();
+      // A settled attempt needs no close-time cancellation: its fence also reads
+      // delivery.closed, so dropping it here keeps the set bounded by in-flight previews.
+      this.previewAttempts.delete(attempt);
       this.releaseClosedRecords();
     }
   }
@@ -943,6 +946,7 @@ export class TerminalSubscriptions {
     const route = subscriptionId ? this.routes.get(subscriptionId) : undefined;
     return {
       routes: this.routes.size,
+      previews: this.previewAttempts.size,
       active: [...this.routes.values()].filter((entry) => entry.phase !== "retired").length,
       identities: this.externalIds.size + this.settledIds.size,
       pending: this.requests.size,
