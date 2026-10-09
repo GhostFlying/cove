@@ -453,13 +453,48 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
     );
     expect(rejectionKind(staleInput)).toBe("STALE_CONTROL");
 
+    // The current holder's own subscription carrying its first, superseded epoch is refused
+    // too, so the server checks the epoch and not only who holds focus. The same subscription
+    // then sends its next line under the current epoch, which is accepted: only the epoch
+    // differs. Hand-built input advances this subscription's input counter past anything A's
+    // controller has used, so A's own controller types nothing after this point.
+    const aRef = A.controller.snapshot().subscription;
+    const aInputSeq = Math.max(
+      ...a.tap.outbound
+        .filter((frame) => frame.metadata.type === "input")
+        .map((frame) => frame.metadata.inputSeq),
+    );
+    const holderStale = await a.tap.inject(
+      {
+        type: "input",
+        run: aRef.run,
+        subscription: aRef,
+        epoch: firstGrant.epoch,
+        inputSeq: aInputSeq + 1,
+      },
+      encoder.encode("old-epoch-bytes\r"),
+    );
+    expect(firstGrant.epoch).toBeLessThan(aGrant.epoch);
+    expect(rejectionKind(holderStale)).toBe("STALE_CONTROL");
+    const holderCurrent = await a.tap.inject(
+      {
+        type: "input",
+        run: aRef.run,
+        subscription: aRef,
+        epoch: aGrant.epoch,
+        inputSeq: aInputSeq + 2,
+      },
+      encoder.encode("size a3\r"),
+    );
+    expect(holderCurrent.metadata.type).not.toBe("error");
+
     // The PTY applies inputs in order, so once the holder's later line is echoed any
     // accepted spectator or stale bytes would already be visible.
-    await typeText(A.controller, "size a3\r");
     await waitFor("the holder's later line", () => C.recording.text().includes("size-a3:30 100"));
     for (const { recording } of [A, B, C]) {
       expect(recording.text()).not.toContain("spectator-bytes");
       expect(recording.text()).not.toContain("stale-bytes");
+      expect(recording.text()).not.toContain("old-epoch-bytes");
     }
     // The spectator never sent input of its own.
     expect(spectator.tap.sentInput(cRef.subscriptionId)).toBe("");
@@ -657,9 +692,10 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       30_000,
     );
 
-    // While the slow client is still held, the healthy client types two lines in the middle
-    // of a second flood, refocuses and keeps receiving every line. The flood only stops once
-    // the shell has read the first typed line.
+    // While the slow client is still held, the healthy client types two lines into a second
+    // flood, refocuses and keeps receiving every line. The flood only stops once the shell has
+    // read the first typed line, so that line certainly arrives mid-flood; the second follows
+    // it at once and may land just as the flood is stopping.
     await typeText(H.controller, "flood-until 20001\r");
     await waitFor(
       "the open-ended flood on the healthy view",
