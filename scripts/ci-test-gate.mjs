@@ -211,7 +211,7 @@ export const requiredSuites = [
   {
     project: "client",
     file: "packages/client/tests/terminal-control-input.test.mjs",
-    minimumTests: 36,
+    minimumTests: 62,
   },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
