@@ -905,6 +905,8 @@ const fixture = {
       initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 }),
     );
     const nestedError = await nested;
+    // A change caused by a listener's reaction is announced in a later round on a new task.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const result = {
       webgl2: offersWebgl2,
       a,
@@ -1136,6 +1138,86 @@ const fixture = {
       failures: failures.map((error) => error.kind),
       children: container.childElementCount,
     };
+  },
+  // Supersession inside foreign code (terminal-architecture 4.4.7, #82). Each case runs foreign
+  // code that supersedes the operation in progress, then fails it; the superseded operation must
+  // neither publish a failure for its successor nor throw out of a "latest wins" setting.
+  async supersededInsideForeignCode() {
+    // A focus observer re-shows the view from the blur that hiding runs, and types into it.
+    await initialize();
+    await ready();
+    capturedTerminal!.input("f", true);
+    let reshown = false;
+    const reshow = view!.onFocusIntent((intent) => {
+      if (intent.focused || reshown) return;
+      reshown = true;
+      view!.setVisibility(true);
+      capturedTerminal!.input("t", true);
+    });
+    const focusesBefore = focuses.length;
+    let visibilityThrew: string | undefined;
+    try {
+      view!.setVisibility(false);
+    } catch (caught) {
+      visibilityThrew = kindOf(caught);
+    }
+    reshow.dispose();
+    const visibility = {
+      threw: visibilityThrew,
+      hidden: capturedTerminal?.element?.hasAttribute("hidden") ?? false,
+      focused: focuses.slice(focusesBefore).map((intent) => intent.focused),
+      failures: failures.map((error) => error.kind),
+    };
+
+    // A theme setter that applies a newer appearance and then fails the older one.
+    await initialize();
+    await ready();
+    const options = capturedTerminal!.options as { theme?: unknown };
+    let themeCalls = 0;
+    Object.defineProperty(options, "theme", {
+      configurable: true,
+      set: () => {
+        if (++themeCalls > 1) return;
+        view!.setAppearance({ ...appearance });
+        throw new Error("injected theme failure");
+      },
+    });
+    let appearanceThrew: string | undefined;
+    try {
+      view!.setAppearance({ ...appearance });
+    } catch (caught) {
+      appearanceThrew = kindOf(caught);
+    }
+    const appearanceResult = {
+      threw: appearanceThrew,
+      themeCalls,
+      failures: failures.map((error) => error.kind),
+      ownedRoots: ownedRoots(),
+    };
+
+    // The retired xterm's cleanup disposes the view and then fails.
+    const candidate = standaloneView();
+    const observed: string[] = [];
+    candidate.onFailure((error) => observed.push(error.kind));
+    await initializeStandalone(candidate, ++generation, { cols: 40, rows: 10 });
+    await installStandalone(candidate, { cols: 40, rows: 10 });
+    const retired = capturedTerminal!;
+    const originalDispose = retired.dispose.bind(retired);
+    retired.dispose = () => {
+      originalDispose();
+      candidate.dispose();
+      throw new Error("injected cleanup failure");
+    };
+    const initializeError = await initializeStandalone(candidate, ++generation, {
+      cols: 40,
+      rows: 10,
+    }).then(
+      () => undefined,
+      (caught) => kindOf(caught instanceof AggregateError ? caught.cause : caught),
+    );
+    const cleanup = { error: initializeError, observed, ownedRoots: ownedRoots() };
+    candidate.dispose();
+    return { visibility, appearance: appearanceResult, cleanup };
   },
   disposeAfterPasteWithTimerProbe() {
     let cleared = 0;

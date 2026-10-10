@@ -301,9 +301,10 @@ export function createXtermTerminalView(
   // 2. Delivery is serialized and never nested. One loop, which never runs inside itself,
   //    delivers the renderer active when it looks, to a snapshot of the listeners, one at a time.
   //    Whatever a listener does is only observed by the loop afterwards: if the renderer has
-  //    changed by then, the rest of the stale announcement is dropped and every listener gets the
-  //    current one. The last renderer each listener receives is therefore the current one, and
-  //    a change that is reverted before delivery is never announced.
+  //    changed by then, the rest of the stale announcement is dropped and the current one goes to
+  //    every listener in a new round on a later task, so listeners that keep changing the renderer
+  //    cannot hold the page in one task. The last renderer each listener receives is therefore
+  //    the current one, and a change that is reverted before delivery is never announced.
   // 3. Every operation is fenced with the epoch it started in. Initialize and dispose start a new
   //    epoch; an operation that finds the epoch moved after a step that ran foreign code aborts
   //    with RESYNC_REQUIRED and never writes into the successor.
@@ -311,9 +312,14 @@ export function createXtermTerminalView(
   let delivering = false;
   let announced = renderers.active;
   let owed: Array<Listener<XtermRenderer>> = [];
+  let laterRound: ReturnType<typeof setTimeout> | undefined;
   let epoch = 0;
+  // Settings without a result channel ("latest wins"): a call superseded by a newer one of the
+  // same kind, or by initialize/dispose, abandons silently (terminal-architecture 4.4.7).
+  let visibilitySeq = 0;
+  let appearanceSeq = 0;
   function deliverRendererChanges(): void {
-    if (delivering) return;
+    if (delivering || laterRound !== undefined) return;
     delivering = true;
     try {
       while (state !== "disposed" && operationDepth === 0) {
@@ -324,6 +330,15 @@ export function createXtermTerminalView(
         const listener = owed.shift();
         if (!listener) break;
         if (rendererChanges.has(listener)) rendererChanges.deliver(listener, announced);
+        if (renderers.active !== announced) {
+          // A listener's reaction changed the renderer: announce the new one in a later round.
+          owed = [];
+          laterRound = setTimeout(() => {
+            laterRound = undefined;
+            deliverRendererChanges();
+          }, 0);
+          break;
+        }
       }
     } finally {
       delivering = false;
@@ -516,13 +531,23 @@ export function createXtermTerminalView(
     return backend;
   };
 
-  const replaceBackend = () => {
+  // Cleanup of a retired xterm runs foreign code (tracker, input origin, renderer, xterm), which
+  // may dispose or reinitialize the view. A cleanup failure belongs to the retired backend only:
+  // it is published as this view's failure only while the operation still owns the view, and a
+  // superseded operation stops with RESYNC_REQUIRED without touching the successor.
+  const retireForReplacement = (entry: number, message: string): void => {
     const cleanup = disposeBackend();
+    if (superseded(entry))
+      throw combineErrors(domainError("RESYNC_REQUIRED"), cleanup, `${message} (superseded)`);
     if (cleanup.length) {
       const failure = domainError("RECOVERY_UNAVAILABLE");
       publishFailure(failure, true);
-      throw combineErrors(failure, cleanup, "Terminal replacement cleanup failed");
+      throw combineErrors(failure, cleanup, message);
     }
+  };
+
+  const replaceBackend = (entry: number) => {
+    retireForReplacement(entry, "Terminal replacement cleanup failed");
     // Retire only this construction's incarnation on failure; a listener called during
     // construction may already have built a successor that must survive.
     const target = incarnation + 1;
@@ -559,14 +584,8 @@ export function createXtermTerminalView(
     if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
       throw domainError("RESYNC_REQUIRED");
     const entry = ++epoch;
-    const cleanup = disposeBackend();
-    if (cleanup.length) {
-      const failure = domainError("RECOVERY_UNAVAILABLE");
-      publishFailure(failure, true);
-      throw combineErrors(failure, cleanup, "Terminal initialization cleanup failed");
-    }
-    // Retiring the old xterm ran its cleanup callbacks.
-    fence(entry);
+    // Retiring the old xterm runs its cleanup callbacks; see retireForReplacement.
+    retireForReplacement(entry, "Terminal initialization cleanup failed");
     viewGeneration = input.viewGeneration;
     geometry = { ...input.geometry };
     proposedGeometry = geometry;
@@ -605,7 +624,7 @@ export function createXtermTerminalView(
         )
           throw domainError("RESYNC_REQUIRED");
         if (!pristine) {
-          replaceBackend();
+          replaceBackend(entry);
           fence(entry);
         }
         requireBackend();
@@ -703,17 +722,21 @@ export function createXtermTerminalView(
     setAppearance: (nextAppearance: Appearance): void =>
       operation(() => {
         const entry = epoch;
+        const seq = ++appearanceSeq;
         const theme = xtermTheme(nextAppearance);
         const current = backend;
+        const abandoned = () => superseded(entry) || seq !== appearanceSeq || backend !== current;
         if (current && state !== "disposed" && state !== "failed") {
           try {
             current.terminal.options.theme = theme;
           } catch (error) {
+            // A failure after supersession belongs to nobody that is still current.
+            if (abandoned()) return;
             failAndRetire(error, current.incarnation);
           }
         }
         // A theme change runs xterm's own code; never hand this appearance to a successor.
-        if (superseded(entry)) return;
+        if (superseded(entry) || seq !== appearanceSeq) return;
         appearance = nextAppearance;
       }),
 
@@ -721,25 +744,30 @@ export function createXtermTerminalView(
       operation(() => {
         if (state === "disposed") return;
         const entry = epoch;
+        const seq = ++visibilitySeq;
         visible = nextVisible;
         const element = backend?.terminal.element;
         if (element) {
           const current = backend!;
+          const abandoned = () => superseded(entry) || seq !== visibilitySeq || backend !== current;
           try {
             if (visible) {
               element.removeAttribute("hidden");
               renderers.reveal();
+              if (abandoned()) return;
               current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
             } else {
               element.setAttribute("hidden", "");
               if (effectivelyFocused) {
-                // Blurring runs the focus tracker, whose observers may replace or dispose the view.
+                // Blurring runs the focus tracker, whose observers may replace or dispose the view
+                // or set the visibility again; a superseded call then stops silently.
                 current.terminal.blur();
-                if (superseded(entry)) return;
+                if (abandoned()) return;
                 publishFocus(false);
               }
             }
           } catch (error) {
+            if (abandoned()) return;
             failAndRetire(error, current.incarnation);
           }
         }
@@ -759,7 +787,11 @@ export function createXtermTerminalView(
       state = "disposed";
       epoch++;
       // Dispose the renderer policy first: it cancels a pending retry and releases the addon
-      // without publishing a renderer change to listeners that are about to be cleared.
+      // without publishing a renderer change to listeners that are about to be cleared. A
+      // renderer round scheduled for a later task is dropped too.
+      if (laterRound !== undefined) clearTimeout(laterRound);
+      laterRound = undefined;
+      owed = [];
       renderers.dispose();
       const cleanup = disposeBackend();
       inputs.clear();
