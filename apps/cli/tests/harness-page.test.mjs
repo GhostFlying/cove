@@ -421,16 +421,20 @@ const errorFrame = (fields) =>
 // A command frame without payload, as the page would send it.
 const commandFrame = (metadata) => encodeFrame(TERMINAL_FRAME_CLASSES.command, metadata);
 
-// Lets a test hold the client lane's reply deadline (every 5 s page timer) while it sets up an
-// ordering, and then fire it, so a command whose result never comes ends as RESULT_UNKNOWN
-// exactly when the test says, not when a slow runner happens to reach the deadline. Only timers
-// registered while holding are held; a held timer the page clears is forgotten. Installed before
-// the page loads, so the client's scheduler captures the wrapped functions.
+// Lets a test hold the client lane's reply deadline of one resize command while it sets up an
+// ordering, and then fire it, so a resize whose result never comes ends as RESULT_UNKNOWN exactly
+// when the test says, not when a slow runner happens to reach the deadline. The lane registers a
+// command's 5 s deadline just before it hands the command's frame to the socket; while holding,
+// the deadline registered last before a resize frame is sent is taken off the clock. Every other
+// deadline runs as usual (firing them early would fail live commands such as ACKs). A held
+// deadline the page clears is forgotten. Installed before the page loads, so the client's
+// scheduler captures the wrapped functions.
 const DEADLINE_CONTROL = `(() => {
   const setTimer = window.setTimeout.bind(window);
   const clearTimer = window.clearTimeout.bind(window);
+  const send = WebSocket.prototype.send;
   const held = new Map();
-  let next = -1;
+  let last;
   window.coveDeadlines = { holding: false, held };
   window.coveFireDeadlines = () => {
     window.coveDeadlines.holding = false;
@@ -440,16 +444,26 @@ const DEADLINE_CONTROL = `(() => {
     return callbacks.length;
   };
   window.setTimeout = (callback, delay, ...rest) => {
-    if (window.coveDeadlines.holding && delay === 5000 && typeof callback === "function") {
-      const handle = next--;
-      held.set(handle, () => callback(...rest));
-      return handle;
-    }
-    return setTimer(callback, delay, ...rest);
+    const handle = setTimer(callback, delay, ...rest);
+    if (window.coveDeadlines.holding && delay === 5000 && typeof callback === "function")
+      last = { handle, fire: () => callback(...rest) };
+    return handle;
   };
   window.clearTimeout = (handle) => {
+    if (last?.handle === handle) last = undefined;
     if (held.delete(handle)) return;
     clearTimer(handle);
+  };
+  WebSocket.prototype.send = function (data) {
+    if (window.coveDeadlines.holding && last && typeof data !== "string") {
+      const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      if (new TextDecoder("latin1").decode(bytes).includes('"type":"resize"')) {
+        clearTimer(last.handle);
+        held.set(last.handle, last.fire);
+      }
+      last = undefined;
+    }
+    return send.call(this, data);
   };
 })();`;
 
@@ -1008,7 +1022,8 @@ test("a control command with an unknown result is not retried, and a fact unbloc
       // Ready at X with control, while the resize to A is still unanswered.
       expect(await page.textContent("#terminal-status")).not.toMatch(/resize/);
       expect([sent("focus"), sent("resize")]).toEqual([2, 1]);
-      expect(await page.evaluate(() => window.coveFireDeadlines())).toBeGreaterThan(0);
+      // Exactly the resize's deadline was held; firing it ends the resize as unknown now.
+      expect(await page.evaluate(() => window.coveFireDeadlines())).toBe(1);
       await waitForStatus(page, /resize result unknown/);
       // No click: the recovery settled the unknown resize, so the page asks for A, once.
       await page.waitForFunction(
