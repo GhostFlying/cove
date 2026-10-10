@@ -819,9 +819,12 @@ describe("design review regressions (rounds 1-3)", () => {
   });
 
   test("a focus re-registered from measureGrid yields to host tasks between drain quanta", async () => {
-    const h = await reentryHarness({ scheduler: realScheduler() });
+    // Host tasks are run one at a time by the test, so the bound is counted per task rather
+    // than inferred from wall-clock time.
+    const tasks = manualTasks();
+    const h = await reentryHarness({ scheduler: tasks });
+    tasks.manual = true;
     let measures = 0;
-    let measuresAtTimer;
     const rearm = () => {
       h.mounted.hooks.measureGrid = () => {
         measures++;
@@ -830,11 +833,18 @@ describe("design review regressions (rounds 1-3)", () => {
       };
     };
     rearm();
-    setTimeout(() => (measuresAtTimer = measures), 0);
     h.controller.requestFocus();
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await settle(300);
+    // One quantum (16 entries) runs before the drain yields a host task.
+    expect(measures).toBe(16);
+    let ran = 0;
+    while (measures < 200 && ran < 50) {
+      await tasks.runTask();
+      ran++;
+      expect(measures).toBeLessThanOrEqual(16 * (ran + 1));
+    }
     expect(measures).toBe(200);
-    expect(measuresAtTimer).toBeLessThan(200);
+    expect(ran).toBe(Math.ceil(200 / 16) - 1);
   });
 
   test("a deferred F80 is superseded by an F100 announcement over a 100x30 baseline", async () => {
