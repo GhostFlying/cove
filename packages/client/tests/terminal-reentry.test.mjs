@@ -942,4 +942,45 @@ describe("implementation review regressions (#86 round 1)", () => {
     expect(await outcomeOf(blurs[0])).toBe("ok");
     expect(h.server.ofType("blur")).toHaveLength(1);
   });
+
+  test("a blur whose deadline passes inside its ID supplier ends as timeout, unsent", async () => {
+    const h = await reentryHarness();
+    const blurred = h.controller.blur();
+    h.hooks.requestId = () => h.scheduler.advance(20_000);
+    await h.finish();
+    expect(h.fired).toContain("requestId");
+    expect(await outcomeOf(blurred)).toBe("timeout");
+    expect(h.server.ofType("blur")).toHaveLength(0);
+  });
+
+  test("a granted control waiting for its grant past the recovery deadline ends as timeout", async () => {
+    const h = await reentryHarness();
+    let release;
+    h.mounted.state.applyGate = new Promise((resolve) => (release = resolve));
+    // The first appearance moves the control fence to its event; with that event's parse held,
+    // no ACK covers the fence and the second appearance waits for a usable grant.
+    const first = h.controller.updateAppearance({
+      ...DEFAULT_APPEARANCE,
+      foreground: "1111/1111/1111",
+    });
+    await settle();
+    expect(await outcomeOf(first)).toBe("ok");
+    const second = h.controller.updateAppearance({
+      ...DEFAULT_APPEARANCE,
+      foreground: "2222/2222/2222",
+    });
+    let settled = false;
+    void second.then(() => (settled = true));
+    // The wait spends the negotiated recovery deadline (15 s), not a fixed 5 s.
+    h.scheduler.advance(6_000);
+    await settle();
+    expect(settled).toBe(false);
+    h.scheduler.advance(10_000);
+    await settle();
+    expect(await outcomeOf(second)).toBe("timeout");
+    expect(h.server.ofType("appearance")).toHaveLength(1);
+    h.mounted.state.applyGate = undefined;
+    release();
+    await h.finish();
+  });
 });

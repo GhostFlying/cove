@@ -1306,6 +1306,15 @@ export class RoutedTerminalController implements TerminalController {
       release();
       const result = await sending;
       if (!result.ok && !result.sent && refused && this.recovering() && active()) continue;
+      // Refused at the handoff because the deadline passed meanwhile (inside the ID supplier,
+      // say): proven unsent and expired, so a timeout rather than a supersession (4.4.6).
+      if (
+        !result.ok &&
+        !result.sent &&
+        refused &&
+        this.host.scheduler.nowMs() >= entry.deadlineAtMs
+      )
+        return { ok: false, error: localError("timeout") };
       return this.controlReceipt(result, "blur-result");
     }
   }
@@ -1841,21 +1850,26 @@ export class RoutedTerminalController implements TerminalController {
       this.host.binding() === binding &&
       this.phase === "ready";
     const startedAtMs = this.host.scheduler.nowMs();
-    // Like input, a granted command must follow the applied-ack that covers the grant fence.
+    // Like input, a granted command must follow the applied-ack that covers the grant fence. The
+    // wait spends the negotiated recovery deadline, like the other grant waits. Expiry of a
+    // command never handed off is a timeout (4.4.6-4.4.7); only losing the grant or being
+    // superseded is invalid-state.
+    const deadlineMs = this.recoveryBudget(binding);
     while (
       this.control.currentEpoch(ref, generation, this.appliedSeq) !== null &&
       !this.grantUsable(ref, generation)
     ) {
-      const usable = await this.waitUntil(
+      const waited = await this.waitUntil<"usable" | "lost" | "timeout">(
         () => {
           if (!current() || this.control.currentEpoch(ref, generation, this.appliedSeq) === null)
-            return false;
-          return this.grantUsable(ref, generation) ? true : undefined;
+            return "lost";
+          return this.grantUsable(ref, generation) ? "usable" : undefined;
         },
-        5_000 - (this.host.scheduler.nowMs() - startedAtMs),
-        false,
+        deadlineMs - (this.host.scheduler.nowMs() - startedAtMs),
+        "timeout",
       );
-      if (!usable) return { ok: false, error: localError("invalid-state") };
+      if (waited === "timeout") return { ok: false, error: localError("timeout") };
+      if (waited === "lost") return { ok: false, error: localError("invalid-state") };
     }
     const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
     if (epoch === null || !current()) return { ok: false, error: localError("invalid-state") };
