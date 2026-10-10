@@ -434,6 +434,12 @@ async function tapTerminalSocket(page) {
     holdOutbound() {
       tap.holdingOutbound = true;
     },
+    // Forward the first page message with a frame matching `predicate`, then hold every server
+    // message after it, so that command's reply (and everything else) stays away from the page.
+    holdInboundAfterOutbound(predicate) {
+      tap.afterOutbound = predicate;
+    },
+    afterOutbound: undefined,
     // Release held messages in their original order, and stop holding.
     releaseInbound() {
       tap.holdingInbound = false;
@@ -450,9 +456,14 @@ async function tapTerminalSocket(page) {
     const inbound = createTerminalDecoder();
     const outbound = createTerminalDecoder();
     route.onMessage((message) => {
-      if (typeof message !== "string") tap.outbound.push(...decodeFrames(outbound, message));
+      const frames = typeof message === "string" ? [] : decodeFrames(outbound, message);
+      tap.outbound.push(...frames);
       if (tap.holdingOutbound) tap.heldOutbound.push({ server, message });
       else server.send(message);
+      if (tap.afterOutbound && frames.some(tap.afterOutbound)) {
+        tap.afterOutbound = undefined;
+        tap.holdingInbound = true;
+      }
     });
     server.onMessage((message) => {
       const frames = typeof message === "string" ? [] : decodeFrames(inbound, message);
@@ -766,6 +777,74 @@ test("a first click whose grant is lost during its own recovery reports the acce
     expect(status).toContain("viewing");
     expect(status).toContain("attached");
     expect(socket.outbound.filter((frame) => frame.metadata.type === "focus").length).toBe(1);
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+// A focus or resize whose reply never arrives ends as RESULT_UNKNOWN when its lane deadline
+// passes: the server may have applied it. The page must say so rather than call it refused, and
+// must not send the same resize again before a fact settles the size (no silent retry). The tap
+// holds every server message from the command on, so no fact arrives until the test releases them.
+test("a focus or resize with an unknown result is shown as unknown and never resent", async () => {
+  await withHarness(async ({ page, server, pageErrors }) => {
+    const socket = await tapTerminalSocket(page);
+    await openConnectedPage({ server, page });
+    await openNewTerminal(page);
+    const status = () => page.textContent("#terminal-status");
+    const sent = (type) => socket.outbound.filter((frame) => frame.metadata.type === type).length;
+    try {
+      socket.holdInboundAfterOutbound((frame) => frame.metadata.type === "focus");
+      await page.click("#terminal");
+      await page.waitForFunction(
+        () => /focus result unknown/.test(document.getElementById("terminal-status")?.textContent),
+        undefined,
+        { timeout: 15_000 },
+      );
+      expect(await status()).not.toContain("refused");
+      expect(sent("focus")).toBe(1);
+      socket.releaseInbound();
+      // The page did not adopt a grant it never saw accepted, so it stays a viewer until the user
+      // clicks again: that is a new request, not a resend of the unknown one.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(sent("focus")).toBe(1);
+      await page.click("#terminal");
+      await waitForSteadyControl(page);
+      expect(sent("focus")).toBe(2);
+
+      // A resize this client asks for after the window grows, with its reply and facts held.
+      const resizesBefore = sent("resize");
+      socket.holdInboundAfterOutbound((frame) => frame.metadata.type === "resize");
+      await page.setViewportSize({ width: 1200, height: 760 });
+      await page.waitForFunction(
+        () => /resize result unknown/.test(document.getElementById("terminal-status")?.textContent),
+        undefined,
+        { timeout: 15_000 },
+      );
+      expect(await status()).not.toContain("refused");
+      const unknown = socket.outbound.filter((frame) => frame.metadata.type === "resize")[
+        resizesBefore
+      ].metadata.geometry;
+      const sameResizes = () =>
+        socket.outbound.filter(
+          ({ metadata }) =>
+            metadata.type === "resize" &&
+            metadata.geometry.cols === unknown.cols &&
+            metadata.geometry.rows === unknown.rows,
+        ).length;
+      // The window changes and comes back: the page measures that grid again and must not hand
+      // the uncertain resize off a second time. (The status line's notice can reflow the page and
+      // change the measured grid; a different grid is a new request, so only repeats count.)
+      await page.setViewportSize({ width: 1200, height: 761 });
+      await page.setViewportSize({ width: 1200, height: 760 });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(sameResizes()).toBe(1);
+      socket.releaseInbound();
+      await waitForSteadyControl(page);
+      expect(sameResizes()).toBe(1);
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(socket.sockets).toBe(1);
     expect(pageErrors).toEqual([]);
   });
 });
