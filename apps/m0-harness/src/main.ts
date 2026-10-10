@@ -99,8 +99,9 @@ interface OpenTerminal {
   readonly view: XtermTerminalView;
   readonly disposables: { dispose(): void }[];
   // The one rule for this page's focus and resize commands. While one is in flight, or after
-  // one failed (its result may be unknown: the server may have applied it), the page sends no
-  // resize and never retries it. It waits for a server fact: the applied grid is the one sent,
+  // one that may have taken effect failed (its result is unknown, or the server accepted it and
+  // it failed afterwards), the page sends no resize and never retries it. It waits for a server
+  // fact: the applied grid is the one sent,
   // the authority shows a focus took effect, or a recovery the controller started after sending
   // the command reached ready (the command was on the wire before that recovery's request, so its
   // baseline includes the command's effect). Then the page decides again from the current facts
@@ -108,6 +109,11 @@ interface OpenTerminal {
   // gesture takes control (a click; typing goes through the view), and a click replaces a failed
   // command's wait as a new request, not a resend.
   command?: SentCommand;
+  // A resize the server provably refused (or that was never sent) changed nothing, so it holds
+  // no barrier; the page only does not ask for the same grid again until the measured grid
+  // changes, a later recovery reaches ready, or the user clicks, so a lasting refusal cannot
+  // loop.
+  refused?: { readonly grid: Geometry; readonly recoveries: number };
   // The user is operating this terminal here: set by a click or key in it, cleared when the
   // page is hidden or another client takes control.
   operating: boolean;
@@ -262,15 +268,23 @@ function syncSize(entry: OpenTerminal): void {
   const measured = entry.view.measureGrid();
   const applied = snapshot.appliedGeometry?.geometry;
   if (applied && sameGeometry(applied, measured)) return;
+  const refused = entry.refused;
+  if (
+    refused &&
+    sameGeometry(refused.grid, measured) &&
+    refused.recoveries === snapshot.recoverySequence
+  )
+    return;
+  delete entry.refused;
   const command = sendCommand(entry, snapshot, "resize", measured);
   void entry.controller
     .requestResize(measured)
     .then((outcome) => settleCommand(entry, command, outcome));
 }
 
-// Records a focus or resize result. A success leaves nothing to wait for. A failure, whatever it
-// was, keeps the command until a fact about it arrives (commandSettled), so the page never hands
-// the same request off again on its own.
+// Records a focus or resize result. A success, or a failure proven to have changed nothing,
+// leaves nothing to wait for. A failure that may have taken effect keeps the command until a
+// fact about it arrives (commandSettled), so the page never hands it off again on its own.
 function settleCommand(
   entry: OpenTerminal,
   command: SentCommand,
@@ -278,8 +292,14 @@ function settleCommand(
 ): void {
   command.settled = true;
   if (current !== entry) return;
+  const possiblyApplied = !outcome.ok && (outcome.accepted || mayHaveTakenEffect(outcome));
+  if (!possiblyApplied && entry.command === command) {
+    delete entry.command;
+    if (!outcome.ok && command.kind === "resize")
+      entry.refused = { grid: command.grid, recoveries: command.recoveries };
+  }
   if (outcome.ok) {
-    if (entry.command === command) delete entry.command;
+    // Nothing to report.
   } else if (
     // A request refused because a recovery started meanwhile was superseded by it: no failure
     // to report. One that was accepted, or whose result is unknown, always is.
@@ -433,7 +453,10 @@ function describeControlFailure(outcome: Extract<TerminalControlOutcome, { ok: f
 function focusCurrent(): void {
   if (!current) return;
   current.operating = true;
+  // A click may ask again for a grid the server refused before.
+  delete current.refused;
   takeControl(current);
+  syncSize(current);
 }
 
 async function settle(initial: OperationRecord): Promise<OperationRecord> {
