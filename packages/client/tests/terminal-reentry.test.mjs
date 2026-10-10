@@ -1,5 +1,5 @@
 // Callback re-entry (docs/terminal-architecture.md 4.4.8): a systematic matrix of every foreign
-// code call point the controller reaches against every reentering action, plus the named
+// code call point the client and controller reach against every reentering action, plus the named
 // regressions from #84, the #80 round-4 failure modes and the design review rounds 1-3.
 import { describe, expect, test } from "vitest";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
@@ -22,8 +22,8 @@ function type(h, text) {
   return outcome;
 }
 
-// Each action reenters the controller or the client from inside foreign code. Returned promises
-// are tracked so the invariant "every promise settles" covers them.
+// Each action reenters the controller, the view or the client from inside foreign code. Returned
+// promises are tracked so the invariant "every promise settles" covers them.
 const ACTIONS = {
   dispose: (h) => h.controller.dispose(),
   detach: (h) => h.controller.detach(),
@@ -37,16 +37,32 @@ const ACTIONS = {
   updateAppearance: (h) => h.controller.updateAppearance({ ...DEFAULT_APPEARANCE }),
   sendInput: (h) => type(h, "r"),
   setVisibility: (h) => h.controller.setVisibility(false),
-  clientDispose: (h) => h.client.dispose(),
+  // The application reinitializes the mounted view underneath the controller.
+  initialize: (h) =>
+    h.mounted.terminalView.initialize({
+      geometry: { ...h.mounted.state.grid },
+      appearance: { ...DEFAULT_APPEARANCE },
+      viewGeneration: h.mounted.state.generation + 1,
+    }),
+  clientDispose: (h) => {
+    h.clientDisposed = true;
+    return h.client.dispose();
+  },
   reconnect: (h) => h.client.reconnect(),
 };
 
-// Call points: the client's tool ports, the view's operations and registrations, and observers.
-const PORT_POINTS = ["requestId", "send", "timerDispose"];
+// Call points (docs/terminal-architecture.md 4.4.1). Port and connection points are hooks in the
+// harness's ports; view points are hooks in the mounted view; observers subscribe once.
+// Lane points: the ID supplier, socket send, timer disposal, the codec encoding a command before
+// it is registered and decoding a received frame, and the getters of a view being installed.
+const LANE_POINTS = ["requestId", "send", "timerDispose", "laneEncode", "laneDecode", "viewGetter"];
+// The view operations the controller calls. It never calls setAppearance (appearance arrives as
+// an event through applyEvent); the application does, and terminal-web covers that re-entry.
 const VIEW_POINTS = [
   "measureGrid",
   "initialize",
   "beginBaseline",
+  "writeBaselineChunk",
   "finishBaseline",
   "applyEvent",
   "setVisibility",
@@ -55,6 +71,36 @@ const VIEW_POINTS = [
   "dispose",
 ];
 const OBSERVER_POINTS = ["controllerState", "inputNotice", "clientState"];
+// Connection points: credentials and their getters, the clock and timer registration before an
+// attempt is installed, the codec, the terminal and HTTP transports and the response getters, and
+// every handle release on each cleanup path (commit, fail, fence by reconnect, loss).
+const CONNECTION_POINTS = [
+  "connectNowMs",
+  "connectSetTimer",
+  "credentials",
+  "credentialGetter",
+  "connectEncode",
+  "terminalOpen",
+  "bootstrapSend",
+  "bootstrapDecode",
+  "httpPost",
+  "responseGetter",
+  "commitTimerDispose",
+  "commitHttpCancel",
+  "failTimerDispose",
+  "failHttpCancel",
+  "failTerminalCancel",
+  "failTransportClose",
+  "failTransportDispose",
+  "fenceTerminalCancel",
+  "fenceTransportClose",
+  "fenceTransportDispose",
+  "loseTerminalCancel",
+  "loseTransportClose",
+  "loseTransportDispose",
+];
+// RPC points: the ID supplier and codec before the RPC entry is installed, the request, its timer.
+const RPC_POINTS = ["rpcRequestId", "rpcEncode", "rpcPost", "rpcTimerDispose"];
 
 function arm(h, point, action) {
   const run = () => {
@@ -64,9 +110,8 @@ function arm(h, point, action) {
       h.thrown.push(error);
     }
   };
-  if (PORT_POINTS.includes(point)) h.hooks[point] = run;
-  else if (VIEW_POINTS.includes(point)) h.mounted.hooks[point] = run;
-  else {
+  if (VIEW_POINTS.includes(point)) h.mounted.hooks[point] = run;
+  else if (OBSERVER_POINTS.includes(point)) {
     let done = false;
     const once = () => {
       if (done) return;
@@ -77,11 +122,29 @@ function arm(h, point, action) {
     if (point === "controllerState") h.controller.onState(once);
     if (point === "inputNotice") h.controller.onInputOutcome(once);
     if (point === "clientState") h.client.onState(once);
-  }
+  } else h.hooks[point] = run;
+}
+
+// A view whose property reads, made while the controller installs it, can reenter.
+function observedView(h) {
+  const view = fakeView().terminalView;
+  return new Proxy(view, {
+    get(target, key) {
+      const hook = h.hooks.viewGetter;
+      if (hook) {
+        h.hooks.viewGetter = undefined;
+        h.fired.push("viewGetter");
+        hook();
+      }
+      return target[key];
+    },
+  });
 }
 
 // One scenario that passes every call point at least once: input, output (ACK), a focus that
-// measures, appearance, visibility, a resize recovery, a rejected input notice and a replacement.
+// measures, appearance, visibility, a resize recovery, a rejected input notice, a replacement, an
+// RPC, a reconnect (fencing the connection, then committing a new one), a lost transport, a
+// connect whose bootstrap fails and a final connect.
 async function drive(h) {
   const step = (work) => {
     try {
@@ -95,7 +158,9 @@ async function drive(h) {
   h.server.output("o");
   await settle();
   step(() => h.controller.requestFocus());
-  step(() => h.controller.updateAppearance({ ...DEFAULT_APPEARANCE }));
+  step(() =>
+    h.controller.updateAppearance({ ...DEFAULT_APPEARANCE, foreground: "1234/5678/9abc" }),
+  );
   step(() => h.controller.setVisibility(true));
   await settle();
   step(() => h.controller.requestResize(larger));
@@ -103,16 +168,29 @@ async function drive(h) {
   step(() => type(h, "b"));
   step(() => h.controller.sendInput({ source: "keyboard", bytes: "not bytes" }));
   await settle();
-  step(() => h.controller.replaceView(fakeView().terminalView));
+  step(() => h.controller.replaceView(observedView(h)));
+  await settle();
+  h.phase.rpc = true;
+  step(() => h.client.getOperation("operation-1"));
+  h.phase.rpc = false;
   await settle();
   // Moves the client through connecting/connected, which client state observers see.
+  step(() => h.client.reconnect());
+  await settle();
+  h.server.close();
+  await settle();
+  h.phase.failConnect = true;
+  step(() => h.client.reconnect());
+  await settle();
+  h.phase.failConnect = false;
   step(() => h.client.reconnect());
   await settle();
 }
 
 // The invariants every matrix case must keep, as a list of violations: no nested lane send, no
-// reused focusSeq/inputSeq, nothing thrown out of foreign code, every promise settled, and only
-// true input receipts.
+// reused focusSeq/inputSeq, nothing thrown out of foreign code, every promise settled, only true
+// input receipts, and a coherent client: a disposed client stays disposed, connection ports run
+// only for the attempt the client reports as connecting, and no transport outlives its attempt.
 async function violations(h) {
   const found = [];
   if (h.maxSendDepth > 1) found.push(`nested lane send (depth ${h.maxSendDepth})`);
@@ -121,6 +199,11 @@ async function violations(h) {
   const pending = await h.finish();
   if (pending) found.push(`${pending} promises never settled`);
   for (const { text } of await untrueReceipts(h)) found.push(`untrue receipt for ${text}`);
+  found.push(...h.portViolations);
+  const status = h.client.snapshot().status;
+  if (h.clientDisposed && status !== "disposed") found.push(`disposed client became ${status}`);
+  const allowed = status === "connected" ? 1 : 0;
+  if (h.liveTransports > allowed) found.push(`${h.liveTransports} live transports while ${status}`);
   return found;
 }
 
@@ -141,11 +224,11 @@ async function untrueReceipts(h) {
   return untrue;
 }
 
-// One test runs every combination, because the CI gate discovers tests statically and counts a
-// test declared in a loop once. Each case reports its violations by name, and the test fails
-// unless every combination ran and reached its call point.
-test("every foreign-code call point x every reentering action keeps the invariants", async () => {
-  const points = [...PORT_POINTS, ...VIEW_POINTS, ...OBSERVER_POINTS];
+// Runs every combination of the given points with every action. Each case reports its violations
+// by name, and the result lists unreached call points, so a test fails unless every combination
+// ran and reached its call point. The matrix is three tests, not one per case, because the CI
+// gate discovers tests statically and counts a test declared in a loop once.
+async function runMatrix(points) {
   const actions = Object.keys(ACTIONS);
   const executed = new Set();
   const failures = [];
@@ -162,9 +245,44 @@ test("every foreign-code call point x every reentering action keeps the invarian
       for (const violation of await violations(h))
         failures.push(`${point} x ${action}: ${violation}`);
     }
-  expect(failures).toEqual([]);
-  expect(executed.size).toBe(points.length * actions.length);
-  expect(executed.size).toBe(210);
+  return { failures, executed: executed.size, expected: points.length * actions.length };
+}
+
+const MATRIX_TIMEOUT_MS = 120_000;
+
+describe("re-entry matrix: every foreign-code call point x every reentering action", () => {
+  test(
+    "view, lane and observer call points keep the invariants",
+    async () => {
+      const result = await runMatrix([...LANE_POINTS, ...VIEW_POINTS, ...OBSERVER_POINTS]);
+      expect(result.failures).toEqual([]);
+      expect(result.executed).toBe(result.expected);
+      expect(result.executed).toBe(19 * 15);
+    },
+    MATRIX_TIMEOUT_MS,
+  );
+
+  test(
+    "connection call points keep the invariants",
+    async () => {
+      const result = await runMatrix(CONNECTION_POINTS);
+      expect(result.failures).toEqual([]);
+      expect(result.executed).toBe(result.expected);
+      expect(result.executed).toBe(23 * 15);
+    },
+    MATRIX_TIMEOUT_MS,
+  );
+
+  test(
+    "RPC call points keep the invariants",
+    async () => {
+      const result = await runMatrix(RPC_POINTS);
+      expect(result.failures).toEqual([]);
+      expect(result.executed).toBe(result.expected);
+      expect(result.executed).toBe(4 * 15);
+    },
+    MATRIX_TIMEOUT_MS,
+  );
 });
 
 const outcomeOf = async (promise) => {

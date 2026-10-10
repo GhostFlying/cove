@@ -419,6 +419,41 @@ function safeClose(connection: TerminalConnection | undefined): void {
   safeDispose(connection);
 }
 
+interface AttemptHandles {
+  readonly timer: Disposable | undefined;
+  readonly httpCancellation: CancellationHandle | undefined;
+  readonly terminalCancellation: CancellationHandle | undefined;
+  readonly terminalConnection: TerminalConnection | undefined;
+}
+
+// Takes an attempt's foreign handles off it before any of them is released (docs/terminal-
+// architecture.md 4.4.1). Releasing a handle runs adapter code that may reenter the client:
+// dispose it, reconnect, or deliver a close for this very attempt. Withdrawing first means such a
+// reentry finds nothing left to release twice, and the caller still holds exactly what it owns.
+// `transport` also withdraws the terminal transport, which a committed attempt keeps.
+function withdrawHandles(attempt: ConnectAttempt, transport: boolean): AttemptHandles {
+  const handles = {
+    timer: attempt.timer,
+    httpCancellation: attempt.httpCancellation,
+    terminalCancellation: transport ? attempt.terminalCancellation : undefined,
+    terminalConnection: transport ? attempt.terminalConnection : undefined,
+  };
+  delete attempt.timer;
+  delete attempt.httpCancellation;
+  if (transport) {
+    delete attempt.terminalCancellation;
+    delete attempt.terminalConnection;
+  }
+  return handles;
+}
+
+function releaseHandles(handles: AttemptHandles): void {
+  safeDispose(handles.timer);
+  safeCancel(handles.httpCancellation);
+  safeCancel(handles.terminalCancellation);
+  safeClose(handles.terminalConnection);
+}
+
 function copyCredentials(
   credentials: ClientCredentials,
   codec: Utf8Codec,
@@ -852,6 +887,9 @@ class CoveClient implements Client {
       this.failConnect(attempt, localError("invalid-options"));
       return;
     }
+    // The credential getters and the codec ran above; a violating codec or a getter may have
+    // disposed the client or replaced the attempt, which then must not open a transport (4.4.1).
+    if (!this.currentAttempt(attempt)) return;
 
     try {
       const cancellation = this.options.terminal.open({
@@ -1010,20 +1048,28 @@ class CoveClient implements Client {
   }
 
   private tryCommit(attempt: ConnectAttempt): void {
-    if (!this.currentAttempt(attempt) || !attempt.httpSuccess || !attempt.terminalSuccess) return;
+    if (
+      !this.currentAttempt(attempt) ||
+      attempt.finished ||
+      !attempt.httpSuccess ||
+      !attempt.terminalSuccess
+    )
+      return;
     const agreement = agreeBootstraps(attempt.httpSuccess, attempt.terminalSuccess);
     if (!agreement.ok) {
       this.failConnect(attempt, this.negotiationError("channel-disagreement", agreement.field));
       return;
     }
-    attempt.finished = true;
-    attempt.committed = true;
-    safeDispose(attempt.timer);
-    safeCancel(attempt.httpCancellation);
     delete attempt.httpSuccess;
     delete attempt.terminalSuccess;
-    delete attempt.httpCancellation;
-    delete attempt.timer;
+    // The attempt stays installed (and unfinished) while its timer and HTTP request are released,
+    // so a reentrant dispose or reconnect fences it the ordinary way: it closes the transport and
+    // resolves the attempt. Only an attempt that is still the client's own afterwards commits;
+    // otherwise whichever path superseded it already owns the client state and the outcome.
+    releaseHandles(withdrawHandles(attempt, false));
+    if (!this.currentAttempt(attempt) || attempt.finished || this.attempt !== attempt) return;
+    attempt.finished = true;
+    attempt.committed = true;
     this.attempt = undefined;
     this.connectedAttempt = attempt;
     this.connection = agreement.value;
@@ -1038,22 +1084,21 @@ class CoveClient implements Client {
     if (!this.currentAttempt(attempt) || attempt.finished) return;
     attempt.finished = true;
     attempt.fenced = true;
-    safeDispose(attempt.timer);
-    safeCancel(attempt.httpCancellation);
-    safeCancel(attempt.terminalCancellation);
-    safeClose(attempt.terminalConnection);
     delete attempt.httpSuccess;
     delete attempt.terminalSuccess;
-    delete attempt.httpCancellation;
-    delete attempt.terminalCancellation;
-    delete attempt.terminalConnection;
-    delete attempt.timer;
+    const handles = withdrawHandles(attempt, true);
     if (this.attempt === attempt) this.attempt = undefined;
+    // The failure is published before the foreign cleanup runs, so a cleanup that reenters
+    // (dispose, reconnect) starts from it and its own state stands: nothing after the cleanup
+    // writes client state, and the failure is announced only if nothing superseded it.
     this.connection = undefined;
     this.status = error.category === "local" ? "unverifiable" : "incompatible";
     this.lastError = error;
+    const generation = this.generation;
+    const status = this.status;
+    releaseHandles(handles);
     attempt.resolve(Object.freeze({ ok: false, error }));
-    this.emitState();
+    if (this.generation === generation && this.status === status && !this.attempt) this.emitState();
   }
 
   private loseConnectedAttempt(
@@ -1075,8 +1120,7 @@ class CoveClient implements Client {
       for (const controller of controllers)
         controller.connectionLost(controller === origin ? originError : undefined);
       this.terminalLane.close("transport");
-      safeCancel(attempt.terminalCancellation);
-      safeClose(attempt.terminalConnection);
+      releaseHandles(withdrawHandles(attempt, true));
       this.suppressRpcState = true;
       try {
         this.cancelPendingRpcs("transport");
@@ -1110,16 +1154,12 @@ class CoveClient implements Client {
       if (attempt && !attempt.finished) {
         const error = localError(reason);
         attempt.finished = true;
-        safeDispose(attempt.timer);
-        safeCancel(attempt.httpCancellation);
-        safeCancel(attempt.terminalCancellation);
-        safeClose(attempt.terminalConnection);
+        delete attempt.httpSuccess;
+        delete attempt.terminalSuccess;
+        releaseHandles(withdrawHandles(attempt, true));
         attempt.resolve(Object.freeze({ ok: false, error }));
       }
-      if (connected) {
-        safeCancel(connected.terminalCancellation);
-        safeClose(connected.terminalConnection);
-      }
+      if (connected) releaseHandles(withdrawHandles(connected, true));
       this.suppressRpcState = true;
       try {
         this.cancelPendingRpcs(reason);
