@@ -213,8 +213,8 @@ export const requiredSuites = [
     file: "packages/client/tests/terminal-control-input.test.mjs",
     minimumTests: 62,
   },
-  // Three tests run the matrix (46 call points x 15 actions); 28 named regressions.
-  { project: "client", file: "packages/client/tests/terminal-reentry.test.mjs", minimumTests: 31 },
+  // Three tests run the matrix (46 call points x 15 actions); 29 named regressions.
+  { project: "client", file: "packages/client/tests/terminal-reentry.test.mjs", minimumTests: 32 },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },

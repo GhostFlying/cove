@@ -825,11 +825,18 @@ describe("client preview transaction", () => {
     });
   });
 
-  test("definitely unsent refusal frees admission; connection loss settles one pending transfer", async () => {
-    let refuse = true;
-    const h = await harness({ onSend: () => (refuse ? "not-sent" : "handed-off") });
-    expect(await h.client.getPreview(run)).toMatchObject({ ok: false, uncertain: false });
-    refuse = false;
+  test("an adapter not-sent after send was entered is quarantined; connection loss settles one pending transfer", async () => {
+    // Once send() was entered the request may have reached the server whatever it returns
+    // (docs/terminal-architecture.md 4.4.6), so "not-sent" is as uncertain as "unknown".
+    const refused = await harness({ onSend: () => "not-sent" });
+    expect(await refused.client.getPreview(run)).toMatchObject({ ok: false, uncertain: true });
+    expect(await refused.client.getPreview(run)).toMatchObject({
+      ok: false,
+      error: { reason: "invalid-state" },
+    });
+    refused.client.dispose();
+
+    const h = await harness();
     const pending = h.client.getPreview(run);
     h.peer.emit(3, {
       type: "preview-start",

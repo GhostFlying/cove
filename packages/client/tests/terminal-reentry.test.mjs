@@ -850,3 +850,21 @@ describe("design review regressions (rounds 1-3)", () => {
     expect(h.server.ofType("focus").map(({ command }) => command.geometry)).toEqual([larger]);
   });
 });
+
+describe("implementation review regressions (#86 round 1)", () => {
+  test("an input whose send reports not-sent after it was entered is reported unknown", async () => {
+    // The adapter forwards the frame and then reports "not-sent"; once send was entered the
+    // write may have happened, so no byte may be reported as not sent (4.4.6).
+    const h = await reentryHarness({
+      disposition: (command) => (command.type === "input" ? "not-sent" : undefined),
+    });
+    h.inputs = [];
+    const outcome = type(h, "x");
+    await h.finish();
+    expect(h.server.written).toEqual(["x"]);
+    expect(await outcome).toMatchObject({
+      ok: false,
+      value: { writtenBytes: 0, unknownBytes: 1, notSentBytes: 0 },
+    });
+  });
+});
