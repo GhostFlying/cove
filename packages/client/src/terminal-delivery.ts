@@ -24,9 +24,20 @@ import type { ClientError, LocalErrorReason } from "./client.js";
 import type { NegotiatedConnection } from "./connection-session.js";
 import type { Disposable, Scheduler, TerminalConnection, Utf8Codec } from "./transport-ports.js";
 
+// `sent` is true once the lane has entered `socket.send()` for the command, whatever send
+// returned and whatever reply arrived (docs/terminal-architecture.md 4.4.6). Only a failure with
+// `sent: false` proves the command never reached the connection, so only such a command may be
+// deferred again or held; anything else keeps its real result and is never repeated.
 export type CommandOutcome =
   | { readonly ok: true; readonly result: TerminalResult }
-  | { readonly ok: false; readonly error: ClientError | DomainError; readonly uncertain: boolean };
+  | {
+      readonly ok: false;
+      readonly error: ClientError | DomainError;
+      readonly uncertain: boolean;
+      readonly sent: boolean;
+    };
+
+type CommandFailure = Omit<Extract<CommandOutcome, { ok: false }>, "sent">;
 
 interface PendingCommand {
   readonly command: TerminalCommand;
@@ -103,6 +114,14 @@ export class TerminalLane {
   private readonly focusSequences = new Map<string, number>();
   private readonly inputSequences = new Map<string, number>();
   private lastSentRoute: string | undefined;
+  // Lane entry depth and the follow-up work registered while inside it (4.4.5). Sender and route
+  // callbacks run inside lane entries and may only do their own command's bookkeeping; anything
+  // else they start (another send, a cancellation, a controller failure or recovery) is passed to
+  // afterward() and runs once the outermost entry has finished its own bookkeeping, in
+  // registration order, and before the lane hands any further command to the socket.
+  private depth = 0;
+  private readonly followUps: (() => void)[] = [];
+  private runningFollowUps = false;
 
   constructor(
     private readonly owner: TerminalLaneOwner,
@@ -150,6 +169,39 @@ export class TerminalLane {
     return next;
   }
 
+  // Runs `work` now when no lane entry is active, otherwise after the outermost one.
+  afterward(work: () => void): void {
+    this.followUps.push(work);
+    if (this.depth === 0) this.runFollowUps();
+  }
+
+  private enter<T>(body: () => T): T {
+    this.depth++;
+    try {
+      return body();
+    } finally {
+      this.depth--;
+      if (this.depth === 0) this.runFollowUps();
+    }
+  }
+
+  private runFollowUps(): void {
+    if (this.runningFollowUps) return;
+    this.runningFollowUps = true;
+    try {
+      while (this.followUps.length) {
+        const work = this.followUps.shift()!;
+        try {
+          work();
+        } catch {
+          this.owner.invalid();
+        }
+      }
+    } finally {
+      this.runningFollowUps = false;
+    }
+  }
+
   send(
     command: TerminalCommand,
     deadlineMs: number,
@@ -158,11 +210,25 @@ export class TerminalLane {
     beforeSend?: () => boolean,
     payload: Uint8Array = new Uint8Array(),
   ): Promise<CommandOutcome> {
+    return this.enter(() =>
+      this.sendInside(command, deadlineMs, onHandoff, onSettled, beforeSend, payload),
+    );
+  }
+
+  private sendInside(
+    command: TerminalCommand,
+    deadlineMs: number,
+    onHandoff: (() => void) | undefined,
+    onSettled: ((outcome: CommandOutcome) => void) | undefined,
+    beforeSend: (() => boolean) | undefined,
+    payload: Uint8Array,
+  ): Promise<CommandOutcome> {
     const rejectBeforeSend = (reason: LocalErrorReason): Promise<CommandOutcome> => {
       const outcome: CommandOutcome = {
         ok: false,
         error: localError(reason),
         uncertain: false,
+        sent: false,
       };
       try {
         onSettled?.(outcome);
@@ -234,7 +300,7 @@ export class TerminalLane {
     try {
       const timer = this.scheduler.setTimer(deadlineMs, () => {
         const uncertain = pending.attempting || pending.handedOff;
-        this.finish(pending, {
+        this.finishOutside(pending, {
           ok: false,
           error: uncertain
             ? domainError(
@@ -286,6 +352,10 @@ export class TerminalLane {
   // Cancellation scans a snapshot of the commands present when it began: a settlement callback
   // may send new commands, and those belong to the operation that sent them, not to this sweep.
   cancelUnsentControl(ref: SubscriptionRef): void {
+    this.enter(() => this.cancelUnsentControlInside(ref));
+  }
+
+  private cancelUnsentControlInside(ref: SubscriptionRef): void {
     for (const pending of [...this.pending.values()]) {
       const command = pending.command;
       if (
@@ -303,6 +373,10 @@ export class TerminalLane {
   }
 
   cancelUnsent(ref: SubscriptionRef, types: readonly TerminalCommand["type"][]): void {
+    this.enter(() => this.cancelUnsentInside(ref, types));
+  }
+
+  private cancelUnsentInside(ref: SubscriptionRef, types: readonly TerminalCommand["type"][]): void {
     for (const pending of [...this.pending.values()]) {
       const command = pending.command;
       if (
@@ -321,6 +395,10 @@ export class TerminalLane {
   }
 
   cancelPreview(requestId: string): void {
+    this.enter(() => this.cancelPreviewInside(requestId));
+  }
+
+  private cancelPreviewInside(requestId: string): void {
     this.heldPreviewReservations.delete(requestId);
     const pending = this.pending.get(requestId);
     if (!pending || pending.command.type !== "preview") return;
@@ -352,6 +430,10 @@ export class TerminalLane {
   }
 
   receive(message: Uint8Array, connection: ConnectionRef): void {
+    this.enter(() => this.receiveInside(message, connection));
+  }
+
+  private receiveInside(message: Uint8Array, connection: ConnectionRef): void {
     const binding = this.owner.binding();
     if (
       !binding ||
@@ -477,6 +559,10 @@ export class TerminalLane {
   }
 
   close(reason: LocalErrorReason): void {
+    this.enter(() => this.closeInside(reason));
+  }
+
+  private closeInside(reason: LocalErrorReason): void {
     this.routes.clear();
     this.retiredRefs.clear();
     this.focusSequences.clear();
@@ -510,6 +596,9 @@ export class TerminalLane {
     this.flushing = true;
     try {
       while (this.outbound.length) {
+        // Work registered by the previous command's callbacks runs before the next handoff.
+        this.runFollowUps();
+        if (!this.outbound.length) break;
         const pending = this.takeNextOutbound();
         if (pending.settled) continue;
         if (pending.beforeSend) {
@@ -585,9 +674,17 @@ export class TerminalLane {
     return this.outbound.splice(index, 1)[0]!;
   }
 
-  private finish(pending: PendingCommand, outcome: CommandOutcome): void {
+  // Settlement from outside any lane entry (a deadline timer) is itself a lane entry.
+  private finishOutside(pending: PendingCommand, failure: CommandFailure): void {
+    this.enter(() => this.finish(pending, failure));
+  }
+
+  private finish(pending: PendingCommand, failureOrResult: CommandFailure | CommandOutcome): void {
     if (pending.settled) return;
     pending.settled = true;
+    const outcome: CommandOutcome = failureOrResult.ok
+      ? failureOrResult
+      : { ...failureOrResult, sent: pending.attempting || pending.handedOff };
     // The result can retire its frame while the preview still owns an ordinary slot.
     if (
       pending.command.type === "preview" &&
