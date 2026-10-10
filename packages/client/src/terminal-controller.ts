@@ -367,6 +367,12 @@ export class RoutedTerminalController implements TerminalController {
   private progressInFlight = false;
   private pendingProgress: number | undefined;
   private autoRecoveryUsed = false;
+  // The seq of the last run event queued for the current token, so a gap is recognized when the
+  // event arrives rather than when the parser reaches it.
+  private queuedSeq: number | null = null;
+  // The token under which a downlink gap was observed and its recovery not yet begun. Input is
+  // fenced from that moment: nothing may be handed off after the client knows of a gap.
+  private gapToken: number | undefined;
   private retiring = false;
   private disposalComplete = false;
   private readonly notifier: Notifier<TerminalSnapshot, TerminalInputNotice, RejectionAggregate>;
@@ -1631,7 +1637,9 @@ export class RoutedTerminalController implements TerminalController {
       !this.control.wantsFocus
     )
       return localError("invalid-state");
-    const recovering = this.recovering();
+    // A gap observed while ready holds input exactly like the recovery it is about to start.
+    const recovering =
+      this.recovering() || (this.phase === "ready" && this.gapToken === this.token);
     // Only never-handed-off input may be held; the rest of a partly sent input is not.
     if (item.started && (recovering || this.phase !== "ready")) return localError("invalid-state");
     if (this.host.scheduler.nowMs() >= item.deadlineAtMs) return localError("timeout");
@@ -1997,8 +2005,24 @@ export class RoutedTerminalController implements TerminalController {
       failLater();
       return;
     }
+    // A run event that does not follow the last queued (or applied) one proves a downlink gap.
+    // The parser may still be awaiting the view on an earlier event, so waiting for apply() to
+    // reach this one would let input typed meanwhile be handed off after the gap was known.
+    // Input is fenced now and the recovery starts as lane follow-up work, before the lane hands
+    // anything else to the socket (4.4.5); apply() then finds the queue already superseded.
+    let gap = false;
+    if (event.type === "run-event") {
+      gap = this.phase === "ready" && event.event.seq !== (this.queuedSeq ?? this.appliedSeq) + 1;
+      this.queuedSeq = event.event.seq;
+    }
     this.queue.push({ event, payload, charge, token: this.token });
     this.queuedBytes += charge;
+    if (gap && this.gapToken !== token) {
+      this.gapToken = token;
+      this.host.lane.afterward(() => {
+        if (this.token === token && this.phase === "ready") this.triggerRecovery("gap");
+      });
+    }
     this.drain();
   }
 
@@ -2658,6 +2682,7 @@ export class RoutedTerminalController implements TerminalController {
     for (const item of this.queue) this.host.lane.releaseIngress(item.charge);
     this.queue.length = 0;
     this.queuedBytes = 0;
+    this.queuedSeq = null;
   }
 
   private finishViewWork(item: QueuedEvent): void {

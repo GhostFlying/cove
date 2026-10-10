@@ -867,4 +867,27 @@ describe("implementation review regressions (#86 round 1)", () => {
       value: { writtenBytes: 0, unknownBytes: 1, notSentBytes: 0 },
     });
   });
+
+  test("a gap queued behind a pending parse fences input before the parser reaches it", async () => {
+    const h = await reentryHarness();
+    h.inputs = [];
+    let release;
+    h.mounted.state.applyGate = new Promise((resolve) => (release = resolve));
+    // Event N is parsing (held in the view); event N+2 arrives, proving N+1 is missing.
+    h.server.output("n");
+    await settle();
+    h.server.gap();
+    type(h, "after-gap");
+    await settle();
+    expect(h.server.written).not.toContain("after-gap");
+    h.mounted.state.applyGate = undefined;
+    release();
+    await h.finish();
+    // The recovery began at the gap, and no input was handed off before it.
+    const order = h.server.state.commands.map(({ command }) => command.type);
+    const recoverAt = order.indexOf("recover");
+    expect(recoverAt).toBeGreaterThanOrEqual(0);
+    expect(order.slice(0, recoverAt)).not.toContain("input");
+    expect(await untrueReceipts(h)).toEqual([]);
+  });
 });
