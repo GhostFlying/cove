@@ -983,4 +983,23 @@ describe("implementation review regressions (#86 round 1)", () => {
     release();
     await h.finish();
   });
+
+  test("a malformed input's receipt and notice carry malformed, never the caller's source", async () => {
+    const h = await reentryHarness();
+    const notices = noticesOf(h);
+    const untrusted = { untrusted: "x".repeat(64) };
+    const direct = await h.controller.sendInput({ source: untrusted, bytes: encoder.encode("a") });
+    // Through the view, with an intent of another view generation.
+    h.mounted.state.generation += 1;
+    h.mounted.input("b", untrusted);
+    h.mounted.state.generation -= 1;
+    await h.finish();
+    expect(direct).toMatchObject({ ok: false, value: { source: "malformed" } });
+    const individual = notices.filter((notice) => notice.kind === "input");
+    expect(individual.map((notice) => notice.outcome.value.source)).toEqual([
+      "malformed",
+      "malformed",
+    ]);
+    expect(JSON.stringify(notices)).not.toContain("untrusted");
+  });
 });

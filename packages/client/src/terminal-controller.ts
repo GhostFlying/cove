@@ -241,8 +241,14 @@ function authorityFact(
   });
 }
 
+// Normalizes a caller-provided source at admission, so a rejected input's receipt and notice
+// hold one of a finite set of values and never the caller's object (4.4.3).
+function receiptSource(source: unknown): TerminalInputSource | "malformed" {
+  return source === "keyboard" || source === "paste" || source === "mouse" ? source : "malformed";
+}
+
 function inputReceipt(
-  source: TerminalInputSource,
+  source: TerminalInputSource | "malformed",
   total: number,
   inputId: number | null,
   writtenBytes = 0,
@@ -258,7 +264,7 @@ function inputReceipt(
 }
 
 function inputFailure(
-  source: TerminalInputSource,
+  source: TerminalInputSource | "malformed",
   total: number,
   error: ClientError | DomainError,
   inputId: number | null = null,
@@ -1397,7 +1403,7 @@ export class RoutedTerminalController implements TerminalController {
       bytes instanceof Uint8Array &&
       total >= 1;
     const reject = (error: ClientError | DomainError): Promise<TerminalInputOutcome> => {
-      const outcome = inputFailure(source as TerminalInputSource, total, error);
+      const outcome = inputFailure(receiptSource(source), total, error);
       this.publishRejection(
         inputNotice(outcome),
         wellFormed ? rejectionSource(source) : "malformed",
@@ -2808,7 +2814,7 @@ export class RoutedTerminalController implements TerminalController {
         const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
         const error = localError("invalid-state");
         this.publishRejection(
-          inputNotice(inputFailure(source as TerminalInputSource, total, error)),
+          inputNotice(inputFailure(receiptSource(source), total, error)),
           rejectionSource(source),
           bytes instanceof Uint8Array ? total : undefined,
           error,

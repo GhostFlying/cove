@@ -184,7 +184,9 @@ export type TerminalInputSource = "keyboard" | "paste" | "mouse";
 
 export interface TerminalInputReceipt {
   readonly inputId: number | null;
-  readonly source: TerminalInputSource;
+  // "malformed" for an input rejected because its source was not one of the known sources: the
+  // caller's value itself is never retained or echoed.
+  readonly source: TerminalInputSource | "malformed";
   readonly writtenBytes: number;
   readonly unknownBytes: number;
   readonly notSentBytes: number;
