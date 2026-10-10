@@ -436,8 +436,13 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
   - 拒绝：在接受时就被拒绝的输入（参数无效、状态不允许、capacity、暂存世代已关闭等）以及 view 的 renderer 输入拒绝都从未交出。
     有空闲的拒绝通知位（暂定 32）时逐条入队；没有空闲位时并入拒绝聚合通知：只有当队尾已是聚合通知时才并入它，否则在队尾追加新的聚合通知。
     因此一个聚合只覆盖一段连续的溢出拒绝，FIFO 与状态标记的相对位置不变。
-- 拒绝聚合通知（公开类型新增，`kind: "input-rejections"`）包含条数，以及按（来源、错误分类）分组的条数与字节数；来源含 keyboard、paste、mouse、
-  renderer。被聚合的输入都是 notSent，`writtenBytes` 与 `unknownBytes` 恒为 0。聚合只削弱“逐条”这一点，不丢失任何已写入或不确定的证据。
+- 拒绝聚合通知（公开类型新增，`kind: "input-rejections"`）只含有限字段：总条数，以及按（来源、错误分类）分组的计数。
+  来源是穷举枚举 `keyboard`、`paste`、`mouse`、`renderer`、`malformed`；调用方传入的来源不合法或字节不是 `Uint8Array` 时归入 `malformed`，
+  不保留调用方提供的原始值。错误分类同样是有限枚举（`invalid-request`、`invalid-state`、`disposed`、`capacity`、`timeout`、`counter-exhausted`、
+  `input-rejected`、`other`），按错误的 reason 或 kind 映射，未知值归入 `other`。每组记录条数、已知字节数与长度未知的条数：
+  renderer 拒绝（view 只报告 `INPUT_REJECTED`，不给出长度）和 malformed 拒绝计入长度未知，绝不编造长度。所有计数在
+  `Number.MAX_SAFE_INTEGER` 饱和。被聚合的输入都是 notSent，`writtenBytes` 与 `unknownBytes` 恒为 0。聚合的大小因此有固定上界，
+  它只削弱“逐条”这一点，不丢失任何已写入或不确定的证据。
 - 总界：队列条目数任意时刻不超过 1（标记）+ 输入条数上限 + 拒绝通知位 + 聚合数；两个聚合之间至少隔一个其他条目，
   所以聚合数不超过其他条目数加一。这个界与生产速度无关。
 - 每轮取开始时的监听者快照（期间新增的从下一轮开始，期间显式注销的不再收到），最多处理固定配额（暂定 64 个条目）；
@@ -457,21 +462,32 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
 
 - 入口：view 的 focus、input、failure 意图在平台事件或产生它们的那一刻同步交给 controller，即使 view 操作（包括等待解析的异步操作）
   仍在进行，因此打字延迟不取决于未完成的解析。公开的 `sendInput`、`setInputTarget`、`requestFocus`、`blur` 走同一入口。
-- 同步登记只做簿记：不调用任何外部代码，不访问 lane，不运行 controller 操作。每条登记都追加到唯一的有序意图日志，
+- 同步登记只做簿记：不调用任何外部代码，不访问 lane，不运行 controller 操作。需要后续工作的登记追加到唯一的有序意图日志，
   并记录登记时的身份（ref、view、`viewGeneration`、目标版本、请求序号、暂存世代、接受时刻）：
   - focus（focused=true）：主机在前台时设置输入目标，并按 relay-protocol 9.1 的去重规则判断是否需要新请求。需要时立即分配 focus 请求序号，
     记下待发的 focus 意图及其暂存关联。因此同一调用栈中紧随其后的输入会被暂存，而不会因“没有 grant 也没有待发 focus”被拒。
-  - input：按输入字节、条数与通知额度计费，记录接受时刻（期限起点）与所属暂存世代；不满足条件时立即以拒绝产生可见结果。view 本身不缓存输入。
+  - input：按输入字节、条数与通知额度计费，记录接受时刻（期限起点）与所属暂存世代。不满足条件时立即以拒绝产生可见结果，
+    在登记时完成全部簿记（含按前缀规则关闭暂存世代与通知聚合），不进入日志。view 本身不缓存输入。
+  - renderer 输入拒绝（`INPUT_REJECTED`，例如 xterm-input-origin 在发出前拒绝的超长粘贴）：表示被丢弃的用户输入。
+    暂存世代打开时，它与 controller 的 capacity 拒绝一样，按登记顺序关闭该世代；它只产生拒绝通知，不进入日志。
   - unfocus（含隐藏引起的 blur）：立即记录目标丢失、推进目标版本、以锁存的原因关闭当前暂存世代，并记下要释放的 epoch。
   - fatal failure：按逻辑 view 对象（而非 backend incarnation）归属，立即锁存致命失败；backend 已退役也不丢弃。
+    致命失败对该逻辑 view 与订阅是终局：之后登记的 focus、input 都立即被拒，不进入日志；只有显式的后继 view（`replaceView`）或新订阅
+    （attach）才清除它。
   - 意图的 `viewGeneration` 早于当前代时，输入以 `invalid-state` 拒绝，focus 被忽略。
 - 关闭先于工作：已记录的目标丢失与致命失败在登记时就关闭输入许可；输入谓词检查二者，`beforeSend` 在交出时也检查。
-  它们只能由之后登记的意图重新打开（新的 focus 登记开始新的目标版本），排在它们之前的 focus 工作绝不能重新打开。
+  目标丢失只能由之后登记的 focus 重新打开（新的 focus 登记开始新的目标版本），排在它之前的 focus 工作绝不能重新打开；致命失败不能被 focus 重新打开。
+- 日志的界：日志只保存需要后续工作的条目。被接受的输入以输入条数上限为界。相邻两条输入之间的一段控制条目在登记时同步合并为至多两条：
+  一条 unfocus（保留这段中最早记下的要释放的 epoch）在前，以及这段最后的 focus（如果这段以 focus 结束）在后。
+  被合并掉的较早 focus 请求本来就已被更新的请求取代，其调用方立即以 `invalid-state` 结算。目标丢失在登记时已经生效，所以合并不改变顺序语义。
+  致命失败至多一条。因此日志条目数以 `输入条数上限 + 2 × (输入条数上限 + 1) + 1` 为界，与生产速度无关。
 - 排水：一个不可重入的排水按登记顺序处理日志，每条都使用登记时的身份。
   - focus 工作（`measureGrid`、取 ID、`beginFocus`、发送）以登记时的请求序号与目标版本核对，因此登记在它之后的 unfocus 会使它放弃。
   - unfocus 工作取消 lane 中未交出的命令、使暂存失败，并按 relay-protocol 9.1 发送或延迟 blur。
   - fatal 工作以该错误结束当前订阅。
     排水只从微任务启动（空调用栈），绝不在外部代码或 view 调用内部运行；排水进行中的新登记只追加，由同一排水在之后处理。
+  - 公平：每一轮排水最多处理固定配额（暂定 16 条）的条目，之后在 `scheduler.yieldTurn()`（宿主任务，不是微任务）之后继续剩余的 FIFO 条目。
+    因此 `measureGrid` 回调中同步 `requestFocus` 这类每处理一条就登记一条新条目的重入，每个任务最多推进一个配额，不会饿死定时器与 I/O。
 - 对不遵守契约、在意图回调中同步调用 view 的监听者，view 仍按 4.4.2 的谓词保持自身一致，但不承诺这类调用的结果。
 - renderer 通知：`onRendererChange` 观察者属于应用代码。操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，
   在最外层操作结束后投递（异步操作要等到 settle）。单一循环按监听者快照投递当前 renderer，中途变回的不通知；
@@ -514,6 +530,8 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
 - 回归测试覆盖：#84 的每个发现；#80 第四轮的失败模式（相同状态反复发布、交出前期限、同步 `accepted` 错误）；两轮设计评审的每个场景，
   包括通知总界（以成功结果反馈的生产者、拒绝聚合的位置）、意图日志顺序（focus→input→unfocus 与 fatal 关闭）、失败暂存世代的结束、
   先前在途输入的屏障、gap 恢复中同网格的 focus、恢复中的 blur、ACK/progress 取 ID 时的重入、granted 控制的自我预留、两阶段结果。
+  第三轮的场景同样各有测试：意图日志的界（大量拒绝与 focus/unfocus 风暴）、排水配额与宿主任务让出（`measureGrid` 中同步 `requestFocus`）、
+  renderer 拒绝关闭暂存世代、致命失败不被 focus 重新打开、延迟 focus 的过期网格、被未交出 focus 取代的 blur、聚合通知的有限结构。
 - 公平与终止测试使用可控的任务轮次（手动推进的宏任务调度器）或真实调度器。现有测试中的 `yieldTurn: async () => {}` 只让出到微任务，
   只用于功能测试，并相应地等待通知器排空。依赖同步 `onState` 的测试改为等待通知器，每处变更都在 PR 中列出。
 - S3 改用传输层钩子：在转发触发 watcher 恢复的帧之前设置拦截，再在恢复确实未完成时（用 `snapshot()` 拉取确认）请求 focus。
