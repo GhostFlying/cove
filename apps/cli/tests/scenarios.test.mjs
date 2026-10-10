@@ -664,24 +664,29 @@ describe("H1 operator scenarios over the compiled server and CLI", () => {
       W.recording.text().includes("size-before:24 80"),
     );
 
-    // The resize forces the watcher through a baseline recovery. The user clicks into the
-    // watcher the moment that recovery starts; the test does not wait for it to finish.
-    // The watcher's frames are held from then until the resizer's resize has resolved: its
-    // focus, once sent, takes control from the resizer, and a resizer still waiting for its
-    // grant would then rightly report that grant lost. Holding the watcher pins the order in
-    // which the resizer keeps control through its own recovery and the watcher's focus follows.
+    // The resize forces the watcher through a baseline recovery. The tap forwards the resize
+    // event that starts it and holds every watcher frame after it, so the recovery cannot
+    // finish; the user clicks into the watcher while it is still recovering, as confirmed by
+    // pulling a snapshot (observers are asynchronous, terminal-architecture 4.4.3). The frames
+    // stay held until the resizer's resize has resolved: the watcher's focus, once sent, takes
+    // control from the resizer, and a resizer still waiting for its grant would then rightly
+    // report that grant lost. Holding pins the order in which the resizer keeps control through
+    // its own recovery and the watcher's focus follows.
     expect(W.controller.setInputTarget(true, true)).toMatchObject({ ok: true });
-    let focus;
-    const started = W.controller.onState((snapshot) => {
-      if (focus || snapshot.phase === "ready") return;
-      watcher.tap.pause();
-      focus = W.controller.requestFocus();
-    });
-    expect(await R.controller.requestResize({ cols: 100, rows: 30 })).toMatchObject({ ok: true });
-    await waitFor("the watcher's recovery to start", () => focus !== undefined);
-    started.dispose();
+    watcher.tap.beforeForward(
+      (frame) => frame.metadata.type === "run-event" && frame.metadata.event?.type === "resize",
+      () => watcher.tap.pause(),
+    );
+    const resized = R.controller.requestResize({ cols: 100, rows: 30 });
+    await waitFor(
+      "the watcher's recovery to start",
+      () => watcher.tap.paused && W.controller.snapshot().phase !== "ready",
+    );
+    const focus = W.controller.requestFocus();
+    expect(await resized).toMatchObject({ ok: true });
     // Held, the watcher cannot have finished its recovery, so its focus has not been sent yet.
     expect(W.controller.snapshot().phase).not.toBe("ready");
+    expect(watcher.tap.outbound.filter((frame) => frame.metadata.type === "focus").length).toBe(0);
     await watcher.tap.resume();
     expect(await focus).toMatchObject({ ok: true });
     // The watcher took control at its own 80x24 grid and types right away.
