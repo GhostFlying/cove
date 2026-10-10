@@ -347,145 +347,187 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 本节规则适用于下表列出的全部调用点；新增调用点必须加入此表与重入测试矩阵。
 
 **4.4.1 外部代码调用点清单。** “外部代码”指可能同步回调、抛出或改变调用方状态的任何代码，包括注入端口与它们返回的句柄。
+少数工具端口按契约是纯函数且不可重入（见表后）；其余一律视为外部代码。
 
-| 文件                                                                                 | 调用点                                                                                                                                       | 外部代码可能做的事                                    | 适用规则                                                      |
-| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------- |
-| `client.ts`                                                                          | `options.credentials()`                                                                                                                      | 异步返回期间 dispose 或重连                           | 连接尝试身份（4.4.2）                                         |
-| `client.ts`                                                                          | `terminal.open({onOpen,onText,onBinary,onClose})`；`onOpen` 可在 `open()` 返回前同步调用                                                     | 同步发送引导、同步送达引导应答并提交连接、关闭        | 尝试身份；返回的句柄在尝试已非当前时立即取消                  |
-| `client.ts`                                                                          | 引导 `connection.send()`、`connection.close()`、连接与句柄的 `dispose()`/`cancel()`                                                          | 同步 onClose/onText、抛出                             | 先撤销所有权（清字段、置 finished）再调用                     |
-| `client.ts`                                                                          | `http.post(request, {onDisposition,onResponse,onFailure})` 及返回的 `cancel()`；回调可在 `post()` 返回前同步发生                             | 同步结算、重入 dispose                                | 尝试或 RPC 身份；返回的句柄按同一规则处理                     |
-| `client.ts`、`terminal-delivery.ts`                                                  | `createOpaqueId()`（RPC 与 lane `nextRequestId`）                                                                                            | 任意重入（focus、resize、detach、dispose）            | 先取值后修改；返回后按操作谓词核对                            |
-| `client.ts`、`terminal-controller.ts`、`terminal-delivery.ts`、`terminal-preview.ts` | `scheduler.setTimer()` 注册；返回句柄的 `dispose()`                                                                                          | 注册按契约不得同步回调；句柄 `dispose()` 可重入或抛出 | 撤销所有权后再 dispose 句柄                                   |
-| `client.ts`、`terminal-controller.ts`                                                | 公开观察者：client `onState`，controller `onState`、`onInputOutcome`                                                                         | 任意                                                  | 只在通知器中投递（4.4.3）                                     |
-| `terminal-controller.ts`                                                             | `completeTerminalView()` 读取的属性 getter；`view.measureGrid()`                                                                             | 任意重入                                              | 先取值后修改；核对谓词                                        |
-| `terminal-controller.ts`                                                             | view 操作：`initialize`、`beginBaseline`、`writeBaselineChunk`、`finishBaseline`、`applyEvent`、`setVisibility`、`setAppearance`、`dispose`  | 同步发出 view 意图；await 期间任意重入                | 调用前已提交；返回后核对谓词                                  |
-| `terminal-controller.ts`                                                             | view 监听注册 `onInputIntent`/`onFocusIntent`/`onFailure` 及返回的 disposer                                                                  | 注册期间同步发出意图；disposer 重入                   | 注册后核对；撤销所有权后 dispose                              |
-| `terminal-controller.ts`（入口）                                                     | view 的 focus/input/failure 意图回调                                                                                                         | 在 view 操作中途同步到达                              | 同步登记，不在回调内运行操作（4.4.4）                         |
-| `terminal-delivery.ts`                                                               | `owner.socket().send()`                                                                                                                      | 同步送达应答（嵌套 lane `receive`）、同步关闭         | 进入 send 前标记可能交出（4.4.6）                             |
-| `terminal-delivery.ts`（入口）                                                       | 发送方的 `onHandoff`/`onSettled`/`beforeSend`；路由回调；`owner.preview`/`previewReply`/`invalid`                                            | 嵌套发送、取消、失败                                  | 4.4.5                                                         |
-| `terminal-preview.ts`                                                                | 只完成 promise；计时器同上                                                                                                                   | —                                                     | 无额外入口                                                    |
-| `xterm-view.ts`                                                                      | xterm `new Terminal`、`open`、`blur`、`resize`、`options.theme`、`refresh`、`dispose`                                                        | blur 回调、抛出                                       | view 操作谓词（4.4.2）                                        |
-| `browser-input-intents.ts`                                                           | DOM `addEventListener` 回调、`setTimeout` 标记定时器、`removeEventListener`/`clearTimeout`                                                   | 平台事件中发出 focus/input                            | 平台事件入口；dispose 时撤销                                  |
-| `xterm-input-origin.ts`                                                              | 替换的 `triggerDataEvent`、原始 data/binary 方法、`onUserInput` 订阅及其 dispose                                                             | 同步发出 input、INPUT_REJECTED 或致命错误             | 按 backend incarnation 核对                                   |
-| `xterm-parse-operation.ts`                                                           | `terminal.write(bytes, callback)` 完成回调、解析定时器                                                                                       | 回调晚到或在退役后到达                                | 按解析操作身份核对                                            |
-| `xterm-renderer.ts`                                                                  | `createAddon`、`loadAddon`、`onContextLoss` 订阅、`clearTextureAtlas`、`refresh`、重试的 `setTimer`/`clearTimer`、`disposeAddon`、`onChange` | context loss 与重试晚到；onChange 观察者重入          | renderer 尝试身份；onChange 走 view 的 renderer 通知（4.4.4） |
+| 文件                                                                                 | 调用点                                                                                                                                          | 外部代码可能做的事                                    | 适用规则                                                                                                  |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `client.ts`                                                                          | `options.credentials()` 及 `copyCredentials` 读取的凭据属性                                                                                     | 异步返回期间 dispose 或重连；getter 重入              | 连接尝试或 RPC 身份（4.4.2）                                                                              |
+| `client.ts`                                                                          | `terminal.open({onOpen,onText,onBinary,onClose})`；`onOpen` 可在 `open()` 返回前同步调用                                                        | 同步发送引导、同步送达引导应答并提交连接、关闭        | 尝试身份；返回的句柄在尝试已非当前时立即取消                                                              |
+| `client.ts`                                                                          | 引导 `connection.send()`、`connection.close()`、连接与句柄的 `dispose()`/`cancel()`                                                             | 同步 onClose/onText、抛出                             | 先撤销所有权（清字段、置 finished）再调用                                                                 |
+| `client.ts`                                                                          | `http.post(request, {onDisposition,onResponse,onFailure})` 及返回的 `cancel()`，回调可在 `post()` 返回前同步发生；`onResponse` 中读取的响应属性 | 同步结算、重入 dispose                                | 尝试或 RPC 身份；返回的句柄按同一规则处理                                                                 |
+| `client.ts`、`terminal-delivery.ts`                                                  | `createOpaqueId()`（RPC 与 lane `nextRequestId`）                                                                                               | 任意重入（focus、resize、detach、dispose）            | 调用前记录所有权，返回后按操作谓词核对，再安装状态                                                        |
+| `client.ts`、`terminal-controller.ts`、`terminal-delivery.ts`、`terminal-preview.ts` | `scheduler.setTimer()` 注册；返回句柄的 `dispose()`                                                                                             | 注册按契约不得同步回调；句柄 `dispose()` 可重入或抛出 | 撤销所有权后再 dispose 句柄                                                                               |
+| `terminal-controller.ts`、通知器                                                     | `scheduler.yieldTurn()` 之后的续体（解析排水、通知投递）                                                                                        | 让出期间任意状态变化                                  | 续体核对排水 token 或通知器生命周期                                                                       |
+| `client.ts`、`terminal-controller.ts`                                                | 公开观察者：client `onState`，controller `onState`、`onInputOutcome`                                                                            | 任意                                                  | 只在通知器中投递（4.4.3）                                                                                 |
+| `terminal-controller.ts`                                                             | `completeTerminalView()` 读取的属性 getter；`view.measureGrid()`                                                                                | 任意重入                                              | 先取值后修改；核对谓词                                                                                    |
+| `terminal-controller.ts`                                                             | view 操作：`initialize`、`beginBaseline`、`writeBaselineChunk`、`finishBaseline`、`applyEvent`、`setVisibility`、`setAppearance`、`dispose`     | 同步发出 view 意图；await 期间任意重入                | 调用前已提交；返回后核对谓词                                                                              |
+| `terminal-controller.ts`                                                             | view 监听注册 `onInputIntent`/`onFocusIntent`/`onFailure` 及返回的 disposer                                                                     | 注册期间同步发出意图；disposer 重入                   | 注册后核对；撤销所有权后 dispose                                                                          |
+| `terminal-controller.ts`（入口）                                                     | view 的 focus/input/failure 意图回调；公开 `sendInput`、`setInputTarget`、`requestFocus`、`blur`                                                | 在 view 操作或外部调用中途同步到达                    | 同步登记，由意图排水执行（4.4.4）                                                                         |
+| `terminal-delivery.ts`                                                               | `owner.socket().send()`                                                                                                                         | 同步送达应答（嵌套 lane `receive`）、同步关闭         | 进入 send 前标记可能交出（4.4.6）                                                                         |
+| `terminal-delivery.ts`（入口）                                                       | 发送方的 `onHandoff`/`onSettled`/`beforeSend`；路由回调；`owner.preview`/`previewReply`/`invalid`                                               | 嵌套发送、取消、失败                                  | 4.4.5                                                                                                     |
+| `terminal-preview.ts`                                                                | 只完成 promise；计时器同上                                                                                                                      | —                                                     | 预览条目身份（4.4.2）                                                                                     |
+| `web-ports.ts`                                                                       | `fetch`、`AbortController`、`WebSocket` 构造与事件、响应体 reader、`TextEncoder`/`TextDecoder`、`addEventListener`、`setTimeout`/`clearTimeout` | 平台事件晚到                                          | 实现端口契约：回调只在平台事件中异步发生，按端口句柄自身的关闭状态丢弃晚到事件；经上述端口回调进入 client |
+| `xterm-view.ts`                                                                      | xterm `new Terminal`、`open`、`blur`、`resize`、`options.theme`、`refresh`、`dispose`                                                           | blur 回调、抛出                                       | view 操作谓词（4.4.2）                                                                                    |
+| `xterm-view-geometry.ts`                                                             | DOM 与 xterm 尺寸读取（`getBoundingClientRect`、`getComputedStyle`、cell 尺寸）                                                                 | 只触发同步布局，不运行脚本                            | 不可重入的读取；结果由 `measureGrid` 的调用方核对                                                         |
+| `browser-input-intents.ts`                                                           | DOM `addEventListener` 回调、`setTimeout` 标记定时器、`removeEventListener`/`clearTimeout`                                                      | 平台事件中发出 focus/input                            | 平台事件入口；dispose 时撤销                                                                              |
+| `xterm-input-origin.ts`                                                              | 替换的 `triggerDataEvent`、原始 data/binary 方法、`onUserInput` 订阅及其 dispose                                                                | 同步发出 input、INPUT_REJECTED 或致命错误             | 按 backend incarnation 核对                                                                               |
+| `xterm-parse-operation.ts`                                                           | `terminal.write(bytes, callback)` 完成回调、解析定时器                                                                                          | 回调晚到或在退役后到达                                | 按解析操作身份核对                                                                                        |
+| `xterm-renderer.ts`                                                                  | `createAddon`、`loadAddon`、`onContextLoss` 订阅、`clearTextureAtlas`、`refresh`、重试的 `setTimer`/`clearTimer`、`disposeAddon`、`onChange`    | context loss 与重试晚到；onChange 观察者重入          | renderer 尝试身份；onChange 走 renderer 通知（4.4.4）                                                     |
 
-Scheduler 的 `setTimer` 注册与 `yieldTurn` 按契约不得同步回调；`yieldTurn` 必须让出到宿主事件循环的新任务（浏览器为宏任务），
-不能只让出到微任务。其余端口与句柄都视为外部代码。
+按契约纯且不可重入的工具端口：`Utf8Codec.encode`/`decodeFatal`、`Scheduler.nowMs`，以及 `Scheduler.setTimer` 与 `yieldTurn` 的注册本身
+（不得同步回调；`yieldTurn` 必须让出到宿主事件循环的新任务，浏览器为宏任务，不能只让出到微任务）。`transport-ports.ts` 记录这些契约。
+作为防御，凡在安装状态之前调用它们的地方，仍在调用后核对所有权，测试矩阵用违约的实现覆盖这些位置：
+`beginConnect` 先读 `nowMs` 再安装连接尝试；`client.call` 在 `dispatchRpc` 安装 RPC 条目之前调用 `codec.encode`；
+lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
 
 **4.4.2 身份与有效性谓词。** 每个续体按自己操作的谓词核对，而不是要求一个全局元组完全不变。身份分两类：
 
 - 所有权（变化即取代）：client 生命周期；连接尝试对象及其阶段（已打开、HTTP 成功、已提交、finished）；已提交连接与连接 generation；
-  RPC 条目（requestId）及其阶段；controller 生命周期、订阅 ref、view 对象；用户意图请求的身份；view 生命周期 epoch；
-  renderer 所附的 terminal 与 addon 实例。
-- 进度世代（变化不等于取代，续体重新求值谓词）：controller `token`（attach/recover 操作）、`viewGeneration`、phase、
-  `TerminalControl.intentVersion`（`suspendForRecovery` 会推进它）、appliedSeq、`fenceSeq`/`handedAckSeq`、`grantedControlsInFlight`、控制 epoch。
-
-各操作的谓词：
-
-| 操作                                 | 交出前谓词（全部成立才可交给连接）                                                                                                                                                                                                                   | 已交出后的结果处理                                                                                                                                                          |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 连接尝试回调                         | 尝试对象仍为当前尝试，且处于该回调预期的阶段                                                                                                                                                                                                         | 非当前尝试的连接被关闭，句柄被取消                                                                                                                                          |
-| RPC 回调                             | RPC 条目仍拥有该 requestId 且未结算                                                                                                                                                                                                                  | 已交出的写操作保留不确定性（relay-protocol 11.6）                                                                                                                           |
-| attach/recover 标记                  | `operation === this.operation` 且未结算                                                                                                                                                                                                              | 被取代的操作只做簿记                                                                                                                                                        |
-| focus                                | ref、binding、view 未变；仍是最新 focus 请求且输入目标版本未变；未到期；phase 为 ready 且无进行中的恢复。若仅因恢复进行中而不成立，则重新延迟（relay-protocol 9.1），否则以 `invalid-state` 结束                                                     | 现有 `valid()`：同一 token/generation 下仍是 pending intent，或 `carriesFocus(intent)`（#76 携带）。其他情况仍必须对账：以结果的 epoch 释放过期 grant（作为延迟的后续工作） |
-| blur                                 | ref、binding 未变；之后没有更新的 focus 请求；phase 为 ready；携带调用时的 epoch                                                                                                                                                                     | server 只释放匹配的 epoch；结果如实返回                                                                                                                                     |
-| granted resize/appearance            | ref、binding、view、token、viewGeneration 未变；phase 为 ready；是同类型最新请求；`grantUsable()` 成立且 `currentEpoch === epoch`                                                                                                                    | 成功结果抬高 fence；不确定结果如实报告                                                                                                                                      |
-| 输入的每一块                         | ref、binding 未变；所属暂存世代未关闭；输入目标版本未变；未到期；`grantUsable()`（当前权威、无未结算的 granted 控制、ACK 覆盖 `max(fenceSeq, grantAtSeq)`）且 `currentEpoch` 等于本块使用的 epoch。进度世代变化（含 `suspendForRecovery`）不取代输入 | 保留真实的 written/unknown 回执；不重放                                                                                                                                     |
-| view 异步操作                        | 入口 epoch 未变；backend incarnation 与解析操作身份未变；baseline 进度对象未变                                                                                                                                                                       | 以 `RESYNC_REQUIRED` 拒绝，不写入后继                                                                                                                                       |
-| view `setVisibility`/`setAppearance` | epoch 未变，且是同类设置的最新序号                                                                                                                                                                                                                   | 被取代时静默放弃                                                                                                                                                            |
-| renderer 回调                        | 所附 terminal 与 addon 仍为当前实例；重试定时器属于当前重试世代                                                                                                                                                                                      | 晚到的 loss 或重试被忽略                                                                                                                                                    |
+  RPC 条目（requestId）及其阶段；预览条目；controller 生命周期、订阅 ref、view 对象；attach/recover 操作对象；基线描述符；
+  用户意图请求的身份；view 生命周期 epoch；renderer 所附的 terminal 与 addon 实例。
+- 进度世代（变化不等于取代，续体重新求值谓词）：controller `token`、`viewGeneration`、phase、`TerminalControl.intentVersion`
+  （`suspendForRecovery` 会推进它）、appliedSeq、`fenceSeq`/`handedAckSeq`、`grantedControlsInFlight`、控制 epoch。
 
 通用要求：
 
-- 调用外部代码前，状态已提交或尚未修改（例如先取得 `createOpaqueId`/`measureGrid` 的值）。返回后、读取任何可变状态或修改/发送前，
-  按上表重新求值；不读取可能已被清理的字段（例如 `measureGrid` 期间 dispose 后的 `retainedGeometry`）。
-- 交出前的最终谓词由 lane 的 `beforeSend` 在交给 socket 的那一刻求值，进度类条件（`grantUsable()`、期限、phase）也在此重新求值。
+- 调用外部代码之前记录本操作的所有权，而不是之后。调用前状态必须已提交，或尚未修改（例如先取得 `createOpaqueId`/`measureGrid` 的值）。
+  返回后、读取可变状态或安装状态/发送之前，按下表重新求值；不读取可能已被清理的字段（例如 `measureGrid` 期间 dispose 后的 `retainedGeometry`）。
+  谓词不成立时放弃，不触碰后继的簿记。
+- 交出前的最终谓词由 lane 的 `beforeSend` 在交给 socket 的那一刻求值，进度类条件（`grantUsable`、期限、phase）也在此重新求值。
+- 谓词成立后才能内联提交的簿记，见表中“内联簿记”列；其他效果按 4.4.5 作为后续工作。
 - 替换先提交新所有者：`replaceView` 先安装新 view 并推进 generation，再撤销旧 view 的监听并 dispose 旧 view；之后的 attach 以新 view
   作为所有权核对。若旧 view 的 dispose 或 ID 回调中又发生更新的替换，本次替换放弃，绝不 dispose 更新的 view。连接尝试、view backend
   与 renderer addon 的退役同样先撤销所有权再调用清理。view 的 `initialize` 与重建 backend 在清理旧 xterm 后核对 epoch；
   清理失败只归属被退役的那一代。
 - 失败按产生它的所有权归属：用调用前记录的 token 调用 `fail`，后继不会因前任的迟到错误而失败。
 
+`grantUsable(except)` 指：当前权威属于本订阅，且 `currentEpoch` 等于命令使用的 epoch；除 `except` 指定的本命令预留外，没有未结算的 granted 控制；
+已交出的 ACK 覆盖 `max(fenceSeq, grantAtSeq)`。
+
+| 操作                                                              | 外部调用前记录的所有权                                                | 交出前谓词（全部成立才交给连接）                                                                                                                                | 内联簿记                                                                                                                  | 交出后的结果处理                                                                                                                                                    |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 连接尝试（`beginConnect` 到提交）                                 | client 未 dispose；当前无尝试，或就是该尝试                           | 尝试对象仍为当前尝试，且处于该回调预期的阶段                                                                                                                    | 安装尝试、记录阶段                                                                                                        | 非当前尝试的连接被关闭，句柄被取消                                                                                                                                  |
+| RPC（`call` 到结算）                                              | client 状态与连接 generation                                          | 安装前：client 仍连接且 generation 未变；回调中：条目仍拥有该 requestId 且未结算                                                                                | 安装 RPC 条目、结算                                                                                                       | 已交出的写操作保留不确定性（relay-protocol 11.6）                                                                                                                   |
+| 预览                                                              | 预览条目 requestId                                                    | 条目仍在且未取消                                                                                                                                                | 记录传输 previewId                                                                                                        | 按 previewId 完成，或以无效应答结束（relay-protocol 9）                                                                                                             |
+| attach/recover 创建（从取 ID、`measureGrid` 到 `beginOperation`） | controller 未 dispose、未退役；`operation`、ref、binding、view、phase | 全部未变。期间若已开始同类操作则加入其 promise，否则以 `invalid-state` 结束                                                                                     | `beginOperation`                                                                                                          | —                                                                                                                                                                   |
+| attach/recover 标记                                               | 操作对象                                                              | `operation === this.operation` 且未结算                                                                                                                         | attach 结果注册路由、安装 ref、推进 phase                                                                                 | 被取代的操作只做本命令簿记                                                                                                                                          |
+| applied-ack                                                       | ref、token、要确认的 seq（在取 ID 之前记录）                          | ref、token 未变，且 phase 不是 await-marker                                                                                                                     | 置 `ackInFlight`；交出时推进 `handedAckSeq`                                                                               | token 已变的结果被忽略，不清除后继的 ACK 状态；失败按记录的 token 结束订阅                                                                                          |
+| baseline-progress                                                 | ref、token、操作对象、基线描述符（baselineId）、ordinal               | 全部未变，且 phase 为 baseline                                                                                                                                  | 置 `progressInFlight`                                                                                                     | 同上，按记录的 token 与 baselineId                                                                                                                                  |
+| detach（公开 detach 与 `releaseRemote`）                          | ref 与其连接                                                          | ref 所属连接仍为当前连接                                                                                                                                        | —                                                                                                                         | `detachLeavesStateUnproven` 且连接仍为该连接时退役连接                                                                                                              |
+| 过期 grant 释放                                                   | ref、要释放的 epoch E                                                 | ref 与连接未变；本订阅已不持有 E；phase 为 ready                                                                                                                | —                                                                                                                         | 结果如实处理，不重发                                                                                                                                                |
+| focus                                                             | ref、binding、view、请求身份、登记时的目标版本                        | 全部未变；仍是最新 focus 请求；未到期；phase 为 ready 且无进行中的恢复。若仅因恢复进行中而不成立，则重新延迟（relay-protocol 9.1），否则以 `invalid-state` 结束 | `beginFocus`                                                                                                              | 现有 `valid()`：同一 token/generation 下仍是 pending intent，或 `carriesFocus(intent)`（#76 携带）。其他情况仍须对账：以结果的 epoch 释放过期 grant（作为后续工作） |
+| blur                                                              | ref、binding、登记时要释放的 epoch E                                  | ref 与连接未变；本订阅仍持有或携带 E；之后没有仍有效的更新 focus 请求；phase 为 ready。恢复进行中则等待到 ready（relay-protocol 9.1）                           | —                                                                                                                         | server 只释放匹配的 epoch；结果如实返回                                                                                                                             |
+| granted resize/appearance                                         | ref、binding、view、token、viewGeneration、请求身份                   | 全部未变；phase 为 ready；是同类型最新请求；`grantUsable(本命令)`                                                                                               | 等到 `grantUsable` 成立后立即预留 `grantedControlsInFlight`，在交出前就已预留并持有到结算，使同步重入的输入看到未结算控制 | 成功结果抬高 fence；不确定结果如实报告                                                                                                                              |
+| 输入的每一块                                                      | ref、binding、输入条目与所属暂存世代、登记时的目标版本                | ref、binding 未变；没有已记录的目标丢失或致命失败；暂存世代未关闭且其屏障已满足；未到期；`grantUsable(无)`。进度世代变化（含 `suspendForRecovery`）不取代输入   | 分配 inputSeq                                                                                                             | 保留真实的 written/unknown 回执；不重放                                                                                                                             |
+| view 异步操作                                                     | 入口 epoch、backend incarnation、解析操作、baseline 进度对象          | 全部未变                                                                                                                                                        | —                                                                                                                         | 以 `RESYNC_REQUIRED` 拒绝，不写入后继                                                                                                                               |
+| view `setVisibility`/`setAppearance`                              | epoch 与同类设置序号                                                  | 全部未变                                                                                                                                                        | —                                                                                                                         | 被取代时静默放弃                                                                                                                                                    |
+| renderer 回调                                                     | 所附 terminal、addon、重试世代                                        | 全部未变                                                                                                                                                        | —                                                                                                                         | 晚到的 loss 或重试被忽略                                                                                                                                            |
+
 **4.4.3 公开通知器（client 与 controller）。**
 
 - 观察者从不在 client、controller、lane 或 view 回调的调用栈上运行。每个 client 与 controller 各有一个通知器，在
   `scheduler.yieldTurn()` 之后的新任务中投递，绝不用微任务链接续。观察者返回的 promise 不被等待；抛出或拒绝不影响其他监听者。
-- 单一 FIFO 队列，有两类条目：状态标记与输入结果通知。状态在上一次投递的标记之后第一次变化时追加一个标记，之后的变化不再追加；
-  标记被投递时给出当时的最新快照（合并，保留最早位置）。输入结果在产生它的状态变化之后入队，因此观察者看到的状态不早于对应结果。
-  输入结果不合并、不重排。内容与上一次已投递快照相同的快照不再投递。
+- 单一 FIFO 队列，条目有三类：状态标记、输入结果通知、拒绝聚合通知。
+  - 状态标记：队列中最多有一个未投递的标记。没有未投递标记时，状态变化追加一个标记；已有时不再追加。标记被投递时给出当时的最新快照。
+    输入结果在产生它的状态变化之后入队，因此观察者看到的状态不早于对应结果。内容与上一次已投递快照相同的快照不再投递。
+  - 输入结果通知：每条被接受的输入（含暂存）在接受时预留一个通知位，其条数额度一直占用到它的结果通知被投递。
+    因此已接受输入的结果（成功、失败、不确定，含完整的 written/unknown/notSent 回执、错误分类与来源）总是逐条按序投递，
+    未投递的结果数不超过输入条数上限（现为 224）。额度占满时，新的输入在接受时即以 capacity 被拒，这就是对生产者的背压。
+  - 拒绝：在接受时就被拒绝的输入（参数无效、状态不允许、capacity、暂存世代已关闭等）以及 view 的 renderer 输入拒绝都从未交出。
+    有空闲的拒绝通知位（暂定 32）时逐条入队；没有空闲位时并入拒绝聚合通知：只有当队尾已是聚合通知时才并入它，否则在队尾追加新的聚合通知。
+    因此一个聚合只覆盖一段连续的溢出拒绝，FIFO 与状态标记的相对位置不变。
+- 拒绝聚合通知（公开类型新增，`kind: "input-rejections"`）包含条数，以及按（来源、错误分类）分组的条数与字节数；来源含 keyboard、paste、mouse、
+  renderer。被聚合的输入都是 notSent，`writtenBytes` 与 `unknownBytes` 恒为 0。聚合只削弱“逐条”这一点，不丢失任何已写入或不确定的证据。
+- 总界：队列条目数任意时刻不超过 1（标记）+ 输入条数上限 + 拒绝通知位 + 聚合数；两个聚合之间至少隔一个其他条目，
+  所以聚合数不超过其他条目数加一。这个界与生产速度无关。
 - 每轮取开始时的监听者快照（期间新增的从下一轮开始，期间显式注销的不再收到），最多处理固定配额（暂定 64 个条目）；
-  剩余条目和本轮新入队的条目按 FIFO 在下一轮继续，下一轮总在新的任务中运行。
-- 因此每个任务内的投递工作以“配额 × 监听者数”为界。无条件地对每次通知都改变状态的观察者，每个任务最多推进一轮，
-  如同观察者自己设置的定时器，不会饿死其他定时器或 I/O；这不保证该观察者自身终止，但幂等反应因快照去重而停止。
-- 过载：输入结果通知队列上限暂定 256 条。达到上限后，新的失败结果不再逐条入队，而是累加到队尾的一个聚合通知（条数与字节数）。
-  成功结果以及每次调用自身的返回值（`sendInput` 的 promise）不受影响。这是公开通知类型的新增，不是新的错误原因。
-- 生命周期：dispose 立即拒绝新操作。已入队的最终状态和输入结果仍投递给 dispose 时已订阅、且未显式注销的监听者，直到队列排空、
-  且所有在途输入的结果都已投递（`pendingInputNotifications` 计到投递完成），之后才清空监听者集合。显式注销随时立即生效。
+  剩余条目与新入队的条目按 FIFO 在下一轮继续，下一轮总在新的任务中运行。每个任务内的投递工作因此以“配额 × 监听者数”为界。
+  无条件地对每次通知都改变状态的观察者，每个任务最多推进一轮，不会饿死其他定时器或 I/O；这不保证该观察者自身终止，但幂等反应因快照去重而停止。
+- 生命周期：dispose 立即拒绝新操作。已入队的最终状态与结果仍投递给 dispose 时已订阅、且未显式注销的监听者，直到队列排空，
+  且所有在途输入的结果都已投递（`pendingInputNotifications` 计到投递完成）；之后才清空监听者集合。显式注销随时立即生效。
 - 内部等待（恢复 ready、grant 可用、输入权限）不注册为观察者，而在每次提交时同步检查；检查只读状态并完成自己的 promise，
   不调用外部代码。被唤醒的续体随后按 4.4.2 重新核对。
 - 恢复可观察：快照合并会跳过中间 phase，因此 `TerminalSnapshot` 增加单调的 `recoverySequence`（本 controller 开始的 attach/recover
-  操作计数，含自动恢复）。需要恢复边沿的消费者比较该计数与 `viewGeneration`，不依赖看到非 ready 的快照。
+  操作计数，含自动恢复）。它是公开的观察手段，不是恢复开始时的同步钩子。消费者记下“上次已处理的 ready 恢复”的计数，
+  与当前计数和 `viewGeneration` 比较：看到带新计数的非 ready 快照不算已处理，等到 ready 才执行恢复后的动作并记下该计数。
+  M0 harness 据此在每次重建后恢复 DOM 焦点、计数恢复并归类错误。需要在恢复进行中介入的测试（S3）使用传输层钩子，
+  在转发触发恢复的帧之前设置拦截。
 
-**4.4.4 View 意图与 renderer 通知。**
+**4.4.4 意图登记与排水。**
 
-- focus、input、failure 意图在平台事件或产生它们的那一刻同步交给监听者，即使 view 操作（包括等待解析的异步操作）仍在进行；
-  打字延迟不取决于未完成的解析。controller 的这三个监听者是“登记入口”：只同步登记，不在回调内运行 controller 操作，也不同步调用 view：
-  - 失焦（含隐藏引起的 blur）立即撤销输入许可：记录目标丢失、推进输入目标版本、关闭当前暂存世代。随后，取消 lane 中未交出的命令、
-    使暂存输入失败、发送 blur 等工作作为下一步骤运行。`beforeSend` 检查输入目标版本，因此登记之后不再有输入交给 socket。
-  - 输入在登记时即按 controller 的字节与条数上限计费，并记录接受时刻（期限起点），然后进入 controller 的输入路径或暂存；
-    超限立即以 capacity 产生可见结果。view 本身不缓存输入。
-  - 致命 failure 按逻辑 view 对象（而非 backend incarnation）归属登记，backend 已退役也不丢弃；controller 随后以该错误结束当前订阅。
-  - 意图的 `viewGeneration` 早于当前代时，输入以 `invalid-state` 产生可见结果，focus 被忽略。
-- 对不遵守登记契约、在意图回调中同步调用 view 的监听者，view 仍按 4.4.2 的谓词保持自身一致，但不承诺这类调用的结果。
-- `onRendererChange` 观察者属于应用代码：操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，在最外层操作结束后投递
-  （异步操作要等到 settle）。单一循环按监听者快照投递当前 renderer，中途变回的不通知；一轮中观察者反应引起的新变化在新的任务中投递。
-- dispose 丢弃尚未投递的 renderer 通知。focus、input 与 failure 不在 view 中排队，因此 dispose 不会丢弃任何输入。
+- 入口：view 的 focus、input、failure 意图在平台事件或产生它们的那一刻同步交给 controller，即使 view 操作（包括等待解析的异步操作）
+  仍在进行，因此打字延迟不取决于未完成的解析。公开的 `sendInput`、`setInputTarget`、`requestFocus`、`blur` 走同一入口。
+- 同步登记只做簿记：不调用任何外部代码，不访问 lane，不运行 controller 操作。每条登记都追加到唯一的有序意图日志，
+  并记录登记时的身份（ref、view、`viewGeneration`、目标版本、请求序号、暂存世代、接受时刻）：
+  - focus（focused=true）：主机在前台时设置输入目标，并按 relay-protocol 9.1 的去重规则判断是否需要新请求。需要时立即分配 focus 请求序号，
+    记下待发的 focus 意图及其暂存关联。因此同一调用栈中紧随其后的输入会被暂存，而不会因“没有 grant 也没有待发 focus”被拒。
+  - input：按输入字节、条数与通知额度计费，记录接受时刻（期限起点）与所属暂存世代；不满足条件时立即以拒绝产生可见结果。view 本身不缓存输入。
+  - unfocus（含隐藏引起的 blur）：立即记录目标丢失、推进目标版本、以锁存的原因关闭当前暂存世代，并记下要释放的 epoch。
+  - fatal failure：按逻辑 view 对象（而非 backend incarnation）归属，立即锁存致命失败；backend 已退役也不丢弃。
+  - 意图的 `viewGeneration` 早于当前代时，输入以 `invalid-state` 拒绝，focus 被忽略。
+- 关闭先于工作：已记录的目标丢失与致命失败在登记时就关闭输入许可；输入谓词检查二者，`beforeSend` 在交出时也检查。
+  它们只能由之后登记的意图重新打开（新的 focus 登记开始新的目标版本），排在它们之前的 focus 工作绝不能重新打开。
+- 排水：一个不可重入的排水按登记顺序处理日志，每条都使用登记时的身份。
+  - focus 工作（`measureGrid`、取 ID、`beginFocus`、发送）以登记时的请求序号与目标版本核对，因此登记在它之后的 unfocus 会使它放弃。
+  - unfocus 工作取消 lane 中未交出的命令、使暂存失败，并按 relay-protocol 9.1 发送或延迟 blur。
+  - fatal 工作以该错误结束当前订阅。
+    排水只从微任务启动（空调用栈），绝不在外部代码或 view 调用内部运行；排水进行中的新登记只追加，由同一排水在之后处理。
+- 对不遵守契约、在意图回调中同步调用 view 的监听者，view 仍按 4.4.2 的谓词保持自身一致，但不承诺这类调用的结果。
+- renderer 通知：`onRendererChange` 观察者属于应用代码。操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，
+  在最外层操作结束后投递（异步操作要等到 settle）。单一循环按监听者快照投递当前 renderer，中途变回的不通知；
+  一轮中观察者反应引起的新变化在新的任务中投递。dispose 丢弃尚未投递的 renderer 通知。view 不排队 focus、input 或 failure。
 
 **4.4.5 连接层（lane）回调。**
 
-- 发送方的 `onHandoff`/`onSettled`、`beforeSend` 与路由回调只做本命令或本帧的簿记并提交状态，可以同步完成。例如 attach 结果在此注册路由，
-  使同一次同步送达中紧随其后的 `baseline-start` 能被路由；ACK 交出时在此推进 `handedAckSeq`。
-- 它们发起的其他工作（新的发送，如下一个 ACK、`releaseStaleFocus` 的 blur、detach；对其他命令的取消；controller 的 `fail`、退役、恢复）
-  登记为后续工作，在最外层 lane 入口（`send`、`receive`、`close`、取消、flush）完成自身簿记后按登记顺序运行，且先于 lane 再向 socket
-  交出任何命令。遍历在途命令的取消只扫描开始时的快照。
+- 发送方的 `onHandoff`/`onSettled`、`beforeSend` 与路由回调只做本命令或本帧的簿记，可以同步完成，范围见 4.4.2 的“内联簿记”列。
+  例如 attach 结果在此注册路由，使同一次同步送达中紧随的 `baseline-start` 能被路由；ACK 交出时在此推进 `handedAckSeq`。
+- 它们发起的其他工作都登记为后续工作：新的发送（下一个 ACK、过期 grant 释放、detach）、对其他命令的取消，以及 controller 的 `fail`、退役、恢复。
+  后续工作在最外层 lane 入口（`send`、`receive`、`close`、取消、flush）完成自身簿记后按登记顺序运行，
+  且先于 lane 再向 socket 交出任何命令。遍历在途命令的取消只扫描开始时的快照。
 
 **4.4.6 期限与重发。**
 
-- 延迟或暂存的工作（延迟 focus、暂存输入、grant 可用等待）的期限从首次接受起算：focus 从请求起，输入从登记起，grant 等待从结果被接受起。
-  重新延迟、回到暂存或在 view 中经过的时间都不重置期限。期限由定时器、每次唤醒的续体和 `beforeSend` 三处检查；交出前到期以
-  `timeout` 结束且不发送，交出后到期不撤回。
+- 延迟或暂存的工作的期限从首次接受起算：focus、blur、输入都从登记起，grant 可用等待从结果被接受起。
+  重新延迟、回到暂存、新的恢复都不重置期限。期限由定时器、每次唤醒的续体和 `beforeSend` 三处检查：交出前到期以
+  `timeout` 结束且不发送；交出后到期不撤回。
 - lane 在调用 `socket.send()` 之前就把命令标记为可能交出，与 send 的返回值、同步应答的接受情况和 `onHandoff` 都无关。此后的任何结果
   （包括 send 返回 `not-sent`，或 send 返回前同步收到的成功或错误应答）都视为可能已送达。只有从未进入 `socket.send()` 的命令
   可以重试、重新延迟或回到暂存。这条保守规则以活性换取不静默重发。
 
-**4.4.7 被取代操作的结果。**
+**4.4.7 结果约定。**
 
 - 只有证明从未交出的工作才以本地错误结束：被取代为 `invalid-state`，dispose 为 `disposed`，到期为 `timeout`。不新增公开错误原因。
 - 已交出的命令保留真实结果：成功、server 错误、`RESULT_UNKNOWN`、已写前缀与 `unknownBytes`。controller 总是完成内部对账
-  （例如以结果的 epoch 释放过期 grant、抬高 fence），绝不把它转为重试候选。调用方可以另外得知本地已被取代，但这不能掩盖已发生的远端效果。
+  （例如以结果的 epoch 释放过期 grant、抬高 fence），绝不把它转为重试候选。
+- focus 与 resize 的结果分两个阶段。第一阶段是命令结算：未被接受时按上两条报告。第二阶段是接受后的就绪：网格变化使 grant 要等恢复后
+  才可用时，等待 grant 可用。就绪失败时返回 `{ ok: false, error, accepted: { epoch, atSeq } }`，其中 `error` 为 `invalid-state`（grant 经裁定丢失或被取代）、
+  `timeout` 或 `disposed`，`accepted` 证明 server 已接受该命令。`accepted` 是 `TerminalOutcome<TerminalControlReceipt>` 失败分支的可选字段，不是新的错误原因；
+  就绪阶段的本地错误总带 `accepted`，不会与第一阶段混淆。
 - view 的异步操作被取代时以 `RESYNC_REQUIRED` 拒绝。`setVisibility`/`setAppearance` 是没有结果通道的“最新者生效”设置，
   被更新的同类设置或 initialize/dispose 取代时静默放弃且不抛出，以免 controller 把前任的取代当作自身失败。
 
 **4.4.8 测试要求。**
 
-- 系统化重入矩阵：对 4.4.1 表中的每个调用点，分别执行每种相关的重入动作（dispose、detach、replaceView、attach、recover、requestFocus、
-  setInputTarget、blur、requestResize、updateAppearance、sendInput、setVisibility、initialize、重连、client dispose），并统计实际到达的调用点
-  与执行的动作；未到达的组合使测试失败。
-- #84 的每个发现、#80 第四轮的失败模式（相同状态反复发布、交出前期限、同步 `accepted` 错误）以及本节各条规则都有回归测试。
+- 系统化重入矩阵：对 4.4.1 表中的每个调用点（包括违约工具端口的安装前位置），分别执行每种相关重入动作（dispose、detach、replaceView、attach、
+  recover、requestFocus、setInputTarget、blur、requestResize、updateAppearance、sendInput、setVisibility、initialize、重连、client dispose），
+  并统计实际到达的调用点与执行的动作；未到达的组合使测试失败。
+- 回归测试覆盖：#84 的每个发现；#80 第四轮的失败模式（相同状态反复发布、交出前期限、同步 `accepted` 错误）；两轮设计评审的每个场景，
+  包括通知总界（以成功结果反馈的生产者、拒绝聚合的位置）、意图日志顺序（focus→input→unfocus 与 fatal 关闭）、失败暂存世代的结束、
+  先前在途输入的屏障、gap 恢复中同网格的 focus、恢复中的 blur、ACK/progress 取 ID 时的重入、granted 控制的自我预留、两阶段结果。
 - 公平与终止测试使用可控的任务轮次（手动推进的宏任务调度器）或真实调度器。现有测试中的 `yieldTurn: async () => {}` 只让出到微任务，
   只用于功能测试，并相应地等待通知器排空。依赖同步 `onState` 的测试改为等待通知器，每处变更都在 PR 中列出。
+- S3 改用传输层钩子：在转发触发 watcher 恢复的帧之前设置拦截，再在恢复确实未完成时（用 `snapshot()` 拉取确认）请求 focus。
 
 **4.4.9 Orca 对照**（只读，`~/WORKSPACE/bytedance_orca` @ `ac562724ad92915660420035fa88066d0e5b09bc`，路径相对 `src/renderer/src/`）：
 
 - `components/terminal-pane/pty-dispatcher.ts` 同步内联分发；旁路观察者遍历前复制快照（:157-162），一次性的退出处理器先移除再调用（:194-202），
-  `pty-exit-delivery.ts` 对每个回调单独捕获异常。采用：快照遍历与异常隔离；不采用同步内联分发。
+  `pty-exit-delivery.ts` 对每个回调单独捕获异常。采用：快照遍历与异常隔离。不采用：同步内联分发。
 - `pty-transport.ts` 的 `lifecycleGeneration`（:48、:67-72、:133-146）以及约 15 处 `session.disposed` 检查在 await 之后核对身份；
   `PaneManager` 只有 `destroyed` 标志，`destroy`/`disposePane` 不幂等。采用：按世代核对续体。不采用：分散在各调用点的临时检查，
   Cove 以 4.4.2 的逐操作谓词与统一通知器代替。
 - `pty-preconnect-input-buffer.ts` 只在首次连接前有界缓存输入（1024 条，:3-7），按序冲刷一次并在每条前核对 `writer.isCurrent()`，
   失败即清空其余；重连期间的输入被拒绝或丢弃，不跨重连重放。采用：有界、按序、失败后不再发送后续。不同之处：Cove 按用户决定在恢复期间
-  暂存，并逐条可见地报告失败，而不是静默丢弃。
+  暂存，并可见地报告失败，而不是静默丢弃。
 - 取代与取消静默返回 `false`/`null`；`pty-input-write-queue.ts:313` 遍历活动集合。Cove 不采用静默取代（4.4.7），也不遍历活动集合。
 
 ## 5. 前后台资源管理
