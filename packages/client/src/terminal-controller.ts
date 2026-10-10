@@ -88,6 +88,9 @@ interface FocusEntry {
   requested: Geometry | undefined;
   readonly settle: ((outcome: TerminalControlOutcome) => void)[];
   settled: boolean;
+  // Set once its focus command has been handed to the connection. Until then held input waits
+  // for it, so a failure of this focus reaches the input first (relay-protocol 9.1).
+  handedOff: boolean;
 }
 
 // A registered input-target loss. The local effect (no further input, held input failed) took
@@ -757,6 +760,7 @@ export class RoutedTerminalController implements TerminalController {
       requested,
       settle: [settle],
       settled: false,
+      handedOff: false,
     };
     this.liveFocus = entry;
     this.appendControl(entry);
@@ -866,8 +870,14 @@ export class RoutedTerminalController implements TerminalController {
 
   private settleFocus(entry: FocusEntry, outcome: TerminalControlOutcome): void {
     if (entry.settled) return;
+    // Still the user's latest focus request under the current target: the held input follows it.
+    const relevant = this.liveFocusCurrent() === entry;
     entry.settled = true;
     if (this.liveFocus === entry) this.liveFocus = undefined;
+    // relay-protocol 9.1: the current relevant focus failing fails the held input, even when an
+    // older grant is still carried, because the input was typed for the focus the user asked
+    // for. A focus superseded by a newer one is not relevant; the input follows the newer one.
+    if (relevant && !outcome.ok) this.failHeldInputs(outcome.error);
     for (const settle of entry.settle) settle(outcome);
     // Held input waiting on this focus re-evaluates whether any focus remains.
     this.wake();
@@ -1073,7 +1083,10 @@ export class RoutedTerminalController implements TerminalController {
         appearance: this.appearance,
       },
       5_000,
-      undefined,
+      () => {
+        entry.handedOff = true;
+        this.wake();
+      },
       handle,
       sendable,
     );
@@ -1499,6 +1512,23 @@ export class RoutedTerminalController implements TerminalController {
     this.wake();
   }
 
+  // Closes the open hold generation from its start: every held input not yet handed off fails
+  // with `cause`, and so does new input until the generation ends. Inputs already handed off
+  // (its barrier) keep their own results.
+  private failHeldInputs(cause: ClientError | DomainError): void {
+    const hold = this.hold;
+    if (!hold) return;
+    hold.cause ??= cause;
+    hold.closedAfter = 0;
+    for (const item of [...this.inputQueue])
+      if (item.hold === hold && !item.settled && !item.started)
+        this.settleInput(
+          item,
+          inputFailure(item.source, item.bytes.byteLength, cause, item.inputId),
+        );
+    this.wake();
+  }
+
   // Fails every accepted input not yet handed off (target loss, fatal view failure, view
   // replacement, retirement); an open hold generation closes with the same cause.
   private failUnsentInputs(error: ClientError | DomainError): void {
@@ -1644,6 +1674,11 @@ export class RoutedTerminalController implements TerminalController {
     if (item.started && (recovering || this.phase !== "ready")) return localError("invalid-state");
     if (this.host.scheduler.nowMs() >= item.deadlineAtMs) return localError("timeout");
     if (recovering) return "wait";
+    // Held input follows the user's current focus request until that focus is handed off or
+    // ends: an older carried grant could otherwise send it just before the focus fails, and the
+    // failure of the current relevant focus must fail the held input (relay-protocol 9.1).
+    const focus = this.liveFocusCurrent();
+    if (item.hold && !item.started && focus && !focus.handedOff) return "wait";
     if (this.phase !== "ready") return localError("invalid-state");
     const generation = this.viewGeneration;
     const epoch = this.control.currentEpoch(item.ref, generation, this.appliedSeq);

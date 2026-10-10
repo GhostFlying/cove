@@ -890,4 +890,40 @@ describe("implementation review regressions (#86 round 1)", () => {
     expect(order.slice(0, recoverAt)).not.toContain("input");
     expect(await untrueReceipts(h)).toEqual([]);
   });
+
+  test("the current focus failing before its handoff fails the held input; a superseded one does not", async () => {
+    // A carried grant survives the resize-context recovery, but the user's focus is the request
+    // the held input follows: when it fails (here measureGrid throws), the input fails with it
+    // instead of flushing under the older grant (relay-protocol 9.1).
+    const failed = await withHeldRecovery();
+    failed.inputs = [];
+    await failed.startRecovery("resize");
+    const focus = failed.controller.requestFocus();
+    type(failed, "held");
+    failed.mounted.hooks.measureGrid = () => {
+      throw new Error("measure");
+    };
+    await failed.release();
+    await failed.finish();
+    expect(await outcomeOf(focus)).toBe("invalid-state");
+    expect(failed.server.written).toEqual([]);
+    expect(await failed.inputs[0].outcome).toMatchObject({
+      ok: false,
+      value: { writtenBytes: 0, unknownBytes: 0, notSentBytes: 4 },
+    });
+
+    // A focus superseded by a newer valid one is no longer the relevant focus: the held input
+    // follows the newer focus and is written.
+    const superseded = await withHeldRecovery();
+    superseded.inputs = [];
+    await superseded.startRecovery("resize");
+    const older = superseded.controller.requestFocus({ cols: 90, rows: 24 });
+    type(superseded, "held");
+    const newer = superseded.controller.requestFocus(larger);
+    await superseded.release();
+    await superseded.finish();
+    expect(await outcomeOf(older)).toBe("invalid-state");
+    expect(await outcomeOf(newer)).toBe("ok");
+    expect(superseded.server.written).toEqual(["held"]);
+  });
 });
