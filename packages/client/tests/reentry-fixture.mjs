@@ -52,6 +52,32 @@ export function manualClock() {
   };
 }
 
+// A manual clock whose yieldTurn is a host task the test runs explicitly with runTask(), so a
+// fairness test counts what happens per task without depending on wall-clock time. Until
+// `manual` is set (after the harness is set up), turns are granted at once.
+export function manualTasks() {
+  const clock = manualClock();
+  const turns = [];
+  const tasks = {
+    ...clock,
+    manual: false,
+    yieldTurn() {
+      if (!tasks.manual) return Promise.resolve();
+      return new Promise((resolve) => turns.push(resolve));
+    },
+    // Runs one host task: every turn yielded before it continues, and what that work yields
+    // waits for the next task.
+    async runTask() {
+      for (const resolve of turns.splice(0)) resolve();
+      await settle(300);
+    },
+    get waitingTurns() {
+      return turns.length;
+    },
+  };
+  return tasks;
+}
+
 // Host-task scheduler: yieldTurn resolves on a macrotask, as the Scheduler contract requires.
 export function realScheduler() {
   return {

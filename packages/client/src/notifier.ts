@@ -172,7 +172,11 @@ export class Notifier<S, N, A = never> {
     if (this.closed) return;
     const states = [...this.stateListeners];
     const notices = [...this.noticeListeners];
-    for (let count = 0; count < DELIVERY_QUANTUM; count++) {
+    // The round covers only entries queued before it started. Entries observers produce during
+    // it (a new marker, notice or aggregate) are appended behind them and wait for the next
+    // round on a new task, so an observer reacting to every entry runs once per task.
+    const count = Math.min(DELIVERY_QUANTUM, this.queue.length);
+    for (let index = 0; index < count; index++) {
       const entry = this.queue.shift();
       if (!entry) break;
       if (entry.kind === "state") {
