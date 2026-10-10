@@ -196,6 +196,7 @@ controlEpoch；对应子进程验证 epoch，排入尺寸事件，更新 headles
 控制切换前已写入 PTY 的输入不能撤回。客户端断线不缓存并在重连后自动补发键盘输入或粘贴；
 输入已送达但 ACK 丢失时报告结果不确定，不能用重放用户输入解决。
 后台重连不自动抢占；有效前台 focus 按既有约定自动接管，输入等待控制权与恢复状态就绪。
+恢复期间从未交出的输入在客户端有界暂存，就绪后按序发送（规则见 relay-protocol 9.1 的输入暂存）；这不同于断线后补发。
 
 已确认：服务端权威终端模型是受支持终端查询的唯一回复方，在解析实时查询时由执行侧写回 PTY。
 回复方不随客户端连接、断开、focus 或可见性变化；无客户端时仍正常回复。该决策不等于具体引擎与适配实现已通过验证。
@@ -339,6 +340,102 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 恢复基线可称为终端快照，但其传输载荷是 VT 恢复序列与元数据，不是绘图指令或私有引擎内存。
 这一边界不要求 Server 业务主体改变语言，也不要求客户端和服务端同时更换终端引擎。
 
+### 4.4 回调、通知与重入（client controller 与 view）
+
+背景：controller（`packages/client`）与浏览器 view（`packages/terminal-web`）曾在操作中途同步调用外部代码：状态与输入结果观察者、
+view 的 focus/input/failure/renderer 监听者、注入的 `createOpaqueId`、`measureGrid`、`view.dispose` 以及 xterm 的 blur/dispose 回调。
+这些代码可以同步重入（recover、requestFocus、attach、replaceView、initialize、dispose、setVisibility、重连），逐点修补无法收敛（#84）。
+以下规则适用于这两个包的所有现有和新增回调点。
+
+**外部代码的分类。**
+
+- 公开观察者：controller 的 `onState`、`onInputOutcome`，client 的 `onState`。属于应用代码，可以做任何事。
+- 注入的取值回调：`createOpaqueId`、`view.measureGrid`。必须同步取得返回值，但可能重入。
+- 对 view 的调用：controller 调用的每个 view 方法（initialize、baseline、applyEvent、setVisibility、setAppearance、dispose）
+  都视为外部代码；view 内部对 xterm 的调用（open、blur、resize、主题、dispose）对 view 而言同样是外部代码。
+- 回到上游的入口：view 的 focus/input/failure 意图与 renderer 变化、连接层（lane）的 onHandoff/onSettled/beforeSend、
+  `socket.send()` 内同步送达的应答。
+- Scheduler、codec 等基础端口按契约不得同步回调；`setTimer` 不能在返回前触发回调。
+
+**规则 1：公开观察者从不在 controller 或 client 的调用栈上运行。** 状态变化只在提交后登记一次发布；投递由每个
+controller/client 一个的通知器在 Scheduler 的新一轮事件循环（`yieldTurn`，浏览器为宏任务）中进行。因此任何操作、
+连接层回调或 view 回调的中途都不会有观察者运行，操作无需在观察者之后自我核对。
+
+**规则 2：投递串行、不可重入，并有终止保证。**
+
+- 一轮投递开始时取监听者快照（期间新增的监听者从下一轮开始接收，期间注销的不再收到），状态观察者收到该时刻的最新快照，
+  输入结果通知按产生顺序逐条投递、不合并。
+- 一轮内的观察者反应（新的操作、状态变化或通知）不会在本轮中投递，只登记下一轮；下一轮总在新的事件循环轮次运行，
+  不在本轮内重启，也不用微任务链接续。
+- 与上一次已投递快照内容相同的状态不再投递；幂等反应（无变化的 `setInputTarget`、同步失败后状态不变的重连）因此自然终止。
+- 由此每轮工作量以监听者数量为界；无条件地对每次通知都改变状态的观察者每个事件循环轮次最多引起一轮投递，
+  其行为如同观察者自己设置的定时器，不会饿死其他观察者、定时器或 I/O。#80 第四轮的做法（微任务投递、遇到新版本在同一循环内重启）
+  正是缺少这一让步才在相同状态反复发布时无限循环。
+- 观察者抛出异常或返回被拒绝的 promise 不影响投递其余监听者，也不影响操作。
+
+**规则 3：内部等待与公开观察者分开。** 等待恢复 ready、grant 可用、输入权限的内部等待不注册为公开观察者，而在每次提交时
+同步检查；检查只读状态并完成自己的 promise，不调用外部代码。被唤醒的续体之后运行，必须按规则 4 和规则 6 重新核对。
+
+**规则 4：外部代码之后的每个续体都按身份核对。**
+
+- 调用外部代码前，状态必须已经处于一致的已提交状态：先完成本步骤的提交，或者在任何修改之前调用（例如先取得
+  `createOpaqueId`/`measureGrid` 的结果再修改状态）。不允许在半完成的状态下调用外部代码。
+- 调用前记录身份元组：订阅 incarnation（`token`）、view 对象与 `viewGeneration`、订阅 ref、连接 binding、phase 与当前操作；
+  对请求级操作再加上请求身份（focus 的最新请求序号与输入目标版本、输入的 intentVersion、view 的 epoch 及可见性/外观设置序号）。
+- 外部代码返回后、读取任何可变状态或做任何修改/发送之前重新核对整个元组；任一项变化即按规则 7 放弃，不读取已被
+  他人清理的字段（例如 `measureGrid` 期间 dispose 后的 `retainedGeometry`），不写入后继。
+- 替换类操作先提交新的拥有者，再处理旧对象：`replaceView` 先安装新 view 并推进 generation，再调用旧 view 的 `dispose`；
+  之后的 attach 按身份核对，若旧 view 的 `dispose` 或 ID 回调中又发生了更新的替换，本次替换放弃，绝不 dispose 更新的 view，
+  也不把新订阅接到已退役的 view 上。view 的 `initialize`/重建 backend 在清理旧 xterm 后同样先核对 epoch，
+  清理失败只归属被退役的那一代，不把后继标记为失败。
+- 失败归属到产生它的身份：用调用前记录的 token/incarnation 调用 `fail`，后继不会因前任的迟到错误而失败。
+
+**规则 5：连接层回调不重入连接层。** onHandoff/onSettled/beforeSend 是发送方自己的续体：只结算本命令并提交状态。
+它们发起的后续工作（下一个 ACK、释放过期 grant 的 blur、`fail` 引起的退役与 detach、取消）在调用它们的连接层入口完成自身簿记后运行，
+且先于连接层再向 socket 交出任何命令；遍历在途命令的取消只扫描开始时的快照。`socket.send()` 内同步送达的应答照常结算，但该命令
+已被视为交出。
+
+**规则 6：期限与重发。**
+
+- 延迟或暂存的工作（延迟 focus、暂存输入、grant 可用等待）的期限从原始请求（或输入进入暂存、结果被接受）起算，由定时器、
+  每次唤醒后的续体以及交给连接前的 `beforeSend` 三处检查；在交出前到期即以 timeout 失败且不发送，交出后到期不撤回命令。
+- 连接层为每个结果标注是否可能已交出：一旦对该命令调用过 `socket.send()`（包括 send 尚未返回时同步收到的应答，无论成功还是
+  错误），即视为可能已送达。只有连接层证明从未交出的命令可以重试、重新延迟或回到暂存；可能已送达的命令绝不重发，
+  结果不确定时如实报告。
+
+**规则 7：被取代操作的错误约定。** 一个操作在中途被更新的操作、dispose 或身份变化取代后，不再产生任何效果。
+有结果通道的操作报告取代：controller 的公开操作返回 `{ ok: false }`，错误为本地 `invalid-state`（disposed 时为 `disposed`，
+到期为 `timeout`）；view 的异步操作以 `RESYNC_REQUIRED` 拒绝。没有结果通道的“最新者生效”设置（view 的 `setVisibility`、
+`setAppearance`）被更新的同类设置或 initialize/dispose 取代时静默放弃，因为结果已由取代者确定；它们不抛出，
+以免 controller 把前任的取代当作自身失败。
+
+**View 的通知。** view 的 focus、input、failure 与 renderer 通知使用同一个串行投递器：
+
+- 平台事件（键盘、IME、粘贴、鼠标、DOM 失焦、GL context loss、重试定时器）在没有打开的 view 操作且无待投递通知时立即投递，
+  不增加打字延迟。
+- 操作中产生的通知（例如 `setVisibility(false)` 触发 xterm blur 产生的失焦、致命 failure、renderer 变化）先按顺序排队，
+  在最外层操作（异步操作到其 settle）结束后投递，因此监听者不能在操作中途重入。
+- 投递一轮只处理开始时已排队的通知；监听者反应产生的新通知由下一轮在新的事件循环轮次投递。
+- 每条排队通知带有产生它的 incarnation；投递时该 incarnation 已退役（重建或 dispose）则丢弃，输入意图不会被标上后继的
+  generation。dispose 丢弃所有未投递通知。renderer 变化保留合并语义：只投递当前 renderer，中途变回的不通知。
+- focus 与 input 意图在产生时即分配 focusSeq 并更新 view 的焦点状态，投递顺序与用户事件顺序一致：输入之后被隐藏触发的失焦排在
+  输入之后，由 controller 按目标丢失处理尚未交出的输入。
+
+**测试要求。** 实现须带系统化的重入测试：对上面列出的每个回调点，分别执行每种相关的重入动作，并统计实际到达的回调点和执行的动作，
+避免用例因未触发而空过；#84 列出的每个发现和 #80 第四轮的失败模式（相同状态循环、交出前期限）各有回归测试。
+
+**Orca 对照**（只读，`~/WORKSPACE/bytedance_orca` @ `ac562724ad92915660420035fa88066d0e5b09bc`，路径相对 `src/renderer/src/`）：
+
+- `components/terminal-pane/pty-dispatcher.ts` 同步内联分发；旁路观察者遍历前复制快照（:157-162），一次性的退出处理器先移除再调用（:194-202），
+  `pty-exit-delivery.ts` 对每个回调单独捕获异常。采用：快照遍历与异常隔离。
+- `pty-transport.ts` 的 `lifecycleGeneration`（:48、:67-72、:133-146）以及约 15 处 `session.disposed` 检查在 await 之后核对身份；
+  `PaneManager` 只有 `destroyed` 标志，`destroy`/`disposePane` 不幂等。采用：按 generation 核对续体；不采用：分散在各调用点的临时检查，
+  Cove 用统一的身份元组与投递器代替。
+- `pty-preconnect-input-buffer.ts` 只在首次连接前有界缓存输入（1024 条，:3-7），按序冲刷一次并在每条前核对 `writer.isCurrent()`，
+  失败即清空其余；重连期间的输入被拒绝或丢弃，不跨重连重放。采用：有界、按序、失败后不再发送后续；不同之处：Cove 按用户决定在恢复期间
+  暂存，并逐条可见地报告失败而不是静默丢弃。
+- 取代与取消静默返回 `false`/`null`；`pty-input-write-queue.ts:313` 遍历活动集合。Cove 不采用静默取代（规则 7）与活动集合遍历。
+
 ## 5. 前后台资源管理
 
 | 状态          | 客户端行为                                          | Host 行为                    |
@@ -367,17 +464,8 @@ WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到�
 - 策略按 view 而非 xterm 实例保存：新基线重建 xterm 不会重置重试次数；等待重试期间新建的实例先用 DOM，
   由重试升级当前实例。view 重新可见时重建 glyph atlas 并重绘；dispose 释放 addon、GPU context 和重试定时器。
 - 当前 renderer 只读暴露（`renderer`、`onRendererChange`），用于诊断与测试；controller 与协议不感知 renderer。
-- 视图对重入的规则（监听者可能同步地 initialize 新一代或 dispose 视图）：
-  - `onRendererChange` 只在没有任何公开操作进行时投递：initialize、beginBaseline（到状态提交）、
-    baseline 分块与 finish、applyEvent、setAppearance、setVisibility，以及回调触发的致命退役，
-    异步操作直到其 settle；操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，操作结束后再投递。
-  - 投递串行且不嵌套：单一循环按监听者快照逐个投递当时的当前 renderer；投递期间发生的变化只排队，
-    若当前 renderer 已变，未送出的旧值被丢弃、所有监听者改收最新值，因此每个监听者最后收到的总是当前 renderer，
-    中途又变回的变化不通知。
-  - 每个操作在入口记录 epoch（initialize 与 dispose 推进），执行外部代码后的每个后续步骤都先检查；
-    epoch 已变或视图已 dispose 则以 `RESYNC_REQUIRED` 中止，绝不写入后继。
-  - failure、focus、input 监听者按设计同步调用，可重入视图：致命 failure 发布后该路径随即抛出；focus 发布后
-    输入路径重新检查所有权再发 input；其余发布都是所在操作的最后一步，之后不再写视图状态。
+- renderer 变化通知与 view 的其他通知一样按 [4.4](#44-回调通知与重入client-controller-与-view) 的规则投递：
+  操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，最外层操作结束后由串行投递器投递当前 renderer。
 - 两种 renderer 的 cell 宽度不同（WebGL 对齐设备像素），切换后 `measureGrid` 可能给出不同网格；
   这是可见网格的真实变化，只有持有控制权的客户端按常规 resize 流程跟随，不用 resize 恢复绘制。
 - 网格测量取宿主内容区的小数宽度，扣除 xterm 叠加在右缘的纵向滚动条（xterm 6 默认 14px，与
