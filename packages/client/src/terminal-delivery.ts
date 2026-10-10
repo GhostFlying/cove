@@ -283,8 +283,10 @@ export class TerminalLane {
     this.retiredRefs.add(key);
   }
 
+  // Cancellation scans a snapshot of the commands present when it began: a settlement callback
+  // may send new commands, and those belong to the operation that sent them, not to this sweep.
   cancelUnsentControl(ref: SubscriptionRef): void {
-    for (const pending of this.pending.values()) {
+    for (const pending of [...this.pending.values()]) {
       const command = pending.command;
       if (
         (command.type === "applied-ack" || command.type === "baseline-progress") &&
@@ -301,7 +303,7 @@ export class TerminalLane {
   }
 
   cancelUnsent(ref: SubscriptionRef, types: readonly TerminalCommand["type"][]): void {
-    for (const pending of this.pending.values()) {
+    for (const pending of [...this.pending.values()]) {
       const command = pending.command;
       if (
         "subscription" in command &&

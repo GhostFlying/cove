@@ -205,7 +205,7 @@ export const requiredSuites = [
     file: "packages/client/tests/terminal-budgets-preview.test.mjs",
     minimumTests: 33,
   },
-  { project: "client", file: "packages/client/tests/terminal-lifecycle.test.mjs", minimumTests: 4 },
+  { project: "client", file: "packages/client/tests/terminal-lifecycle.test.mjs", minimumTests: 5 },
   { project: "client", file: "packages/client/tests/terminal-recovery.test.mjs", minimumTests: 46 },
   { project: "client", file: "packages/client/tests/terminal-state.test.mjs", minimumTests: 11 },
   {
