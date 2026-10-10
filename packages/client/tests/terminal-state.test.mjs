@@ -607,7 +607,7 @@ describe("public terminal state completion", () => {
     expect(controller.snapshot().appliedGeometry).toBeNull();
   });
 
-  test("nested disposal suppresses stale outer state delivery to later listeners", async () => {
+  test("disposal by an earlier listener reaches later listeners in the next round", async () => {
     const h = await harness();
     const controller = h.client.openTerminal({
       run,
@@ -624,7 +624,13 @@ describe("public terminal state completion", () => {
     await settle();
     h.respond(0, "live");
     expect((await query).ok).toBe(true);
-    expect(later).toEqual([["disposed", "unverifiable"]]);
+    await settle();
+    // Every listener of a round sees the same snapshot; the disposal an earlier listener caused
+    // is delivered in the following round (terminal-architecture 4.4.3).
+    expect(later).toEqual([
+      ["idle", "live"],
+      ["disposed", "unverifiable"],
+    ]);
     h.client.dispose();
   });
 

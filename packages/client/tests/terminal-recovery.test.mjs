@@ -721,7 +721,7 @@ describe("public terminal subscription and recovery", () => {
       process.off("unhandledRejection", catchUnhandled);
     }
   });
-  test("revokes old connection before synchronous unavailable listeners can reenter", async () => {
+  test("revokes old connection before unavailable listeners can reenter", async () => {
     const rendered = view();
     let attachSerial = 0;
     const { client, peer } = await harness((command, peer) => {
@@ -749,18 +749,16 @@ describe("public terminal subscription and recovery", () => {
           view: view().terminalView,
           initialAppearance: DEFAULT_APPEARANCE,
         }),
-        reconnect: client.reconnect(),
       };
     });
     const before = peer.commands.length;
     peer.close();
+    // Observers run on a later turn, after the close has revoked the old connection.
+    expect(reentered).toBeUndefined();
+    await settle();
     expect(peer.commands).toHaveLength(before);
     expect(await reentered.attach).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
     expect(reentered.open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
-    expect(await reentered.reconnect).toMatchObject({
-      ok: false,
-      error: { reason: "invalid-state" },
-    });
     expect(client.snapshot().status).toBe("unverifiable");
     expect((await client.reconnect()).ok).toBe(true);
     const second = controller.attach();
@@ -930,7 +928,7 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
-  test("guards nested reconnect and dispose notifications before adapter cleanup", async () => {
+  test("reconnect and dispose notify state observers only after returning", async () => {
     const rendered = view();
     const { client, peer } = await harness((command, peer) => {
       if (command.type === "attach") reply(command, peer, subscription("view-1"));
@@ -945,33 +943,22 @@ describe("public terminal subscription and recovery", () => {
     const attached = controller.attach();
     baseline(peer, subscription("view-1"));
     expect((await attached).ok).toBe(true);
-    const nested = [];
-    controller.onState((snapshot) => {
-      if (snapshot.phase === "unavailable") {
-        nested.push({
-          open: client.openTerminal({
-            run,
-            viewId: "nested",
-            view: view().terminalView,
-            initialAppearance: DEFAULT_APPEARANCE,
-          }),
-          reconnect: client.reconnect(),
-        });
-      }
-    });
+    await settle();
+    // Observers are delivered on a later turn (terminal-architecture 4.4.3), so they can no
+    // longer reenter reconnect or dispose before adapter cleanup has finished.
+    const seen = [];
+    controller.onState((snapshot) => seen.push(snapshot.phase));
     const before = peer.commands.length;
-    expect((await client.reconnect()).ok).toBe(true);
+    const reconnecting = client.reconnect();
+    expect(seen).toEqual([]);
+    expect((await reconnecting).ok).toBe(true);
+    await settle();
     expect(peer.commands).toHaveLength(before);
-    expect(nested).toHaveLength(1);
-    expect(nested[0].open).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
-    expect(await nested[0].reconnect).toMatchObject({
-      ok: false,
-      error: { reason: "invalid-state" },
-    });
+    expect(seen).toEqual(["unavailable"]);
     client.dispose();
-    expect(nested).toHaveLength(2);
-    expect(nested[1].open).toMatchObject({ ok: false, error: { reason: "disposed" } });
-    expect(await nested[1].reconnect).toMatchObject({ ok: false, error: { reason: "disposed" } });
+    expect(seen).toEqual(["unavailable"]);
+    await settle();
+    expect(seen).toEqual(["unavailable", "disposed"]);
   });
 
   test("same-stack local capacity refusal cannot retire a healthy connection", async () => {
@@ -1885,6 +1872,8 @@ describe("public terminal subscription and recovery", () => {
     first.fail(domainError("INPUT_REJECTED"));
     expect(a.snapshot().phase).toBe("ready");
     first.fail(domainError("RECOVERY_UNAVAILABLE"));
+    // The fatal failure is latched at once and ends the subscription from the intent drain.
+    await settle();
     expect(a.snapshot().phase).toBe("unavailable");
     expect(b.snapshot().phase).toBe("ready");
     peer.emit(
@@ -2117,7 +2106,7 @@ describe("public terminal subscription and recovery", () => {
     client.dispose();
   });
 
-  test("a reentrant observer may dispose before attach sends a marker", async () => {
+  test("an observer that disposes during attach ends it as disposed", async () => {
     const { client, peer } = await harness();
     const controller = client.openTerminal({
       run,
@@ -2129,7 +2118,9 @@ describe("public terminal subscription and recovery", () => {
       if (snapshot.phase === "await-marker") controller.dispose();
     });
     expect(await controller.attach()).toMatchObject({ ok: false, error: { reason: "disposed" } });
-    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(0);
+    // The observer runs on a later turn, after the marker has been handed off; it can no longer
+    // reenter attach between beginning the operation and sending its marker.
+    expect(peer.commands.filter((command) => command.type === "attach")).toHaveLength(1);
     client.dispose();
   });
 

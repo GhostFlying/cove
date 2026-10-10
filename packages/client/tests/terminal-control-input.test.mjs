@@ -148,6 +148,7 @@ async function harness({
   onBeginBaseline,
   autoOpen = true,
   holdAcks = false,
+  onRequestId,
 } = {}) {
   const commands = [];
   const heldAcks = [];
@@ -243,7 +244,12 @@ async function harness({
       encode: (value) => encoder.encode(value),
       decodeFatal: (bytes) => decoder.decode(bytes),
     },
-    createOpaqueId: () => `request-${++request}`,
+    createOpaqueId: () => {
+      const id = `request-${++request}`;
+      // Lets a test reenter the controller from the ID supplier, a foreign-code call point.
+      onRequestId?.(id);
+      return id;
+    },
     scheduler: scheduler ?? {
       nowMs: () => 0,
       setTimer: () => ({ dispose() {} }),
@@ -320,6 +326,9 @@ async function harness({
 async function grant(controller, peer) {
   controller.setInputTarget(true, true);
   const pending = controller.requestFocus();
+  await settle();
+  // Focus requests are registered synchronously and sent by the intent drain on a microtask.
+  await settle();
   const command = peer.commands.at(-1).command;
   peer.result(command, { epoch: 1, atSeq: 1 });
   expect((await pending).ok).toBe(true);
@@ -451,6 +460,7 @@ describe("client control authority", () => {
     const { controller, peer } = await harness();
     expect(controller.setInputTarget(true, true).ok).toBe(true);
     const pending = controller.requestFocus();
+    await settle();
     const command = peer.commands.at(-1).command;
     expect(command.type).toBe("focus");
     peer.result(command, { epoch: 1, atSeq: 1 });
@@ -479,6 +489,7 @@ describe("client control authority", () => {
       focused: true,
       geometry,
     });
+    await settle();
     expect(peer.commands.at(-1).command.type).toBe("focus");
     const focus = peer.commands.at(-1).command;
     peer.event({
@@ -495,6 +506,7 @@ describe("client control authority", () => {
     await settle();
     expect(controller.snapshot().inputReady).toBe(true);
     const blur = controller.blur();
+    await settle();
     expect(controller.snapshot().inputReady).toBe(false);
     const command = peer.commands.at(-1).command;
     expect(command.type).toBe("blur");
@@ -508,6 +520,7 @@ describe("client control authority", () => {
     expect(peer.commands.filter(({ command }) => command.type === "focus")).toHaveLength(0);
     controller.setInputTarget(true, true);
     const pending = controller.requestFocus();
+    await settle();
     const focus = peer.commands.at(-1).command;
     peer.result(focus, { epoch: 1, atSeq: 1 });
     expect((await pending).ok).toBe(true);
@@ -531,6 +544,7 @@ describe("client control authority", () => {
     await grant(controller, peer);
     controller.setInputTarget(false, false);
     expect(controller.snapshot().inputReady).toBe(false);
+    await settle();
     const blur = peer.commands.at(-1).command;
     expect(blur.type).toBe("blur");
     expect(blur.epoch).toBe(1);
@@ -552,6 +566,7 @@ describe("client control authority", () => {
     });
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus();
+    await settle();
     const command = peer.commands.at(-1).command;
     peer.result(command, { epoch: 1, atSeq: 1 });
     await focus;
@@ -565,6 +580,7 @@ describe("client control authority", () => {
     const { controller, peer } = await harness();
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus();
+    await settle();
     const requested = peer.commands.at(-1).command;
     const localBlur = await controller.blur();
     expect(localBlur).toEqual({ ok: true, value: undefined });
@@ -625,6 +641,7 @@ describe("client control authority", () => {
       focused: true,
       geometry,
     });
+    await settle();
     expect(peer.commands.filter(({ command: item }) => item.type === "focus")).toHaveLength(2);
   });
 
@@ -658,6 +675,7 @@ describe("client control authority", () => {
         resolved = true;
         return outcome;
       });
+      await settle();
       const focus = peer.commands.at(-1).command;
       peer.result(focus, { epoch: 1, atSeq: 2 });
       grantFacts(peer);
@@ -665,16 +683,22 @@ describe("client control authority", () => {
       // The focus waits for the recovery its own resize triggered rather than resolving into it.
       expect(resolved).toBe(false);
       expect(controller.snapshot().phase).not.toBe("ready");
-      // Input staged during the recovery is still cancelled, as for every recovery.
-      expect(
-        await controller.sendInput({ source: "keyboard", bytes: encoder.encode("early") }),
-      ).toMatchObject({
-        ok: false,
-        error: { reason: "invalid-state" },
-        value: { notSentBytes: 5 },
-      });
+      // Input typed during the recovery is held (#83) and sent once the grant is usable again.
+      const early = controller.sendInput({ source: "keyboard", bytes: encoder.encode("early") });
+      await settle();
+      expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(0);
       await recoverWith(peer, { epoch: 1, holder: self });
       expect(await pending).toEqual({ ok: true, value: { epoch: 1, atSeq: 2 } });
+      const held = peer.commands.at(-1);
+      expect(held.command).toMatchObject({ type: "input", epoch: 1 });
+      expect(decoder.decode(held.payload)).toBe("early");
+      peer.result(held.command, {
+        epoch: 1,
+        inputSeq: held.command.inputSeq,
+        status: "written",
+        writtenBytes: 5,
+      });
+      expect(await early).toMatchObject({ ok: true, value: { writtenBytes: 5 } });
       expect(controller.snapshot()).toMatchObject({
         phase: "ready",
         inputReady: true,
@@ -701,6 +725,7 @@ describe("client control authority", () => {
       const { controller, peer } = await harness();
       controller.setInputTarget(true, true);
       const pending = controller.requestFocus(larger);
+      await settle();
       const focus = peer.commands.at(-1).command;
       grantFacts(peer);
       await settle();
@@ -721,6 +746,7 @@ describe("client control authority", () => {
         resolved = true;
         return outcome;
       });
+      await settle();
       peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
       peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
       // The baseline was captured between the resize and the grant (B = 1 < A = 2).
@@ -764,6 +790,7 @@ describe("client control authority", () => {
       });
       controller.setInputTarget(true, true);
       const pending = controller.requestFocus(larger);
+      await settle();
       peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
       grantFacts(peer);
       await recoverWith(peer, { epoch: 2, holder: other });
@@ -782,6 +809,7 @@ describe("client control authority", () => {
       controller.setInputTarget(true, true);
       let outcome;
       void controller.requestFocus(larger).then((value) => (outcome = value));
+      await settle();
       peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
       await settle();
       scheduler.advance(M0_LIMITS.recoveryDeadlineMs - 1);
@@ -799,6 +827,7 @@ describe("client control authority", () => {
       await settle();
       controller.setInputTarget(true, true);
       const pending = controller.requestFocus(geometry);
+      await settle();
       peer.result(peer.commands.at(-1).command, { epoch: 3, atSeq: 3 });
       expect(await pending).toEqual({ ok: true, value: { epoch: 3, atSeq: 3 } });
       // Epoch 2 at seq 2 precedes the grant (epoch 3 at seq 3), so it says nothing against it.
@@ -827,6 +856,7 @@ describe("client control authority", () => {
       const blurs = () => peer.commands.filter(({ command }) => command.type === "blur").length;
       controller.setInputTarget(true, true);
       const pending = controller.requestFocus(larger);
+      await settle();
       const focus = peer.commands.at(-1).command;
       peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
       await recoverWith(peer, { epoch: 0, holder: null }, 1);
@@ -859,6 +889,7 @@ describe("client control authority", () => {
       controller.setInputTarget(true, true);
       let outcome;
       void controller.requestFocus(larger).then((value) => (outcome = value));
+      await settle();
       const focus = peer.commands.at(-1).command;
       peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
       // B = 2 reports epoch 0, so a grant of epoch 1 at A = 2 cannot be current.
@@ -876,6 +907,7 @@ describe("client control authority", () => {
       const { controller, peer } = await harness();
       controller.setInputTarget(true, true);
       const pending = controller.requestFocus(larger);
+      await settle();
       peer.result(peer.commands.at(-1).command, { epoch: 1, atSeq: 2 });
       grantFacts(peer);
       await recoverWith(peer, control);
@@ -907,6 +939,7 @@ describe("client control authority", () => {
     });
     expect(denied.ok).toBe(false);
     const focus = controller.requestFocus();
+    await settle();
     const focusCommand = peer.commands.at(-1).command;
     const original = new Uint8Array([0, 255, 27, 91, 54, 110]);
     const staged = controller.sendInput({ source: "paste", bytes: original });
@@ -955,6 +988,7 @@ describe("client control authority", () => {
     const { controller, peer } = await harness();
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus();
+    await settle();
     const focusCommand = peer.commands.at(-1).command;
     peer.result(focusCommand, { epoch: 1, atSeq: 1 });
     await focus;
@@ -1103,6 +1137,7 @@ describe("client control authority", () => {
       value: { writtenBytes: 0, unknownBytes: 3, notSentBytes: 0 },
     });
     expect("operationId" in result.error).toBe(false);
+    await settle();
     expect(notices).toHaveLength(1);
     expect(notices[0].outcome).toEqual(result);
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
@@ -1198,6 +1233,7 @@ describe("client control authority", () => {
     });
     expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     expect("operationId" in outcome.error).toBe(false);
+    await settle();
     expect(notices).toHaveLength(1);
     expect(notices[0].notice).toEqual({ kind: "input", outcome });
     expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
@@ -1228,6 +1264,7 @@ describe("client control authority", () => {
       value: { inputId: 1, writtenBytes: 0, unknownBytes: 2, notSentBytes: 0 },
     });
     expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    await settle();
     expect(notices).toHaveLength(1);
     expect(notices[0].notice).toEqual({ kind: "input", outcome });
     expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
@@ -1260,6 +1297,7 @@ describe("client control authority", () => {
       value: { inputId: 1, writtenBytes: 0, unknownBytes: 1, notSentBytes: 0 },
     });
     expect(outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
+    await settle();
     expect(notices).toHaveLength(1);
     expect(notices[0].notice).toEqual({ kind: "input", outcome });
     expect(notices[0].snapshot).toMatchObject({ retainedInputBytes: 0, pendingInputIntents: 0 });
@@ -1285,6 +1323,7 @@ describe("client control authority", () => {
     expect(uncertain.value).toMatchObject({ unknownBytes: 1, notSentBytes: 0 });
     expect(unsent.error).toEqual({ category: "local", reason: "invalid-state" });
     expect(unsent.value).toMatchObject({ writtenBytes: 0, unknownBytes: 0, notSentBytes: 2 });
+    await settle();
     expect(notices).toEqual([
       { kind: "input", outcome: uncertain },
       { kind: "input", outcome: unsent },
@@ -1428,11 +1467,12 @@ describe("client control authority", () => {
       writtenBytes: 1,
     });
     const result = await direct;
+    await settle();
     expect(notices).toHaveLength(2);
     expect(notices[1].outcome).toEqual(result);
   });
 
-  test("current nonadmitting view input is rejected visibly, obsolete callback is silent", async () => {
+  test("view input held by a gap recovery fails visibly without a grant, obsolete callback is silent", async () => {
     const { controller, peer, mounted } = await harness();
     await grant(controller, peer);
     const notices = [];
@@ -1440,16 +1480,11 @@ describe("client control authority", () => {
     const generation = controller.snapshot().viewGeneration;
     const recovering = controller.recover("gap");
     const beforeInput = peer.commands.filter(({ command }) => command.type === "input").length;
+    // Held during the recovery (#83) rather than rejected.
     mounted.input({ viewGeneration: generation, source: "paste", bytes: new Uint8Array([65, 66]) });
     await settle();
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toMatchObject({
-      kind: "input",
-      outcome: { ok: false, value: { inputId: null, notSentBytes: 2 } },
-    });
-    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
-      beforeInput,
-    );
+    expect(notices).toHaveLength(0);
+    expect(controller.snapshot()).toMatchObject({ pendingInputIntents: 1, retainedInputBytes: 2 });
     const recoverCommand = peer.commands.findLast(
       ({ command }) => command.type === "recover",
     ).command;
@@ -1457,12 +1492,27 @@ describe("client control authority", () => {
     peer.baseline(1);
     await settle();
     expect((await recovering).ok).toBe(true);
+    // A gap recovery starts from no authority and nobody asked for focus, so it fails.
+    await settle();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({
+      kind: "input",
+      outcome: {
+        ok: false,
+        error: { reason: "invalid-state" },
+        value: { inputId: 1, notSentBytes: 2 },
+      },
+    });
+    expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
+      beforeInput,
+    );
     const beforeStale = notices.length;
     mounted.staleInput({
       viewGeneration: generation,
       source: "keyboard",
       bytes: new Uint8Array([67]),
     });
+    await settle();
     expect(notices).toHaveLength(beforeStale);
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(
       beforeInput,
@@ -1475,6 +1525,7 @@ describe("client control authority", () => {
     const notices = [];
     controller.onInputOutcome((notice) => notices.push(notice));
     mounted.fail(domainError("INPUT_REJECTED"));
+    await settle();
     expect(notices).toEqual([{ kind: "renderer-rejection", error: domainError("INPUT_REJECTED") }]);
     expect("outcome" in notices[0]).toBe(false);
     expect(controller.snapshot().inputReady).toBe(true);
@@ -1519,6 +1570,7 @@ describe("client control authority", () => {
       kind: "input",
       outcome: { ok: false, value: { unknownBytes: 1, notSentBytes: 0 } },
     });
+    await settle();
     expect(notices[0].outcome.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     unknown.peer.result(pendingCommand, {
       epoch: 1,
@@ -1551,6 +1603,7 @@ describe("client control authority", () => {
     scheduler.advance(5_001);
     const result = await pending;
     expect(result.ok).toBe(false);
+    await settle();
     expect(seen).toHaveLength(1);
     expect(seen[0].retained).toBe(0);
     expect(seen[0].notice.outcome).toEqual(result);
@@ -1574,6 +1627,7 @@ describe("client control authority", () => {
     controller.onInputOutcome((notice) => seen.push({ notice, snapshot: controller.snapshot() }));
     const result = await controller.sendInput({ source: "keyboard", bytes: new Uint8Array([65]) });
     expect(result.ok).toBe(true);
+    await settle();
     expect(seen).toHaveLength(1);
     expect(seen[0].notice.outcome).toEqual(result);
     expect(seen[0].snapshot).toMatchObject({
@@ -1602,6 +1656,7 @@ describe("input right after a focus grant (Issue #21)", () => {
     controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus(geometry);
+    await settle();
     const text = "echo cove-web-ok\r";
     [...text].forEach((key, index) => type(controller, mounted, index + 1, key));
     await settle();
@@ -1637,6 +1692,7 @@ describe("input right after a focus grant (Issue #21)", () => {
       await settle();
     }
     expect(delivered.join("")).toBe(text);
+    await settle();
     expect(outcomes).toHaveLength(text.length);
     expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
     expect(ofType(peer, "focus")).toHaveLength(1);
@@ -1669,6 +1725,7 @@ describe("input right after a focus grant (Issue #21)", () => {
       focused: true,
       geometry: { cols: 100, rows: 30 },
     });
+    await settle();
     expect(ofType(peer, "focus")).toHaveLength(2);
     expect(ofType(peer, "focus")[1].command.geometry).toEqual({ cols: 100, rows: 30 });
   });
@@ -1677,6 +1734,7 @@ describe("input right after a focus grant (Issue #21)", () => {
     const { controller, peer, mounted } = await harness({ holdAcks: true });
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus(geometry);
+    await settle();
     peer.result(ofType(peer, "focus")[0].command, { epoch: 1, atSeq: 1 });
     expect((await focus).ok).toBe(true);
     peer.event({ type: "control", run, seq: 1, epoch: 1, holder, geometry });
@@ -1750,6 +1808,7 @@ describe("input right after a focus grant (Issue #21)", () => {
       await settle();
     }
     expect(delivered.join("")).toBe(text);
+    await settle();
     expect(outcomes).toHaveLength(text.length);
     expect(outcomes.every((outcome) => outcome.ok)).toBe(true);
     expect(controller.snapshot().controlEpoch).toBe(1);
@@ -1771,6 +1830,7 @@ describe("input right after a focus grant (Issue #21)", () => {
     controller.onInputOutcome((notice) => outcomes.push(notice.outcome));
     controller.setInputTarget(true, true);
     const focus = controller.requestFocus(geometry);
+    await settle();
     type(controller, mounted, 1, "a");
     await settle();
     expect(ofType(peer, "focus")).toHaveLength(1);
@@ -1779,6 +1839,7 @@ describe("input right after a focus grant (Issue #21)", () => {
     type(controller, mounted, 2, "b");
     await settle();
     expect(ofType(peer, "focus")).toHaveLength(1);
+    await settle();
     expect(outcomes).toHaveLength(0);
     peer.event({ type: "control", run, seq: 2, epoch: 3, holder, geometry });
     await settle();
@@ -1797,6 +1858,7 @@ describe("input right after a focus grant (Issue #21)", () => {
       await settle();
     }
     expect(delivered.join("")).toBe("ab");
+    await settle();
     expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true]);
     expect(controller.snapshot().controlEpoch).toBe(3);
   });
@@ -1864,9 +1926,11 @@ describe("resize and focus around a resize-context recovery", () => {
     peer.result(ofType(peer, "resize")[0].command, { epoch: 1, atSeq: 2 });
     peer.event({ type: "resize", run, seq: 2, geometry: larger, requiresBaseline: true });
     await serveRecovery(peer, 3, { epoch: 2, holder: other });
+    // Two-stage result: the server accepted the resize, then the grant was lost.
     expect(await resize).toEqual({
       ok: false,
       error: { category: "local", reason: "invalid-state" },
+      accepted: { epoch: 1, atSeq: 2 },
     });
     expect(controller.snapshot()).toMatchObject({ phase: "ready", inputReady: false });
   });
@@ -1897,9 +1961,9 @@ describe("resize and focus around a resize-context recovery", () => {
   });
 
   // Another client's resize forces this one, which holds no grant, through a recovery.
-  async function recovering() {
+  async function recovering(options = {}) {
     const scheduler = clock();
-    const fixture = await harness({ scheduler });
+    const fixture = await harness({ scheduler, ...options });
     fixture.controller.setInputTarget(true, true);
     fixture.peer.event({ type: "resize", run, seq: 1, geometry: larger, requiresBaseline: true });
     await settle();
@@ -1949,6 +2013,7 @@ describe("resize and focus around a resize-context recovery", () => {
       focused: false,
       geometry,
     });
+    await settle();
     expect(await focus).toEqual({
       ok: false,
       error: { category: "local", reason: "invalid-state" },
@@ -2011,24 +2076,26 @@ describe("resize and focus around a resize-context recovery", () => {
     expect(ofType(peer, "focus")).toHaveLength(1);
   });
 
-  test("a deferred focus superseded by an observer of its own begin is never sent", async () => {
-    const { controller, peer } = await recovering();
+  test("a deferred focus superseded from the ID supplier before its handoff is never sent", async () => {
+    // Observers no longer run on the controller's stack, so the reentrant window is the focus's
+    // own foreign-code call: the request-ID supplier, after the deferred focus woke at ready and
+    // before it began. It starts another resize-context recovery and requests a newer focus.
+    let controllerRef;
+    let armed = false;
+    let second;
+    const { controller, peer } = await recovering({
+      onRequestId: () => {
+        if (!armed || controllerRef.snapshot().phase !== "ready") return;
+        armed = false;
+        void controllerRef.recover("resize-context");
+        second = controllerRef.requestFocus(larger);
+      },
+    });
+    controllerRef = controller;
     const first = controller.requestFocus(larger);
     await settle();
-    // White-box trigger: act on the publication right after the deferred focus has begun (its
-    // intent is pending), before it is handed to the lane. The observer synchronously starts
-    // another resize-context recovery, which carries that intent, and requests a newer focus,
-    // which defers behind the recovery.
-    let acted = false;
-    let second;
-    const observer = controller.onState(() => {
-      if (acted || controller.control.pendingIntent === undefined) return;
-      acted = true;
-      void controller.recover("resize-context");
-      second = controller.requestFocus(larger);
-    });
+    armed = true;
     await serveRecovery(peer, 1, { epoch: 0, holder: null });
-    observer.dispose();
     expect(second).toBeDefined();
     // The second recovery started, and no focus went out: not the older one, which would
     // otherwise follow the recover with its stale intent, nor the newer one, which waits.

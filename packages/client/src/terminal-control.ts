@@ -110,6 +110,30 @@ export class TerminalControl {
     return this.grant?.atSeq;
   }
 
+  // The epoch this subscription holds (accepted grant) or carries across a recovery, if any. An
+  // unfocus records it as the epoch to release (relay-protocol 9.1).
+  get heldEpoch(): number | undefined {
+    return this.grant?.epoch ?? this.carried?.epoch;
+  }
+
+  // The focus intent whose grant is held or carried, so its requested grid can be looked up.
+  get heldIntent(): number | undefined {
+    return this.grant?.intent ?? this.carried?.intent;
+  }
+
+  get carriesGrant(): boolean {
+    return this.carried !== undefined;
+  }
+
+  // True when the authority known now proves that `epoch` is no longer this subscription's: a
+  // newer epoch, or the same epoch naming another holder or none. An older epoch proves nothing
+  // (the grant's own fact may still be ahead), so a blur of `epoch` is still sent then.
+  rulesOut(epoch: number, ref: SubscriptionRef): boolean {
+    const observed = this.observed;
+    if (!observed) return false;
+    return observed.epoch > epoch || (observed.epoch === epoch && !heldBy(ref, observed));
+  }
+
   // True while the grant of `epoch` is accepted or carried across a recovery.
   keepsGrant(epoch: number): boolean {
     return this.grant?.epoch === epoch || this.carried?.epoch === epoch;

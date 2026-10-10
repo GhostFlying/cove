@@ -557,6 +557,9 @@ describe("dual-channel connection", () => {
     context.scheduler.advance(5_001);
     expect(await promise).toMatchObject({ ok: false, error: { reason: "timeout" } });
     context.client.dispose();
+    // Observers are notified on a later turn; the final state reaches the listener first.
+    await flush();
+    await flush();
     expect(context.client.snapshot()).toMatchObject({ status: "disposed", listenerCount: 0 });
     expect(publications).toBeGreaterThanOrEqual(2);
   });
