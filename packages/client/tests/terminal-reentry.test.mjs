@@ -1193,4 +1193,36 @@ describe("implementation review regressions (#86 round 2)", () => {
     // The release expired before its handoff, so the stale epoch is never blurred.
     expect(h.server.ofType("blur").map(({ command }) => command.epoch)).not.toContain(stale);
   });
+  test("a fatal view failure before the attach reply ends the attach without waiting", async () => {
+    let armed = false;
+    let heldAttach;
+    const h = await reentryHarness({
+      onCommand: (entry) => {
+        if (armed && entry.command.type === "attach" && !heldAttach) {
+          heldAttach = entry;
+          return "drop";
+        }
+        return undefined;
+      },
+    });
+    h.server.close();
+    await settle();
+    expect(await h.client.reconnect()).toMatchObject({ ok: true });
+    armed = true;
+    const attached = h.controller.attach();
+    await settle();
+    expect(heldAttach).toBeDefined();
+    h.mounted.fail(domainError("RESYNC_REQUIRED"));
+    // No clock advance: the attach must end on the failure itself, not at its deadline.
+    await settle();
+    const pending = Symbol("pending");
+    const outcome = await Promise.race([attached, Promise.resolve(pending)]);
+    expect(outcome).not.toBe(pending);
+    expect(outcome).toMatchObject({ ok: false, error: { kind: "RESYNC_REQUIRED" } });
+    expect(h.controller.snapshot().phase).toBe("unavailable");
+    // A late attach result and baseline cannot revive it.
+    h.server.process(heldAttach);
+    await h.finish();
+    expect(h.controller.snapshot().phase).toBe("unavailable");
+  });
 });
