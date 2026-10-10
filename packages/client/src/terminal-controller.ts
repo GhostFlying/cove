@@ -995,10 +995,13 @@ export class RoutedTerminalController implements TerminalController {
       this.phase === "ready" &&
       !this.recovering() &&
       this.host.scheduler.nowMs() < entry.deadlineAtMs;
+    // Expiry before the handoff is reported as such (4.4.6), not as a supersession.
+    const expiredUnsent = (): boolean =>
+      current() && this.host.scheduler.nowMs() >= entry.deadlineAtMs;
     if (!sendable()) {
       this.control.failFocus(intent);
       this.publish();
-      return abandon();
+      return expiredUnsent() ? { ok: false, error: localError("timeout") } : abandon();
     }
     let settled = false;
     let receipt: TerminalControlOutcome | undefined;
@@ -1018,7 +1021,10 @@ export class RoutedTerminalController implements TerminalController {
           this.host.scheduler.nowMs() < entry.deadlineAtMs
         )
           redefer = true;
-        receipt = { ok: false, error: outcome.error };
+        receipt =
+          !outcome.sent && expiredUnsent()
+            ? { ok: false, error: localError("timeout") }
+            : { ok: false, error: outcome.error };
       } else if (outcome.result.type !== "focus-result") {
         this.control.failFocus(intent);
         receipt = { ok: false, error: localError("invalid-response") };
