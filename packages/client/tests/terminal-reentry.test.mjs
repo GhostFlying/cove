@@ -1316,3 +1316,25 @@ describe("implementation review regressions (#86 round 3)", () => {
     expect(h.client.snapshot().status).toBe("connected");
   });
 });
+
+describe("implementation review regressions (#86 round 4)", () => {
+  test("a stale queued fatal failure never absorbs the current subscription's fatal failure", async () => {
+    const h = await reentryHarness();
+    // F1 is queued for the first subscription; the application detaches and attaches again
+    // before the drain runs, and the same view then fails again (F2) for the new subscription.
+    h.mounted.fail(domainError("RESYNC_REQUIRED"));
+    h.controller.detach();
+    const attached = h.controller.attach();
+    h.mounted.fail(domainError("RECOVERY_UNAVAILABLE"));
+    const startedAt = h.scheduler.nowMs();
+    // No clock advance: the attach must end from F2 at once, not at its deadline.
+    await settle(200);
+    expect(h.scheduler.nowMs()).toBe(startedAt);
+    const pending = Symbol("pending");
+    const result = await Promise.race([attached, Promise.resolve(pending)]);
+    expect(result).not.toBe(pending);
+    expect(result.ok).toBe(false);
+    expect(result.error.kind).toBe("RECOVERY_UNAVAILABLE");
+    expect(h.controller.snapshot().phase).not.toBe("ready");
+  });
+});
