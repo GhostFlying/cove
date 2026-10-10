@@ -199,6 +199,41 @@ describe("lane residual bounds — explicitly white-box compiled branch", () => 
     await Promise.all(pending);
   });
 
+  test("a cancellation does not sweep up a command sent while it settles another", async () => {
+    const order = [];
+    const outcomes = {};
+    const focus = (requestId) => ({
+      type: "focus",
+      requestId,
+      run,
+      subscription: a,
+      focusSeq: Number(requestId.slice(1)),
+      geometry: { cols: 80, rows: 24 },
+      appearance: { theme: "dark" },
+    });
+    let started = false;
+    const { lane } = laneFixture((bytes, currentLane) => {
+      order.push(sentRequestId(bytes));
+      if (started) return "handed-off";
+      started = true;
+      // Queued behind the command being handed off, so still unsent when cancelled below. Its
+      // settlement sends a newer focus, which belongs to the operation that sent it.
+      void currentLane.send(focus("f0"), 5_000, undefined, (outcome) => {
+        outcomes.f0 = outcome;
+        void currentLane.send(focus("f2"), 5_000, undefined, (next) => {
+          outcomes.f2 = next;
+        });
+      });
+      currentLane.cancelUnsent(a, ["focus"]);
+      return "handed-off";
+    });
+    void lane.send(ack("ack0"), 5_000);
+    expect(outcomes.f0).toMatchObject({ ok: false, error: { reason: "invalid-state" } });
+    expect(outcomes.f2).toBeUndefined();
+    expect(order).toEqual(["ack0", "f2"]);
+    lane.close("transport");
+  });
+
   test("counter exhaustion refuses new request identity without wrapping or sending", () => {
     const { lane, sent } = laneFixture();
     // Private TS fields are ordinary compiled properties; no production seeding API is added.
