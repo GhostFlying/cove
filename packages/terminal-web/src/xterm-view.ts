@@ -296,9 +296,9 @@ export function createXtermTerminalView(
   // 1. Renderer changes are delivered only between public operations. The fallback reports
   //    changes synchronously from attach, detach, a failed load or a context loss, often halfway
   //    through initialize, a baseline replacement or a fatal retirement. Every public operation
-  //    (and a retirement started by a callback) runs inside `operation`, async ones until they
-  //    settle, and delivery waits until no operation is running; an async operation's changes
-  //    are delivered only after its promise has settled.
+  //    (and a retirement started by a callback) runs inside `operation`, async ones until the
+  //    delivery queued after they settle, and delivery waits until no operation is running; an
+  //    async operation's changes are delivered only after its caller has seen it settle.
   // 2. Delivery is serialized and never nested. One loop, which never runs inside itself,
   //    delivers the renderer active when it looks, to a snapshot of the listeners, one at a time.
   //    Whatever a listener does is only observed by the loop afterwards: if the renderer has
@@ -357,17 +357,18 @@ export function createXtermTerminalView(
   // Renderer changes made during an asynchronous operation reach observers only after its promise
   // has settled (4.4.4). Delivery is queued from a reaction to the settled promise, so it also
   // follows the reactions its caller registered when it started awaiting: the caller resumes and
-  // can re-check its own state before an observer may dispose or reinitialize the view.
+  // can re-check its own state before an observer may dispose or reinitialize the view. The
+  // operation counts as running until that queued delivery: a synchronous operation (a setting
+  // changed from a microtask, say) that runs after the step but before the caller resumes would
+  // otherwise deliver the change itself, ahead of the caller.
   const asyncOperation = <T>(step: () => Promise<T>): Promise<T> => {
     operationDepth++;
-    const settled = (async () => {
-      try {
-        return await step();
-      } finally {
+    const settled = (async () => await step())();
+    const deliver = (): void =>
+      queueMicrotask(() => {
         operationDepth--;
-      }
-    })();
-    const deliver = (): void => queueMicrotask(deliverRendererChanges);
+        deliverRendererChanges();
+      });
     settled.then(deliver, deliver);
     return settled;
   };

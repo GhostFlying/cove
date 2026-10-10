@@ -776,8 +776,11 @@ const fixture = {
     }
   },
   // Disposing the view from the renderer-change listener notified by initialize must not leave
-  // the new xterm behind or revive the view.
-  async disposeOnRendererChange() {
+  // the new xterm behind or revive the view. With `settingBetween`, another caller changes a
+  // setting from a microtask queued right after initialize starts, which runs once initialize's
+  // own work is done but before its caller resumes: that synchronous operation must not deliver
+  // the initialize's renderer change ahead of the caller.
+  async disposeOnRendererChange(settingBetween = false) {
     view?.dispose();
     view = undefined;
     container.replaceChildren();
@@ -800,6 +803,11 @@ const fixture = {
         appearance,
         viewGeneration: ++generation,
       });
+      if (settingBetween)
+        queueMicrotask(() => {
+          order.push("setting");
+          candidate.setVisibility(true);
+        });
       void initializing.then(
         () => order.push("settled"),
         () => order.push("settled"),
