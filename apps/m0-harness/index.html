@@ -79,10 +79,16 @@
         flex-direction: column;
         min-width: 0;
       }
+      /* One line whatever the status says: a wrapping status would change the terminal's height,
+         so the grid measured while recovering and once ready would differ and resize the PTY
+         back and forth. */
       #terminal-status {
         padding: 4px 10px;
         color: #aaa;
         border-bottom: 1px solid #222;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
       #terminal {
         flex: 1;
