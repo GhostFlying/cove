@@ -486,7 +486,9 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
   以输入条数上限为界；输入与 focus 的相对顺序由 grant 决定（输入随本订阅当时可用的 grant 发送），不需要在同一日志中排序。
   控制条目在登记时同步合并：未处理的 focus 被之后的 focus 替换、被之后的 unfocus 丢弃；相邻的 unfocus 合并，保留最早记下的要释放的 epoch。
   被合并掉的 focus 请求本来就已被更新的请求或目标丢失取代，其调用方立即以 `invalid-state` 结算。目标丢失在登记时已经生效，所以合并不改变顺序语义。
-  致命失败至多一条，之后的 unfocus 只做本地簿记（订阅随致命失败结束，由 detach 释放）。因此控制日志至多有 unfocus、focus、fatal 三条，与生产速度无关。
+  致命失败只在同一订阅生命周期与同一 view 内合并：登记新的致命失败时，丢弃来自更早生命周期或其他 view 的排队 fatal 条目（它们已无法生效），
+  不让过期条目吞掉当前订阅的失败（否则当前 attach 会等到期限才结束）。锁存使每个生命周期与 view 至多登记一条，所以日志中致命失败至多一条，
+  之后的 unfocus 只做本地簿记（订阅随致命失败结束，由 detach 释放）。因此控制日志至多有 unfocus、focus、fatal 三条，与生产速度无关。
 - 排水：一个不可重入的排水按登记顺序处理日志，每条都使用登记时的身份。
   - focus 工作（`measureGrid`、取 ID、`beginFocus`、发送）以登记时的请求序号与目标版本核对，因此登记在它之后的 unfocus 会使它放弃。
   - unfocus 工作取消 lane 中未交出的命令、使暂存失败，并按 relay-protocol 9.1 发送或延迟 blur。

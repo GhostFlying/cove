@@ -836,6 +836,16 @@ export class RoutedTerminalController implements TerminalController {
     const log = this.controlLog;
     let kept = entry;
     if (entry.kind === "fatal") {
+      // Fatal entries coalesce only within one subscription lifetime and view. A queued entry
+      // from an earlier lifetime or another view can never act (the drain ignores it), so it is
+      // dropped here: it must not absorb the current failure, or the current attach would wait
+      // for its deadline instead of failing now. The latch admits one fatal per lifetime and
+      // view, so at most one fatal entry stays queued.
+      for (let index = log.length - 1; index >= 0; index--) {
+        const queued = log[index]!;
+        if (queued.kind === "fatal" && (queued.life !== entry.life || queued.view !== entry.view))
+          log.splice(index, 1);
+      }
       if (!log.some((queued) => queued.kind === "fatal")) log.push(entry);
     } else {
       let tail = log[log.length - 1];
