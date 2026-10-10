@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTerminalDecoder } from "@cove/protocol/terminal";
 import { expect, test } from "vitest";
 import { writeFitProbe } from "./fit-probe.mjs";
 import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
@@ -385,6 +386,92 @@ async function openConnectedPage({ server, page }, renderer) {
   return secret;
 }
 
+const frameText = new TextDecoder();
+
+function decodeFrames(frameDecoder, bytes) {
+  const frames = [];
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const read = frameDecoder.read(bytes.subarray(offset));
+    if (read.status === "error" || read.consumedBytes === 0)
+      throw new Error("terminal socket tap could not decode a frame");
+    offset += read.consumedBytes;
+    for (const frame of read.frames)
+      frames.push({ metadata: JSON.parse(frameText.decode(frame.metadata)) });
+  }
+  return frames;
+}
+
+const isResizeEvent = (frame) =>
+  frame.metadata.type === "run-event" && frame.metadata.event?.type === "resize";
+
+// Routes the page's terminal WebSocket through the test, which forwards every message in both
+// directions and records the decoded frames' metadata (never their payloads, which carry
+// terminal bytes). It can hold the server's messages from just after a chosen one, and the
+// page's messages, so a test can keep the page's recovery incomplete for as long as it needs:
+// the transport boundary, not the page's timing, decides when the recovery may finish. Install
+// it before the page loads.
+async function tapTerminalSocket(page) {
+  const tap = {
+    inbound: [],
+    outbound: [],
+    heldInbound: [],
+    heldOutbound: [],
+    holdingInbound: false,
+    holdingOutbound: false,
+    afterInbound: undefined,
+    sockets: 0,
+    // Forward the first server message with a frame matching `predicate`, then hold every
+    // server message after it.
+    holdInboundAfter(predicate) {
+      tap.afterInbound = predicate;
+    },
+    holdOutbound() {
+      tap.holdingOutbound = true;
+    },
+    // Release held messages in their original order, and stop holding.
+    releaseInbound() {
+      tap.holdingInbound = false;
+      for (const { route, message } of tap.heldInbound.splice(0)) route.send(message);
+    },
+    releaseOutbound() {
+      tap.holdingOutbound = false;
+      for (const { server, message } of tap.heldOutbound.splice(0)) server.send(message);
+    },
+  };
+  await page.routeWebSocket(/\/terminal$/, (route) => {
+    tap.sockets++;
+    const server = route.connectToServer();
+    const inbound = createTerminalDecoder();
+    const outbound = createTerminalDecoder();
+    route.onMessage((message) => {
+      if (typeof message !== "string") tap.outbound.push(...decodeFrames(outbound, message));
+      if (tap.holdingOutbound) tap.heldOutbound.push({ server, message });
+      else server.send(message);
+    });
+    server.onMessage((message) => {
+      const frames = typeof message === "string" ? [] : decodeFrames(inbound, message);
+      tap.inbound.push(...frames);
+      if (tap.holdingInbound) {
+        tap.heldInbound.push({ route, message });
+        return;
+      }
+      route.send(message);
+      if (tap.afterInbound && frames.some(tap.afterInbound)) {
+        tap.afterInbound = undefined;
+        tap.holdingInbound = true;
+      }
+    });
+  });
+  return tap;
+}
+
+const statusPhase = (page) =>
+  page.evaluate(() => document.getElementById("terminal-status")?.dataset.phase);
+
+// Lets the page run its pending tasks, so anything it would send now has reached the tap.
+const pageTurn = (page) => page.evaluate(() => new Promise((done) => setTimeout(done, 100)));
+
 // One harness serves both the printed-URL check and the context-loss policy: every harness
 // start costs a server and a Chromium, and the macOS CI test budget is tight.
 test("the printed harness URL renders typed output with the default renderer and survives WebGL context loss", async ({
@@ -548,9 +635,12 @@ process.stdout.write("byte-probe-ready\r\n");
 // The first click into a run created at another grid takes control at the page's grid, so the
 // PTY is resized and this client recovers with a fresh baseline. Keys typed at once, with no
 // wait for control to settle, are held during that recovery and sent once the grant is usable
-// (relay-protocol 9.1): every byte reaches the PTY exactly once, in order.
+// (relay-protocol 9.1): every byte reaches the PTY exactly once, in order. A fast local server
+// could finish that recovery before the first key is typed, so the test holds the server's
+// messages from the resize event on, and types only while the page is visibly still recovering.
 test("a first click that changes the grid keeps every byte typed right after it", async () => {
   await withHarness(async ({ directory, server, page, pageErrors }) => {
+    const socket = await tapTerminalSocket(page);
     const script = join(directory, "byte-probe.mjs");
     const out = join(directory, "byte-probe.json");
     await writeFile(script, BYTE_PROBE);
@@ -578,11 +668,21 @@ test("a first click that changes the grid keeps every byte typed right after it"
     try {
       await waitForRow(page, "byte-probe-ready");
       before = await statusGrid();
+      socket.holdInboundAfter(isResizeEvent);
       // Click on the first row: a 61x17 screen does not reach the middle of the host.
       await page.click("#terminal", { position: { x: 24, y: 8 } });
+      await page.waitForFunction(
+        () => document.getElementById("terminal-status")?.dataset.phase !== "ready",
+      );
       await page.keyboard.type(typed);
       await page.keyboard.type("done");
       await page.keyboard.press("Enter");
+      await pageTurn(page);
+      // Every key was typed while the recovery could not finish, and none was sent yet.
+      expect(socket.holdingInbound).toBe(true);
+      expect(await statusPhase(page)).not.toBe("ready");
+      expect(socket.outbound.filter((frame) => frame.metadata.type === "input")).toEqual([]);
+      socket.releaseInbound();
       await waitFor(
         "the probe's report",
         async () => (received = JSON.parse(await readFile(out, "utf8").catch(() => "null"))),
@@ -592,6 +692,7 @@ test("a first click that changes the grid keeps every byte typed right after it"
       throw await describePage(page, error);
     }
     expect(received).toBe(typed);
+    expect(socket.sockets).toBe(1);
     // The click did change the grid, so the input really crossed a resize recovery.
     expect(before).toMatch(/^\d+×\d+$/);
     expect(await statusGrid()).not.toBe(before);
