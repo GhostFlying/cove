@@ -411,6 +411,27 @@ function createServer({ syncReplies, onCommand, grid }) {
           lastParsedOrdinal: command.lastParsedOrdinal,
         });
         return;
+      case "preview": {
+        // A transfer: its result, then the preview events, which carry no subscription and are
+        // routed to the client's preview owner rather than to a controller.
+        const previewId = `preview-${state.commands.length}`;
+        const previewResult = { status: "transfer", version: 1, previewId };
+        state.lastPreview = { command, previewResult };
+        result(command, previewResult);
+        const preview = { run, previewId, version: 1 };
+        emit(3, {
+          type: "preview-start",
+          ...preview,
+          atSeq: state.seq,
+          geometry: { ...state.grid },
+          generatedAtMs: 1,
+          vtBytes: 1,
+          chunkCount: 1,
+        });
+        emit(3, { type: "preview-chunk", ...preview, ordinal: 0 }, new Uint8Array([65]));
+        emit(3, { type: "preview-end", ...preview, atSeq: state.seq, totalBytes: 1 });
+        return;
+      }
       default:
         return;
     }
@@ -447,6 +468,15 @@ function createServer({ syncReplies, onCommand, grid }) {
     gap() {
       state.seq++;
       event({ type: "output" }, encoder.encode("gap"));
+    },
+    // The last preview's result again, after the client settled it: an unmatched preview reply.
+    previewAgain() {
+      if (state.lastPreview) result(state.lastPreview.command, state.lastPreview.previewResult);
+    },
+    // A frame no server may send (a command frame), which the client treats as a protocol
+    // violation and retires the connection for.
+    invalidFrame() {
+      emit(1, { type: "applied-ack", requestId: "server-command", run });
     },
     close() {
       current?.callbacks.onClose();
@@ -501,6 +531,43 @@ function cleanupPath() {
     }
   }
   return found;
+}
+
+// The lane's callback points (docs/terminal-architecture.md 4.4.1): the sender callbacks
+// (beforeSend, onHandoff, onSettled), the route callbacks a controller registers, and the
+// client's lane owner (preview events, unmatched preview replies, protocol violations). They are
+// internal, so the harness wraps them on the client's lane instance, which the compiled class
+// keeps as an ordinary property. Each wrapper fires its one-shot hook inside the callback, before
+// the callback itself runs, so the reentering action happens within the lane entry.
+function instrumentLane(client, fire) {
+  const lane = client.terminalLane;
+  if (!lane || typeof lane.send !== "function" || typeof lane.register !== "function")
+    throw new Error("fixture cannot reach the client's terminal lane");
+  const inside = (name, callback) =>
+    callback &&
+    ((...args) => {
+      fire(name);
+      return callback(...args);
+    });
+  const send = lane.send.bind(lane);
+  lane.send = (command, deadlineMs, onHandoff, onSettled, beforeSend, payload) =>
+    send(
+      command,
+      deadlineMs,
+      inside("onHandoff", onHandoff),
+      inside("onSettled", onSettled),
+      inside("beforeSend", beforeSend),
+      payload,
+    );
+  const register = lane.register.bind(lane);
+  lane.register = (ref, receive) => register(ref, inside("route", receive));
+  const owner = lane.owner;
+  for (const [method, name] of [
+    ["preview", "ownerPreview"],
+    ["previewReply", "ownerPreviewReply"],
+    ["invalid", "ownerInvalid"],
+  ])
+    owner[method] = inside(name, owner[method].bind(owner));
 }
 
 export async function reentryHarness({
@@ -677,6 +744,7 @@ export async function reentryHarness({
       },
     },
   });
+  instrumentLane(client, fire);
   if (!(await client.connect()).ok) throw new Error("fixture connect failed");
   const mounted = fakeView((name) => fired.push(`view:${name}`), grid);
   mounted.state.focusSeq = 0;
@@ -692,6 +760,7 @@ export async function reentryHarness({
   await settle();
   if (!(await attached).ok) throw new Error("fixture attach failed");
   const harness = {
+    run,
     client,
     controller,
     mounted,

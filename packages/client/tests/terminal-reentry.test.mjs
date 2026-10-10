@@ -55,8 +55,24 @@ const ACTIONS = {
 // Call points (docs/terminal-architecture.md 4.4.1). Port and connection points are hooks in the
 // harness's ports; view points are hooks in the mounted view; observers subscribe once.
 // Lane points: the ID supplier, socket send, timer disposal, the codec encoding a command before
-// it is registered and decoding a received frame, and the getters of a view being installed.
-const LANE_POINTS = ["requestId", "send", "timerDispose", "laneEncode", "laneDecode", "viewGetter"];
+// it is registered and decoding a received frame, the getters of a view being installed, the
+// sender callbacks (beforeSend, onHandoff, onSettled), a controller's route callback, and the
+// client's lane owner callbacks (preview events, an unmatched preview reply, a protocol violation).
+const LANE_POINTS = [
+  "requestId",
+  "send",
+  "timerDispose",
+  "laneEncode",
+  "laneDecode",
+  "viewGetter",
+  "beforeSend",
+  "onHandoff",
+  "onSettled",
+  "route",
+  "ownerPreview",
+  "ownerPreviewReply",
+  "ownerInvalid",
+];
 // The view operations the controller calls. It never calls setAppearance (appearance arrives as
 // an event through applyEvent); the application does, and terminal-web covers that re-entry.
 const VIEW_POINTS = [
@@ -145,7 +161,8 @@ function observedView(h) {
 // One scenario that passes every call point at least once: input, output (ACK), a focus that
 // measures, appearance, visibility, a resize recovery, a rejected input notice, a replacement, an
 // RPC, a reconnect (fencing the connection, then committing a new one), a lost transport, a
-// connect whose bootstrap fails and a final connect.
+// connect whose bootstrap fails, a final connect, a preview with a late duplicate reply, and a
+// protocol violation that retires the final connection.
 async function drive(h) {
   const step = (work) => {
     try {
@@ -185,6 +202,12 @@ async function drive(h) {
   await settle();
   h.phase.failConnect = false;
   step(() => h.client.reconnect());
+  await settle();
+  step(() => h.client.getPreview(h.run));
+  await settle();
+  h.server.previewAgain();
+  await settle();
+  h.server.invalidFrame();
   await settle();
 }
 
@@ -258,7 +281,7 @@ describe("re-entry matrix: every foreign-code call point x every reentering acti
       const result = await runMatrix([...LANE_POINTS, ...VIEW_POINTS, ...OBSERVER_POINTS]);
       expect(result.failures).toEqual([]);
       expect(result.executed).toBe(result.expected);
-      expect(result.executed).toBe(19 * 15);
+      expect(result.executed).toBe(26 * 15);
     },
     MATRIX_TIMEOUT_MS,
   );
