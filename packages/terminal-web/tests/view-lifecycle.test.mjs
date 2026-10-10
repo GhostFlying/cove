@@ -677,6 +677,32 @@ test("V1-L13 a view disposed by its renderer-change listener on initialize stays
   );
 });
 
+test("V1-L19 a setting changed between initialize's work and its caller does not deliver early", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.disposeOnRendererChange(true)),
+  );
+  // The setting runs after initialize's own work but before the promise's reactions. Its
+  // synchronous operation must not deliver the initialize's WebGL notification: the listener
+  // still runs only after the initialize promise has settled.
+  expect(result).toEqual(
+    result.webgl2
+      ? {
+          webgl2: true,
+          changes: 1,
+          order: ["setting", "settled", "listener"],
+          error: undefined,
+          ownedRoots: 0,
+        }
+      : {
+          webgl2: false,
+          changes: 0,
+          order: ["setting", "settled"],
+          error: undefined,
+          ownedRoots: 1,
+        },
+  );
+});
+
 test("V1-L14 a renderer-change listener cannot interleave with a transition and leak its successor", async () => {
   const result = await withViewPage(async (page) =>
     page.evaluate(() => window.coveView.reinitializeOnRendererChange()),
