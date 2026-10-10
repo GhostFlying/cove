@@ -880,7 +880,11 @@ export class RoutedTerminalController implements TerminalController {
         try {
           if (entry.kind === "focus") await this.runFocus(entry);
           else if (entry.kind === "unfocus") await this.runUnfocus(entry);
-          else if (this.view === entry.view && this.ref) this.fail(entry.error);
+          // A fatal failure ends the subscription of its view, and also an attach whose result has
+          // not identified that subscription yet: fail() then retires the connection, which is
+          // the only way to release a subscription the server may have created unseen.
+          else if (this.view === entry.view && (this.ref || this.operation?.kind === "attach"))
+            this.fail(entry.error);
         } catch {
           /* Every entry settles its own callers. */
         }
