@@ -2,8 +2,9 @@
 // (docs/terminal-architecture.md 4.4.8). It drives the compiled client against a small in-memory
 // model of the server's terminal lane: one ordered event sequence per run, control epochs and a
 // holder, a grid, and per-subscription focus/input counters. Every foreign-code call point the
-// controller reaches (ID supplier, socket send, timer disposal, view operations and listener
-// registration) has a one-shot hook a test can arm to reenter the controller there.
+// client and controller reach (credentials, codec, clock, ID supplier, HTTP and terminal
+// transports and their cleanup, socket send, timer disposal, view operations and listener
+// registration) has a one-shot hook a test can arm to reenter the client there.
 import { TextDecoder, TextEncoder } from "node:util";
 import { createClient } from "@cove/client";
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
@@ -440,6 +441,38 @@ function createServer({ syncReplies, onCommand, grid }) {
   return server;
 }
 
+// The client's connection cleanup paths, by the method that releases a handle. A cleanup call
+// point is named after the innermost of these on the stack (for example `commitTimerDispose`), so
+// a test can arm the release on one path rather than whichever release happens first.
+const CLEANUP_PATHS = [
+  ["tryCommit", "commit"],
+  ["failConnect", "fail"],
+  ["fenceConnection", "fence"],
+  ["loseConnectedAttempt", "lose"],
+];
+
+function callStack() {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 80;
+  const stack = new Error().stack ?? "";
+  Error.stackTraceLimit = limit;
+  return stack;
+}
+
+function cleanupPath() {
+  const stack = callStack();
+  let found;
+  let at = Infinity;
+  for (const [method, path] of CLEANUP_PATHS) {
+    const index = stack.indexOf(`.${method} `);
+    if (index >= 0 && index < at) {
+      at = index;
+      found = path;
+    }
+  }
+  return found;
+}
+
 export async function reentryHarness({
   scheduler = manualClock(),
   syncReplies = false,
@@ -457,56 +490,127 @@ export async function reentryHarness({
     fired.push(name);
     hook(...args);
   };
+  // Fires the named release on the cleanup path it runs on, if it runs on one.
+  const fireCleanup = (name) => {
+    const path = cleanupPath();
+    if (path) fire(`${path}${name}`);
+  };
   const server = createServer({ syncReplies, onCommand, grid });
   let request = 0;
   let depth = 0;
   let maxDepth = 0;
   const tracked = [];
+  // Every terminal transport opened, and whether the client has closed it since.
+  const transports = [];
+  // Connection ports entered while the client did not report the attempt as connecting.
+  const portViolations = [];
+  const phase = { rpc: false, failConnect: false };
+  let client;
+  const requireConnecting = (port) => {
+    const status = client.snapshot().status;
+    if (status !== "connecting") portViolations.push(`${port} entered while ${status}`);
+  };
   const ports = {
     ...scheduler,
+    // nowMs and setTimer registration are pure by contract; a violating implementation that
+    // reenters here exercises the client's defensive ownership checks (4.4.1).
+    nowMs() {
+      if (callStack().includes(".beginConnect ")) fire("connectNowMs");
+      return scheduler.nowMs();
+    },
     setTimer(delay, callback) {
+      const stack = callStack();
+      const connect = stack.includes(".beginConnect ");
+      const rpc = stack.includes(".dispatchRpc ");
+      if (connect) fire("connectSetTimer");
       const handle = scheduler.setTimer(delay, callback);
       return {
         dispose() {
           handle.dispose();
           fire("timerDispose", delay);
+          if (connect) fireCleanup("TimerDispose");
+          if (rpc) fire("rpcTimerDispose");
         },
       };
     },
   };
-  const client = createClient({
+  client = createClient({
     expectedServerId: run.serverId,
     expectedRelayInstanceId: run.relayInstanceId,
     buildVersion: "client-build",
-    credentials: () => ({ authorization: "Bearer test", terminalSecret: "a".repeat(43) }),
+    credentials: () => {
+      fire("credentials");
+      return {
+        get authorization() {
+          fire("credentialGetter");
+          return "Bearer test";
+        },
+        terminalSecret: "a".repeat(43),
+      };
+    },
     codec: {
-      encode: (value) => encoder.encode(value),
-      decodeFatal: (bytes) => decoder.decode(bytes),
+      encode(value) {
+        if (phase.rpc) fire("rpcEncode");
+        const stack = callStack();
+        if (stack.includes(".startConnectTransports ")) fire("connectEncode");
+        if (stack.includes("terminal-delivery")) fire("laneEncode");
+        return encoder.encode(value);
+      },
+      decodeFatal(bytes) {
+        const stack = callStack();
+        if (stack.includes("decodeBootstrap")) fire("bootstrapDecode");
+        if (stack.includes("terminal-delivery")) fire("laneDecode");
+        return decoder.decode(bytes);
+      },
     },
     createOpaqueId: () => {
       const id = `request-${++request}`;
-      fire("requestId", id);
+      fire(phase.rpc ? "rpcRequestId" : "requestId", id);
       return id;
     },
     scheduler: ports,
     http: {
-      post(_request, callback) {
+      post(httpRequest, callback) {
+        if (httpRequest.path !== "/bootstrap") {
+          // An RPC: the fixture has no RPC server, so the request fails as a transport would.
+          fire("rpcPost");
+          queueMicrotask(() => callback.onFailure({ reason: "transport" }));
+          return { cancel: () => "not-sent" };
+        }
+        requireConnecting("http.post");
+        fire("httpPost");
+        // A bootstrap the server answered with a non-200 status fails the attempt (fail path).
+        const status = phase.failConnect ? 500 : 200;
+        const body = encoder.encode(JSON.stringify(bootstrap(false, undefined, budgets)));
         queueMicrotask(() =>
           callback.onResponse({
-            status: 200,
+            status,
             headers: {},
-            body: encoder.encode(JSON.stringify(bootstrap(false, undefined, budgets))),
+            get body() {
+              fire("responseGetter");
+              return body;
+            },
           }),
         );
-        return { cancel: () => "not-sent" };
+        return {
+          cancel: () => {
+            fireCleanup("HttpCancel");
+            return "not-sent";
+          },
+        };
       },
     },
     terminal: {
       open(callbacks) {
+        requireConnecting("terminal.open");
+        fire("terminalOpen");
         const connection = server.open(callbacks);
+        const transport = { closed: false };
+        transports.push(transport);
         callbacks.onOpen({
           send(message) {
             if (typeof message === "string") {
+              fire("bootstrapSend");
               callbacks.onText(
                 encoder.encode(JSON.stringify(bootstrap(true, connection, budgets))),
               );
@@ -523,10 +627,21 @@ export async function reentryHarness({
               depth--;
             }
           },
-          close() {},
-          dispose() {},
+          close() {
+            transport.closed = true;
+            fireCleanup("TransportClose");
+          },
+          dispose() {
+            transport.closed = true;
+            fireCleanup("TransportDispose");
+          },
         });
-        return { cancel: () => "not-sent" };
+        return {
+          cancel: () => {
+            fireCleanup("TerminalCancel");
+            return "not-sent";
+          },
+        };
       },
     },
   });
@@ -552,6 +667,12 @@ export async function reentryHarness({
     scheduler,
     hooks,
     fired,
+    phase,
+    portViolations,
+    // Transports the client opened and has not closed: at most the one it is connected through.
+    get liveTransports() {
+      return transports.filter((transport) => !transport.closed).length;
+    },
     get maxSendDepth() {
       return maxDepth;
     },
