@@ -1289,3 +1289,30 @@ describe("implementation review regressions (#86 round 2)", () => {
     expect(h.server.written).toEqual(["held"]);
   });
 });
+
+describe("implementation review regressions (#86 round 3)", () => {
+  test("a fatal failure queued before a detach never ends the successor attach or the connection", async () => {
+    const h = await reentryHarness();
+    // A sibling subscription on the same connection, which retiring the connection would end.
+    const sibling = fakeView();
+    const opened = h.client.openTerminal({
+      run: h.run,
+      viewId: "view-2",
+      view: sibling.terminalView,
+      initialAppearance: DEFAULT_APPEARANCE,
+    });
+    expect(opened.ok).toBe(true);
+    const other = opened.value;
+    expect(await outcomeOf(other.attach())).toBe("ok");
+    // The view fails; before the control drain runs, the application detaches and attaches a new
+    // subscription with the same view, which clears the fatal latch.
+    h.mounted.fail(domainError("RESYNC_REQUIRED"));
+    h.controller.detach();
+    const attached = h.controller.attach();
+    await h.finish();
+    expect(await outcomeOf(attached)).toBe("ok");
+    expect(h.controller.snapshot().phase).toBe("ready");
+    expect(other.snapshot().phase).toBe("ready");
+    expect(h.client.snapshot().status).toBe("connected");
+  });
+});

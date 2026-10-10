@@ -115,6 +115,9 @@ interface FatalEntry {
   readonly kind: "fatal";
   readonly error: DomainError;
   readonly view: TerminalView;
+  // The subscription lifetime (attach and its recoveries) the failure belongs to; see
+  // TerminalController.subscriptionLife.
+  readonly life: number;
 }
 
 type ControlEntry = FocusEntry | UnfocusEntry | FatalEntry;
@@ -335,6 +338,10 @@ export class RoutedTerminalController implements TerminalController {
   private controlDraining = false;
   // The latest registered focus request until it settles.
   private liveFocus: FocusEntry | undefined;
+  // Counts subscription lifetimes: a new one starts with every attach (which clears the fatal
+  // latch) and ends with retirement. A queued fatal entry acts only within the lifetime it was
+  // registered in, so a failure of a detached subscription never ends its successor's attach.
+  private subscriptionLife = 0;
   // A fatal view failure, latched at registration. Terminal for this view and subscription: only
   // replaceView or a new attach clears it.
   private fatal: DomainError | undefined;
@@ -816,7 +823,7 @@ export class RoutedTerminalController implements TerminalController {
     if (this.fatal || this.phase === "disposed") return;
     this.fatal = Object.freeze({ ...error });
     this.failUnsentInputs(localError("invalid-state"));
-    this.appendControl({ kind: "fatal", error: this.fatal, view });
+    this.appendControl({ kind: "fatal", error: this.fatal, view, life: this.subscriptionLife });
   }
 
   // Appends to the control log, coalescing so its length stays bounded whatever the producer
@@ -883,7 +890,13 @@ export class RoutedTerminalController implements TerminalController {
           // A fatal failure ends the subscription of its view, and also an attach whose result has
           // not identified that subscription yet: fail() then retires the connection, which is
           // the only way to release a subscription the server may have created unseen.
-          else if (this.view === entry.view && (this.ref || this.operation?.kind === "attach"))
+          // An entry from an earlier subscription lifetime was withdrawn when a detach or a later
+          // attach ended that lifetime; it never fails the successor.
+          else if (
+            this.view === entry.view &&
+            entry.life === this.subscriptionLife &&
+            (this.ref || this.operation?.kind === "attach")
+          )
             this.fail(entry.error);
         } catch {
           /* Every entry settles its own callers. */
@@ -2200,7 +2213,10 @@ export class RoutedTerminalController implements TerminalController {
     this.token = token;
     this.recoverySequence = sequence;
     // A new subscription starts without the previous one's fatal view failure.
-    if (kind === "attach") this.fatal = undefined;
+    if (kind === "attach") {
+      this.fatal = undefined;
+      this.subscriptionLife++;
+    }
     this.resetExecution();
     this.appliedGeometry = null;
     this.appliedAuthority = null;
@@ -2783,6 +2799,7 @@ export class RoutedTerminalController implements TerminalController {
     this.operation = undefined;
     this.ref = undefined;
     this.listener = undefined;
+    this.subscriptionLife++;
     const focusListener = this.focusListener;
     this.focusListener = undefined;
     const inputListener = this.inputListener;
