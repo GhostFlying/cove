@@ -1083,7 +1083,7 @@ describe("client control authority", () => {
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
   });
 
-  test("definitely not sent and handed-off lost-result have distinct byte outcomes", async () => {
+  test("an adapter not-sent after send was entered and a lost result both report unknown bytes", async () => {
     const refused = await harness({
       onCommand: ({ command }) => (command.type === "input" ? "not-sent" : undefined),
     });
@@ -1094,9 +1094,9 @@ describe("client control authority", () => {
     });
     expect(notSent).toMatchObject({
       ok: false,
-      value: { writtenBytes: 0, unknownBytes: 0, notSentBytes: 2 },
+      value: { writtenBytes: 0, unknownBytes: 2, notSentBytes: 0 },
     });
-    expect(notSent.error).toEqual({ category: "local", reason: "transport" });
+    expect(notSent.error).toEqual(domainError("RESULT_UNKNOWN", "unknown", "input"));
     expect(refused.peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(1);
 
     const scheduler = clock();
@@ -1532,7 +1532,7 @@ describe("client control authority", () => {
     expect(peer.commands.filter(({ command }) => command.type === "input")).toHaveLength(0);
   });
 
-  test("view-origin not-sent and unknown each notify once; late result cannot replay", async () => {
+  test("view-origin adapter not-sent and unknown each notify once; late result cannot replay", async () => {
     const refused = await harness({
       onCommand: ({ command }) => (command.type === "input" ? "not-sent" : undefined),
     });
@@ -1548,7 +1548,7 @@ describe("client control authority", () => {
     expect(refusedNotices).toHaveLength(1);
     expect(refusedNotices[0]).toMatchObject({
       kind: "input",
-      outcome: { ok: false, value: { unknownBytes: 0, notSentBytes: 1 } },
+      outcome: { ok: false, value: { unknownBytes: 1, notSentBytes: 0 } },
     });
 
     const scheduler = clock();

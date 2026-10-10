@@ -480,6 +480,7 @@ export async function reentryHarness({
   onCommand,
   grant = true,
   grid = geometry,
+  disposition,
 } = {}) {
   const hooks = {};
   const fired = [];
@@ -622,7 +623,8 @@ export async function reentryHarness({
               const entry = decodeCommand(message);
               fire("send", entry.command);
               server.receive(entry);
-              return "handed-off";
+              // What send reports is up to the test; the frame reached the server either way.
+              return disposition?.(entry.command) ?? "handed-off";
             } finally {
               depth--;
             }

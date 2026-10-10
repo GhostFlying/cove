@@ -637,17 +637,17 @@ export class TerminalLane {
         if (disposition === "handed-off" && !pending.settled) {
           this.notifyHandoff(pending);
         } else if (!pending.settled) {
+          // Once send() was entered the frame may have reached the server whatever send returns:
+          // an adapter can forward synchronously and still report "not-sent" or throw. Only a
+          // command that never entered send is proven unsent (4.4.6).
           this.finish(pending, {
             ok: false,
-            error:
-              disposition === "not-sent"
-                ? localError("transport")
-                : domainError(
-                    "RESULT_UNKNOWN",
-                    "unknown",
-                    pending.command.type === "input" ? "input" : undefined,
-                  ),
-            uncertain: disposition !== "not-sent",
+            error: domainError(
+              "RESULT_UNKNOWN",
+              "unknown",
+              pending.command.type === "input" ? "input" : undefined,
+            ),
+            uncertain: true,
           });
         }
       }

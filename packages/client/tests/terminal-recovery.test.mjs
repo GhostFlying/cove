@@ -1113,12 +1113,13 @@ describe("public terminal subscription and recovery", () => {
 
   test("keeps a healthy route after definite attach rejection but retires unknown acceptance", async () => {
     const first = view();
-    let secondMode = "not-sent";
+    // A definite rejection is the server's not-accepted error. An adapter "not-sent" is not one:
+    // once send() was entered the attach may have reached the server (4.4.6), so it is unknown.
+    let secondMode = "not-accepted";
     const { client, peer } = await harness((command, peer) => {
       if (command.type === "attach" && command.viewId === "a")
         reply(command, peer, subscription("a"));
       if (command.type === "attach" && command.viewId === "b") {
-        if (secondMode === "not-sent") return "not-sent";
         peer.emit(4, {
           type: "error",
           requestId: command.requestId,
@@ -1144,9 +1145,6 @@ describe("public terminal subscription and recovery", () => {
     const ap = a.attach();
     baseline(peer, subscription("a"));
     expect((await ap).ok).toBe(true);
-    expect((await b.attach()).ok).toBe(false);
-    expect(client.snapshot().status).toBe("connected");
-    secondMode = "not-accepted";
     expect((await b.attach()).ok).toBe(false);
     expect(client.snapshot().status).toBe("connected");
     peer.emit(
