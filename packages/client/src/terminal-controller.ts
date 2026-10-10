@@ -1073,7 +1073,7 @@ export class RoutedTerminalController implements TerminalController {
         this.control.failFocus(intent);
         const epoch = outcome.result.epoch;
         // The server accepted it, so the epoch is released even though this request lost.
-        this.host.lane.afterward(() => this.releaseStaleFocus(ref, epoch));
+        this.host.lane.afterward(() => void this.releaseStaleFocus(ref, epoch));
         receipt = {
           ok: false,
           error: localError("invalid-state"),
@@ -1938,21 +1938,47 @@ export class RoutedTerminalController implements TerminalController {
     return { ok: true, value: { epoch: result.epoch, atSeq: result.atSeq } };
   }
 
-  private releaseStaleFocus(ref: SubscriptionRef, epoch: number): void {
-    if (this.ref !== ref || !this.currentConnection(ref) || this.control.epoch === epoch) return;
-    const requestId = this.host.lane.nextRequestId(this.host.generation());
-    if (!requestId || this.ref !== ref || !this.currentConnection(ref)) return;
-    void this.host.lane.send(
-      { type: "blur", requestId, run: this.run, subscription: ref, epoch },
-      5_000,
-      undefined,
-      undefined,
-      () =>
-        this.ref === ref &&
-        this.currentConnection(ref) &&
-        this.control.epoch !== epoch &&
-        this.phase === "ready",
-    );
+  // Releases the epoch of a focus the server accepted after this client stopped wanting it. Like
+  // an unfocus (relay-protocol 9.1), the blur can only be sent while ready, so during a recovery
+  // the release waits for ready instead of being dropped; it stops when the subscription or
+  // connection ends (its detach releases everything), when this epoch became the client's own
+  // grant again, when the authority known then rules the epoch out, or at the recovery deadline.
+  // A blur that may have been handed off is never sent again.
+  private async releaseStaleFocus(ref: SubscriptionRef, epoch: number): Promise<void> {
+    const deadlineAtMs = this.host.scheduler.nowMs() + this.recoveryBudget(this.host.binding());
+    const owned = (): boolean =>
+      this.ref === ref && this.currentConnection(ref) && this.control.epoch !== epoch;
+    for (;;) {
+      if (!owned() || this.isDisposed() || this.control.rulesOut(epoch, ref)) return;
+      if (this.host.scheduler.nowMs() >= deadlineAtMs) return;
+      if (this.phase !== "ready") {
+        if (!this.recovering()) return;
+        const ready = await this.waitUntil(
+          () => (!owned() || this.phase === "ready" || !this.recovering() ? true : undefined),
+          deadlineAtMs - this.host.scheduler.nowMs(),
+          false,
+        );
+        if (!ready) return;
+        continue;
+      }
+      const requestId = this.host.lane.nextRequestId(this.host.generation());
+      if (!owned() || this.phase !== "ready") continue;
+      if (!requestId) return;
+      let refused = false;
+      const result = await this.host.lane.send(
+        { type: "blur", requestId, run: this.run, subscription: ref, epoch },
+        5_000,
+        undefined,
+        undefined,
+        () => {
+          const ok = owned() && this.phase === "ready";
+          if (!ok) refused = true;
+          return ok;
+        },
+      );
+      if (!result.ok && !result.sent && refused && this.recovering()) continue;
+      return;
+    }
   }
 
   snapshot(): TerminalSnapshot {

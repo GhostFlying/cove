@@ -1030,4 +1030,40 @@ describe("implementation review regressions (#86 round 1)", () => {
       expect(delivered).toBe(task);
     }
   });
+
+  test("a focus accepted after a blur during recovery has its epoch released once ready", async () => {
+    let heldFocus;
+    const h = await withHeldRecovery({
+      grant: false,
+      onCommand: (entry) => {
+        if (entry.command.type === "focus" && !heldFocus) {
+          heldFocus = entry;
+          return "drop";
+        }
+        return undefined;
+      },
+    });
+    h.controller.setInputTarget(true, true);
+    const focused = h.controller.requestFocus(larger);
+    await settle();
+    expect(heldFocus).toBeDefined();
+    // The focus is with the server; a recovery starts and the user blurs before its result.
+    await h.startRecovery("resize");
+    const blurred = h.controller.blur();
+    h.server.process(heldFocus);
+    await settle();
+    const subscription = h.controller.snapshot().subscription;
+    expect(h.server.state.holder).toBe(
+      `${subscription.connection.connectionId}/${subscription.subscriptionId}`,
+    );
+    await h.release();
+    await h.finish();
+    expect(await outcomeOf(focused)).toBe("invalid-state");
+    expect(await outcomeOf(blurred)).toBe("ok");
+    // The accepted epoch is released after the recovery instead of being dropped.
+    expect(h.server.ofType("blur").map(({ command }) => command.epoch)).toContain(
+      h.server.state.epoch,
+    );
+    expect(h.server.state.holder).toBe(null);
+  });
 });
