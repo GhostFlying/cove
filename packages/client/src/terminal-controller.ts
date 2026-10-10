@@ -1911,6 +1911,7 @@ export class RoutedTerminalController implements TerminalController {
     // command never handed off is a timeout (4.4.6-4.4.7); only losing the grant or being
     // superseded is invalid-state.
     const deadlineMs = this.recoveryBudget(binding);
+    const expired = (): boolean => this.host.scheduler.nowMs() - startedAtMs >= deadlineMs;
     while (
       this.control.currentEpoch(ref, generation, this.appliedSeq) !== null &&
       !this.grantUsable(ref, generation)
@@ -1936,6 +1937,9 @@ export class RoutedTerminalController implements TerminalController {
       const requestId = this.host.lane.nextRequestId(this.host.generation());
       if (!current() || this.control.currentEpoch(ref, generation, this.appliedSeq) !== epoch)
         return { ok: false, error: localError("invalid-state") };
+      // The ID supplier is foreign code and may spend the rest of the deadline; the command is
+      // then proven unsent and expired (4.4.6). The lane checks the deadline again at handoff.
+      if (expired()) return { ok: false, error: localError("timeout") };
       if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
       const command = {
         type,
@@ -1945,16 +1949,20 @@ export class RoutedTerminalController implements TerminalController {
         epoch,
         ...value,
       } as TerminalCommand;
-      const result = await this.host.lane.send(
-        command,
-        5_000,
-        undefined,
-        undefined,
-        () =>
+      let refusedExpired = false;
+      const result = await this.host.lane.send(command, 5_000, undefined, undefined, () => {
+        if (expired()) {
+          refusedExpired = true;
+          return false;
+        }
+        return (
           current() &&
           this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch &&
-          this.grantUsable(ref, generation, 1),
-      );
+          this.grantUsable(ref, generation, 1)
+        );
+      });
+      if (!result.ok && !result.sent && refusedExpired)
+        return { ok: false, error: localError("timeout") };
       const receipt = this.controlReceipt(result, `${type}-result`);
       if (receipt.ok && this.token === token && this.ref === ref) {
         // The server moved its control boundary to this result; later granted commands wait for
@@ -2012,7 +2020,10 @@ export class RoutedTerminalController implements TerminalController {
         continue;
       }
       const requestId = this.host.lane.nextRequestId(this.host.generation());
-      if (!owned() || this.phase !== "ready") continue;
+      // The ID supplier is foreign code: it may change ownership or phase, or spend the deadline,
+      // which the top of the loop then reports. The lane checks the deadline again at handoff.
+      if (!owned() || this.phase !== "ready" || this.host.scheduler.nowMs() >= deadlineAtMs)
+        continue;
       if (!requestId) return;
       let refused = false;
       const result = await this.host.lane.send(
@@ -2021,7 +2032,8 @@ export class RoutedTerminalController implements TerminalController {
         undefined,
         undefined,
         () => {
-          const ok = owned() && this.phase === "ready";
+          const ok =
+            owned() && this.phase === "ready" && this.host.scheduler.nowMs() < deadlineAtMs;
           if (!ok) refused = true;
           return ok;
         },
