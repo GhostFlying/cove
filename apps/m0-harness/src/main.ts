@@ -6,6 +6,7 @@ import {
   type CallOutcome,
   type Client,
   type TerminalController,
+  type TerminalControlOutcome,
   type TerminalSnapshot,
 } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec, createWebPorts } from "@cove/client/web-ports";
@@ -95,10 +96,10 @@ interface OpenTerminal {
   operating: boolean;
   // This client changed the grid itself, so the recovery that follows must not cost it control.
   retakeAfterRecovery: boolean;
-  lastPhase: TerminalSnapshot["phase"];
-  // Counts departures from "ready", so a failed request can tell whether a recovery
-  // superseded it or the server rejected it outright.
-  recoveries: number;
+  // The controller's recoverySequence of the last ready this page has acted on. Observers see
+  // coalesced snapshots and can miss intermediate phases, so a recovery is recognized by a ready
+  // snapshot with a sequence not handled yet, not by watching the phase leave ready.
+  handledRecovery: number;
   inputNotice: string;
 }
 
@@ -205,16 +206,16 @@ function syncSize(entry: OpenTerminal): void {
   entry.requested = measured;
   entry.retakeAfterRecovery = true;
   entry.resizing = true;
-  const recoveries = entry.recoveries;
+  const recoveries = snapshot.recoverySequence;
   void entry.controller.requestResize(measured).then((outcome) => {
     entry.resizing = false;
     if (outcome.ok || current !== entry) return;
     // A recovery that started meanwhile superseded this request; the retake after it settles
-    // the size. Otherwise the rejection was definite: show it and allow a later retry.
-    if (entry.recoveries !== recoveries) return;
+    // the size. Otherwise show the failure and allow a later retry.
+    if (entry.controller.snapshot().recoverySequence !== recoveries) return;
     delete entry.requested;
     entry.retakeAfterRecovery = false;
-    entry.inputNotice = `resize refused: ${describe(outcome.error)}`;
+    entry.inputNotice = `resize ${describeControlFailure(outcome)}`;
     renderTerminalStatus(entry);
   });
 }
@@ -256,8 +257,7 @@ async function openRun(run: RunRef): Promise<void> {
     focusing: false,
     operating: false,
     retakeAfterRecovery: false,
-    lastPhase: "idle",
-    recoveries: 0,
+    handledRecovery: 0,
     inputNotice: "",
   };
   current = entry;
@@ -270,9 +270,9 @@ async function openRun(run: RunRef): Promise<void> {
         entry.operating = false;
         entry.retakeAfterRecovery = false;
       }
-      const enteredReady = snapshot.phase === "ready" && entry.lastPhase !== "ready";
-      if (entry.lastPhase === "ready" && snapshot.phase !== "ready") entry.recoveries++;
-      entry.lastPhase = snapshot.phase;
+      const enteredReady =
+        snapshot.phase === "ready" && snapshot.recoverySequence !== entry.handledRecovery;
+      if (enteredReady) entry.handledRecovery = snapshot.recoverySequence;
       // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM
       // focus and this client's control. Restore DOM focus while the user operates here, and
       // control only after this client's own resize, never after another client's: two pages
@@ -288,6 +288,10 @@ async function openRun(run: RunRef): Promise<void> {
     entry.controller.onInputOutcome((notice) => {
       if (notice.kind === "renderer-rejection")
         entry.inputNotice = `input rejected by the view: ${describe(notice.error)}`;
+      else if (notice.kind === "input-rejections")
+        entry.inputNotice = `${notice.count} inputs not delivered: ${notice.groups
+          .map((group) => `${group.count} ${group.source} ${group.error}`)
+          .join(", ")}`;
       else if (!notice.outcome.ok)
         entry.inputNotice = `input not delivered: ${describe(notice.outcome.error)}`;
       else entry.inputNotice = "";
@@ -331,21 +335,29 @@ function takeControl(entry: OpenTerminal): void {
   if (resizes) entry.retakeAfterRecovery = true;
   entry.requested = measured;
   entry.focusing = true;
-  const recoveries = entry.recoveries;
+  const recoveries = snapshot.recoverySequence;
   entry.controller.setInputTarget(true, true);
   void entry.controller.requestFocus(measured).then((outcome) => {
     entry.focusing = false;
     if (current !== entry) return;
     // A focus that changed the grid may be overtaken by the recovery it caused; the retake
     // after that recovery then settles it. Any other failure is reported and forgotten.
-    if (!outcome.ok && entry.recoveries === recoveries) {
+    if (!outcome.ok && entry.controller.snapshot().recoverySequence === recoveries) {
       delete entry.requested;
       if (resizes) entry.retakeAfterRecovery = false;
-      entry.inputNotice = `focus refused: ${describe(outcome.error)}`;
+      entry.inputNotice = `focus ${describeControlFailure(outcome)}`;
       renderTerminalStatus(entry);
     }
     syncSize(entry);
   });
+}
+
+// A failure with `accepted` was accepted by the server and lost afterwards (the grant was lost,
+// superseded or timed out before it became usable); only one without it was refused.
+function describeControlFailure(outcome: Extract<TerminalControlOutcome, { ok: false }>): string {
+  return outcome.accepted
+    ? `accepted at epoch ${outcome.accepted.epoch} but not usable: ${describe(outcome.error)}`
+    : `refused: ${describe(outcome.error)}`;
 }
 
 // A click in the terminal is a deliberate request to operate it.

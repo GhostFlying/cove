@@ -376,7 +376,10 @@ export class TerminalLane {
     this.enter(() => this.cancelUnsentInside(ref, types));
   }
 
-  private cancelUnsentInside(ref: SubscriptionRef, types: readonly TerminalCommand["type"][]): void {
+  private cancelUnsentInside(
+    ref: SubscriptionRef,
+    types: readonly TerminalCommand["type"][],
+  ): void {
     for (const pending of [...this.pending.values()]) {
       const command = pending.command;
       if (
@@ -700,12 +703,18 @@ export class TerminalLane {
     } catch {
       this.owner.invalid();
     }
-    // A remote accepted/unknown result must fence connection authority before timer disposal can reenter.
-    try {
-      pending.timer?.dispose();
-    } catch {
-      /* The timer no longer owns settlement. */
-    }
+    // The deadline timer's dispose() is foreign code and may reenter. It runs as follow-up work,
+    // after the follow-ups the settlement callback registered (for example the connection fence
+    // an accepted or unknown attach result requires).
+    const timer = pending.timer;
+    if (timer)
+      this.afterward(() => {
+        try {
+          timer.dispose();
+        } catch {
+          /* The timer no longer owns settlement. */
+        }
+      });
     pending.resolve(outcome);
   }
 

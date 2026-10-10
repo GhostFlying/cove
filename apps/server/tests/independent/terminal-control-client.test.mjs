@@ -96,6 +96,8 @@ describe("P2-B2 independent actual compiled public consumer", () => {
               }
             : { ok: true },
         );
+        // Input notices are delivered by the controller's notifier on a later turn.
+        await turns();
         expect(notices).toHaveLength(1);
         expect(notices[0].outcome).toEqual(outcome);
         expect(h.controller.snapshot()).toMatchObject({
@@ -131,6 +133,8 @@ describe("P2-B2 independent actual compiled public consumer", () => {
           nextAction: "inspect-run",
         },
       });
+      // Input notices are delivered by the controller's notifier on a later turn.
+      await turns();
       expect(notices).toHaveLength(1);
       expect(notices[0].outcome).toEqual(result);
       r.accept(command, { inputSeq: command.inputSeq, writtenBytes: 9 });

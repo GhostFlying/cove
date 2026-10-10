@@ -60,6 +60,7 @@ import { TerminalLane } from "./terminal-delivery.js";
 import { TerminalPreview, type PreviewOutcome } from "./terminal-preview.js";
 import { RoutedTerminalController } from "./terminal-controller.js";
 import { completeTerminalView } from "./terminal-view-contract.js";
+import { Notifier } from "./notifier.js";
 
 export type { PreviewOutcome } from "./terminal-preview.js";
 
@@ -197,9 +198,49 @@ export type TerminalInputOutcome =
       readonly error: ClientError | DomainError;
     };
 
+// Two-stage control results (terminal-architecture 4.4.7). A failure carrying `accepted` means
+// the server accepted the focus or resize, but the grant did not become usable afterwards (it was
+// lost, superseded, timed out or the controller was disposed); without `accepted` the command
+// itself was not accepted or its result is reported as is.
+export type TerminalControlOutcome =
+  | { readonly ok: true; readonly value: TerminalControlReceipt }
+  | {
+      readonly ok: false;
+      readonly error: ClientError | DomainError;
+      readonly accepted?: TerminalControlReceipt;
+    };
+
+export type TerminalInputRejectionSource =
+  "keyboard" | "paste" | "mouse" | "renderer" | "malformed";
+
+export type TerminalInputRejectionClass =
+  | "invalid-request"
+  | "invalid-state"
+  | "disposed"
+  | "capacity"
+  | "timeout"
+  | "counter-exhausted"
+  | "input-rejected"
+  | "other";
+
+export interface TerminalInputRejectionGroup {
+  readonly source: TerminalInputRejectionSource;
+  readonly error: TerminalInputRejectionClass;
+  readonly count: number;
+  readonly knownBytes: number;
+  readonly unknownLengthCount: number;
+}
+
+// Inputs rejected at admission are never handed to the connection; beyond the individual
+// rejection notice slots they are reported as an aggregate (terminal-architecture 4.4.3).
 export type TerminalInputNotice =
   | { readonly kind: "input"; readonly outcome: TerminalInputOutcome }
-  | { readonly kind: "renderer-rejection"; readonly error: DomainError };
+  | { readonly kind: "renderer-rejection"; readonly error: DomainError }
+  | {
+      readonly kind: "input-rejections";
+      readonly count: number;
+      readonly groups: readonly TerminalInputRejectionGroup[];
+    };
 
 export type TerminalExecutionEvidence =
   | { readonly status: "unverifiable"; readonly source: "none" | "terminal-get" }
@@ -252,6 +293,10 @@ export interface TerminalSnapshot {
   readonly controlEpoch?: number;
   readonly retainedInputBytes: number;
   readonly pendingInputIntents: number;
+  // Counts attach and recover operations this controller has started, including automatic
+  // recoveries. Coalesced snapshots can skip intermediate phases, so a consumer acts on a
+  // recovery once it sees ready with a sequence it has not handled yet.
+  readonly recoverySequence: number;
 }
 
 export interface TerminalController {
@@ -262,9 +307,9 @@ export interface TerminalController {
   detach(): Promise<TerminalOutcome>;
   replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>>;
   setInputTarget(foreground: boolean, focused: boolean): TerminalOutcome;
-  requestFocus(geometry?: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>>;
+  requestFocus(geometry?: Geometry): Promise<TerminalControlOutcome>;
   blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>>;
-  requestResize(geometry: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>>;
+  requestResize(geometry: Geometry): Promise<TerminalControlOutcome>;
   updateAppearance(appearance: Appearance): Promise<TerminalOutcome<TerminalControlReceipt>>;
   sendInput(input: {
     source: TerminalInputSource;
@@ -443,7 +488,8 @@ class CoveClient implements Client {
   private connectedAttempt: ConnectAttempt | undefined;
   private connection: NegotiatedConnection | undefined;
   private lastError: ClientError | undefined;
-  private readonly listeners = new Set<(snapshot: ClientSnapshot) => void>();
+  // Observers run only from the notifier, on a later host task (terminal-architecture 4.4.3).
+  private readonly notifier: Notifier<ClientSnapshot, never>;
   private readonly pendingRpcs = new Map<string, PendingRpc>();
   // This map exists only while a write is in flight. Unknown outcomes are handed to
   // callers; retaining them here would turn the client into a second receipt ledger.
@@ -460,6 +506,10 @@ class CoveClient implements Client {
     this.offer = copyOffer(options);
     this.connectionTimeoutMs = options.connectionTimeoutMs ?? DEFAULT_CONNECTION_TIMEOUT_MS;
     this.rpcTimeoutMs = options.rpcTimeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
+    this.notifier = new Notifier<ClientSnapshot, never>({
+      scheduler: options.scheduler,
+      snapshot: () => this.snapshot(),
+    });
     this.optionsValid =
       validOffer(this.offer) &&
       validDeadline(this.connectionTimeoutMs, MAX_CONNECTION_TIMEOUT_MS) &&
@@ -545,12 +595,21 @@ class CoveClient implements Client {
     )
       return this.localCallFailure("capacity");
 
+    const generation = this.generation;
+    // The ID supplier and the codec run before the RPC entry exists; the call proceeds only if
+    // the connection it was admitted under is still the current one afterwards (4.4.2).
+    const stillCurrent = (): boolean =>
+      this.status === "connected" && this.connection === binding && this.generation === generation;
     let suppliedRequestId: string;
     try {
       suppliedRequestId = this.options.createOpaqueId();
     } catch {
       return this.localCallFailure("invalid-request");
     }
+    if (!stillCurrent())
+      return this.localCallFailure(
+        this.snapshot().status === "disposed" ? "disposed" : "invalid-state",
+      );
     const requestSequence = nextCounter(this.requestSequence);
     if (!OpaqueIdSchema.safeParse(suppliedRequestId).success || requestSequence === null)
       return this.localCallFailure("invalid-request");
@@ -600,6 +659,12 @@ class CoveClient implements Client {
     if (body.byteLength < 1 || body.byteLength > requestCap) {
       if (operation) this.activeOperationIntents.delete(operation.operationId);
       return this.localCallFailure("capacity");
+    }
+    if (!stillCurrent()) {
+      if (operation) this.activeOperationIntents.delete(operation.operationId);
+      return this.localCallFailure(
+        this.snapshot().status === "disposed" ? "disposed" : "invalid-state",
+      );
     }
     return this.dispatchRpc(prepared, body, binding, operation, requestSequence);
   }
@@ -678,22 +743,14 @@ class CoveClient implements Client {
       ...(this.connection ? { connection: this.connection } : {}),
       pendingRpcCount: this.pendingRpcs.size,
       peakPendingRpcCount: this.peakPendingRpcCount,
-      listenerCount: this.listeners.size,
+      listenerCount: this.notifier.listenerCount,
       ...(this.lastError ? { lastError: this.lastError } : {}),
     });
   }
 
   onState(listener: (snapshot: ClientSnapshot) => void): Disposable {
     if (this.status === "disposed") return Object.freeze({ dispose() {} });
-    this.listeners.add(listener);
-    let active = true;
-    return Object.freeze({
-      dispose: () => {
-        if (!active) return;
-        active = false;
-        this.listeners.delete(listener);
-      },
-    });
+    return this.notifier.onState(listener);
   }
 
   dispose(): void {
@@ -703,11 +760,26 @@ class CoveClient implements Client {
     this.status = "disposed";
     this.lastError = undefined;
     this.emitState();
-    this.listeners.clear();
+    // The final state still reaches the listeners subscribed now; then the notifier lets them go.
+    this.notifier.closeWhenIdle(() => true);
     this.activeOperationIntents.clear();
   }
 
   private beginConnect(): Promise<ConnectOutcome> {
+    // nowMs() is pure by the Scheduler contract, but it is read before anything is installed and
+    // the client state is checked again afterwards, so a port that breaks the contract and
+    // reenters (dispose, connect) cannot leave a second attempt or a stale generation behind.
+    let startedAtMs: number;
+    try {
+      startedAtMs = this.options.scheduler.nowMs();
+      if (!Number.isFinite(startedAtMs)) throw new Error();
+    } catch {
+      return Promise.resolve({ ok: false, error: localError("invalid-options") });
+    }
+    if (this.status === "disposed")
+      return Promise.resolve({ ok: false, error: localError("disposed") });
+    if (this.status !== "idle" || this.attempt || this.retiringConnection)
+      return Promise.resolve({ ok: false, error: localError("invalid-state") });
     const generation = nextCounter(this.generation);
     if (generation === null)
       return Promise.resolve({ ok: false, error: localError("invalid-state") });
@@ -716,13 +788,6 @@ class CoveClient implements Client {
     const promise = new Promise<ConnectOutcome>((settle) => {
       resolve = settle;
     });
-    let startedAtMs: number;
-    try {
-      startedAtMs = this.options.scheduler.nowMs();
-      if (!Number.isFinite(startedAtMs)) throw new Error();
-    } catch {
-      return Promise.resolve({ ok: false, error: localError("invalid-options") });
-    }
     const attempt: ConnectAttempt = {
       generation,
       offer: this.offer,
@@ -1363,17 +1428,9 @@ class CoveClient implements Client {
     );
   }
 
+  // Marks a state change; listeners see the latest snapshot on a later task.
   private emitState(): void {
-    const snapshot = this.snapshot();
-    // Snapshotting the listener set makes reentrant unsubscribe/dispose deterministic:
-    // each listener present at publication is invoked at most once for that publication.
-    for (const listener of [...this.listeners]) {
-      try {
-        listener(snapshot);
-      } catch {
-        // Application listener failures are isolated from connection cleanup and peers.
-      }
-    }
+    this.notifier.markState();
   }
 }
 

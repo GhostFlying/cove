@@ -29,6 +29,7 @@ import type {
   ClientError,
   LocalErrorReason,
   TerminalController,
+  TerminalControlOutcome,
   TerminalControlReceipt,
   TerminalAppliedAuthority,
   TerminalAppliedGeometry,
@@ -48,6 +49,13 @@ import { TerminalControl } from "./terminal-control.js";
 import { completeTerminalView } from "./terminal-view-contract.js";
 import type { Disposable, Scheduler } from "./transport-ports.js";
 import type { TerminalView } from "@cove/protocol/view";
+import { Notifier } from "./notifier.js";
+import {
+  REJECTION_SLOTS,
+  RejectionAggregate,
+  rejectionClass,
+  rejectionSource,
+} from "./input-notices.js";
 
 type RecoveryReason = "gap" | "released-view" | "resize-context" | "expired";
 type Phase = "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
@@ -66,6 +74,74 @@ interface Operation {
   markerAttempted: boolean;
   attachDisposition?: "not-accepted" | "accepted" | "unknown";
 }
+
+// A registered focus request (terminal-architecture 4.4.4). Its identity is fixed at
+// registration: the request number (the latest one wins), the input-target version (any later
+// target loss supersedes it) and the acceptance time its deadline counts from.
+interface FocusEntry {
+  readonly kind: "focus";
+  readonly request: number;
+  readonly targetVersion: number;
+  readonly deadlineAtMs: number;
+  // The grid this request asks for. Known at registration when the caller or view supplied it,
+  // otherwise once measured; the focus-announcement dedupe compares against it.
+  requested: Geometry | undefined;
+  readonly settle: ((outcome: TerminalControlOutcome) => void)[];
+  settled: boolean;
+}
+
+// A registered input-target loss. The local effect (no further input, held input failed) took
+// place at registration; this entry only releases the epoch recorded then (relay-protocol 9.1).
+interface UnfocusEntry {
+  readonly kind: "unfocus";
+  epoch: number | null;
+  readonly ref: SubscriptionRef;
+  readonly deadlineAtMs: number;
+  readonly settle: ((outcome: TerminalOutcome<TerminalControlReceipt | undefined>) => void)[];
+}
+
+interface FatalEntry {
+  readonly kind: "fatal";
+  readonly error: DomainError;
+  readonly view: TerminalView;
+}
+
+type ControlEntry = FocusEntry | UnfocusEntry | FatalEntry;
+
+// An accepted input. It keeps its count slot until its outcome notice has been delivered, which
+// bounds undelivered outcomes and pushes back on producers (4.4.3).
+interface InputItem {
+  readonly inputId: number;
+  readonly source: TerminalInputSource;
+  readonly bytes: Uint8Array;
+  readonly ref: SubscriptionRef;
+  readonly binding: NegotiatedConnection;
+  readonly targetVersion: number;
+  readonly deadlineAtMs: number;
+  readonly resolve: (outcome: TerminalInputOutcome) => void;
+  written: number;
+  unknown: number;
+  // Set when a chunk passes the lane's final check, just before socket.send(): from then on the
+  // input is never held, retried or replayed.
+  started: boolean;
+  epoch: number | undefined;
+  settled: boolean;
+  outcome: TerminalInputOutcome | undefined;
+  hold: HoldGeneration | undefined;
+}
+
+// Inputs held while the controller cannot send (a recovery, or this subscription's own focus or
+// resize grant wait), together with the earlier unsettled inputs they must follow (the barrier).
+// See relay-protocol 9.1. Once `cause` is set the generation is closed: its unsent inputs have
+// failed and new inputs fail with the same cause until the generation ends.
+interface HoldGeneration {
+  unsettled: number;
+  undelivered: number;
+  cause: ClientError | DomainError | undefined;
+}
+
+// Bounds the work one drain round does before yielding a host task (4.4.4).
+const CONTROL_DRAIN_QUANTUM = 16;
 
 interface QueuedEvent {
   readonly event: ExternalTerminalEvent;
@@ -117,23 +193,6 @@ function safeDispose(disposable: Disposable | undefined): void {
     disposable?.dispose();
   } catch {
     /* Local retirement continues. */
-  }
-}
-
-function consumeObserverResult(value: unknown): void {
-  if (!value || (typeof value !== "object" && typeof value !== "function")) return;
-  try {
-    const then = (value as { then?: unknown }).then;
-    if (typeof then !== "function") return;
-    const derived: unknown = then.call(
-      value,
-      () => undefined,
-      () => undefined,
-    );
-    if (derived && derived !== value)
-      void Promise.resolve(derived).then(undefined, () => undefined);
-  } catch {
-    /* A hostile observer cannot interrupt state publication. */
   }
 }
 
@@ -203,13 +262,23 @@ function inputFailure(
   };
 }
 
+function inputNotice(outcome: TerminalInputOutcome): TerminalInputNotice {
+  return Object.freeze({
+    kind: "input",
+    outcome: Object.freeze({
+      ...outcome,
+      value: Object.freeze({ ...outcome.value }),
+      ...(!outcome.ok ? { error: Object.freeze({ ...outcome.error }) } : {}),
+    }),
+  });
+}
+
 export class RoutedTerminalController implements TerminalController {
   private execution: TerminalExecutionEvidence = Object.freeze({
     status: "unverifiable",
     source: "none",
   });
   private latestGetOrdinal = 0;
-  private publicationRevision = Symbol();
   private phase: Phase = "idle";
   private ref: SubscriptionRef | undefined;
   private operation: Operation | undefined;
@@ -227,7 +296,28 @@ export class RoutedTerminalController implements TerminalController {
   private inputIntentSequence = 0;
   private retainedInputBytes = 0;
   private pendingInputIntents = 0;
-  private inputTail: Promise<void> = Promise.resolve();
+  // Accepted inputs whose outcome notice is not delivered yet; see InputItem.
+  private inputSlots = 0;
+  private rejectionSlots = 0;
+  private readonly inputQueue: InputItem[] = [];
+  // Accepted inputs in acceptance order until their outcome notice is queued. An input can settle
+  // before an earlier one (a connection loss fails queued input at once while the earlier input's
+  // handed-off chunk is still being settled by the lane), but outcomes are reported in order.
+  private readonly noticeOrder: InputItem[] = [];
+  private pumping = false;
+  private hold: HoldGeneration | undefined;
+  // The ordered intent log and its drain (4.4.4).
+  private readonly controlLog: ControlEntry[] = [];
+  private drainScheduled = false;
+  private controlDraining = false;
+  // The latest registered focus request until it settles.
+  private liveFocus: FocusEntry | undefined;
+  // A fatal view failure, latched at registration. Terminal for this view and subscription: only
+  // replaceView or a new attach clears it.
+  private fatal: DomainError | undefined;
+  private recoverySequence = 0;
+  private resizeRequests = 0;
+  private appearanceRequests = 0;
   private appliedSeq = 0;
   private provenSeq = 0;
   private retainedModel = false;
@@ -265,19 +355,19 @@ export class RoutedTerminalController implements TerminalController {
   // the baseline's authority check; held input fails with a reported invalid-state rather than
   // being carried across recovery.
   private grantedControlsInFlight = 0;
-  // Wakes authority waits on changes that publish() does not report (ack handoff, control settle).
-  private readonly authorityWatchers = new Set<() => void>();
-  // Geometry carried by the pending or accepted focus request (updated by granted resizes), so
-  // a repeated focus intent with the same grid can be recognized as adding nothing.
-  private focusGeometry: Geometry | undefined;
+  // Internal waits (recovery ready, grant usable, input authority). They are not observers: each
+  // commit point checks them synchronously, and a check only reads state and settles its own
+  // promise; the woken continuation re-checks its operation's predicate (4.4.3).
+  private readonly waiters = new Set<() => void>();
+  // The grid requested by the focus of `intent` (updated by granted resizes), so a repeated
+  // focus announcement for the grant it produced can be recognized as adding nothing.
+  private focusGeometry: { readonly intent: number; readonly geometry: Geometry } | undefined;
   private progressInFlight = false;
   private pendingProgress: number | undefined;
   private autoRecoveryUsed = false;
   private retiring = false;
   private disposalComplete = false;
-  private readonly listeners = new Set<(snapshot: TerminalSnapshot) => void>();
-  private readonly inputOutcomeListeners = new Set<(notice: TerminalInputNotice) => void>();
-  private pendingInputNotifications = 0;
+  private readonly notifier: Notifier<TerminalSnapshot, TerminalInputNotice, RejectionAggregate>;
 
   constructor(
     private readonly host: ControllerHost,
@@ -285,7 +375,16 @@ export class RoutedTerminalController implements TerminalController {
     private readonly viewId: string,
     private view: TerminalView,
     private appearance: Appearance,
-  ) {}
+  ) {
+    this.notifier = new Notifier({
+      scheduler: host.scheduler,
+      snapshot: () => this.snapshot(),
+      aggregate: {
+        create: () => new RejectionAggregate(),
+        freeze: (aggregate) => aggregate.freeze(),
+      },
+    });
+  }
 
   matchesRun(run: RunRef): boolean {
     return sameRunRef(this.run, run);
@@ -352,7 +451,12 @@ export class RoutedTerminalController implements TerminalController {
     if (this.ref) return Promise.resolve(errorOutcome(localError("invalid-state")));
     const binding = this.host.binding();
     if (!binding) return Promise.resolve(errorOutcome(localError("invalid-state")));
+    const view = this.view;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
+    // The ID supplier may reenter (dispose, replaceView, another attach); create the operation
+    // only if nothing it owns changed meanwhile (terminal-architecture 4.4.2).
+    const raced = this.creationRaced("attach", binding, view, undefined);
+    if (raced) return raced;
     if (!requestId) return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
     const operation = this.beginOperation(binding, "attach");
     if (!operation) return Promise.resolve(errorOutcome(localError("invalid-state")));
@@ -391,7 +495,11 @@ export class RoutedTerminalController implements TerminalController {
     const priorToken = this.token;
     const priorView = this.view;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
+    const racedId = this.creationRaced("recover", binding, priorView, ref, priorToken);
+    if (racedId) return racedId;
     if (!requestId) return Promise.resolve(errorOutcome(domainError("COUNTER_EXHAUSTED")));
+    // Read what the resume decision needs before measureGrid(): the view may reenter and clear it.
+    const retainedGeometry = this.retainedGeometry;
     let resume:
       | {
           appliedSeq: number;
@@ -400,40 +508,34 @@ export class RoutedTerminalController implements TerminalController {
           geometry: Geometry;
         }
       | undefined;
+    const appliedSeq = this.appliedSeq;
     if (
       this.retainedModel &&
-      this.retainedGeometry &&
+      retainedGeometry &&
       this.appliedGeometry &&
-      ![...this.viewWork.values()].some((work) => work.view === this.view) &&
+      ![...this.viewWork.values()].some((work) => work.view === priorView) &&
       reason !== "gap" &&
       reason !== "resize-context"
     ) {
       let measured: Geometry;
       try {
-        measured = this.view.measureGrid();
+        measured = priorView.measureGrid();
       } catch {
         return Promise.resolve(errorOutcome(localError("invalid-state")));
       }
-      if (
-        measured.cols === this.retainedGeometry.cols &&
-        measured.rows === this.retainedGeometry.rows
-      ) {
+      const racedMeasure = this.creationRaced("recover", binding, priorView, ref, priorToken);
+      if (racedMeasure) return racedMeasure;
+      if (measured.cols === retainedGeometry.cols && measured.rows === retainedGeometry.rows) {
         resume = {
-          appliedSeq: this.appliedSeq,
+          appliedSeq,
           profile: PROFILE,
           encoding: BASELINE_ENCODING,
-          geometry: this.retainedGeometry,
+          geometry: retainedGeometry,
         };
       }
     }
-    if (
-      this.token !== priorToken ||
-      this.view !== priorView ||
-      this.ref !== ref ||
-      this.phase !== "ready" ||
-      this.host.binding() !== binding
-    )
-      return Promise.resolve(errorOutcome(localError("invalid-state")));
+    const racedLate = this.creationRaced("recover", binding, priorView, ref, priorToken);
+    if (racedLate) return racedLate;
     if ([...this.viewWork.values()].some((work) => work.view === this.view)) resume = undefined;
     const resumeGeometry =
       resume && this.appliedGeometry
@@ -462,6 +564,39 @@ export class RoutedTerminalController implements TerminalController {
     return operation.promise;
   }
 
+  // Re-checks what an attach or recover recorded before calling foreign code (the ID supplier,
+  // measureGrid). If an operation of the same kind started meanwhile, the caller joins it;
+  // anything else that changed ends this creation with invalid-state, touching nothing.
+  private creationRaced(
+    kind: "attach" | "recover",
+    binding: NegotiatedConnection,
+    view: TerminalView,
+    ref: SubscriptionRef | undefined,
+    token?: number,
+  ): Promise<TerminalOutcome<TerminalReady>> | undefined {
+    if (this.isDisposed()) return Promise.resolve(errorOutcome(localError("disposed")));
+    const operation = this.operation;
+    if (operation)
+      return operation.kind === kind
+        ? operation.promise
+        : Promise.resolve(errorOutcome(localError("invalid-state")));
+    if (
+      this.retiring ||
+      this.host.binding() !== binding ||
+      this.view !== view ||
+      this.ref !== ref ||
+      (token !== undefined && this.token !== token) ||
+      (kind === "recover" && this.phase !== "ready")
+    )
+      return Promise.resolve(errorOutcome(localError("invalid-state")));
+    return undefined;
+  }
+
+  // Reads the phase through a call so the compiler does not narrow it across reentrant calls.
+  private isDisposed(): boolean {
+    return this.phase === "disposed";
+  }
+
   async detach(): Promise<TerminalOutcome> {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     if (this.retiring) return { ok: true, value: undefined };
@@ -487,7 +622,7 @@ export class RoutedTerminalController implements TerminalController {
   }
 
   async replaceView(view: TerminalView): Promise<TerminalOutcome<TerminalReady>> {
-    if (this.snapshot().phase === "disposed") return errorOutcome(localError("disposed"));
+    if (this.isDisposed()) return errorOutcome(localError("disposed"));
     if (this.retiring) return errorOutcome(localError("invalid-state"));
     const phase = this.phase;
     const token = this.token;
@@ -495,7 +630,7 @@ export class RoutedTerminalController implements TerminalController {
     const previousView = this.view;
     const binding = this.host.binding();
     if (!completeTerminalView(view)) return errorOutcome(localError("invalid-request"));
-    if (this.phase === "disposed") return errorOutcome(localError("disposed"));
+    if (this.isDisposed()) return errorOutcome(localError("disposed"));
     if (
       this.retiring ||
       this.phase !== phase ||
@@ -505,76 +640,309 @@ export class RoutedTerminalController implements TerminalController {
       this.host.binding() !== binding
     )
       return errorOutcome(localError("invalid-state"));
+    // Commit the new owner before any foreign code runs (4.4.2): the old view's disposer, the
+    // detach and the listener disposers may all reenter, and none of them may see the old view as
+    // current or dispose the new one.
+    const generation = nextCounter(this.viewGeneration);
+    this.view = view;
+    this.viewGeneration = generation ?? Number.MAX_SAFE_INTEGER;
+    this.fatal = undefined;
     this.control.replaceView();
+    this.failUnsentInputs(localError("invalid-state"));
     void this.detach();
-    if (this.snapshot().phase === "disposed") return errorOutcome(localError("disposed"));
-    if (this.retiring) return errorOutcome(localError("invalid-state"));
+    if (this.isDisposed()) return errorOutcome(localError("disposed"));
     this.releaseListener();
     this.releaseFocusListener();
     this.releaseInputListener();
     try {
-      this.view.dispose();
+      previousView.dispose();
     } catch {
       /* Replacement remains local. */
     }
-    this.view = view;
-    this.viewGeneration = nextCounter(this.viewGeneration) ?? Number.MAX_SAFE_INTEGER;
+    if (this.isDisposed()) return errorOutcome(localError("disposed"));
+    // A newer replacement made during the old view's disposal owns the controller now.
+    if (this.view !== view || this.retiring) return errorOutcome(localError("invalid-state"));
     return this.attach();
   }
 
   setVisibility(visible: boolean): void {
     if (this.phase === "disposed" || this.retiring) return;
+    const token = this.token;
+    const view = this.view;
     try {
-      this.view.setVisibility(visible);
+      view.setVisibility(visible);
     } catch {
-      this.fail(localError("invalid-state"));
+      // Attributed to the subscription that made the call, never to a successor.
+      if (this.view === view) this.fail(localError("invalid-state"), token);
     }
   }
+
+  // ---- Intent registration (terminal-architecture 4.4.4) ----
+  //
+  // Public focus/input entry points and view intents register synchronously: bookkeeping only,
+  // no foreign code and no lane access. Work that needs the lane or the view is appended to the
+  // control log (focus, unfocus, fatal) or the input queue and runs later from an empty stack.
 
   setInputTarget(foreground: boolean, focused: boolean): TerminalOutcome {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     if (this.retiring) return { ok: false, error: localError("invalid-state") };
     if (typeof foreground !== "boolean" || typeof focused !== "boolean")
       return { ok: false, error: localError("invalid-request") };
-    if (!foreground || !focused) void this.blur();
-    this.control.setTarget(foreground, focused);
-    if (!this.control.wantsFocus && this.ref)
-      this.host.lane.cancelUnsent(this.ref, ["focus", "resize", "appearance", "input"]);
+    if (!foreground || !focused) this.registerUnfocus(foreground, undefined);
+    else this.control.setTarget(true, true);
     this.publish();
     return { ok: true, value: undefined };
   }
 
-  async requestFocus(geometry?: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>> {
-    if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
-    // A user's focus during a recovery (e.g. the baseline another client's resize forces on this
-    // one) is deferred, not rejected: it is sent once the recovery reaches ready. The recovery
-    // itself still never sends focus; this is the user's request, only delayed.
-    // While deferred, the request stays the user's current intent only until a newer focus
-    // request or any loss of the input target, including an unfocus followed by a refocus from a
-    // state observer before this continuation runs; either supersedes it. It is re-checked right
-    // before the focus is begun, because observers run between the ready wake-up and here.
-    const request = ++this.focusRequests;
-    const targetVersion = this.control.targetVersion;
-    const current = (): boolean =>
-      this.focusRequests === request && this.control.targetVersion === targetVersion;
-    if (this.recovering()) {
-      const deferred = await this.waitForRecoveryReady(current);
-      if (deferred !== "ready") return { ok: false, error: localError(deferred) };
+  requestFocus(geometry?: Geometry): Promise<TerminalControlOutcome> {
+    if (this.phase === "disposed")
+      return Promise.resolve({ ok: false, error: localError("disposed") });
+    let requested: Geometry | undefined;
+    if (geometry !== undefined) {
+      const checked = GeometrySchema.safeParse(geometry);
+      if (!checked.success)
+        return Promise.resolve({ ok: false, error: localError("invalid-request") });
+      requested = Object.freeze({ ...checked.data });
     }
-    const ref = this.ref;
+    return new Promise((resolve) => this.registerFocus(requested, resolve));
+  }
+
+  blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>> {
+    if (this.phase === "disposed")
+      return Promise.resolve({ ok: false, error: localError("disposed") });
+    return new Promise((resolve) => {
+      this.registerUnfocus(this.control.hostForeground, resolve);
+      this.publish();
+    });
+  }
+
+  // A user's focus during a recovery (for example the baseline another client's resize forces on
+  // this one) is deferred, not rejected: it is sent once the recovery reaches ready. The recovery
+  // itself never sends focus; this is the user's request, only delayed (relay-protocol 9.1).
+  private registerFocus(
+    requested: Geometry | undefined,
+    settle: (outcome: TerminalControlOutcome) => void,
+  ): void {
     const binding = this.host.binding();
     if (
-      !ref ||
+      this.retiring ||
+      this.fatal ||
+      !this.ref ||
       !binding ||
-      !this.currentConnection(ref) ||
-      this.phase !== "ready" ||
-      !this.control.wantsFocus
-    )
+      !this.control.wantsFocus ||
+      (this.phase !== "ready" && !this.recovering())
+    ) {
+      settle({ ok: false, error: localError("invalid-state") });
+      return;
+    }
+    const request = nextCounter(this.focusRequests);
+    if (request === null) {
+      settle({ ok: false, error: domainError("COUNTER_EXHAUSTED") });
+      return;
+    }
+    this.focusRequests = request;
+    const entry: FocusEntry = {
+      kind: "focus",
+      request,
+      targetVersion: this.control.targetVersion,
+      deadlineAtMs: this.host.scheduler.nowMs() + this.recoveryBudget(binding),
+      requested,
+      settle: [settle],
+      settled: false,
+    };
+    this.liveFocus = entry;
+    this.appendControl(entry);
+  }
+
+  // Loss of the input target takes effect now: no further input is admitted or handed off and
+  // every input not yet handed off fails. Releasing the epoch held now is left to the drain.
+  private registerUnfocus(
+    foreground: boolean,
+    settle: ((outcome: TerminalOutcome<TerminalControlReceipt | undefined>) => void) | undefined,
+  ): void {
+    const ref = this.ref;
+    // A focus still awaiting its result releases its own epoch when the result arrives
+    // (releaseStaleFocus); this records the grant held or carried now.
+    const epoch = ref ? (this.control.heldEpoch ?? null) : null;
+    this.control.setTarget(foreground, false);
+    this.failUnsentInputs(localError("invalid-state"));
+    if (!ref || this.fatal || this.phase === "disposed") {
+      settle?.({ ok: true, value: undefined });
+      this.wake();
+      return;
+    }
+    this.appendControl({
+      kind: "unfocus",
+      epoch,
+      ref,
+      deadlineAtMs: this.host.scheduler.nowMs() + this.recoveryBudget(this.host.binding()),
+      settle: settle ? [settle] : [],
+    });
+  }
+
+  private registerFatal(error: DomainError, view: TerminalView): void {
+    if (this.fatal || this.phase === "disposed") return;
+    this.fatal = Object.freeze({ ...error });
+    this.failUnsentInputs(localError("invalid-state"));
+    this.appendControl({ kind: "fatal", error: this.fatal, view });
+  }
+
+  // Appends to the control log, coalescing so its length stays bounded whatever the producer
+  // does: an unprocessed focus is replaced by a later focus and dropped by a later unfocus (it is
+  // already superseded by either, so its caller settles now), and adjacent unfocus entries merge
+  // keeping the earliest recorded epoch. Inputs never enter the log, so it holds at most an
+  // unfocus, a focus and a fatal entry (plus one unfocus after a fatal).
+  private appendControl(entry: ControlEntry): void {
+    const log = this.controlLog;
+    if (entry.kind === "fatal") {
+      if (!log.some((queued) => queued.kind === "fatal")) log.push(entry);
+    } else {
+      let tail = log[log.length - 1];
+      if (tail?.kind === "focus") {
+        log.pop();
+        this.settleFocus(tail, { ok: false, error: localError("invalid-state") });
+        tail = log[log.length - 1];
+      }
+      if (entry.kind === "unfocus" && tail?.kind === "unfocus" && tail.ref === entry.ref) {
+        tail.epoch ??= entry.epoch;
+        tail.settle.push(...entry.settle);
+      } else log.push(entry);
+    }
+    this.wake();
+    this.scheduleDrain();
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainScheduled || this.controlDraining) return;
+    this.drainScheduled = true;
+    // Always from a microtask: the drain never runs inside foreign code or a view call.
+    void Promise.resolve().then(() => this.drainControl());
+  }
+
+  // Processes the control log in registration order, one entry at a time. A focus or unfocus
+  // holds the drain only until its command is with the lane (or it ends), so later entries keep
+  // their order on the wire. Each round handles at most CONTROL_DRAIN_QUANTUM entries and then
+  // yields a host task, so a reaction that registers a new entry for every processed one advances
+  // one quantum per task.
+  private async drainControl(): Promise<void> {
+    this.drainScheduled = false;
+    if (this.controlDraining) return;
+    this.controlDraining = true;
+    try {
+      let processed = 0;
+      while (this.controlLog.length) {
+        if (processed >= CONTROL_DRAIN_QUANTUM) {
+          processed = 0;
+          try {
+            await this.host.scheduler.yieldTurn();
+          } catch {
+            /* The drain continues on the next microtask. */
+          }
+          continue;
+        }
+        const entry = this.controlLog.shift()!;
+        processed++;
+        try {
+          if (entry.kind === "focus") await this.runFocus(entry);
+          else if (entry.kind === "unfocus") await this.runUnfocus(entry);
+          else if (this.view === entry.view && this.ref) this.fail(entry.error);
+        } catch {
+          /* Every entry settles its own callers. */
+        }
+      }
+    } finally {
+      this.controlDraining = false;
+      if (this.controlLog.length) this.scheduleDrain();
+    }
+  }
+
+  private settleFocus(entry: FocusEntry, outcome: TerminalControlOutcome): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    if (this.liveFocus === entry) this.liveFocus = undefined;
+    for (const settle of entry.settle) settle(outcome);
+    // Held input waiting on this focus re-evaluates whether any focus remains.
+    this.wake();
+  }
+
+  private liveFocusCurrent(): FocusEntry | undefined {
+    const entry = this.liveFocus;
+    return entry &&
+      !entry.settled &&
+      entry.request === this.focusRequests &&
+      entry.targetVersion === this.control.targetVersion
+      ? entry
+      : undefined;
+  }
+
+  // Resolves once the drain may move on: the focus command is with the lane, or the focus ended.
+  private runFocus(entry: FocusEntry): Promise<void> {
+    return new Promise<void>((release) => {
+      void this.focusFlow(entry, release).then(
+        (outcome) => {
+          release();
+          this.settleFocus(entry, outcome);
+        },
+        () => {
+          release();
+          this.settleFocus(entry, { ok: false, error: localError("invalid-state") });
+        },
+      );
+    });
+  }
+
+  private async focusFlow(entry: FocusEntry, release: () => void): Promise<TerminalControlOutcome> {
+    // The request stays the user's current intent only until a newer focus request, any loss of
+    // the input target (even if regained since), or a fatal view failure; it is checked again
+    // right up to the handoff.
+    const current = (): boolean =>
+      !entry.settled &&
+      this.focusRequests === entry.request &&
+      this.control.targetVersion === entry.targetVersion &&
+      this.control.wantsFocus &&
+      !this.fatal;
+    for (;;) {
+      if (this.isDisposed()) return { ok: false, error: localError("disposed") };
+      if (!current()) return { ok: false, error: localError("invalid-state") };
+      if (this.host.scheduler.nowMs() >= entry.deadlineAtMs)
+        return { ok: false, error: localError("timeout") };
+      if (this.recovering()) {
+        const waited = await this.waitForRecoveryReady(current, entry.deadlineAtMs);
+        if (waited !== "ready") return { ok: false, error: localError(waited) };
+        continue;
+      }
+      const attempt = await this.attemptFocus(entry, current, release);
+      if (attempt !== "re-defer") return attempt;
+    }
+  }
+
+  private async attemptFocus(
+    entry: FocusEntry,
+    current: () => boolean,
+    release: () => void,
+  ): Promise<TerminalControlOutcome | "re-defer"> {
+    const ref = this.ref;
+    const binding = this.host.binding();
+    const view = this.view;
+    if (!ref || !binding || !this.currentConnection(ref) || this.phase !== "ready" || !current())
       return { ok: false, error: localError("invalid-state") };
     const token = this.token;
     const generation = this.viewGeneration;
-    const view = this.view;
-    let proposed = geometry;
+    const unchanged = (): boolean =>
+      this.token === token &&
+      this.viewGeneration === generation &&
+      this.view === view &&
+      this.ref === ref &&
+      this.host.binding() === binding &&
+      this.phase === "ready" &&
+      current();
+    // A focus that was never handed off and lost only to a recovery that started meanwhile is
+    // deferred again (relay-protocol 9.1); anything else that changed supersedes it.
+    const abandon = (): TerminalControlOutcome | "re-defer" =>
+      this.recovering() && current() && this.ref === ref
+        ? "re-defer"
+        : { ok: false, error: localError("invalid-state") };
+    let proposed = entry.requested;
     if (!proposed) {
       try {
         proposed = view.measureGrid();
@@ -584,33 +952,29 @@ export class RoutedTerminalController implements TerminalController {
     }
     const checked = GeometrySchema.safeParse(proposed);
     if (!checked.success) return { ok: false, error: localError("invalid-request") };
-    if (
-      this.token !== token ||
-      this.viewGeneration !== generation ||
-      this.view !== view ||
-      this.ref !== ref ||
-      this.host.binding() !== binding ||
-      this.phase !== "ready" ||
-      !current()
-    )
-      return { ok: false, error: localError("invalid-state") };
+    if (!unchanged()) return abandon();
+    entry.requested ??= Object.freeze({ ...checked.data });
     const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (!unchanged()) return abandon();
     const focusSeq = this.host.lane.nextFocusSeq(ref);
-    // The ID supplier can reenter and end the subscription; see TerminalLane.nextFocusSeq.
+    // The subscription can end before the counter is allocated; see TerminalLane.nextFocusSeq.
     if (focusSeq === undefined) return { ok: false, error: localError("invalid-state") };
     if (!requestId || focusSeq === null)
       return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     const intent = this.control.beginFocus();
     if (intent === null) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
-    this.focusGeometry = Object.freeze({ ...checked.data });
+    this.focusGeometry = Object.freeze({
+      intent,
+      geometry: Object.freeze({ ...checked.data }),
+    });
     // The worker's model admits a control fact only at its current grid, so a focus at a grid
     // other than the applied one is preceded by a resize fact, and every M0 resize requires a
     // baseline: this client will recover before it can apply the grant's own fact.
     const resizes = !sameGrid(this.appliedGeometry?.geometry, checked.data);
-    this.host.lane.cancelUnsent(ref, ["focus", "input"]);
+    this.host.lane.cancelUnsent(ref, ["focus"]);
     this.publish();
-    // A recovery that starts before the result arrives keeps the focus as carried rather than
-    // pending (TerminalControl.suspendForRecovery), so its result is still accepted.
+    // A recovery that starts after the handoff keeps the focus as carried rather than pending
+    // (TerminalControl.suspendForRecovery), so its result is still accepted.
     const valid = (): boolean =>
       this.view === view &&
       this.ref === ref &&
@@ -620,31 +984,43 @@ export class RoutedTerminalController implements TerminalController {
         this.phase === "ready" &&
         this.control.pendingIntent === intent) ||
         this.control.carriesFocus(intent));
-    // Until the command is handed to the socket, it must also still be the latest focus request
-    // with no input-target loss since it was made. Observers notified by the publication above
-    // (or by commands that cancelUnsent or the lane settles) can reenter: one may start another
-    // resize-context recovery, which carries this intent, and request a newer focus that defers
-    // behind it. `valid` alone would then still pass through carriesFocus and put this older
-    // focus on the wire after the newer intent. The lane evaluates `sendable` again at the
-    // actual handoff, so no reentrant window remains before it. Once handed off, the result is
-    // judged by `valid` only: a newer request then follows it on the wire and supersedes it there.
-    const sendable = (): boolean => current() && valid();
+    // Evaluated again by the lane at the actual handoff: still the latest request with no target
+    // loss, not expired, and no recovery in progress. A recovery that starts first (from a
+    // reentrant callback, say) leaves the command unsent, and it is deferred again below.
+    const sendable = (): boolean =>
+      current() &&
+      valid() &&
+      this.phase === "ready" &&
+      !this.recovering() &&
+      this.host.scheduler.nowMs() < entry.deadlineAtMs;
     if (!sendable()) {
       this.control.failFocus(intent);
       this.publish();
-      return { ok: false, error: localError("invalid-state") };
+      return abandon();
     }
     let settled = false;
-    let receipt: TerminalOutcome<TerminalControlReceipt> | undefined;
+    let receipt: TerminalControlOutcome | undefined;
+    let redefer = false;
     let acceptedAtMs = 0;
     const handle = (outcome: CommandOutcome): void => {
       if (settled) return;
       settled = true;
       if (!outcome.ok) {
         this.control.failFocus(intent);
+        // Proven never handed off and lost only to a recovery: wait for the next ready.
+        if (
+          !outcome.sent &&
+          this.recovering() &&
+          current() &&
+          this.ref === ref &&
+          this.host.scheduler.nowMs() < entry.deadlineAtMs
+        )
+          redefer = true;
         receipt = { ok: false, error: outcome.error };
+      } else if (outcome.result.type !== "focus-result") {
+        this.control.failFocus(intent);
+        receipt = { ok: false, error: localError("invalid-response") };
       } else if (
-        outcome.result.type !== "focus-result" ||
         !valid() ||
         !this.control.acceptFocus(
           intent,
@@ -655,9 +1031,14 @@ export class RoutedTerminalController implements TerminalController {
         )
       ) {
         this.control.failFocus(intent);
-        if (outcome.result.type === "focus-result")
-          this.releaseStaleFocus(ref, outcome.result.epoch);
-        receipt = { ok: false, error: localError("invalid-state") };
+        const epoch = outcome.result.epoch;
+        // The server accepted it, so the epoch is released even though this request lost.
+        this.host.lane.afterward(() => this.releaseStaleFocus(ref, epoch));
+        receipt = {
+          ok: false,
+          error: localError("invalid-state"),
+          accepted: { epoch, atSeq: outcome.result.atSeq },
+        };
       } else {
         acceptedAtMs = this.host.scheduler.nowMs();
         receipt = {
@@ -667,7 +1048,7 @@ export class RoutedTerminalController implements TerminalController {
       }
       this.publish();
     };
-    const outcome = await this.host.lane.send(
+    const sending = this.host.lane.send(
       {
         type: "focus",
         requestId,
@@ -682,15 +1063,14 @@ export class RoutedTerminalController implements TerminalController {
       handle,
       sendable,
     );
-    handle(outcome);
+    release();
+    handle(await sending);
+    if (redefer) return "re-defer";
     const granted = receipt!;
     // Resolve only once the grant is usable or lost, so input sent after a successful focus is
-    // not caught by the recovery that the focus's own resize triggers (that recovery still
-    // cancels input queued before it). The wait is keyed on the requested grid because the focus
-    // result can arrive before the resize fact. A stalled downlink or view could keep that fact
-    // from ever arriving, so the whole wait spends the recovery deadline budget from the moment
-    // the result was accepted and then reports the grant as unknown rather than hanging. A focus
-    // at the applied grid keeps resolving on its result as before.
+    // not caught by the recovery its own resize triggers. The wait is keyed on the requested grid
+    // because the focus result can arrive before the resize fact; it spends the recovery budget
+    // from the moment the result was accepted. A focus at the applied grid resolves on its result.
     if (granted.ok && (resizes || this.phase !== "ready")) {
       const settledFocus = await this.waitForGrantSettled(
         ref,
@@ -699,7 +1079,8 @@ export class RoutedTerminalController implements TerminalController {
         granted.value.epoch,
         acceptedAtMs,
       );
-      if (settledFocus !== "usable") return { ok: false, error: localError(settledFocus) };
+      if (settledFocus !== "usable")
+        return { ok: false, error: localError(settledFocus), accepted: granted.value };
     }
     return granted;
   }
@@ -708,63 +1089,90 @@ export class RoutedTerminalController implements TerminalController {
     return this.phase !== "ready" && this.operation?.kind === "recover";
   }
 
+  private recoveryBudget(binding: NegotiatedConnection | undefined): number {
+    return Math.min(
+      binding?.effectiveBudgets.recoveryDeadlineMs ?? M0_LIMITS.recoveryDeadlineMs,
+      M0_LIMITS.recoveryDeadlineMs,
+    );
+  }
+
+  // Wakes every internal wait so it re-checks its condition. Checks only read state and settle
+  // their own promise; no foreign code runs here.
+  private wake(): void {
+    for (const waiter of [...this.waiters]) waiter();
+  }
+
+  // Waits until `check` returns a value or `delayMs` elapses (then `expired`). The timer handle
+  // is disposed in the continuation, never inside a commit, because its dispose() is foreign code.
+  private waitUntil<T>(check: () => T | undefined, delayMs: number, expired: T): Promise<T> {
+    let done = false;
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((settle) => {
+      resolve = settle;
+    });
+    const finish = (value: T): void => {
+      if (done) return;
+      done = true;
+      this.waiters.delete(waiter);
+      resolve(value);
+    };
+    const waiter = (): void => {
+      if (done) return;
+      let value: T | undefined;
+      try {
+        value = check();
+      } catch {
+        value = expired;
+      }
+      if (value !== undefined) finish(value);
+    };
+    this.waiters.add(waiter);
+    let timer: Disposable | undefined;
+    waiter();
+    if (!done) {
+      try {
+        timer = this.host.scheduler.setTimer(Math.max(0, delayMs), () => finish(expired));
+      } catch {
+        finish(expired);
+      }
+    }
+    return promise.then((value) => {
+      safeDispose(timer);
+      return value;
+    });
+  }
+
   // Waits for the recovery in progress to reach ready for a deferred focus. It gives up when the
-  // request is superseded (`current` turns false), the input target is unfocused, the view is
-  // replaced, the subscription or connection changes, or the recovery fails, and after the
-  // recovery deadline budget measured from the request: a recovery has the same budget, so a
-  // longer wait could only outlive a failed one.
+  // request is superseded, the view is replaced, the subscription or connection changes or the
+  // recovery fails, and at the request's deadline. A further recovery that starts meanwhile keeps
+  // it waiting; the deadline is never reset.
   private waitForRecoveryReady(
     current: () => boolean,
-  ): Promise<"ready" | "invalid-state" | "timeout"> {
+    deadlineAtMs: number,
+  ): Promise<"ready" | "invalid-state" | "timeout" | "disposed"> {
     const ref = this.ref;
     const binding = this.host.binding();
     const view = this.view;
-    const operation = this.operation;
-    if (!ref || !binding || !operation || !this.control.wantsFocus)
-      return Promise.resolve("invalid-state");
-    return new Promise((resolve) => {
-      let settled = false;
-      let state: Disposable | undefined;
-      let timer: Disposable | undefined;
-      const finish = (outcome: "ready" | "invalid-state" | "timeout"): void => {
-        if (settled) return;
-        settled = true;
-        safeDispose(state);
-        safeDispose(timer);
-        resolve(outcome);
-      };
-      // Each baseline bumps viewGeneration, so the recovery being awaited changes it too; only a
-      // replaced view (which also clears the input target) cancels the deferred focus.
-      const check = (): void => {
+    if (!ref || !binding) return Promise.resolve("invalid-state");
+    return this.waitUntil<"ready" | "invalid-state" | "timeout" | "disposed">(
+      () => {
+        if (this.phase === "disposed") return "disposed";
         if (
           this.ref !== ref ||
           this.view !== view ||
           this.host.binding() !== binding ||
-          !this.control.wantsFocus ||
           !current() ||
-          this.phase === "disposed" ||
           this.phase === "unavailable" ||
-          this.phase === "idle" ||
-          (this.phase !== "ready" && this.operation !== operation)
+          this.phase === "idle"
         )
-          finish("invalid-state");
-        else if (this.phase === "ready") finish("ready");
-      };
-      state = this.onState(check);
-      try {
-        timer = this.host.scheduler.setTimer(
-          Math.min(binding.effectiveBudgets.recoveryDeadlineMs, M0_LIMITS.recoveryDeadlineMs),
-          () => finish("timeout"),
-        );
-      } catch {
-        finish("invalid-state");
-      }
-      if (settled) {
-        safeDispose(state);
-        safeDispose(timer);
-      }
-      check();
-    });
+          return "invalid-state";
+        if (this.phase === "ready") return "ready";
+        if (!this.recovering()) return "invalid-state";
+        return undefined;
+      },
+      deadlineAtMs - this.host.scheduler.nowMs(),
+      "timeout",
+    );
   }
 
   private waitForGrantSettled(
@@ -773,96 +1181,117 @@ export class RoutedTerminalController implements TerminalController {
     view: TerminalView,
     epoch: number,
     acceptedAtMs: number,
-  ): Promise<"usable" | "invalid-state" | "timeout"> {
-    return new Promise((resolve) => {
-      let settled = false;
-      let state: Disposable | undefined;
-      let timer: Disposable | undefined;
-      const finish = (outcome: "usable" | "invalid-state" | "timeout"): void => {
-        if (settled) return;
-        settled = true;
-        this.authorityWatchers.delete(watcher);
-        safeDispose(state);
-        safeDispose(timer);
-        resolve(outcome);
-      };
-      // Usable, not merely ready: the grant's covering ACK must already be handed to the uplink,
-      // otherwise input sent right after the focus would still wait behind the fence.
-      const check = (): void => {
+  ): Promise<"usable" | "invalid-state" | "timeout" | "disposed"> {
+    // Usable, not merely ready: the grant's covering ACK must already be handed to the uplink,
+    // otherwise input sent right after the focus would still wait behind the fence.
+    return this.waitUntil<"usable" | "invalid-state" | "timeout" | "disposed">(
+      () => {
+        if (this.phase === "disposed") return "disposed";
         if (
           this.ref !== ref ||
           this.view !== view ||
           this.host.binding() !== binding ||
-          this.phase === "disposed" ||
           this.phase === "unavailable" ||
           this.phase === "idle" ||
           !this.control.keepsGrant(epoch)
         )
-          finish("invalid-state");
-        else if (
+          return "invalid-state";
+        if (
           this.phase === "ready" &&
           this.control.epoch === epoch &&
           this.grantUsable(ref, this.viewGeneration)
         )
-          finish("usable");
+          return "usable";
+        return undefined;
+      },
+      this.recoveryBudget(binding) - (this.host.scheduler.nowMs() - acceptedAtMs),
+      "timeout",
+    );
+  }
+
+  private runUnfocus(entry: UnfocusEntry): Promise<void> {
+    return new Promise<void>((release) => {
+      const finish = (outcome: TerminalOutcome<TerminalControlReceipt | undefined>): void => {
+        release();
+        for (const settle of entry.settle) settle(outcome);
       };
-      const watcher = (): void => check();
-      this.authorityWatchers.add(watcher);
-      state = this.onState(check);
-      const budget = Math.min(
-        binding.effectiveBudgets.recoveryDeadlineMs,
-        M0_LIMITS.recoveryDeadlineMs,
+      void this.unfocusFlow(entry, release).then(finish, () =>
+        finish({ ok: false, error: localError("invalid-state") }),
       );
-      try {
-        timer = this.host.scheduler.setTimer(
-          Math.max(0, budget - (this.host.scheduler.nowMs() - acceptedAtMs)),
-          () => finish("timeout"),
-        );
-      } catch {
-        finish("invalid-state");
-      }
-      if (settled) {
-        safeDispose(state);
-        safeDispose(timer);
-      }
-      check();
     });
   }
 
-  async blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>> {
-    if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
-    const ref = this.ref;
-    const epoch = ref ? this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) : null;
-    this.control.setTarget(this.control.hostForeground, false);
-    if (ref) this.host.lane.cancelUnsent(ref, ["focus", "resize", "appearance", "input"]);
-    this.publish();
-    if (!ref || epoch === null || !this.currentConnection(ref))
-      return { ok: true, value: undefined };
-    const requestId = this.host.lane.nextRequestId(this.host.generation());
-    if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
-    const result = await this.host.lane.send(
-      { type: "blur", requestId, run: this.run, subscription: ref, epoch },
-      5_000,
-      undefined,
-      undefined,
-      () => this.ref === ref && this.currentConnection(ref) && this.phase === "ready",
-    );
-    return this.controlReceipt(result, "blur-result");
+  // Releases the epoch recorded at the unfocus (relay-protocol 9.1). During a recovery it waits
+  // for ready; it is not sent when the authority known then proves the epoch is no longer this
+  // subscription's, and a subscription that ended is released by its detach. A blur that may have
+  // been handed off is never sent again.
+  private async unfocusFlow(
+    entry: UnfocusEntry,
+    release: () => void,
+  ): Promise<TerminalOutcome<TerminalControlReceipt | undefined>> {
+    const ref = entry.ref;
+    const epoch = entry.epoch;
+    if (this.ref === ref)
+      this.host.lane.cancelUnsent(ref, ["focus", "resize", "appearance", "input"]);
+    if (epoch === null) return { ok: true, value: undefined };
+    const active = (): boolean => this.ref === ref && this.currentConnection(ref);
+    for (;;) {
+      if (!active() || this.isDisposed()) return { ok: true, value: undefined };
+      if (this.host.scheduler.nowMs() >= entry.deadlineAtMs)
+        return { ok: false, error: localError("timeout") };
+      if (this.phase !== "ready") {
+        if (!this.recovering()) return { ok: true, value: undefined };
+        const ready = await this.waitUntil(
+          () => (!active() || this.phase === "ready" || !this.recovering() ? true : undefined),
+          entry.deadlineAtMs - this.host.scheduler.nowMs(),
+          false,
+        );
+        if (!ready) return { ok: false, error: localError("timeout") };
+        continue;
+      }
+      if (this.control.rulesOut(epoch, ref)) return { ok: true, value: undefined };
+      const requestId = this.host.lane.nextRequestId(this.host.generation());
+      if (!active() || this.phase !== "ready") continue;
+      if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+      let refused = false;
+      const sending = this.host.lane.send(
+        { type: "blur", requestId, run: this.run, subscription: ref, epoch },
+        5_000,
+        undefined,
+        undefined,
+        () => {
+          const ok =
+            active() && this.phase === "ready" && this.host.scheduler.nowMs() < entry.deadlineAtMs;
+          if (!ok) refused = true;
+          return ok;
+        },
+      );
+      release();
+      const result = await sending;
+      if (!result.ok && !result.sent && refused && this.recovering() && active()) continue;
+      return this.controlReceipt(result, "blur-result");
+    }
   }
 
-  async requestResize(geometry: Geometry): Promise<TerminalOutcome<TerminalControlReceipt>> {
+  async requestResize(geometry: Geometry): Promise<TerminalControlOutcome> {
     const parsed = GeometrySchema.safeParse(geometry);
     if (!parsed.success) return { ok: false, error: localError("invalid-request") };
+    const request = nextCounter(this.resizeRequests);
+    if (request === null) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+    this.resizeRequests = request;
     const ref = this.ref;
     const binding = this.host.binding();
     const view = this.view;
     // Every M0 grid change requires a baseline, so a resize to another grid sends this client
-    // through a resize-context recovery that carries the grant and cancels input queued before
-    // it. Like a resizing focus, resolve only once the grant is usable again or lost, so input
-    // sent right after a successful resize reaches the PTY; the wait spends the recovery deadline
-    // budget from the result. A resize at the applied grid resolves on its result.
+    // through a resize-context recovery that carries the grant. Like a resizing focus, resolve
+    // only once the grant is usable again or lost; the wait spends the recovery budget from the
+    // result. A resize at the applied grid resolves on its result.
     const resizes = !sameGrid(this.appliedGeometry?.geometry, parsed.data);
-    const receipt = await this.sendGrantedControl("resize", { geometry: parsed.data });
+    const receipt = await this.sendGrantedControl(
+      "resize",
+      { geometry: parsed.data },
+      () => this.resizeRequests === request,
+    );
     if (!receipt.ok || !ref || !binding || (!resizes && this.phase === "ready")) return receipt;
     const settled = await this.waitForGrantSettled(
       ref,
@@ -871,299 +1300,449 @@ export class RoutedTerminalController implements TerminalController {
       receipt.value.epoch,
       this.host.scheduler.nowMs(),
     );
-    return settled === "usable" ? receipt : { ok: false, error: localError(settled) };
+    return settled === "usable"
+      ? receipt
+      : { ok: false, error: localError(settled), accepted: receipt.value };
   }
 
   async updateAppearance(appearance: Appearance): Promise<TerminalOutcome<TerminalControlReceipt>> {
     const parsed = validateAppearance(appearance);
     if (!parsed) return { ok: false, error: localError("invalid-request") };
-    return this.sendGrantedControl("appearance", { appearance: parsed });
+    const request = nextCounter(this.appearanceRequests);
+    if (request === null) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+    this.appearanceRequests = request;
+    const receipt = await this.sendGrantedControl(
+      "appearance",
+      { appearance: parsed },
+      () => this.appearanceRequests === request,
+    );
+    return receipt.ok ? receipt : { ok: false, error: receipt.error };
   }
+
+  // ---- Input (relay-protocol 9.1 input hold; terminal-architecture 4.4.3/4.4.4) ----
 
   sendInput(input: {
     source: TerminalInputSource;
     bytes: Uint8Array;
   }): Promise<TerminalInputOutcome> {
-    const source = input?.source;
-    const bytes = input?.bytes;
+    let source: unknown;
+    let bytes: unknown;
+    try {
+      source = input?.source;
+      bytes = input?.bytes;
+    } catch {
+      /* Reported as a malformed input below. */
+    }
+    return Promise.resolve(this.admitInput(source, bytes));
+  }
+
+  onInputOutcome(listener: (notice: TerminalInputNotice) => void): Disposable {
+    if (this.phase === "disposed") return { dispose() {} };
+    return this.notifier.onNotice(listener);
+  }
+
+  // Admission is synchronous bookkeeping: an input is either accepted into the input queue (it
+  // then keeps a count slot until its outcome notice is delivered) or rejected now with a visible
+  // outcome. Nothing here calls foreign code or the lane.
+  private admitInput(source: unknown, bytes: unknown): Promise<TerminalInputOutcome> {
     const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
+    const wellFormed =
+      (source === "keyboard" || source === "paste" || source === "mouse") &&
+      bytes instanceof Uint8Array &&
+      total >= 1;
     const reject = (error: ClientError | DomainError): Promise<TerminalInputOutcome> => {
-      const outcome = inputFailure(source, total, error);
-      this.publishInputOutcome(outcome);
+      const outcome = inputFailure(source as TerminalInputSource, total, error);
+      this.publishRejection(
+        inputNotice(outcome),
+        wellFormed ? rejectionSource(source) : "malformed",
+        wellFormed ? total : undefined,
+        error,
+      );
       return Promise.resolve(outcome);
     };
-    if (
-      !["keyboard", "paste", "mouse"].includes(source) ||
-      !(bytes instanceof Uint8Array) ||
-      total < 1
-    )
-      return reject(localError("invalid-request"));
+    if (!wellFormed) return reject(localError("invalid-request"));
     if (this.phase === "disposed") return reject(localError("disposed"));
+    if (this.fatal || this.retiring) return reject(localError("invalid-state"));
+    const hold = this.hold;
+    if (hold?.cause) return reject(hold.cause);
     const ref = this.ref;
     const binding = this.host.binding();
-    const token = this.token;
-    const generation = this.viewGeneration;
-    const intent = this.control.intentVersion;
+    if (!ref || !binding || !this.control.wantsFocus) return reject(localError("invalid-state"));
     if (
-      !ref ||
-      !binding ||
-      this.phase !== "ready" ||
-      !this.control.wantsFocus ||
-      (this.control.pendingIntent === undefined &&
-        this.control.epoch === undefined &&
-        !this.control.ready(ref, generation, this.appliedSeq))
+      !this.recovering() &&
+      (this.phase !== "ready" ||
+        (this.control.pendingIntent === undefined &&
+          this.control.epoch === undefined &&
+          !this.liveFocusCurrent()))
     )
       return reject(localError("invalid-state"));
     const cap = Math.min(binding.effectiveBudgets.inputQueueBytes, M0_LIMITS.inputQueueBytes);
     if (
       total > cap ||
       this.retainedInputBytes + total > cap ||
-      this.pendingInputIntents >= M0_LIMITS.pendingWorkerCommands - 32
-    )
-      return reject(localError("capacity"));
+      this.inputSlots >= M0_LIMITS.pendingWorkerCommands - 32
+    ) {
+      const capacity = localError("capacity");
+      const outcome = reject(capacity);
+      this.closeHeldSuffix(capacity);
+      return outcome;
+    }
     const inputId = nextCounter(this.inputIntentSequence);
     if (inputId === null) return reject(domainError("COUNTER_EXHAUSTED"));
     let owned: Uint8Array;
     try {
-      owned = new Uint8Array(bytes);
+      owned = new Uint8Array(bytes as Uint8Array);
     } catch {
       return reject(localError("capacity"));
     }
     this.inputIntentSequence = inputId;
-    this.retainedInputBytes += total;
-    this.pendingInputIntents++;
-    let releaseTurn!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
+    let resolve!: (outcome: TerminalInputOutcome) => void;
+    const promise = new Promise<TerminalInputOutcome>((settle) => {
+      resolve = settle;
     });
-    const prior = this.inputTail;
-    this.inputTail = prior.then(() => turn);
-    this.pendingInputNotifications++;
-    this.publish();
-    return this.deliverInput(
-      owned,
-      source,
+    const item: InputItem = {
       inputId,
+      source: source as TerminalInputSource,
+      bytes: owned,
       ref,
       binding,
-      token,
-      generation,
-      intent,
-      prior,
-      releaseTurn,
-    ).then((outcome) => {
-      try {
-        this.publishInputOutcome(outcome);
-        return outcome;
-      } finally {
-        this.pendingInputNotifications--;
-        if (this.phase === "disposed" && this.pendingInputNotifications === 0)
-          this.inputOutcomeListeners.clear();
-      }
-    });
-  }
-
-  onInputOutcome(listener: (notice: TerminalInputNotice) => void): Disposable {
-    if (this.phase === "disposed") return { dispose() {} };
-    this.inputOutcomeListeners.add(listener);
-    let active = true;
-    return {
-      dispose: () => {
-        if (!active) return;
-        active = false;
-        this.inputOutcomeListeners.delete(listener);
-      },
+      targetVersion: this.control.targetVersion,
+      deadlineAtMs: this.host.scheduler.nowMs() + this.recoveryBudget(binding),
+      resolve,
+      written: 0,
+      unknown: 0,
+      started: false,
+      epoch: undefined,
+      settled: false,
+      outcome: undefined,
+      hold: undefined,
     };
+    this.noticeOrder.push(item);
+    this.retainedInputBytes += total;
+    this.pendingInputIntents++;
+    this.inputSlots++;
+    // Held: accepted while the controller cannot send it now. It then follows every earlier
+    // unsettled input (the barrier) and the prefix rule applies.
+    if (this.hold || !this.inputSendableNow(ref)) this.joinHold(item);
+    this.inputQueue.push(item);
+    this.publish();
+    void this.pumpInputs();
+    return promise;
   }
 
-  private publishInputOutcome(outcome: TerminalInputOutcome): void {
-    const notice: TerminalInputNotice = Object.freeze({
-      kind: "input",
-      outcome: Object.freeze({
-        ...outcome,
-        value: Object.freeze({ ...outcome.value }),
-        ...(!outcome.ok ? { error: Object.freeze({ ...outcome.error }) } : {}),
-      }),
-    });
-    this.publishInputNotice(notice);
+  private inputSendableNow(ref: SubscriptionRef): boolean {
+    return (
+      this.phase === "ready" &&
+      !this.recovering() &&
+      this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) !== null &&
+      this.grantUsable(ref, this.viewGeneration)
+    );
   }
 
-  private publishInputNotice(notice: TerminalInputNotice): void {
-    for (const listener of [...this.inputOutcomeListeners]) {
-      try {
-        consumeObserverResult(listener(notice));
-      } catch {
-        /* An observer cannot interrupt input settlement. */
-      }
+  // Opens a hold generation if none is open (its barrier is every earlier unsettled input) and
+  // adds `item` to it.
+  private joinHold(item: InputItem | undefined): void {
+    let hold = this.hold;
+    if (!hold) {
+      hold = { unsettled: 0, undelivered: 0, cause: undefined };
+      this.hold = hold;
+      for (const earlier of this.inputQueue)
+        if (!earlier.settled && !earlier.hold) this.addToHold(hold, earlier);
     }
+    if (item) this.addToHold(hold, item);
   }
 
-  private async deliverInput(
-    owned: Uint8Array,
-    source: TerminalInputSource,
-    inputId: number,
-    ref: SubscriptionRef,
-    binding: NegotiatedConnection,
-    token: number,
-    generation: number,
-    intent: number,
-    prior: Promise<void>,
-    releaseTurn: () => void,
-  ): Promise<TerminalInputOutcome> {
-    const total = owned.byteLength;
-    const reject = (
-      error: ClientError | DomainError,
-      written = 0,
-      unknown = 0,
-    ): TerminalInputOutcome => inputFailure(source, total, error, inputId, written, unknown);
-    let written = 0;
-    let unknown = 0;
-    let inFlightBytes = 0;
-    try {
-      await prior;
-      // Re-check after every wait: the wait settles on a later microtask, and a newly applied
-      // control fact can raise the fence again before this turn resumes.
-      while (
-        (this.control.pendingIntent === intent || this.control.epoch !== undefined) &&
-        !this.grantUsable(ref, generation)
-      ) {
-        const ready = await this.waitForInputAuthority(ref, token, generation, intent);
-        if (!ready) return reject(localError("invalid-state"));
-      }
-      const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
-      if (
-        this.token !== token ||
-        this.ref !== ref ||
-        this.host.binding() !== binding ||
-        this.phase !== "ready" ||
-        this.control.intentVersion !== intent ||
-        epoch === null
-      )
-        return reject(localError("invalid-state"));
-      while (written < total) {
-        const end = Math.min(total, written + MAX_PAYLOAD_BYTES);
-        const chunk = owned.subarray(written, end);
-        const requestId = this.host.lane.nextRequestId(this.host.generation());
-        const inputSeq = this.host.lane.nextInputSeq(ref);
-        // The ID supplier can reenter and end the subscription; see TerminalLane.nextInputSeq.
-        if (inputSeq === undefined) return reject(localError("invalid-state"), written);
-        if (!requestId || inputSeq === null)
-          return reject(domainError("COUNTER_EXHAUSTED"), written);
-        inFlightBytes = chunk.byteLength;
-        const outcome = await this.host.lane.send(
-          { type: "input", requestId, run: this.run, subscription: ref, epoch, inputSeq },
-          5_000,
-          undefined,
-          undefined,
-          () =>
-            this.token === token &&
-            this.ref === ref &&
-            this.host.binding() === binding &&
-            this.phase === "ready" &&
-            this.control.intentVersion === intent &&
-            this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
-          chunk,
+  private addToHold(hold: HoldGeneration, item: InputItem): void {
+    item.hold = hold;
+    hold.unsettled++;
+    hold.undelivered++;
+  }
+
+  // The prefix-closure decision point (relay-protocol 9.1, option A). Every event that can leave
+  // a gap in the held input comes here: an earlier input (barrier or held) that did not complete
+  // successfully, a capacity rejection, or a renderer input rejection while a generation is open.
+  // Under option A each of them closes the generation: its inputs not yet handed off fail with
+  // the same cause and are never sent, and new inputs fail with that cause until the generation
+  // ends. The input that failed keeps its own real receipt.
+  private closeHeldSuffix(cause: ClientError | DomainError, origin?: InputItem): void {
+    const hold = this.hold;
+    if (!hold || hold.cause) return;
+    if (origin && origin.hold !== hold) return;
+    hold.cause = cause;
+    for (const item of [...this.inputQueue])
+      if (item.hold === hold && !item.settled && !item.started)
+        this.settleInput(
+          item,
+          inputFailure(item.source, item.bytes.byteLength, cause, item.inputId),
         );
-        inFlightBytes = 0;
-        if (!outcome.ok) {
-          if (
-            outcome.uncertain ||
-            ("acceptance" in outcome.error && outcome.error.acceptance !== "not-accepted")
-          )
-            unknown += chunk.byteLength;
-          return reject(outcome.error, written, unknown);
-        }
-        if (outcome.result.type !== "input-result") {
-          unknown += chunk.byteLength;
-          return reject(localError("invalid-response"), written, unknown);
-        }
-        const length = outcome.result.writtenBytes;
-        if (length > chunk.byteLength) {
-          unknown += chunk.byteLength;
-          return reject(localError("invalid-response"), written, unknown);
-        }
-        written += length;
-        if (length < chunk.byteLength) {
-          unknown += chunk.byteLength - length;
-          return reject(domainError("RESULT_UNKNOWN", "unknown", "input"), written, unknown);
-        }
-      }
-      return { ok: true, value: inputReceipt(source, total, inputId, written) };
-    } catch {
-      unknown += inFlightBytes;
-      return reject(
-        inFlightBytes
-          ? domainError("RESULT_UNKNOWN", "unknown", "input")
-          : localError("invalid-state"),
-        written,
-        unknown,
-      );
-    } finally {
-      this.retainedInputBytes -= total;
-      this.pendingInputIntents--;
-      releaseTurn();
-      this.publish();
+    this.wake();
+  }
+
+  // Fails every accepted input not yet handed off (target loss, fatal view failure, view
+  // replacement, retirement); an open hold generation closes with the same cause.
+  private failUnsentInputs(error: ClientError | DomainError): void {
+    const hold = this.hold;
+    if (hold && !hold.cause) hold.cause = error;
+    for (const item of [...this.inputQueue])
+      if (!item.settled && !item.started)
+        this.settleInput(
+          item,
+          inputFailure(item.source, item.bytes.byteLength, error, item.inputId),
+        );
+    this.wake();
+  }
+
+  private settleInput(item: InputItem, outcome: TerminalInputOutcome): void {
+    if (item.settled) return;
+    item.settled = true;
+    this.retainedInputBytes -= item.bytes.byteLength;
+    this.pendingInputIntents--;
+    const hold = item.hold;
+    if (hold) hold.unsettled--;
+    item.outcome = outcome;
+    item.resolve(outcome);
+    // The state change is marked before the notice is queued, so an observer never sees an
+    // outcome before the state that produced it.
+    this.publish();
+    this.queueInputNotices();
+    if (!outcome.ok) this.closeHeldSuffix(outcome.error, item);
+    this.endHoldIfDone();
+  }
+
+  private queueInputNotices(): void {
+    while (this.noticeOrder[0]?.outcome) {
+      const item = this.noticeOrder.shift()!;
+      const hold = item.hold;
+      this.notifier.pushNotice(inputNotice(item.outcome!), () => {
+        this.inputSlots--;
+        if (hold) hold.undelivered--;
+        this.endHoldIfDone();
+        this.notifier.poke();
+      });
     }
   }
 
-  private waitForInputAuthority(
-    ref: SubscriptionRef,
-    token: number,
-    generation: number,
-    intent: number,
-  ): Promise<boolean> {
-    return new Promise((resolve) => {
-      let settled = false;
-      let listener: Disposable | undefined;
-      let timer: Disposable | undefined;
-      const finish = (ready: boolean): void => {
-        if (settled) return;
-        settled = true;
-        safeDispose(listener);
-        safeDispose(timer);
-        resolve(ready);
-      };
-      const check = (): void => {
-        if (
-          this.token !== token ||
-          this.ref !== ref ||
-          this.phase !== "ready" ||
-          this.control.intentVersion !== intent ||
-          !this.control.wantsFocus
-        ) {
-          finish(false);
-          return;
-        }
-        if (this.grantUsable(ref, generation)) {
-          finish(true);
-          return;
-        }
-        if (this.control.pendingIntent === undefined && this.control.epoch === undefined)
-          finish(false);
-      };
-      const watcher = (): void => check();
-      this.authorityWatchers.add(watcher);
-      const state = this.onState(check);
-      listener = {
-        dispose: () => {
-          this.authorityWatchers.delete(watcher);
-          state.dispose();
-        },
-      };
-      try {
-        timer = this.host.scheduler.setTimer(5_000, () => finish(false));
-      } catch {
-        finish(false);
-      }
-      if (settled) safeDispose(timer);
-      check();
-    });
+  // Success end: every input of the generation was written completely. Failure end: the
+  // generation is closed, all its inputs settled and their notices delivered; no new grant is
+  // needed. Input admitted afterwards starts afresh.
+  private endHoldIfDone(): void {
+    const hold = this.hold;
+    if (!hold || hold.unsettled > 0) return;
+    if (hold.cause && hold.undelivered > 0) return;
+    this.hold = undefined;
   }
 
-  private grantUsable(ref: SubscriptionRef, generation: number): boolean {
+  private publishRejection(
+    notice: TerminalInputNotice,
+    source: ReturnType<typeof rejectionSource> | "renderer" | "malformed",
+    bytes: number | undefined,
+    error: ClientError | DomainError,
+  ): void {
+    if (this.rejectionSlots < REJECTION_SLOTS) {
+      this.rejectionSlots++;
+      this.notifier.pushNotice(notice, () => {
+        this.rejectionSlots--;
+      });
+      return;
+    }
+    this.notifier.tailAggregate()?.add(source, rejectionClass(error), bytes);
+  }
+
+  private rejectRendererInput(error: DomainError): void {
+    const frozen = Object.freeze({ ...error });
+    this.publishRejection(
+      Object.freeze({ kind: "renderer-rejection", error: frozen }),
+      "renderer",
+      undefined,
+      frozen,
+    );
+    this.closeHeldSuffix(frozen);
+  }
+
+  private async pumpInputs(): Promise<void> {
+    if (this.pumping) return;
+    this.pumping = true;
+    try {
+      // Inputs are delivered one at a time in acceptance order; an input settled while waiting
+      // (failed by a target loss, say) is dropped from the queue when reached.
+      await Promise.resolve();
+      while (this.inputQueue.length) {
+        const item = this.inputQueue[0]!;
+        if (!item.settled) {
+          try {
+            await this.deliverItem(item);
+          } catch {
+            this.failItem(item, localError("invalid-state"));
+          }
+        }
+        const index = this.inputQueue.indexOf(item);
+        if (index >= 0) this.inputQueue.splice(index, 1);
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private failItem(item: InputItem, error: ClientError | DomainError, uncertainBytes = 0): void {
+    item.unknown += uncertainBytes;
+    this.settleInput(
+      item,
+      inputFailure(
+        item.source,
+        item.bytes.byteLength,
+        error,
+        item.inputId,
+        item.written,
+        item.unknown,
+      ),
+    );
+  }
+
+  // Whether `item`'s next chunk may be handed off now, must wait, or fails (with the error).
+  // Progress generations (token, viewGeneration, focus intent, a recovery) do not supersede input;
+  // only its own ownership does: the subscription, the connection, the target version, a fatal
+  // failure, its hold generation's closure and its deadline.
+  private inputGate(item: InputItem): "go" | "wait" | ClientError | DomainError {
+    if (this.phase === "disposed") return localError("disposed");
+    if (item.settled || this.fatal) return localError("invalid-state");
+    if (item.hold?.cause) return item.hold.cause;
+    if (
+      this.ref !== item.ref ||
+      this.host.binding() !== item.binding ||
+      this.control.targetVersion !== item.targetVersion ||
+      !this.control.wantsFocus
+    )
+      return localError("invalid-state");
+    const recovering = this.recovering();
+    // Only never-handed-off input may be held; the rest of a partly sent input is not.
+    if (item.started && (recovering || this.phase !== "ready")) return localError("invalid-state");
+    if (this.host.scheduler.nowMs() >= item.deadlineAtMs) return localError("timeout");
+    if (recovering) return "wait";
+    if (this.phase !== "ready") return localError("invalid-state");
+    const generation = this.viewGeneration;
+    const epoch = this.control.currentEpoch(item.ref, generation, this.appliedSeq);
+    if (epoch !== null && this.grantUsable(item.ref, generation)) {
+      if (item.started && item.epoch !== epoch) return localError("invalid-state");
+      return "go";
+    }
+    // Wait while a grant or a focus that may produce one remains; fail once neither does.
+    if (
+      this.control.pendingIntent !== undefined ||
+      this.control.heldEpoch !== undefined ||
+      this.liveFocusCurrent()
+    )
+      return "wait";
+    return localError("invalid-state");
+  }
+
+  private async deliverItem(item: InputItem): Promise<void> {
+    const total = item.bytes.byteLength;
+    let refusals = 0;
+    while (!item.settled) {
+      const gate = this.inputGate(item);
+      if (gate === "wait") {
+        refusals = 0;
+        await this.waitUntil(
+          () => (item.settled || this.inputGate(item) !== "wait" ? true : undefined),
+          item.deadlineAtMs - this.host.scheduler.nowMs(),
+          true,
+        );
+        continue;
+      }
+      if (gate !== "go") {
+        this.failItem(item, gate);
+        return;
+      }
+      const ref = item.ref;
+      const epoch = this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq)!;
+      const requestId = this.host.lane.nextRequestId(this.host.generation());
+      // The ID supplier may reenter; the gate is evaluated again before anything is allocated.
+      if (item.settled) return;
+      if (
+        this.inputGate(item) !== "go" ||
+        this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) !== epoch
+      )
+        continue;
+      const inputSeq = this.host.lane.nextInputSeq(ref);
+      // The subscription can end before the counter is allocated; see TerminalLane.nextInputSeq.
+      if (inputSeq === undefined) {
+        this.failItem(item, localError("invalid-state"));
+        return;
+      }
+      if (!requestId || inputSeq === null) {
+        this.failItem(item, domainError("COUNTER_EXHAUSTED"));
+        return;
+      }
+      const chunk = item.bytes.subarray(
+        item.written,
+        Math.min(total, item.written + MAX_PAYLOAD_BYTES),
+      );
+      const startedBefore = item.started;
+      let refused = false;
+      const outcome = await this.host.lane.send(
+        { type: "input", requestId, run: this.run, subscription: ref, epoch, inputSeq },
+        5_000,
+        undefined,
+        undefined,
+        () => {
+          const ok =
+            this.inputGate(item) === "go" &&
+            this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) === epoch;
+          if (ok) {
+            item.started = true;
+            item.epoch = epoch;
+          } else refused = true;
+          return ok;
+        },
+        chunk,
+      );
+      if (item.settled) return;
+      if (!outcome.ok) {
+        // A chunk the lane proves it never handed off, of an input not started yet, returns to
+        // the gate (it is held across a recovery that began meanwhile). Bounded so that a lane
+        // refusing what the gate allows cannot spin.
+        if (!outcome.sent && !startedBefore && (refused || this.recovering()) && refusals++ < 3)
+          continue;
+        const uncertain =
+          outcome.uncertain ||
+          ("acceptance" in outcome.error && outcome.error.acceptance !== "not-accepted");
+        this.failItem(item, outcome.error, uncertain ? chunk.byteLength : 0);
+        return;
+      }
+      refusals = 0;
+      if (outcome.result.type !== "input-result") {
+        this.failItem(item, localError("invalid-response"), chunk.byteLength);
+        return;
+      }
+      const length = outcome.result.writtenBytes;
+      if (length > chunk.byteLength) {
+        this.failItem(item, localError("invalid-response"), chunk.byteLength);
+        return;
+      }
+      item.written += length;
+      if (length < chunk.byteLength) {
+        this.failItem(
+          item,
+          domainError("RESULT_UNKNOWN", "unknown", "input"),
+          chunk.byteLength - length,
+        );
+        return;
+      }
+      if (item.written === total) {
+        this.settleInput(item, {
+          ok: true,
+          value: inputReceipt(item.source, total, item.inputId, item.written),
+        });
+        return;
+      }
+    }
+  }
+
+  // `except` excludes the caller's own granted-control reservation (4.4.2).
+  private grantUsable(ref: SubscriptionRef, generation: number, except = 0): boolean {
     return (
       this.control.ready(ref, generation, this.appliedSeq) &&
-      this.grantedControlsInFlight === 0 &&
+      this.grantedControlsInFlight - except === 0 &&
       this.handedAckSeq >= Math.max(this.fenceSeq, this.control.grantAtSeq ?? 0)
     );
   }
@@ -1175,76 +1754,86 @@ export class RoutedTerminalController implements TerminalController {
   private async sendGrantedControl(
     type: "resize" | "appearance",
     value: { geometry: Geometry } | { appearance: Appearance },
-  ): Promise<TerminalOutcome<TerminalControlReceipt>> {
+    latest: () => boolean,
+  ): Promise<TerminalControlOutcome> {
     if (this.phase === "disposed") return { ok: false, error: localError("disposed") };
     const ref = this.ref;
     const binding = this.host.binding();
     const token = this.token;
     const generation = this.viewGeneration;
-    const intent = this.control.intentVersion;
     if (!ref || !binding || this.phase !== "ready")
       return { ok: false, error: localError("invalid-state") };
+    const current = (): boolean =>
+      latest() &&
+      this.token === token &&
+      this.ref === ref &&
+      this.host.binding() === binding &&
+      this.phase === "ready";
+    const startedAtMs = this.host.scheduler.nowMs();
     // Like input, a granted command must follow the applied-ack that covers the grant fence.
     while (
       this.control.currentEpoch(ref, generation, this.appliedSeq) !== null &&
       !this.grantUsable(ref, generation)
     ) {
-      if (!(await this.waitForInputAuthority(ref, token, generation, intent)))
-        return { ok: false, error: localError("invalid-state") };
+      const usable = await this.waitUntil(
+        () => {
+          if (!current() || this.control.currentEpoch(ref, generation, this.appliedSeq) === null)
+            return false;
+          return this.grantUsable(ref, generation) ? true : undefined;
+        },
+        5_000 - (this.host.scheduler.nowMs() - startedAtMs),
+        false,
+      );
+      if (!usable) return { ok: false, error: localError("invalid-state") };
     }
     const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
-    if (
-      epoch === null ||
-      this.token !== token ||
-      this.ref !== ref ||
-      this.host.binding() !== binding ||
-      this.phase !== "ready"
-    )
-      return { ok: false, error: localError("invalid-state") };
-    const requestId = this.host.lane.nextRequestId(this.host.generation());
-    if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
-    const command = {
-      type,
-      requestId,
-      run: this.run,
-      subscription: ref,
-      epoch,
-      ...value,
-    } as TerminalCommand;
-    let receipt: TerminalOutcome<TerminalControlReceipt> = {
-      ok: false,
-      error: localError("invalid-state"),
-    };
+    if (epoch === null || !current()) return { ok: false, error: localError("invalid-state") };
+    // Reserved before any foreign code (the ID supplier) runs and held until settlement, so input
+    // registered reentrantly sees an unsettled granted control and waits behind it.
     this.grantedControlsInFlight++;
     try {
+      const requestId = this.host.lane.nextRequestId(this.host.generation());
+      if (!current() || this.control.currentEpoch(ref, generation, this.appliedSeq) !== epoch)
+        return { ok: false, error: localError("invalid-state") };
+      if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
+      const command = {
+        type,
+        requestId,
+        run: this.run,
+        subscription: ref,
+        epoch,
+        ...value,
+      } as TerminalCommand;
       const result = await this.host.lane.send(
         command,
         5_000,
         undefined,
         undefined,
         () =>
-          this.token === token &&
-          this.ref === ref &&
-          this.host.binding() === binding &&
-          this.phase === "ready" &&
-          this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch,
+          current() &&
+          this.control.currentEpoch(ref, generation, this.appliedSeq) === epoch &&
+          this.grantUsable(ref, generation, 1),
       );
-      receipt = this.controlReceipt(result, `${type}-result`);
+      const receipt = this.controlReceipt(result, `${type}-result`);
       if (receipt.ok && this.token === token && this.ref === ref) {
         // The server moved its control boundary to this result; later granted commands wait for
         // the ack that covers it, which also proves the result's fact has been applied.
         this.raiseFence(receipt.value.atSeq);
-        if ("geometry" in value && this.control.epoch === epoch)
-          this.focusGeometry = Object.freeze({ ...value.geometry });
+        const intent = this.control.heldIntent;
+        if ("geometry" in value && this.control.epoch === epoch && intent !== undefined)
+          this.focusGeometry = Object.freeze({
+            intent,
+            geometry: Object.freeze({ ...value.geometry }),
+          });
       }
+      return receipt;
     } finally {
-      // Raise the fence before releasing held commands so none slips out under the old one. A
-      // failed or unknown result leaves the fence as it was; a command then sent under a boundary
-      // the server did move is rejected and reported, never silently retried.
+      // The fence is raised before held commands are released, so none slips out under the old
+      // one. A failed or unknown result leaves the fence as it was; a command then sent under a
+      // boundary the server did move is rejected and reported, never silently retried.
       this.grantedControlsInFlight--;
-      for (const watcher of [...this.authorityWatchers]) watcher();
+      this.wake();
     }
-    return receipt;
   }
 
   private controlReceipt(
@@ -1261,7 +1850,7 @@ export class RoutedTerminalController implements TerminalController {
   private releaseStaleFocus(ref: SubscriptionRef, epoch: number): void {
     if (this.ref !== ref || !this.currentConnection(ref) || this.control.epoch === epoch) return;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
-    if (!requestId) return;
+    if (!requestId || this.ref !== ref || !this.currentConnection(ref)) return;
     void this.host.lane.send(
       { type: "blur", requestId, run: this.run, subscription: ref, epoch },
       5_000,
@@ -1303,22 +1892,14 @@ export class RoutedTerminalController implements TerminalController {
       inputReady,
       retainedInputBytes: this.retainedInputBytes,
       pendingInputIntents: this.pendingInputIntents,
+      recoverySequence: this.recoverySequence,
       ...(this.control.epoch !== undefined ? { controlEpoch: this.control.epoch } : {}),
     });
   }
 
   onState(listener: (snapshot: TerminalSnapshot) => void): Disposable {
     if (this.phase === "disposed") return { dispose() {} };
-    this.listeners.add(listener);
-    let active = true;
-    return {
-      dispose: () => {
-        if (active) {
-          active = false;
-          this.listeners.delete(listener);
-        }
-      },
-    };
+    return this.notifier.onState(listener);
   }
 
   dispose(): void {
@@ -1374,16 +1955,20 @@ export class RoutedTerminalController implements TerminalController {
     const binding = this.host.binding();
     if (!binding) return;
     const charge = bytes.byteLength + JSON.stringify(event).length * 3;
+    // This runs inside the lane's route callback: failing the subscription is follow-up work.
+    const token = this.token;
+    const failLater = (): void =>
+      this.host.lane.afterward(() => this.fail(localError("capacity"), token));
     if (
       this.queue.length + this.activeItems >= binding.effectiveBudgets.postNEvents ||
       this.queuedBytes + this.activeBytes + charge >
         binding.effectiveBudgets.subscriptionCreditBytes
     ) {
-      this.fail(localError("capacity"));
+      failLater();
       return;
     }
     if (!this.host.lane.reserveIngress(charge)) {
-      this.fail(localError("capacity"));
+      failLater();
       return;
     }
     let payload: Uint8Array;
@@ -1391,7 +1976,7 @@ export class RoutedTerminalController implements TerminalController {
       payload = new Uint8Array(bytes);
     } catch {
       this.host.lane.releaseIngress(charge);
-      this.fail(localError("capacity"));
+      failLater();
       return;
     }
     this.queue.push({ event, payload, charge, token: this.token });
@@ -1405,8 +1990,12 @@ export class RoutedTerminalController implements TerminalController {
     resumeGeometry?: TerminalAppliedGeometry,
   ): Operation | null {
     const token = nextCounter(this.token);
-    if (token === null) return null;
+    const sequence = nextCounter(this.recoverySequence);
+    if (token === null || sequence === null) return null;
     this.token = token;
+    this.recoverySequence = sequence;
+    // A new subscription starts without the previous one's fatal view failure.
+    if (kind === "attach") this.fatal = undefined;
     this.resetExecution();
     this.appliedGeometry = null;
     this.appliedAuthority = null;
@@ -1439,6 +2028,10 @@ export class RoutedTerminalController implements TerminalController {
       ...(resumeGeometry ? { resumeGeometry } : {}),
     };
     this.operation = operation;
+    // Input accepted before the recovery and not yet handed off is held across it; input already
+    // handed off forms the barrier the held input must follow (relay-protocol 9.1).
+    if (kind === "recover" && this.inputQueue.some((item) => !item.settled))
+      this.joinHold(undefined);
     if (kind === "recover") {
       try {
         if (!this.bindFailure(this.viewGeneration, token))
@@ -1472,6 +2065,11 @@ export class RoutedTerminalController implements TerminalController {
       if (handled) return;
       handled = true;
       if (this.operation !== operation || operation.settled) return;
+      // Inside the lane only this command's bookkeeping runs inline (the attach route is
+      // registered here so a baseline-start in the same delivery is routed); failing the operation
+      // and committing it are follow-up work (4.4.5).
+      const failLater = (error: ClientError | DomainError): void =>
+        this.host.lane.afterward(() => this.fail(error, operation.token));
       if (!outcome.ok) {
         if (operation.kind === "attach")
           operation.attachDisposition =
@@ -1480,7 +2078,7 @@ export class RoutedTerminalController implements TerminalController {
               : outcome.uncertain
                 ? "unknown"
                 : "not-accepted";
-        this.fail(outcome.error, operation.token);
+        failLater(outcome.error);
         return;
       }
       if (operation.kind === "attach") operation.attachDisposition = "accepted";
@@ -1489,7 +2087,7 @@ export class RoutedTerminalController implements TerminalController {
         (command.type === "attach" && result.type !== "attach-result") ||
         (command.type === "recover" && result.type !== "recover-result")
       ) {
-        this.fail(localError("invalid-response"), operation.token);
+        failLater(localError("invalid-response"));
         return;
       }
       if (result.type !== "attach-result" && result.type !== "recover-result") return;
@@ -1501,7 +2099,7 @@ export class RoutedTerminalController implements TerminalController {
           !sameRunRef(canonicalRef.run, this.run) ||
           !this.host.lane.register(canonicalRef, (event, bytes) => this.receive(event, bytes))
         ) {
-          this.fail(localError("invalid-response"), operation.token);
+          failLater(localError("invalid-response"));
           return;
         }
         this.ref = canonicalRef;
@@ -1509,11 +2107,11 @@ export class RoutedTerminalController implements TerminalController {
       operation.mode = result.mode;
       operation.atSeq = result.atSeq;
       if (result.atSeq < this.provenSeq) {
-        this.fail(localError("invalid-response"), operation.token);
+        failLater(localError("invalid-response"));
         return;
       }
       if (result.mode === "replay" && !this.retainedModel) {
-        this.fail(localError("invalid-response"), operation.token);
+        failLater(localError("invalid-response"));
         return;
       }
       if (result.mode === "baseline") {
@@ -1522,7 +2120,8 @@ export class RoutedTerminalController implements TerminalController {
       }
       this.phase = result.mode === "baseline" ? "baseline" : "replay";
       this.publish();
-      if (result.mode === "replay" && result.atSeq === this.appliedSeq) this.commit(operation);
+      if (result.mode === "replay" && result.atSeq === this.appliedSeq)
+        this.host.lane.afterward(() => this.commit(operation));
     };
     operation.markerAttempted = true;
     const deadline = Math.min(
@@ -1579,7 +2178,9 @@ export class RoutedTerminalController implements TerminalController {
   private async apply(item: QueuedEvent): Promise<void> {
     const event = item.event;
     const operation = this.operation;
-    if (item.token !== this.token || !this.ref) return;
+    // A latched fatal view failure ends the subscription from the intent drain; nothing more is
+    // applied to the view meanwhile.
+    if (item.token !== this.token || !this.ref || this.fatal) return;
     if (event.type === "baseline-start") {
       if (this.phase !== "baseline" || !operation || this.baseline) throw new Error("start order");
       await Promise.all(operation.priorParses);
@@ -1614,7 +2215,8 @@ export class RoutedTerminalController implements TerminalController {
         this.view !== view ||
         this.ref !== ref ||
         this.operation !== operation ||
-        this.phase !== "baseline"
+        this.phase !== "baseline" ||
+        this.fatal
       )
         return;
       await view.initialize({
@@ -1792,26 +2394,37 @@ export class RoutedTerminalController implements TerminalController {
       this.pendingAck = Math.max(this.pendingAck ?? seq, seq);
       return;
     }
+    // Ownership is recorded before the ID supplier, which may reenter (recover, detach, another
+    // ACK); only the subscription and token that asked may install the in-flight state.
+    const token = this.token;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (token !== this.token || ref !== this.ref || this.phase === "await-marker") return;
+    if (this.ackInFlight) {
+      this.pendingAck = Math.max(this.pendingAck ?? seq, seq);
+      return;
+    }
     if (!requestId) {
-      this.fail(domainError("COUNTER_EXHAUSTED"));
+      this.fail(domainError("COUNTER_EXHAUSTED"), token);
       return;
     }
     this.ackInFlight = true;
-    const token = this.token;
     let handled = false;
     const handle = (outcome: CommandOutcome): void => {
       if (handled) return;
       handled = true;
+      // A superseded ACK's result never clears its successor's state.
       if (token !== this.token) return;
       this.ackInFlight = false;
       if (!outcome.ok) {
-        this.fail(outcome.error, token);
+        this.host.lane.afterward(() => this.fail(outcome.error, token));
         return;
       }
       const next = this.pendingAck;
       this.pendingAck = undefined;
-      if (next !== undefined && next > seq) this.sendAck(next);
+      if (next !== undefined && next > seq)
+        this.host.lane.afterward(() => {
+          if (token === this.token) this.sendAck(next);
+        });
     };
     void this.host.lane
       .send(
@@ -1821,7 +2434,7 @@ export class RoutedTerminalController implements TerminalController {
           if (token !== this.token) return;
           if (seq > this.handedAckSeq) this.handedAckSeq = seq;
           onHandoff?.();
-          for (const watcher of [...this.authorityWatchers]) watcher();
+          this.wake();
         },
         handle,
       )
@@ -1831,18 +2444,31 @@ export class RoutedTerminalController implements TerminalController {
   private sendProgress(ordinal: number): void {
     const ref = this.ref;
     const descriptor = this.baseline;
+    const operation = this.operation;
     if (!ref || !descriptor) return;
     if (this.progressInFlight) {
       this.pendingProgress = Math.max(this.pendingProgress ?? ordinal, ordinal);
       return;
     }
+    const token = this.token;
     const requestId = this.host.lane.nextRequestId(this.host.generation());
+    if (
+      token !== this.token ||
+      ref !== this.ref ||
+      operation !== this.operation ||
+      descriptor !== this.baseline ||
+      this.phase !== "baseline"
+    )
+      return;
+    if (this.progressInFlight) {
+      this.pendingProgress = Math.max(this.pendingProgress ?? ordinal, ordinal);
+      return;
+    }
     if (!requestId) {
-      this.fail(domainError("COUNTER_EXHAUSTED"));
+      this.fail(domainError("COUNTER_EXHAUSTED"), token);
       return;
     }
     this.progressInFlight = true;
-    const token = this.token;
     let handled = false;
     const handle = (outcome: CommandOutcome): void => {
       if (handled) return;
@@ -1850,12 +2476,15 @@ export class RoutedTerminalController implements TerminalController {
       if (token !== this.token) return;
       this.progressInFlight = false;
       if (!outcome.ok) {
-        this.fail(outcome.error, token);
+        this.host.lane.afterward(() => this.fail(outcome.error, token));
         return;
       }
       const next = this.pendingProgress;
       this.pendingProgress = undefined;
-      if (next !== undefined && next > ordinal) this.sendProgress(next);
+      if (next !== undefined && next > ordinal)
+        this.host.lane.afterward(() => {
+          if (token === this.token && descriptor === this.baseline) this.sendProgress(next);
+        });
     };
     void this.host.lane
       .send(
@@ -1959,6 +2588,8 @@ export class RoutedTerminalController implements TerminalController {
     this.progressInFlight = false;
     this.pendingProgress = undefined;
     try {
+      // Input not yet handed off ends with the subscription; handed-off input keeps its result.
+      this.failUnsentInputs(localError(this.phase === "disposed" ? "disposed" : "invalid-state"));
       this.clearQueued();
       // Active parse debt remains charged until the original call settles.
       if (operation) this.settle(operation, errorOutcome(error));
@@ -1999,8 +2630,9 @@ export class RoutedTerminalController implements TerminalController {
       /* All local ownership still retires. */
     }
     this.publish();
-    this.listeners.clear();
-    if (this.pendingInputNotifications === 0) this.inputOutcomeListeners.clear();
+    // The final state and every outcome owed to an accepted input still reach the listeners
+    // subscribed now; the notifier lets them go once nothing more is owed.
+    this.notifier.closeWhenIdle(() => this.inputSlots === 0);
     this.host.remove(this);
   }
 
@@ -2050,16 +2682,37 @@ export class RoutedTerminalController implements TerminalController {
     this.releaseInputListener();
     if (!current() || this.inputListener) return false;
     const listener = view.onInputIntent((intent) => {
+      // Registered synchronously even while a view operation is in progress (4.4.4). A call
+      // through a superseded registration is ignored; an intent of an older view generation
+      // through the current one is rejected visibly rather than dropped.
       if (
         generation !== this.viewGeneration ||
         token !== this.token ||
         view !== this.view ||
         ref !== this.ref ||
-        intent.viewGeneration !== generation ||
         this.phase === "disposed"
       )
         return;
-      void this.sendInput({ source: intent.source, bytes: intent.bytes });
+      let source: unknown;
+      let bytes: unknown;
+      let intentGeneration: unknown;
+      try {
+        ({ source, bytes, viewGeneration: intentGeneration } = intent);
+      } catch {
+        /* Rejected as malformed below. */
+      }
+      if (intentGeneration !== this.viewGeneration) {
+        const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
+        const error = localError("invalid-state");
+        this.publishRejection(
+          inputNotice(inputFailure(source as TerminalInputSource, total, error)),
+          rejectionSource(source),
+          bytes instanceof Uint8Array ? total : undefined,
+          error,
+        );
+        return;
+      }
+      void this.admitInput(source, bytes);
     });
     if (!current() || this.inputListener) {
       safeDispose(listener);
@@ -2084,45 +2737,38 @@ export class RoutedTerminalController implements TerminalController {
     this.releaseFocusListener();
     if (!current() || this.focusListener) return false;
     const listener = view.onFocusIntent((intent) => {
+      // Focus and unfocus register synchronously, also during a recovery: a focus is deferred to
+      // ready and an unfocus takes effect at once (4.4.4, relay-protocol 9.1).
       if (
         generation !== this.viewGeneration ||
         token !== this.token ||
         view !== this.view ||
         ref !== this.ref ||
-        intent.viewGeneration !== generation ||
-        // An unfocus is honored during a recovery too, so it cancels a focus deferred across it
-        // (requestFocus); a focus intent waits for ready like any other view interaction.
-        (this.phase !== "ready" && (intent.focused || !this.recovering())) ||
+        this.phase === "disposed" ||
+        intent.viewGeneration !== this.viewGeneration ||
         !Number.isSafeInteger(intent.focusSeq) ||
         intent.focusSeq < 1
       )
         return;
-      if (this.localFocusGeneration !== generation) {
-        this.localFocusGeneration = generation;
+      const current = this.viewGeneration;
+      if (this.localFocusGeneration !== current) {
+        this.localFocusGeneration = current;
         this.localFocusSequence = 0;
       }
-      if (intent.focusSeq < this.localFocusSequence) return;
-      if (intent.focusSeq === this.localFocusSequence) return;
+      if (intent.focusSeq <= this.localFocusSequence) return;
       this.localFocusSequence = intent.focusSeq;
       if (intent.focused) {
-        if (!this.control.hostForeground) return;
+        if (!this.control.hostForeground || this.fatal) return;
+        if (this.phase !== "ready" && !this.recovering()) return;
         this.control.setTarget(true, true);
-        // The view re-announces focus before every deliberate input. While this subscription is
-        // already acquiring or holding control, another focus request would only mint a new epoch
-        // (and a new ack fence) per keystroke and supersede the request that the pending input is
-        // waiting on. Input staged now rides the pending or current grant. The view reports the
-        // grid it has applied, so an intent at the applied grid or at the grid already requested
-        // (focus or granted resize still settling) proposes nothing new.
-        if (
-          ref &&
-          (this.control.pendingIntent !== undefined || this.control.holds(ref, generation)) &&
-          (sameGrid(this.focusGeometry, intent.geometry) ||
-            sameGrid(this.appliedGeometry?.geometry, intent.geometry))
-        )
+        if (this.focusAnnouncementAddsNothing(intent.geometry)) {
+          this.publish();
           return;
+        }
         void this.requestFocus(intent.geometry);
       } else {
-        void this.blur();
+        this.registerUnfocus(this.control.hostForeground, undefined);
+        this.publish();
       }
     });
     if (!current() || this.focusListener) {
@@ -2148,20 +2794,11 @@ export class RoutedTerminalController implements TerminalController {
     this.releaseListener();
     if (!current() || this.listener) return false;
     const listener = view.onFailure((error) => {
-      if (
-        generation !== this.viewGeneration ||
-        token !== this.token ||
-        view !== this.view ||
-        ref !== this.ref
-      )
-        return;
-      if (error.kind === "INPUT_REJECTED") {
-        this.publishInputNotice(
-          Object.freeze({ kind: "renderer-rejection", error: Object.freeze({ ...error }) }),
-        );
-      } else {
-        this.fail(error, token);
-      }
+      // Attributed to the logical view, not to a backend incarnation or view generation: a
+      // failure reported by a retired backend of this view is not dropped (4.4.4).
+      if (view !== this.view || ref !== this.ref) return;
+      if (error.kind === "INPUT_REJECTED") this.rejectRendererInput(error);
+      else this.registerFatal(error, view);
     });
     if (!current() || this.listener) {
       safeDispose(listener);
@@ -2171,18 +2808,28 @@ export class RoutedTerminalController implements TerminalController {
     return true;
   }
 
+  // Marks a state change for observers (delivered on a later task) and wakes internal waits.
   private publish(): void {
-    const revision = Symbol();
-    this.publicationRevision = revision;
-    const snapshot = this.snapshot();
-    for (const listener of [...this.listeners]) {
-      if (this.publicationRevision !== revision) break;
-      if (!this.listeners.has(listener)) continue;
-      try {
-        consumeObserverResult(listener(snapshot));
-      } catch {
-        /* Observers do not control lifecycle. */
-      }
-    }
+    this.notifier.markState();
+    this.wake();
+  }
+
+  // relay-protocol 9.1 focus announcements: the view announces focus before every deliberate
+  // input. Only a still-current focus request, or a grant this subscription holds or carries,
+  // can make one redundant, and only when it asks for the same grid as that request or grant.
+  // The applied grid stands in only for a grant whose requested grid is unknown. With neither
+  // (a gap recovery, say) the announcement is the user's focus request.
+  private focusAnnouncementAddsNothing(geometry: Geometry): boolean {
+    const live = this.liveFocusCurrent();
+    if (live) return sameGrid(live.requested, geometry);
+    const ref = this.ref;
+    if (!ref || !(this.control.holds(ref, this.viewGeneration) || this.control.carriesGrant))
+      return false;
+    const intent = this.control.heldIntent;
+    const requested =
+      this.focusGeometry && this.focusGeometry.intent === intent
+        ? this.focusGeometry.geometry
+        : this.appliedGeometry?.geometry;
+    return sameGrid(requested, geometry);
   }
 }
