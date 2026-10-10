@@ -787,3 +787,18 @@ test("V1-L17 a listener initializing or disposing the view from any renderer cha
     ),
   );
 });
+
+test("V1-L18 an operation superseded inside foreign code abandons without failing its successor", async () => {
+  const result = await withViewPage(async (page) =>
+    page.evaluate(() => window.coveView.supersededInsideForeignCode()),
+  );
+  // Hiding blurs xterm, whose focus observer shows the view again and types into it: the hide
+  // stops without a later unfocus that would withdraw the new focus. A theme setter applying a newer appearance before failing the older one
+  // leaves no failure. A retired xterm whose cleanup disposes the view and then fails stops the
+  // initialize with RESYNC_REQUIRED and publishes nothing.
+  expect(result).toEqual({
+    visibility: { threw: undefined, hidden: false, focused: [false, true], failures: [] },
+    appearance: { threw: undefined, themeCalls: 2, failures: [], ownedRoots: 1 },
+    cleanup: { error: "RESYNC_REQUIRED", observed: [], ownedRoots: 0 },
+  });
+});
