@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test } from "vitest";
@@ -136,9 +136,10 @@ async function withHarness(body) {
 // Name the page's own account of a failure, such as an input rejection, and its screen.
 async function describePage(page, error) {
   const status = await page.textContent("#terminal-status").catch(() => null);
+  const reported = await page.textContent("#error").catch(() => null);
   const rows = await screenRows(page).catch(() => []);
   return new Error(
-    `${error.message}\nterminal status: ${status}\nscreen:\n${rows.filter(Boolean).join("\n")}`,
+    `${error.message}\nterminal status: ${status}\npage error: ${reported}\nscreen:\n${rows.filter(Boolean).join("\n")}`,
     { cause: error },
   );
 }
@@ -303,9 +304,9 @@ const waitForRendererChanges = (page, expected) =>
     { timeout: 15_000 },
   );
 
-// A click takes control at the page's grid; a changed grid is recovered with a fresh baseline
-// and control is retaken, and input typed in between is refused. Wait until the status has
-// stayed attached and controlling for a while before typing.
+// Waits until the status has stayed attached and controlling for a while. Typing no longer
+// needs it (input during a recovery is held); it lets a check read a settled status, and lets a
+// probe that reads its tty size observe a resize before it is asked to print.
 async function waitForSteadyControl(page) {
   let last;
   let since = Date.now();
@@ -403,7 +404,7 @@ test("the printed harness URL renders typed output with the default renderer and
     expect(await rendererOf(page)).toBe(webgl2 ? "webgl" : "dom");
     await page.click("#terminal");
     try {
-      await waitForSteadyControl(page);
+      // Typed at once: input during the click's resize recovery is held, not refused.
       await printMarker(page, MARKER);
       await waitForRedPixels(page);
       if (webgl2) {
@@ -424,8 +425,7 @@ test("the printed harness URL renders typed output with the default renderer and
         await waitForRendererChanges(page, ["dom", "webgl", "dom"]);
         await page.waitForFunction(() => !document.querySelector("#terminal canvas"));
         // DOM cells measure differently from WebGL cells, so the page resizes the PTY to the
-        // DOM grid; wait for that recovery before typing.
-        await waitForSteadyControl(page);
+        // DOM grid; input typed during that recovery is held and sent once it is over.
       }
       // The DOM renderer repainted the existing output and renders new output. The echoed
       // output is its own row, distinct from the typed command line.
@@ -463,10 +463,8 @@ test("S4 the production view answers no terminal query and passes real keys and 
     await page.waitForSelector("#terminal .xterm-rows");
     try {
       // A click takes control at the page's grid. The run was created by the CLI at another grid,
-      // so the size change is recovered with a fresh baseline and control is retaken; the status
-      // briefly reads controlling before that recovery refuses input, so wait until it is steady.
+      // so the size change is recovered with a fresh baseline; input typed meanwhile is held.
       await page.click("#terminal");
-      await waitForSteadyControl(page);
       // The probe prints this only after switching its tty to raw mode; typed earlier, the
       // tty's ICRNL would turn Enter into a newline and the probe would never ask.
       await waitForRow(page, "query-probe-ready");
@@ -497,9 +495,8 @@ test("S4 the production view answers no terminal query and passes real keys and 
 
 // A user's first click in a new terminal takes control and is followed at once by typing, with no
 // wait for control to settle. The page created the terminal at its estimate of the grid the view
-// measures, so taking control resizes nothing and nothing typed in between may be lost. When the
-// grid does change, the controller refuses input during the resize recovery; that remains a known
-// gap of the M0 harness, not covered here.
+// measures, so taking control resizes nothing and nothing typed in between may be lost. A click
+// that does change the grid is covered by the byte-probe test below.
 test("a first click in a new terminal keeps the input typed right after it", async ({ task }) => {
   await withHarness(async ({ directory, server, page, pageErrors }) => {
     await openConnectedPage({ server, page });
@@ -526,6 +523,78 @@ test("a first click in a new terminal keeps the input typed right after it", asy
     }
     expect(created).toMatch(/^\d+×\d+$/);
     expect(await statusGrid()).toBe(created);
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+// A process that switches its tty to raw mode and records every byte it reads until the typed
+// line `done`, so each typed byte can be checked to arrive exactly once and in order.
+const BYTE_PROBE = String.raw`import { writeFileSync } from "node:fs";
+const out = process.argv[2];
+process.stdin.setRawMode(true);
+let received = "";
+process.stdin.on("data", (chunk) => {
+  received += chunk.toString("latin1");
+  const end = received.indexOf("done\r");
+  if (end >= 0) {
+    writeFileSync(out, JSON.stringify(received.slice(0, end)));
+    process.exit(0);
+  }
+});
+process.stdout.write("byte-probe-ready\r\n");
+`;
+
+// The first click into a run created at another grid takes control at the page's grid, so the
+// PTY is resized and this client recovers with a fresh baseline. Keys typed at once, with no
+// wait for control to settle, are held during that recovery and sent once the grant is usable
+// (relay-protocol 9.1): every byte reaches the PTY exactly once, in order.
+test("a first click that changes the grid keeps every byte typed right after it", async () => {
+  await withHarness(async ({ directory, server, page, pageErrors }) => {
+    const script = join(directory, "byte-probe.mjs");
+    const out = join(directory, "byte-probe.json");
+    await writeFile(script, BYTE_PROBE);
+    // Created at a grid no page layout here measures (the default 80x24 can match the page's
+    // own grid on some platforms' fonts), so the click is sure to resize the PTY.
+    const run = await createRun(
+      server.env,
+      directory,
+      [process.execPath, script, out],
+      ["--cols", "61", "--rows", "17"],
+    );
+    // The DOM renderer's rows are the oracle for the probe's raw-mode readiness.
+    await openConnectedPage({ server, page }, "dom");
+    await page.click(`#runs button[data-run-id="${run.runId}"]`);
+    await page.waitForFunction(
+      () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+    );
+    const statusGrid = () =>
+      page.evaluate(
+        () => document.getElementById("terminal-status")?.textContent.match(/\d+×\d+/)?.[0],
+      );
+    const typed = "first-click: every byte once";
+    let before;
+    let received;
+    try {
+      await waitForRow(page, "byte-probe-ready");
+      before = await statusGrid();
+      // Click on the first row: a 61x17 screen does not reach the middle of the host.
+      await page.click("#terminal", { position: { x: 24, y: 8 } });
+      await page.keyboard.type(typed);
+      await page.keyboard.type("done");
+      await page.keyboard.press("Enter");
+      await waitFor(
+        "the probe's report",
+        async () => (received = JSON.parse(await readFile(out, "utf8").catch(() => "null"))),
+        20_000,
+      );
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(received).toBe(typed);
+    // The click did change the grid, so the input really crossed a resize recovery.
+    expect(before).toMatch(/^\d+×\d+$/);
+    expect(await statusGrid()).not.toBe(before);
     expect(await page.textContent("#error")).toBe("");
     expect(pageErrors).toEqual([]);
   });
@@ -562,6 +631,10 @@ test("the measured grid fits the visible terminal at several window sizes and pi
         );
         try {
           if (index === 0) await waitForRow(page, "fit-probe-ready");
+          // The key would be held through the click's resize recovery and still arrive, but the
+          // probe reads its width from Node's cached tty size, which SIGWINCH refreshes only on a
+          // later turn of its event loop: a key arriving right after the resize can be printed
+          // at the old width. Wait for control to settle so the probe has seen the resize.
           await page.click("#terminal");
           await waitForSteadyControl(page);
           await page.keyboard.press("p");
@@ -582,6 +655,8 @@ test("the measured grid fits the visible terminal at several window sizes and pi
           // on a window resize event, and a different answer would resize the PTY.
           await page.evaluate(() => window.dispatchEvent(new Event("resize")));
           await page.waitForTimeout(300);
+          // As above: a resize here must reach the probe before it prints, or the check would
+          // compare against a stale width.
           await waitForSteadyControl(page);
           await page.keyboard.press("p");
           const reprinted = await probe.nextPrint();
@@ -638,11 +713,11 @@ test("the measured grid fits the visible terminal at several window sizes and pi
   });
 });
 
-function createRun(env, directory, argv) {
+function createRun(env, directory, argv, flags = []) {
   return new Promise((done, fail) => {
     execFile(
       process.execPath,
-      [cli, "terminal", "create", "--cwd", directory, "--", ...argv],
+      [cli, "terminal", "create", "--cwd", directory, ...flags, "--", ...argv],
       { env, timeout: 20_000 },
       (error, stdout, stderr) =>
         error
