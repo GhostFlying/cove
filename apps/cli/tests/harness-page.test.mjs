@@ -421,10 +421,15 @@ async function tapTerminalSocket(page) {
     holdingOutbound: false,
     afterInbound: undefined,
     sockets: 0,
+    // Run `action` once, just after the first server message with a frame matching `predicate`
+    // is handed to the page and before the page can react to it.
+    afterInboundFrame(predicate, action) {
+      tap.afterInbound = { predicate, action };
+    },
     // Forward the first server message with a frame matching `predicate`, then hold every
     // server message after it.
     holdInboundAfter(predicate) {
-      tap.afterInbound = predicate;
+      tap.afterInboundFrame(predicate, () => (tap.holdingInbound = true));
     },
     holdOutbound() {
       tap.holdingOutbound = true;
@@ -457,9 +462,10 @@ async function tapTerminalSocket(page) {
         return;
       }
       route.send(message);
-      if (tap.afterInbound && frames.some(tap.afterInbound)) {
+      const hook = tap.afterInbound;
+      if (hook && frames.some(hook.predicate)) {
         tap.afterInbound = undefined;
-        tap.holdingInbound = true;
+        hook.action();
       }
     });
   });
@@ -697,6 +703,69 @@ test("a first click that changes the grid keeps every byte typed right after it"
     expect(before).toMatch(/^\d+×\d+$/);
     expect(await statusGrid()).not.toBe(before);
     expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
+// A focus the server accepted can still fail before its grant is usable: here the grid-changing
+// first click's own recovery is overtaken by another page taking control. The page must report
+// that accepted failure, although a recovery ran meanwhile, and must not take control back. The
+// tap holds this page's messages from the resize event on, so its recovery request reaches the
+// server only after the other page's focus.
+test("a first click whose grant is lost during its own recovery reports the accepted focus", async () => {
+  await withHarness(async ({ directory, server, browser, page, pageErrors }) => {
+    const socket = await tapTerminalSocket(page);
+    const run = await createRun(
+      server.env,
+      directory,
+      ["/bin/cat"],
+      ["--cols", "61", "--rows", "17"],
+    );
+    const openRunIn = async (target) => {
+      await openConnectedPage({ server, page: target });
+      await target.click(`#runs button[data-run-id="${run.runId}"]`);
+      await target.waitForFunction(
+        () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+      );
+      await target.waitForSelector("#terminal .xterm-screen");
+    };
+    const statusText = (target) => target.textContent("#terminal-status");
+    const other = await browser.newPage({ viewport: { width: 1000, height: 640 } });
+    other.setDefaultTimeout(15_000);
+    try {
+      await openRunIn(page);
+      socket.afterInboundFrame(isResizeEvent, () => socket.holdOutbound());
+      await page.click("#terminal", { position: { x: 24, y: 8 } });
+      await waitFor(
+        "the page's recovery request to be held",
+        () =>
+          socket.heldOutbound.length > 0 &&
+          socket.outbound.some((f) => f.metadata.type === "recover"),
+        15_000,
+      );
+      expect(await statusPhase(page)).not.toBe("ready");
+      // The other page measures the same grid, so its focus takes control without a resize.
+      await openRunIn(other);
+      await other.click("#terminal");
+      await other.waitForFunction(() =>
+        document.getElementById("terminal-status")?.textContent.includes("controlling"),
+      );
+      socket.releaseOutbound();
+      await page.waitForFunction(() =>
+        /focus accepted at epoch \d+ but not usable/.test(
+          document.getElementById("terminal-status")?.textContent ?? "",
+        ),
+      );
+      await waitForSteadyControl(other);
+    } catch (error) {
+      throw await describePage(page, error);
+    } finally {
+      await other.close();
+    }
+    const status = await statusText(page);
+    expect(status).toContain("viewing");
+    expect(status).toContain("attached");
+    expect(socket.outbound.filter((frame) => frame.metadata.type === "focus").length).toBe(1);
     expect(pageErrors).toEqual([]);
   });
 });

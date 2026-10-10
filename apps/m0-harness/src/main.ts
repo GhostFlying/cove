@@ -210,9 +210,11 @@ function syncSize(entry: OpenTerminal): void {
   void entry.controller.requestResize(measured).then((outcome) => {
     entry.resizing = false;
     if (outcome.ok || current !== entry) return;
-    // A recovery that started meanwhile superseded this request; the retake after it settles
-    // the size. Otherwise show the failure and allow a later retry.
-    if (entry.controller.snapshot().recoverySequence !== recoveries) return;
+    // A request refused while a recovery started meanwhile was superseded by it; the retake
+    // after that recovery settles the size. One the server accepted failed in its own right,
+    // even though its own recovery ran meanwhile (its grant was lost or expired before it became
+    // usable), so it is shown like any other failure and a later retry is allowed.
+    if (!outcome.accepted && entry.controller.snapshot().recoverySequence !== recoveries) return;
     delete entry.requested;
     entry.retakeAfterRecovery = false;
     entry.inputNotice = `resize ${describeControlFailure(outcome)}`;
@@ -340,9 +342,14 @@ function takeControl(entry: OpenTerminal): void {
   void entry.controller.requestFocus(measured).then((outcome) => {
     entry.focusing = false;
     if (current !== entry) return;
-    // A focus that changed the grid may be overtaken by the recovery it caused; the retake
-    // after that recovery then settles it. Any other failure is reported and forgotten.
-    if (!outcome.ok && entry.controller.snapshot().recoverySequence === recoveries) {
+    // A focus refused while a recovery started meanwhile was overtaken by it; the retake after
+    // that recovery then settles it. A focus the server accepted that failed afterwards (e.g.
+    // another client took control during the recovery the focus itself caused) is a real
+    // failure: it is reported and forgotten, so this page does not take control back.
+    if (
+      !outcome.ok &&
+      (outcome.accepted || entry.controller.snapshot().recoverySequence === recoveries)
+    ) {
       delete entry.requested;
       if (resizes) entry.retakeAfterRecovery = false;
       entry.inputNotice = `focus ${describeControlFailure(outcome)}`;
