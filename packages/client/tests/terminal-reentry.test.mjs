@@ -8,6 +8,7 @@ import {
   encoder,
   fakeView,
   larger,
+  manualTasks,
   realScheduler,
   reentryHarness,
   settle,
@@ -1001,5 +1002,22 @@ describe("implementation review regressions (#86 round 1)", () => {
       "malformed",
     ]);
     expect(JSON.stringify(notices)).not.toContain("untrusted");
+  });
+
+  test("a notice produced by an observer is delivered in a later host task, not the same round", async () => {
+    const tasks = manualTasks();
+    const h = await reentryHarness({ scheduler: tasks });
+    tasks.manual = true;
+    let delivered = 0;
+    // Every delivered notice makes the observer produce another one.
+    h.controller.onInputOutcome(() => {
+      delivered++;
+      h.controller.sendInput({ source: "keyboard", bytes: "not bytes" });
+    });
+    h.controller.sendInput({ source: "keyboard", bytes: "not bytes" });
+    for (let task = 1; task <= 5; task++) {
+      await tasks.runTask();
+      expect(delivered).toBe(task);
+    }
   });
 });
