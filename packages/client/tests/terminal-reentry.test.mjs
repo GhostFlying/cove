@@ -684,11 +684,15 @@ describe("design review regressions (rounds 1-3)", () => {
 
   test("an input before a renderer rejection that fails moves the closure back to it", async () => {
     let refused = false;
+    let later;
     const h = await withHeldRecovery({
       onCommand: ({ command }, server) => {
         if (command.type !== "input" || refused) return undefined;
         refused = true;
         server.fail(command, "BUSY");
+        // Typed once a's refusal has moved the closure back, while the generation is still open
+        // (its failure notices are delivered on a later host task).
+        queueMicrotask(() => (later = type(h, "c")));
         return "drop";
       },
     });
@@ -699,9 +703,20 @@ describe("design review regressions (rounds 1-3)", () => {
     h.mounted.fail(domainError("INPUT_REJECTED"));
     await h.release();
     await h.finish();
-    // a is refused, so b, accepted after it, is behind a gap and is never sent.
+    // a is refused, so b, accepted after it, is behind a gap and is never sent. The generation's
+    // cause is now a's refusal, not the renderer rejection that first closed it after b.
     expect(await first).toMatchObject({ ok: false, error: { kind: "BUSY" } });
-    expect(await second).toMatchObject({ ok: false, value: { notSentBytes: 1 } });
+    expect(await second).toMatchObject({
+      ok: false,
+      error: { kind: "BUSY" },
+      value: { notSentBytes: 1 },
+    });
+    expect(later).toBeDefined();
+    expect(await later).toMatchObject({
+      ok: false,
+      error: { kind: "BUSY" },
+      value: { notSentBytes: 1 },
+    });
     expect(h.server.ofType("input")).toHaveLength(1);
     expect(h.server.written).toEqual([]);
   });
