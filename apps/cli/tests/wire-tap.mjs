@@ -64,6 +64,14 @@ export function createTappedClient(record) {
     holdOutbound(predicate) {
       tap.outboundHold = predicate;
     },
+    // Runs `action` once, just before the first inbound message carrying a frame that matches
+    // `predicate` is handed to the client; that message itself is always forwarded. A test uses
+    // it to start holding (pause) exactly at the frame that makes the client recover, without
+    // relying on when the client's asynchronous observers learn of the recovery.
+    beforeForward(predicate, action) {
+      tap.forwardHook = { predicate, action };
+    },
+    forwardHook: undefined,
     // Send every withheld message, in order, synchronously, so messages held by several taps
     // and released together reach the server as one burst.
     releaseOutbound() {
@@ -174,6 +182,13 @@ export function createTappedClient(record) {
             return;
           }
           tap.inbound.push(...frames);
+          const hook = tap.forwardHook;
+          if (hook && !tap.paused && !tap.held.length && frames.some(hook.predicate)) {
+            tap.forwardHook = undefined;
+            hook.action();
+            callbacks.onBinary(bytes);
+            return;
+          }
           // While paused, `holds` picks what to hold. A frame arriving while resume() is still
           // handing over held ones queues behind them, so resuming never reorders the stream
           // (e.g. a baseline's end before its start).
