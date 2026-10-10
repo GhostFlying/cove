@@ -89,6 +89,10 @@ interface OpenTerminal {
   readonly disposables: { dispose(): void }[];
   // The last grid this client asked for, by focus or resize, so one size is requested once.
   requested?: Geometry;
+  // A grid asked for by a focus or resize whose result is unknown: the server may have applied
+  // it, so it stays requested (never sent again) until a fact settles the size, that is until the
+  // applied grid matches it or a later recovery reaches ready.
+  unknownGrid?: Geometry;
   resizing: boolean;
   focusing: boolean;
   // The user is operating this terminal here: set by a click or key in it, cleared when the
@@ -210,6 +214,14 @@ function syncSize(entry: OpenTerminal): void {
   void entry.controller.requestResize(measured).then((outcome) => {
     entry.resizing = false;
     if (outcome.ok || current !== entry) return;
+    // An unknown result may have resized the PTY: it is shown, and the grid stays requested so
+    // this page never hands the same resize off again before a fact settles the size.
+    if (mayHaveTakenEffect(outcome)) {
+      entry.unknownGrid = measured;
+      entry.inputNotice = `resize ${describeControlFailure(outcome)}`;
+      renderTerminalStatus(entry);
+      return;
+    }
     // A request refused while a recovery started meanwhile was superseded by it; the retake
     // after that recovery settles the size. One the server accepted failed in its own right,
     // even though its own recovery ran meanwhile (its grant was lost or expired before it became
@@ -275,6 +287,19 @@ async function openRun(run: RunRef): Promise<void> {
       const enteredReady =
         snapshot.phase === "ready" && snapshot.recoverySequence !== entry.handledRecovery;
       if (enteredReady) entry.handledRecovery = snapshot.recoverySequence;
+      // A fact settles an unknown request: its grid is applied, or a recovery reached ready with
+      // the server's current grid. Only a grid that is not applied may then be requested again.
+      const applied = snapshot.appliedGeometry?.geometry;
+      const unknownGrid = entry.unknownGrid;
+      if (unknownGrid && (enteredReady || (applied && sameGeometry(applied, unknownGrid)))) {
+        delete entry.unknownGrid;
+        if (
+          (!applied || !sameGeometry(applied, unknownGrid)) &&
+          entry.requested &&
+          sameGeometry(entry.requested, unknownGrid)
+        )
+          delete entry.requested;
+      }
       // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM
       // focus and this client's control. Restore DOM focus while the user operates here, and
       // control only after this client's own resize, never after another client's: two pages
@@ -342,11 +367,18 @@ function takeControl(entry: OpenTerminal): void {
   void entry.controller.requestFocus(measured).then((outcome) => {
     entry.focusing = false;
     if (current !== entry) return;
+    // A focus whose result is unknown may hold control on the server: it is shown, not called
+    // refused, and its grid stays requested until a fact settles it (see unknownGrid).
+    if (!outcome.ok && mayHaveTakenEffect(outcome)) {
+      entry.unknownGrid = measured;
+      entry.inputNotice = `focus ${describeControlFailure(outcome)}`;
+      renderTerminalStatus(entry);
+    }
     // A focus refused while a recovery started meanwhile was overtaken by it; the retake after
     // that recovery then settles it. A focus the server accepted that failed afterwards (e.g.
     // another client took control during the recovery the focus itself caused) is a real
     // failure: it is reported and forgotten, so this page does not take control back.
-    if (
+    else if (
       !outcome.ok &&
       (outcome.accepted || entry.controller.snapshot().recoverySequence === recoveries)
     ) {
@@ -359,12 +391,27 @@ function takeControl(entry: OpenTerminal): void {
   });
 }
 
+// Whether a failed control command without `accepted` may still have taken effect: its error
+// says the server accepted it or that its acceptance is unknown (RESULT_UNKNOWN after the command
+// was handed to the socket). A local error means it was never sent; a domain error that was not
+// accepted is a refusal.
+function mayHaveTakenEffect(outcome: Extract<TerminalControlOutcome, { ok: false }>): boolean {
+  return (
+    !outcome.accepted &&
+    "acceptance" in outcome.error &&
+    outcome.error.acceptance !== "not-accepted"
+  );
+}
+
 // A failure with `accepted` was accepted by the server and lost afterwards (the grant was lost,
-// superseded or timed out before it became usable); only one without it was refused.
+// superseded or timed out before it became usable); one that may have taken effect has an
+// unknown result; only the rest were refused.
 function describeControlFailure(outcome: Extract<TerminalControlOutcome, { ok: false }>): string {
-  return outcome.accepted
-    ? `accepted at epoch ${outcome.accepted.epoch} but not usable: ${describe(outcome.error)}`
-    : `refused: ${describe(outcome.error)}`;
+  if (outcome.accepted)
+    return `accepted at epoch ${outcome.accepted.epoch} but not usable: ${describe(outcome.error)}`;
+  if (mayHaveTakenEffect(outcome))
+    return `result unknown (it may have taken effect): ${describe(outcome.error)}`;
+  return `refused: ${describe(outcome.error)}`;
 }
 
 // A click in the terminal is a deliberate request to operate it.
