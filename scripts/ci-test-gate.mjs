@@ -198,7 +198,7 @@ export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/worker-pipe-burst.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/three-client-acks.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/client-lifetime.test.mjs", minimumTests: 3 },
-  { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 59 },
+  { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 60 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
   {
     project: "client",
@@ -213,6 +213,8 @@ export const requiredSuites = [
     file: "packages/client/tests/terminal-control-input.test.mjs",
     minimumTests: 62,
   },
+  // One test runs all 210 matrix cases (15 call points x 14 actions); 28 named regressions.
+  { project: "client", file: "packages/client/tests/terminal-reentry.test.mjs", minimumTests: 29 },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
@@ -555,7 +557,7 @@ export const requiredSuites = [
   {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-lifecycle.test.mjs",
-    minimumTests: 17,
+    minimumTests: 18,
   },
   {
     project: "terminal-worker",

@@ -87,7 +87,7 @@ function report() {
 function growingViewReport() {
   const viewSuites = requiredSuites.filter((suite) => suite.project === "terminal-web");
   const files = viewSuites.map((suite) => suite.file);
-  const caseCount = (suiteIndex) => [7, 6, 17][suiteIndex];
+  const caseCount = (suiteIndex) => [7, 6, 18][suiteIndex];
   const discovered = viewSuites.flatMap((suite, suiteIndex) =>
     Array.from({ length: caseCount(suiteIndex) }, (_, index) => ({
       projectName: suite.project,
@@ -97,8 +97,8 @@ function growingViewReport() {
   );
   const execution = {
     success: true,
-    numTotalTests: 30,
-    numPassedTests: 30,
+    numTotalTests: 31,
+    numPassedTests: 31,
     numFailedTests: 0,
     numPendingTests: 0,
     numTodoTests: 0,
@@ -208,12 +208,13 @@ test("server author and independent suites are fail-closed and fully owned by Vi
 test("client public-contract suites reject missing and short discovery", async () => {
   const files = await readVitestOwnedTestFiles();
   for (const [name, minimumTests] of [
-    ["connection-rpc", 59],
+    ["connection-rpc", 60],
     ["compiled-client", 4],
     ["terminal-recovery", 46],
     ["terminal-state", 11],
     ["terminal-control-input", 62],
     ["terminal-budgets-preview", 33],
+    ["terminal-reentry", 29],
     ["terminal-lifecycle", 5],
   ]) {
     const file = `packages/client/tests/${name}.test.mjs`;
@@ -248,7 +249,7 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   for (const name of ["view-input", "view-recovery", "view-lifecycle"]) {
     const file = `packages/terminal-web/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
-    const minimumTests = name === "view-lifecycle" ? 17 : 6;
+    const minimumTests = name === "view-lifecycle" ? 18 : 6;
     expect(suite).toMatchObject({ project: "terminal-web", minimumTests });
     expect(files).toContain(file);
     expect(() => verifyDiscovery([], [file], [suite])).toThrow(
@@ -726,8 +727,8 @@ test("browser cleanup artifact gate rejects incomplete, stale and unbounded reco
 test("view evidence follows validated passing case growth above three suite floors", () => {
   const { viewSuites, files, discovered, execution } = growingViewReport();
   const inventory = verifyInventory(discovered, execution, files, viewSuites);
-  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 17]);
-  expect(viewEvidenceCases(execution, inventory)).toHaveLength(30);
+  expect(inventory.map((suite) => suite.passed)).toEqual([7, 6, 18]);
+  expect(viewEvidenceCases(execution, inventory)).toHaveLength(31);
 });
 
 test("diagnostic dispatch requires exact branch, SHA, mode and allowlisted source", () => {
@@ -927,7 +928,7 @@ test("view evidence still rejects missing, short, pending, and mismatched suites
       files,
       viewSuites,
     ),
-  ).toThrow(/discovered 0 tests; needs 17/);
+  ).toThrow(/discovered 0 tests; needs 18/);
   expect(() =>
     verifyInventory(
       discovered.filter(

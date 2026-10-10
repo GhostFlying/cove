@@ -1,0 +1,587 @@
+// Shared fixture for the re-entry matrix and the callback re-entry regressions
+// (docs/terminal-architecture.md 4.4.8). It drives the compiled client against a small in-memory
+// model of the server's terminal lane: one ordered event sequence per run, control epochs and a
+// holder, a grid, and per-subscription focus/input counters. Every foreign-code call point the
+// controller reaches (ID supplier, socket send, timer disposal, view operations and listener
+// registration) has a one-shot hook a test can arm to reenter the controller there.
+import { TextDecoder, TextEncoder } from "node:util";
+import { createClient } from "@cove/client";
+import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
+import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
+import { BASELINE_ENCODING, DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
+import { createTerminalDecoder, encodeTerminalFrame } from "@cove/protocol/terminal";
+
+export const encoder = new TextEncoder();
+export const decoder = new TextDecoder("utf-8", { fatal: true });
+export const run = { serverId: "server-1", relayInstanceId: "instance-1", runId: "run-1" };
+export const geometry = Object.freeze({ cols: 80, rows: 24 });
+export const larger = Object.freeze({ cols: 100, rows: 30 });
+
+export async function settle(turns = 30) {
+  for (let index = 0; index < turns; index++) await Promise.resolve();
+}
+
+// A manual clock. yieldTurn only yields microtasks here; fairness tests use realScheduler().
+export function manualClock() {
+  let now = 0;
+  const timers = new Set();
+  return {
+    nowMs: () => now,
+    setTimer(delay, callback) {
+      const timer = { deadline: now + delay, callback, delay, onDispose: undefined };
+      timers.add(timer);
+      return {
+        dispose() {
+          timers.delete(timer);
+          timer.onDispose?.();
+        },
+        timer,
+      };
+    },
+    yieldTurn: async () => {},
+    advance(ms) {
+      now += ms;
+      for (const timer of [...timers])
+        if (timer.deadline <= now && timers.delete(timer)) timer.callback();
+    },
+    get pending() {
+      return timers.size;
+    },
+  };
+}
+
+// Host-task scheduler: yieldTurn resolves on a macrotask, as the Scheduler contract requires.
+export function realScheduler() {
+  return {
+    nowMs: () => Date.now(),
+    setTimer(delay, callback) {
+      const handle = setTimeout(callback, delay);
+      return { dispose: () => clearTimeout(handle) };
+    },
+    yieldTurn: () => new Promise((resolve) => setTimeout(resolve, 0)),
+  };
+}
+
+function bootstrap(terminal, connection, budgets = {}) {
+  return {
+    type: "cove-bootstrap-result",
+    bootstrapVersion: 1,
+    serverId: run.serverId,
+    relayInstanceId: run.relayInstanceId,
+    protocolVersion: PROTOCOL_VERSION,
+    buildVersion: "server-build",
+    capabilities: [...M0_CAPABILITIES],
+    profile: PROFILE,
+    encoding: BASELINE_ENCODING,
+    effectiveBudgets: { ...M0_LIMITS, ...budgets },
+    ...(terminal ? { connection } : {}),
+  };
+}
+
+function frame(kind, metadata, payload = new Uint8Array()) {
+  const result = encodeTerminalFrame(kind, encoder.encode(JSON.stringify(metadata)), payload);
+  if (!result.ok) throw new Error("bad fixture frame");
+  return result.value;
+}
+
+function decodeCommand(bytes) {
+  const parser = createTerminalDecoder();
+  const read = parser.read(bytes);
+  if (read.frames.length !== 1 || !parser.finish().ok) throw new Error("bad command frame");
+  return {
+    command: JSON.parse(decoder.decode(read.frames[0].metadata)),
+    payload: read.frames[0].payload,
+  };
+}
+
+// A fake view whose every foreign-code point can run a one-shot hook.
+export function fakeView(fired, grid = geometry) {
+  const listeners = { focus: new Set(), input: new Set(), failure: new Set() };
+  const hooks = {};
+  const fire = (name) => {
+    const hook = hooks[name];
+    if (!hook) return;
+    hooks[name] = undefined;
+    fired?.(name);
+    hook();
+  };
+  const state = { grid: { ...grid }, generation: -1, disposed: 0, applied: [] };
+  const subscribe = (kind) => (listener) => {
+    listeners[kind].add(listener);
+    fire("register");
+    return {
+      dispose() {
+        listeners[kind].delete(listener);
+        fire("disposer");
+      },
+    };
+  };
+  const terminalView = {
+    initialize: async (input) => {
+      state.generation = input.viewGeneration;
+      fire("initialize");
+    },
+    beginBaseline: async () => fire("beginBaseline"),
+    writeBaselineChunk: async () => fire("writeBaselineChunk"),
+    finishBaseline: async () => fire("finishBaseline"),
+    applyEvent: async (event) => {
+      state.applied.push(event.type);
+      fire("applyEvent");
+    },
+    measureGrid: () => {
+      fire("measureGrid");
+      return { ...state.grid };
+    },
+    setAppearance: () => fire("setAppearance"),
+    setVisibility: () => fire("setVisibility"),
+    onInputIntent: subscribe("input"),
+    onFocusIntent: subscribe("focus"),
+    onFailure: subscribe("failure"),
+    dispose: () => {
+      state.disposed++;
+      fire("dispose");
+    },
+  };
+  return {
+    terminalView,
+    hooks,
+    state,
+    focus(focused, grid = state.grid, focusSeq) {
+      const intent = {
+        viewGeneration: state.generation,
+        focusSeq: focusSeq ?? ++state.focusSeq,
+        focused,
+        geometry: { ...grid },
+      };
+      for (const listener of [...listeners.focus]) listener(intent);
+    },
+    input(text, source = "keyboard") {
+      const intent = { viewGeneration: state.generation, source, bytes: encoder.encode(text) };
+      for (const listener of [...listeners.input]) listener(intent);
+    },
+    fail(error) {
+      for (const listener of [...listeners.failure]) listener(error);
+    },
+  };
+}
+
+// An in-memory server for one run. Replies are delivered on a microtask unless `syncReplies`.
+function createServer({ syncReplies, onCommand, grid }) {
+  const state = {
+    seq: 0,
+    epoch: 0,
+    holder: null,
+    grid: { ...grid },
+    subscriptions: 0,
+    commands: [],
+    duplicates: [],
+    stale: [],
+    connections: 0,
+  };
+  let current;
+  const seenFocus = new Map();
+  const seenInput = new Map();
+  const live = new Map();
+  const key = (ref) => `${ref.connection.connectionId}/${ref.subscriptionId}`;
+  const holderRef = () => (state.holder ? (live.get(state.holder) ?? null) : null);
+  const holderFact = () => {
+    const ref = holderRef();
+    return ref
+      ? { connection: ref.connection, viewId: ref.viewId, subscriptionId: ref.subscriptionId }
+      : null;
+  };
+  const deliver = (work) => {
+    if (syncReplies) work();
+    else queueMicrotask(work);
+  };
+  const emit = (kind, metadata, payload) =>
+    current?.callbacks.onBinary(frame(kind, metadata, payload));
+  const result = (command, extra) =>
+    emit(2, { type: `${command.type}-result`, requestId: command.requestId, run, ...extra });
+  const error = (command, kind, acceptance = "not-accepted") =>
+    emit(4, {
+      type: "error",
+      requestId: command.requestId,
+      run,
+      commandType: command.type,
+      error: domainError(kind, acceptance),
+    });
+  const event = (body, payload) => {
+    state.seq++;
+    for (const ref of live.values())
+      if (ref.connection.connectionId === current?.connection.connectionId)
+        emit(
+          3,
+          { type: "run-event", subscription: ref, event: { run, seq: state.seq, ...body } },
+          payload,
+        );
+  };
+  const baseline = (ref) => {
+    const baselineId = `baseline-${state.seq}-${ref.subscriptionId}`;
+    const descriptor = {
+      baselineId,
+      run,
+      subscription: ref,
+      profile: PROFILE,
+      encoding: BASELINE_ENCODING,
+      checkpointSeq: state.seq,
+      atSeq: state.seq,
+      captureGeometry: { ...state.grid },
+      currentGeometry: { ...state.grid },
+      control: { epoch: state.epoch, holder: holderFact() },
+      coverage: {
+        normal: {
+          historyLines: 0,
+          includedHistoryLines: 0,
+          trimmedBefore: false,
+          resizeContext: "complete",
+        },
+        alternate: { included: true, resizeContext: "complete" },
+      },
+      vtBytes: 1,
+      tailBytes: 0,
+      chunkCount: 1,
+    };
+    emit(3, { type: "baseline-start", run, descriptor });
+    emit(
+      3,
+      { type: "baseline-chunk", run, subscription: ref, baselineId, ordinal: 0 },
+      new Uint8Array([65]),
+    );
+    emit(3, {
+      type: "baseline-end",
+      run,
+      subscription: ref,
+      baselineId,
+      chunkCount: 1,
+      totalBytes: 1,
+      atSeq: state.seq,
+    });
+  };
+  const holds = (command) =>
+    command.epoch === state.epoch && state.holder === key(command.subscription);
+  // `onCommand` may answer a command itself, or return "drop" to hold it for `process` later.
+  const handle = (entry) => {
+    if (onCommand?.(entry, server) === "drop") return;
+    answer(entry);
+  };
+  const answer = ({ command, payload }) => {
+    switch (command.type) {
+      case "attach": {
+        const ref = {
+          run,
+          connection: current.connection,
+          subscriptionId: `subscription-${++state.subscriptions}`,
+          viewId: command.viewId,
+        };
+        live.set(key(ref), ref);
+        result(command, { subscription: ref, mode: "baseline", atSeq: state.seq });
+        baseline(ref);
+        return;
+      }
+      case "recover":
+        if (!live.has(key(command.subscription))) return error(command, "STALE_CONNECTION");
+        result(command, { subscription: command.subscription, mode: "baseline", atSeq: state.seq });
+        baseline(command.subscription);
+        return;
+      case "detach":
+        live.delete(key(command.subscription));
+        if (state.holder === key(command.subscription)) state.holder = null;
+        result(command, { subscription: command.subscription, detached: true });
+        return;
+      case "focus": {
+        const seen = seenFocus.get(key(command.subscription)) ?? 0;
+        if (command.focusSeq <= seen) state.duplicates.push(command);
+        seenFocus.set(key(command.subscription), command.focusSeq);
+        state.epoch++;
+        state.holder = key(command.subscription);
+        const resizes =
+          command.geometry.cols !== state.grid.cols || command.geometry.rows !== state.grid.rows;
+        const atSeq = state.seq + (resizes ? 2 : 1);
+        result(command, { subscription: command.subscription, epoch: state.epoch, atSeq });
+        if (resizes) {
+          state.grid = { ...command.geometry };
+          event({ type: "resize", geometry: { ...state.grid }, requiresBaseline: true });
+        }
+        event({
+          type: "control",
+          epoch: state.epoch,
+          holder: holderFact(),
+          geometry: { ...state.grid },
+        });
+        return;
+      }
+      case "blur":
+        if (holds(command)) {
+          state.holder = null;
+          result(command, {
+            subscription: command.subscription,
+            epoch: command.epoch,
+            atSeq: state.seq + 1,
+          });
+          event({ type: "control", epoch: state.epoch, holder: null, geometry: { ...state.grid } });
+        } else
+          result(command, {
+            subscription: command.subscription,
+            epoch: command.epoch,
+            atSeq: state.seq,
+          });
+        return;
+      case "resize": {
+        if (!holds(command)) return error(command, "STALE_CONTROL");
+        const resizes =
+          command.geometry.cols !== state.grid.cols || command.geometry.rows !== state.grid.rows;
+        result(command, {
+          subscription: command.subscription,
+          epoch: command.epoch,
+          atSeq: state.seq + (resizes ? 1 : 0),
+        });
+        if (resizes) {
+          state.grid = { ...command.geometry };
+          event({ type: "resize", geometry: { ...state.grid }, requiresBaseline: true });
+        }
+        return;
+      }
+      case "appearance":
+        if (!holds(command)) return error(command, "STALE_CONTROL");
+        result(command, {
+          subscription: command.subscription,
+          epoch: command.epoch,
+          atSeq: state.seq + 1,
+        });
+        event({ type: "appearance", appearance: command.appearance });
+        return;
+      case "input": {
+        if (!holds(command)) {
+          state.stale.push(command);
+          return error(command, "STALE_CONTROL");
+        }
+        const seen = seenInput.get(key(command.subscription)) ?? 0;
+        if (command.inputSeq <= seen) state.duplicates.push(command);
+        seenInput.set(key(command.subscription), command.inputSeq);
+        server.written.push(decoder.decode(payload));
+        result(command, {
+          subscription: command.subscription,
+          epoch: command.epoch,
+          inputSeq: command.inputSeq,
+          status: "written",
+          writtenBytes: payload.byteLength,
+        });
+        return;
+      }
+      case "applied-ack":
+        result(command, { subscription: command.subscription, appliedSeq: command.appliedSeq });
+        return;
+      case "baseline-progress":
+        result(command, {
+          subscription: command.subscription,
+          baselineId: command.baselineId,
+          lastParsedOrdinal: command.lastParsedOrdinal,
+        });
+        return;
+      default:
+        return;
+    }
+  };
+  const server = {
+    state,
+    written: [],
+    // Output from the PTY, ordered after everything before it.
+    output(text) {
+      event({ type: "output" }, encoder.encode(text));
+    },
+    // Another client takes control (a new epoch held by someone else).
+    takeover() {
+      state.epoch++;
+      state.holder = "other";
+      live.set("other", {
+        run,
+        connection: { connectionId: "other-connection", generation: 1 },
+        subscriptionId: "subscription-other",
+        viewId: "other-view",
+      });
+      event({
+        type: "control",
+        epoch: state.epoch,
+        holder: holderFact(),
+        geometry: { ...state.grid },
+      });
+    },
+    // Another client resizes the PTY, forcing this one through a resize-context recovery.
+    foreignResize(grid) {
+      state.grid = { ...grid };
+      event({ type: "resize", geometry: { ...state.grid }, requiresBaseline: true });
+    },
+    gap() {
+      state.seq++;
+      event({ type: "output" }, encoder.encode("gap"));
+    },
+    close() {
+      current?.callbacks.onClose();
+    },
+    open(callbacks) {
+      const connection = { connectionId: `connection-${++state.connections}`, generation: 1 };
+      current = { callbacks, connection };
+      return connection;
+    },
+    receive(entry) {
+      state.commands.push(entry);
+      deliver(() => handle(entry));
+    },
+    // Answers a held command as the server would have.
+    process: answer,
+    // Answers a command with a domain error.
+    fail: error,
+    ofType(type) {
+      return state.commands.filter(({ command }) => command.type === type);
+    },
+  };
+  return server;
+}
+
+export async function reentryHarness({
+  scheduler = manualClock(),
+  syncReplies = false,
+  budgets = {},
+  onCommand,
+  grant = true,
+  grid = geometry,
+} = {}) {
+  const hooks = {};
+  const fired = [];
+  const fire = (name, ...args) => {
+    const hook = hooks[name];
+    if (!hook) return;
+    hooks[name] = undefined;
+    fired.push(name);
+    hook(...args);
+  };
+  const server = createServer({ syncReplies, onCommand, grid });
+  let request = 0;
+  let depth = 0;
+  let maxDepth = 0;
+  const tracked = [];
+  const ports = {
+    ...scheduler,
+    setTimer(delay, callback) {
+      const handle = scheduler.setTimer(delay, callback);
+      return {
+        dispose() {
+          handle.dispose();
+          fire("timerDispose", delay);
+        },
+      };
+    },
+  };
+  const client = createClient({
+    expectedServerId: run.serverId,
+    expectedRelayInstanceId: run.relayInstanceId,
+    buildVersion: "client-build",
+    credentials: () => ({ authorization: "Bearer test", terminalSecret: "a".repeat(43) }),
+    codec: {
+      encode: (value) => encoder.encode(value),
+      decodeFatal: (bytes) => decoder.decode(bytes),
+    },
+    createOpaqueId: () => {
+      const id = `request-${++request}`;
+      fire("requestId", id);
+      return id;
+    },
+    scheduler: ports,
+    http: {
+      post(_request, callback) {
+        queueMicrotask(() =>
+          callback.onResponse({
+            status: 200,
+            headers: {},
+            body: encoder.encode(JSON.stringify(bootstrap(false, undefined, budgets))),
+          }),
+        );
+        return { cancel: () => "not-sent" };
+      },
+    },
+    terminal: {
+      open(callbacks) {
+        const connection = server.open(callbacks);
+        callbacks.onOpen({
+          send(message) {
+            if (typeof message === "string") {
+              callbacks.onText(
+                encoder.encode(JSON.stringify(bootstrap(true, connection, budgets))),
+              );
+              return "handed-off";
+            }
+            depth++;
+            maxDepth = Math.max(maxDepth, depth);
+            try {
+              const entry = decodeCommand(message);
+              fire("send", entry.command);
+              server.receive(entry);
+              return "handed-off";
+            } finally {
+              depth--;
+            }
+          },
+          close() {},
+          dispose() {},
+        });
+        return { cancel: () => "not-sent" };
+      },
+    },
+  });
+  if (!(await client.connect()).ok) throw new Error("fixture connect failed");
+  const mounted = fakeView((name) => fired.push(`view:${name}`), grid);
+  mounted.state.focusSeq = 0;
+  const opened = client.openTerminal({
+    run,
+    viewId: "view-1",
+    view: mounted.terminalView,
+    initialAppearance: DEFAULT_APPEARANCE,
+  });
+  if (!opened.ok) throw new Error("fixture open failed");
+  const controller = opened.value;
+  const attached = controller.attach();
+  await settle();
+  if (!(await attached).ok) throw new Error("fixture attach failed");
+  const harness = {
+    client,
+    controller,
+    mounted,
+    server,
+    scheduler,
+    hooks,
+    fired,
+    get maxSendDepth() {
+      return maxDepth;
+    },
+    track(value) {
+      if (value && typeof value.then === "function") tracked.push(value);
+      return value;
+    },
+    // Lets every pending deadline elapse, so anything waiting must settle.
+    async finish() {
+      for (let step = 0; step < 40; step++) {
+        await settle();
+        scheduler.advance?.(1_000);
+      }
+      await settle();
+      const pending = Symbol("pending");
+      const outcomes = await Promise.all(
+        tracked.map((promise) =>
+          Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve(pending), 50))]),
+        ),
+      );
+      return outcomes.filter((outcome) => outcome === pending).length;
+    },
+  };
+  if (grant) {
+    controller.setInputTarget(true, true);
+    const focused = controller.requestFocus(grid);
+    await settle();
+    if (!(await focused).ok) throw new Error("fixture focus failed");
+    await settle();
+    if (!controller.snapshot().inputReady) throw new Error("fixture grant not usable");
+  }
+  return harness;
+}
