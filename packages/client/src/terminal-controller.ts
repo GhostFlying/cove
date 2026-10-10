@@ -138,6 +138,8 @@ interface HoldGeneration {
   unsettled: number;
   undelivered: number;
   cause: ClientError | DomainError | undefined;
+  // Once closed, inputs accepted after this inputId fail; those accepted up to it keep going.
+  closedAfter: number;
 }
 
 // Bounds the work one drain round does before yielding a host task (4.4.4).
@@ -1444,7 +1446,7 @@ export class RoutedTerminalController implements TerminalController {
   private joinHold(item: InputItem | undefined): void {
     let hold = this.hold;
     if (!hold) {
-      hold = { unsettled: 0, undelivered: 0, cause: undefined };
+      hold = { unsettled: 0, undelivered: 0, cause: undefined, closedAfter: 0 };
       this.hold = hold;
       for (const earlier of this.inputQueue)
         if (!earlier.settled && !earlier.hold) this.addToHold(hold, earlier);
@@ -1461,16 +1463,23 @@ export class RoutedTerminalController implements TerminalController {
   // The prefix-closure decision point (relay-protocol 9.1, option A). Every event that can leave
   // a gap in the held input comes here: an earlier input (barrier or held) that did not complete
   // successfully, a capacity rejection, or a renderer input rejection while a generation is open.
-  // Under option A each of them closes the generation: its inputs not yet handed off fail with
-  // the same cause and are never sent, and new inputs fail with that cause until the generation
-  // ends. The input that failed keeps its own real receipt.
+  // Under option A each of them closes the generation at its own position in acceptance order:
+  // the inputs accepted after that point and not yet handed off fail with the same cause and are
+  // never sent, and new inputs fail with the generation's cause until it ends. Inputs accepted
+  // before the point are not behind the gap and keep going; a registration-time rejection
+  // (capacity, renderer) therefore only closes the generation to later input. If one of those
+  // earlier inputs fails in turn, the point moves back to it. The input that failed keeps its own
+  // real receipt.
   private closeHeldSuffix(cause: ClientError | DomainError, origin?: InputItem): void {
     const hold = this.hold;
-    if (!hold || hold.cause) return;
+    if (!hold) return;
     if (origin && origin.hold !== hold) return;
-    hold.cause = cause;
+    const at = origin ? origin.inputId : this.inputIntentSequence;
+    if (hold.cause && at >= hold.closedAfter) return;
+    hold.cause ??= cause;
+    hold.closedAfter = at;
     for (const item of [...this.inputQueue])
-      if (item.hold === hold && !item.settled && !item.started)
+      if (item.hold === hold && item.inputId > at && !item.settled && !item.started)
         this.settleInput(
           item,
           inputFailure(item.source, item.bytes.byteLength, cause, item.inputId),
@@ -1482,7 +1491,10 @@ export class RoutedTerminalController implements TerminalController {
   // replacement, retirement); an open hold generation closes with the same cause.
   private failUnsentInputs(error: ClientError | DomainError): void {
     const hold = this.hold;
-    if (hold && !hold.cause) hold.cause = error;
+    if (hold) {
+      hold.cause ??= error;
+      hold.closedAfter = 0;
+    }
     for (const item of [...this.inputQueue])
       if (!item.settled && !item.started)
         this.settleInput(
@@ -1605,7 +1617,7 @@ export class RoutedTerminalController implements TerminalController {
   private inputGate(item: InputItem): "go" | "wait" | ClientError | DomainError {
     if (this.phase === "disposed") return localError("disposed");
     if (item.settled || this.fatal) return localError("invalid-state");
-    if (item.hold?.cause) return item.hold.cause;
+    if (item.hold?.cause && item.inputId > item.hold.closedAfter) return item.hold.cause;
     if (
       this.ref !== item.ref ||
       this.host.binding() !== item.binding ||
