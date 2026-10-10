@@ -360,7 +360,7 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 | `terminal-controller.ts`、通知器                                                     | `scheduler.yieldTurn()` 之后的续体（解析排水、通知投递）                                                                                        | 让出期间任意状态变化                                  | 续体核对排水 token 或通知器生命周期                                                                       |
 | `client.ts`、`terminal-controller.ts`                                                | 公开观察者：client `onState`，controller `onState`、`onInputOutcome`                                                                            | 任意                                                  | 只在通知器中投递（4.4.3）                                                                                 |
 | `terminal-controller.ts`                                                             | `completeTerminalView()` 读取的属性 getter；`view.measureGrid()`                                                                                | 任意重入                                              | 先取值后修改；核对谓词                                                                                    |
-| `terminal-controller.ts`                                                             | view 操作：`initialize`、`beginBaseline`、`writeBaselineChunk`、`finishBaseline`、`applyEvent`、`setVisibility`、`setAppearance`、`dispose`     | 同步发出 view 意图；await 期间任意重入                | 调用前已提交；返回后核对谓词                                                                              |
+| `terminal-controller.ts`                                                             | view 操作：`initialize`、`beginBaseline`、`writeBaselineChunk`、`finishBaseline`、`applyEvent`、`setVisibility`、`dispose`                      | 同步发出 view 意图；await 期间任意重入                | 调用前已提交；返回后核对谓词                                                                              |
 | `terminal-controller.ts`                                                             | view 监听注册 `onInputIntent`/`onFocusIntent`/`onFailure` 及返回的 disposer                                                                     | 注册期间同步发出意图；disposer 重入                   | 注册后核对；撤销所有权后 dispose                                                                          |
 | `terminal-controller.ts`（入口）                                                     | view 的 focus/input/failure 意图回调；公开 `sendInput`、`setInputTarget`、`requestFocus`、`blur`                                                | 在 view 操作或外部调用中途同步到达                    | 同步登记，由意图排水执行（4.4.4）                                                                         |
 | `terminal-delivery.ts`                                                               | `owner.socket().send()`                                                                                                                         | 同步送达应答（嵌套 lane `receive`）、同步关闭         | 进入 send 前标记可能交出（4.4.6）                                                                         |
@@ -373,6 +373,9 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 | `xterm-input-origin.ts`                                                              | 替换的 `triggerDataEvent`、原始 data/binary 方法、`onUserInput` 订阅及其 dispose                                                                | 同步发出 input、INPUT_REJECTED 或致命错误             | 按 backend incarnation 核对                                                                               |
 | `xterm-parse-operation.ts`                                                           | `terminal.write(bytes, callback)` 完成回调、解析定时器                                                                                          | 回调晚到或在退役后到达                                | 按解析操作身份核对                                                                                        |
 | `xterm-renderer.ts`                                                                  | `createAddon`、`loadAddon`、`onContextLoss` 订阅、`clearTextureAtlas`、`refresh`、重试的 `setTimer`/`clearTimer`、`disposeAddon`、`onChange`    | context loss 与重试晚到；onChange 观察者重入          | renderer 尝试身份；onChange 走 renderer 通知（4.4.4）                                                     |
+
+view 的 `setAppearance` 只由应用调用（M0 harness 目前不调用），controller 从不调用它；它的重入由 terminal-web 的 view 探针覆盖，
+不在 controller 的重入矩阵中。
 
 按契约纯且不可重入的工具端口：`Utf8Codec.encode`/`decodeFatal`、`Scheduler.nowMs`，以及 `Scheduler.setTimer` 与 `yieldTurn` 的注册本身
 （不得同步回调；`yieldTurn` 必须让出到宿主事件循环的新任务，浏览器为宏任务，不能只让出到微任务）。`transport-ports.ts` 记录这些契约。
@@ -492,7 +495,8 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
     因此 `measureGrid` 回调中同步 `requestFocus` 这类每处理一条就登记一条新条目的重入，每个任务最多推进一个配额，不会饿死定时器与 I/O。
 - 对不遵守契约、在意图回调中同步调用 view 的监听者，view 仍按 4.4.2 的谓词保持自身一致，但不承诺这类调用的结果。
 - renderer 通知：`onRendererChange` 观察者属于应用代码。操作中途 attach/detach、加载失败或 context loss 引起的变化只记下，
-  在最外层操作结束后投递（异步操作要等到 settle）。单一循环按监听者快照投递当前 renderer，中途变回的不通知；
+  在最外层操作结束后投递（异步操作要等到 settle，且排在调用方对该 settle 的直接反应之后，
+  调用方因此先看到操作结果，再看到它引起的 renderer 变化）。单一循环按监听者快照投递当前 renderer，中途变回的不通知；
   一轮中观察者反应引起的新变化在新的任务中投递。dispose 丢弃尚未投递的 renderer 通知。view 不排队 focus、input 或 failure。
 
 **4.4.5 连接层（lane）回调。**
