@@ -82,29 +82,76 @@ function estimateGrid(): Geometry {
   return estimateXtermGrid(terminalHost, viewOptions) ?? { cols: 80, rows: 24 };
 }
 
+// A focus or resize this page sent: in flight until its result arrives, then (if it failed)
+// waiting for a server fact about it.
+interface SentCommand {
+  readonly kind: "focus" | "resize";
+  readonly grid: Geometry;
+  // The controller's recovery count and the authority position when it was sent.
+  readonly recoveries: number;
+  readonly authorityAt: number;
+  settled: boolean;
+}
+
 interface OpenTerminal {
   readonly run: RunRef;
   readonly controller: TerminalController;
   readonly view: XtermTerminalView;
   readonly disposables: { dispose(): void }[];
-  // The last grid this client asked for, by focus or resize, so one size is requested once.
-  requested?: Geometry;
-  // A grid asked for by a focus or resize whose result is unknown: the server may have applied
-  // it, so it stays requested (never sent again) until a fact settles the size, that is until the
-  // applied grid matches it or a later recovery reaches ready.
-  unknownGrid?: Geometry;
-  resizing: boolean;
-  focusing: boolean;
+  // The one rule for this page's focus and resize commands. While one is in flight, or after
+  // one failed (its result may be unknown: the server may have applied it), the page sends no
+  // resize and never retries it. It waits for a server fact: the applied grid is the one sent,
+  // the authority shows a focus took effect, or a recovery the controller started after sending
+  // the command reached ready (the command was on the wire before that recovery's request, so its
+  // baseline includes the command's effect). Then the page decides again from the current facts
+  // and the grid measured now; no slot remembers which grids were asked for. Only a fresh user
+  // gesture takes control (a click; typing goes through the view), and a click replaces a failed
+  // command's wait as a new request, not a resend.
+  command?: SentCommand;
   // The user is operating this terminal here: set by a click or key in it, cleared when the
   // page is hidden or another client takes control.
   operating: boolean;
-  // This client changed the grid itself, so the recovery that follows must not cost it control.
-  retakeAfterRecovery: boolean;
   // The controller's recoverySequence of the last ready this page has acted on. Observers see
   // coalesced snapshots and can miss intermediate phases, so a recovery is recognized by a ready
   // snapshot with a sequence not handled yet, not by watching the phase leave ready.
   handledRecovery: number;
   inputNotice: string;
+}
+
+const sendCommand = (
+  entry: OpenTerminal,
+  snapshot: TerminalSnapshot,
+  kind: SentCommand["kind"],
+  grid: Geometry,
+): SentCommand =>
+  (entry.command = {
+    kind,
+    grid,
+    recoveries: snapshot.recoverySequence,
+    authorityAt: snapshot.appliedAuthority?.atSeq ?? -1,
+    settled: false,
+  });
+
+// Whether no command blocks a new one, ending a failed command's wait once a ready snapshot
+// shows a fact about it. Facts that arrived before the failure was reported count too: a
+// recovery that finished first must not leave the page waiting for one that never comes.
+function commandSettled(entry: OpenTerminal, snapshot: TerminalSnapshot): boolean {
+  const command = entry.command;
+  if (!command) return true;
+  if (!command.settled || snapshot.phase !== "ready") return false;
+  const applied = snapshot.appliedGeometry?.geometry;
+  const authority = snapshot.appliedAuthority;
+  const fact =
+    snapshot.recoverySequence !== command.recoveries ||
+    (applied !== undefined && sameGeometry(applied, command.grid)) ||
+    (command.kind === "focus" &&
+      authority !== null &&
+      authority.atSeq > command.authorityAt &&
+      authority.holder !== null &&
+      authority.holder.subscriptionId === snapshot.subscription?.subscriptionId);
+  if (!fact) return false;
+  delete entry.command;
+  return true;
 }
 
 let info: ConnectionInfo;
@@ -198,40 +245,46 @@ function phaseLabel(snapshot: TerminalSnapshot): string {
 }
 
 // The focused client owns the PTY size. Whenever this client holds control and its view's
-// measured grid differs from the applied one, ask once for that size.
+// measured grid differs from the applied one, ask for that size, unless an earlier focus or
+// resize still blocks it (see OpenTerminal.command).
 function syncSize(entry: OpenTerminal): void {
-  if (current !== entry || entry.resizing || entry.focusing) return;
+  if (current !== entry) return;
   const snapshot = entry.controller.snapshot();
+  if (!commandSettled(entry, snapshot)) return;
   if (snapshot.controlEpoch === undefined || snapshot.phase !== "ready") return;
   const measured = entry.view.measureGrid();
   const applied = snapshot.appliedGeometry?.geometry;
   if (applied && sameGeometry(applied, measured)) return;
-  if (entry.requested && sameGeometry(entry.requested, measured)) return;
-  entry.requested = measured;
-  entry.retakeAfterRecovery = true;
-  entry.resizing = true;
-  const recoveries = snapshot.recoverySequence;
-  void entry.controller.requestResize(measured).then((outcome) => {
-    entry.resizing = false;
-    if (outcome.ok || current !== entry) return;
-    // An unknown result may have resized the PTY: it is shown, and the grid stays requested so
-    // this page never hands the same resize off again before a fact settles the size.
-    if (mayHaveTakenEffect(outcome)) {
-      entry.unknownGrid = measured;
-      entry.inputNotice = `resize ${describeControlFailure(outcome)}`;
-      renderTerminalStatus(entry);
-      return;
-    }
-    // A request refused while a recovery started meanwhile was superseded by it; the retake
-    // after that recovery settles the size. One the server accepted failed in its own right,
-    // even though its own recovery ran meanwhile (its grant was lost or expired before it became
-    // usable), so it is shown like any other failure and a later retry is allowed.
-    if (!outcome.accepted && entry.controller.snapshot().recoverySequence !== recoveries) return;
-    delete entry.requested;
-    entry.retakeAfterRecovery = false;
-    entry.inputNotice = `resize ${describeControlFailure(outcome)}`;
+  const command = sendCommand(entry, snapshot, "resize", measured);
+  void entry.controller
+    .requestResize(measured)
+    .then((outcome) => settleCommand(entry, command, outcome));
+}
+
+// Records a focus or resize result. A success leaves nothing to wait for. A failure, whatever it
+// was, keeps the command until a fact about it arrives (commandSettled), so the page never hands
+// the same request off again on its own.
+function settleCommand(
+  entry: OpenTerminal,
+  command: SentCommand,
+  outcome: TerminalControlOutcome,
+): void {
+  command.settled = true;
+  if (current !== entry) return;
+  if (outcome.ok) {
+    if (entry.command === command) delete entry.command;
+  } else if (
+    // A request refused because a recovery started meanwhile was superseded by it: no failure
+    // to report. One that was accepted, or whose result is unknown, always is.
+    outcome.accepted ||
+    mayHaveTakenEffect(outcome) ||
+    entry.controller.snapshot().recoverySequence === command.recoveries
+  ) {
+    entry.inputNotice = `${command.kind} ${describeControlFailure(outcome)}`;
     renderTerminalStatus(entry);
-  });
+  }
+  // Decide again from the current facts: they may already settle a failed command.
+  syncSize(entry);
 }
 
 function closeCurrent(): void {
@@ -267,10 +320,7 @@ async function openRun(run: RunRef): Promise<void> {
     controller: opened.value,
     view,
     disposables: [],
-    resizing: false,
-    focusing: false,
     operating: false,
-    retakeAfterRecovery: false,
     handledRecovery: 0,
     inputNotice: "",
   };
@@ -280,36 +330,18 @@ async function openRun(run: RunRef): Promise<void> {
     entry.controller.onState((snapshot) => {
       renderTerminalStatus(entry);
       const holder = snapshot.appliedAuthority?.holder;
-      if (holder && holder.subscriptionId !== snapshot.subscription?.subscriptionId) {
+      if (holder && holder.subscriptionId !== snapshot.subscription?.subscriptionId)
         entry.operating = false;
-        entry.retakeAfterRecovery = false;
-      }
       const enteredReady =
         snapshot.phase === "ready" && snapshot.recoverySequence !== entry.handledRecovery;
       if (enteredReady) entry.handledRecovery = snapshot.recoverySequence;
-      // A fact settles an unknown request: its grid is applied, or a recovery reached ready with
-      // the server's current grid. Only a grid that is not applied may then be requested again.
-      const applied = snapshot.appliedGeometry?.geometry;
-      const unknownGrid = entry.unknownGrid;
-      if (unknownGrid && (enteredReady || (applied && sameGeometry(applied, unknownGrid)))) {
-        delete entry.unknownGrid;
-        if (
-          (!applied || !sameGeometry(applied, unknownGrid)) &&
-          entry.requested &&
-          sameGeometry(entry.requested, unknownGrid)
-        )
-          delete entry.requested;
-      }
-      // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM
-      // focus and this client's control. Restore DOM focus while the user operates here, and
-      // control only after this client's own resize, never after another client's: two pages
-      // retaking control after each other's resizes would trade it back and forth forever.
+      // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM focus.
+      // Restore DOM focus while the user operates here, so the next key reaches the view. That
+      // takes no control: only a deliberate input or click does (a grant this client held or
+      // was awaiting survives its own resize recovery, relay-protocol 9.1). Never retaking
+      // control on its own also keeps two pages from trading it back and forth.
       if (enteredReady && entry.operating)
         terminalHost.querySelector<HTMLTextAreaElement>("textarea")?.focus();
-      if (enteredReady && entry.retakeAfterRecovery) {
-        entry.retakeAfterRecovery = false;
-        takeControl(entry);
-      }
       syncSize(entry);
     }),
     entry.controller.onInputOutcome((notice) => {
@@ -346,9 +378,12 @@ async function openRun(run: RunRef): Promise<void> {
 }
 
 // Take control with this view's measured grid so the PTY follows the operating client. The
-// focus carries the grid, so no separate resize is needed for it.
+// focus carries the grid, so no separate resize is needed for it. Called only for a user's
+// click: it is a new request, so it replaces the wait of a command that failed earlier, but not
+// one still in flight.
 function takeControl(entry: OpenTerminal): void {
-  if (current !== entry || entry.focusing || document.visibilityState !== "visible") return;
+  if (current !== entry || document.visibilityState !== "visible") return;
+  if (entry.command && !entry.command.settled) return;
   const snapshot = entry.controller.snapshot();
   if (
     snapshot.phase !== "ready" ||
@@ -357,38 +392,11 @@ function takeControl(entry: OpenTerminal): void {
   )
     return;
   const measured = entry.view.measureGrid();
-  const applied = snapshot.appliedGeometry?.geometry;
-  const resizes = !applied || !sameGeometry(applied, measured);
-  if (resizes) entry.retakeAfterRecovery = true;
-  entry.requested = measured;
-  entry.focusing = true;
-  const recoveries = snapshot.recoverySequence;
+  const command = sendCommand(entry, snapshot, "focus", measured);
   entry.controller.setInputTarget(true, true);
-  void entry.controller.requestFocus(measured).then((outcome) => {
-    entry.focusing = false;
-    if (current !== entry) return;
-    // A focus whose result is unknown may hold control on the server: it is shown, not called
-    // refused, and its grid stays requested until a fact settles it (see unknownGrid).
-    if (!outcome.ok && mayHaveTakenEffect(outcome)) {
-      entry.unknownGrid = measured;
-      entry.inputNotice = `focus ${describeControlFailure(outcome)}`;
-      renderTerminalStatus(entry);
-    }
-    // A focus refused while a recovery started meanwhile was overtaken by it; the retake after
-    // that recovery then settles it. A focus the server accepted that failed afterwards (e.g.
-    // another client took control during the recovery the focus itself caused) is a real
-    // failure: it is reported and forgotten, so this page does not take control back.
-    else if (
-      !outcome.ok &&
-      (outcome.accepted || entry.controller.snapshot().recoverySequence === recoveries)
-    ) {
-      delete entry.requested;
-      if (resizes) entry.retakeAfterRecovery = false;
-      entry.inputNotice = `focus ${describeControlFailure(outcome)}`;
-      renderTerminalStatus(entry);
-    }
-    syncSize(entry);
-  });
+  void entry.controller
+    .requestFocus(measured)
+    .then((outcome) => settleCommand(entry, command, outcome));
 }
 
 // Whether a failed control command without `accepted` may still have taken effect: its error
@@ -540,13 +548,10 @@ function start(): void {
   document.addEventListener("visibilitychange", () => {
     const entry = current;
     if (!entry || entry.controller.snapshot().phase === "disposed") return;
-    // Applies in every phase, including mid-recovery: a hidden page releases control and
-    // drops any pending retake; becoming visible again only re-enables taking control.
+    // Applies in every phase, including mid-recovery: a hidden page releases control; becoming
+    // visible again only re-enables taking control.
     const visible = document.visibilityState === "visible";
-    if (!visible) {
-      entry.operating = false;
-      entry.retakeAfterRecovery = false;
-    }
+    if (!visible) entry.operating = false;
     entry.controller.setInputTarget(visible, false);
   });
   setInterval(() => void refreshRuns(), LIST_REFRESH_MS);
