@@ -1570,7 +1570,10 @@ export class RoutedTerminalController implements TerminalController {
     if (origin && origin.hold !== hold) return;
     const at = origin ? origin.inputId : this.inputIntentSequence;
     if (hold.cause && at >= hold.closedAfter) return;
-    hold.cause ??= cause;
+    // The generation is now closed at an earlier point than before (or for the first time), so
+    // this is the gap every later input is behind: new input fails with its cause, not with the
+    // cause of the later point it replaces.
+    hold.cause = cause;
     hold.closedAfter = at;
     for (const item of [...this.inputQueue])
       if (item.hold === hold && item.inputId > at && !item.settled && !item.started)
@@ -1587,7 +1590,9 @@ export class RoutedTerminalController implements TerminalController {
   private failHeldInputs(cause: ClientError | DomainError): void {
     const hold = this.hold;
     if (!hold) return;
-    hold.cause ??= cause;
+    // Closing from the start moves any later closure point back, and its cause with it; a
+    // generation already closed from the start keeps its first cause.
+    if (!hold.cause || hold.closedAfter > 0) hold.cause = cause;
     hold.closedAfter = 0;
     for (const item of [...this.inputQueue])
       if (item.hold === hold && !item.settled && !item.started)
@@ -1603,7 +1608,7 @@ export class RoutedTerminalController implements TerminalController {
   private failUnsentInputs(error: ClientError | DomainError): void {
     const hold = this.hold;
     if (hold) {
-      hold.cause ??= error;
+      if (!hold.cause || hold.closedAfter > 0) hold.cause = error;
       hold.closedAfter = 0;
     }
     for (const item of [...this.inputQueue])
