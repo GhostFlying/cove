@@ -783,25 +783,36 @@ const fixture = {
     container.replaceChildren();
     const candidate = createXtermTerminalView(container);
     let changes = 0;
+    // The order in which the initialize promise settles and the listener runs: the listener is
+    // application code and must not run before the asynchronous operation has settled.
+    const order: string[] = [];
     candidate.onRendererChange(() => {
       changes++;
+      order.push("listener");
       candidate.dispose();
     });
     let error: string | undefined;
     try {
-      await candidate.initialize({
+      const initializing = candidate.initialize({
         profile: "pragmatic-logical-grid-v1",
         encoding: "vt-checkpoint-tail-v1",
         geometry: { cols: 40, rows: 10 },
         appearance,
         viewGeneration: ++generation,
       });
+      void initializing.then(
+        () => order.push("settled"),
+        () => order.push("settled"),
+      );
+      await initializing;
     } catch (caught) {
       error = (caught as DomainError).kind ?? String(caught);
     }
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const result = {
       webgl2: offersWebgl2,
       changes,
+      order,
       error,
       ownedRoots: container.querySelectorAll("[data-cove-terminal-view]").length,
     };
