@@ -41,6 +41,28 @@ async function installed(peer) {
   );
   return opened;
 }
+// The worker baseline round trip is gated by wall-clock timers inside the
+// worker's terminal engine, so the number of setImmediate turns it spans
+// depends on how fast each turn runs (usually 3, observed above 16). Wait for
+// the observable event itself, bounded by a generous wall-clock deadline, and
+// dump the supplied diagnostics if it never happens.
+async function untilObserved(predicate, label, diagnostics, deadlineMs = 10_000) {
+  const deadline = performance.now() + deadlineMs;
+  let turnCount = 0;
+  while (!predicate()) {
+    if (performance.now() >= deadline)
+      assert.fail(
+        `NOT_OBSERVED within ${deadlineMs}ms (${turnCount} turns): ${label}\n` +
+          JSON.stringify(diagnostics(), null, 2),
+      );
+    await turns(1);
+    turnCount++;
+  }
+}
+const frameName = (value) =>
+  value.metadata.type === "terminal-event"
+    ? value.metadata.terminal.type
+    : `${value.metadata.type}${value.metadata.commandType ? `:${value.metadata.commandType}` : ""}`;
 function orderedMarker(trace, requestId) {
   const marker = trace.findIndex(
     (value) => value.metadata.type === "result" && value.metadata.requestId === requestId,
@@ -691,7 +713,33 @@ describe("W2 current server and public client", () => {
           const { controller, controlled } = await peer.terminal();
           rig.setMutation(mutation);
           const pending = controller.attach();
-          await turns(16);
+          // Positive events that must precede the negative "no begin" check:
+          // the server session has consumed the whole mutated baseline, and for
+          // the reordered marker it has also consumed the late marker and the
+          // client has processed the resulting attach-result. Only after that
+          // would a wrongly accepted baseline have reached the controlled view.
+          await untilObserved(
+            () =>
+              rig.received.some((value) => frameName(value) === "baseline-end") &&
+              (mutation === "marker-removed" ||
+                (rig.received.some((value) => frameName(value) === "result:subscribe") &&
+                  peer.downlink.some((value) => value.metadata.type === "attach-result") &&
+                  controller.snapshot().phase !== "await-marker")),
+            `server consumed mutated baseline for ${mutation}`,
+            () => ({
+              mutation,
+              producer: rig.endpoint.frames.map(frameName),
+              received: rig.received.map(frameName),
+              uplink: peer.uplink.map((value) => value.metadata.type),
+              downlink: peer.downlink.map((value) => value.metadata.type),
+              facts: controlled.facts.map((value) => value.type),
+              controller: controller.snapshot(),
+              session: rig.session.snapshot(),
+            }),
+          );
+          // Forwarding from the server session to the client no longer waits on
+          // the worker, so a short fixed settle covers it.
+          await turns(4);
           assert(
             rig.endpoint.frames.some(
               (value) =>
