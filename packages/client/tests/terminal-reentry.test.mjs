@@ -1116,3 +1116,66 @@ describe("implementation review regressions (#86 round 1)", () => {
     expect(outcomes).toHaveLength(4);
   });
 });
+
+describe("implementation review regressions (#86 round 2)", () => {
+  // Arms the ID supplier hook for the first request ID allocated from `method`'s frames, letting
+  // the others through, and runs `action` there.
+  const atRequestIdFrom = (h, method, action) => {
+    const arm = () => {
+      h.hooks.requestId = () => {
+        if (new Error().stack?.includes(`.${method} `)) action();
+        else arm();
+      };
+    };
+    arm();
+  };
+
+  test("a granted control whose deadline passes inside its ID supplier ends as timeout, unsent", async () => {
+    for (const kind of ["resize", "appearance"]) {
+      const h = await reentryHarness();
+      const before = h.server.ofType(kind).length;
+      atRequestIdFrom(h, "sendGrantedControl", () => h.scheduler.advance(20_000));
+      const pending =
+        kind === "resize"
+          ? h.controller.requestResize(larger)
+          : h.controller.updateAppearance({ ...DEFAULT_APPEARANCE, foreground: "1111/1111/1111" });
+      await h.finish();
+      expect(h.fired).toContain("requestId");
+      expect({ kind, outcome: await outcomeOf(pending) }).toEqual({ kind, outcome: "timeout" });
+      expect(h.server.ofType(kind).length).toBe(before);
+    }
+  });
+
+  test("a stale focus release whose deadline passes inside its ID supplier sends nothing", async () => {
+    let heldFocus;
+    const h = await withHeldRecovery({
+      grant: false,
+      onCommand: (entry) => {
+        if (entry.command.type === "focus" && !heldFocus) {
+          heldFocus = entry;
+          return "drop";
+        }
+        return undefined;
+      },
+    });
+    h.controller.setInputTarget(true, true);
+    const focused = h.controller.requestFocus(larger);
+    await settle();
+    await h.startRecovery("resize");
+    h.controller.blur();
+    h.server.process(heldFocus);
+    await settle();
+    const stale = h.server.state.epoch;
+    let advanced = false;
+    atRequestIdFrom(h, "releaseStaleFocus", () => {
+      advanced = true;
+      h.scheduler.advance(20_000);
+    });
+    await h.release();
+    await h.finish();
+    expect(advanced).toBe(true);
+    expect(await outcomeOf(focused)).toBe("invalid-state");
+    // The release expired before its handoff, so the stale epoch is never blurred.
+    expect(h.server.ofType("blur").map(({ command }) => command.epoch)).not.toContain(stale);
+  });
+});
