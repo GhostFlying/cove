@@ -666,13 +666,15 @@ describe("public terminal subscription and recovery", () => {
     const pending = controller.attach();
     baseline(peer, subscription("view-1"));
     expect((await pending).ok).toBe(true);
+    // The attach bound the failure listener when it began and again at its baseline.
+    const disposalsBefore = disposals;
     retireOnDispose = true;
     const recovered = await controller.recover("expired");
     expect(recovered.ok).toBe(false);
     expect(controller.snapshot().phase).toBe("disposed");
     expect(peer.commands.filter((command) => command.type === "recover")).toEqual([]);
     expect(rendered.facts.filter((fact) => fact[0] === "initialize")).toHaveLength(1);
-    expect(disposals).toBe(1);
+    expect(disposals - disposalsBefore).toBe(1);
     client.dispose();
   });
   test("consumes rejected and hostile observer thenables without waiting for them", async () => {
