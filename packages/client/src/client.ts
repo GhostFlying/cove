@@ -701,6 +701,14 @@ class CoveClient implements Client {
         this.snapshot().status === "disposed" ? "disposed" : "invalid-state",
       );
     }
+    // The ID supplier and codec may also have admitted RPCs of their own on this connection, so
+    // capacity is checked again right before the entry is installed, not only on entry.
+    if (
+      this.pendingRpcs.size >= Math.min(binding.effectiveBudgets.rpcInflight, M0_LIMITS.rpcInflight)
+    ) {
+      if (operation) this.activeOperationIntents.delete(operation.operationId);
+      return this.localCallFailure("capacity");
+    }
     return this.dispatchRpc(prepared, body, binding, operation, requestSequence);
   }
 

@@ -649,6 +649,32 @@ describe("bounded typed RPC", () => {
     expect(context.client.snapshot().pendingRpcCount).toBe(0);
   });
 
+  test("rechecks RPC capacity after an ID supplier that admits RPCs of its own", async () => {
+    let client;
+    let nested = false;
+    let armed = false;
+    let nextId = 0;
+    const context = harness({
+      options: {
+        // The outer call's ID supplier fills every RPC slot before the outer entry is installed.
+        createOpaqueId: () => {
+          if (armed && !nested) {
+            nested = true;
+            for (let index = 0; index < 32; index++) client.call("terminal.list", { limit: 1 });
+          }
+          return `request-${++nextId}`;
+        },
+      },
+    });
+    client = context.client;
+    await connectHarness(context);
+    armed = true;
+    const outer = client.call("terminal.list", { limit: 1 });
+    expect(nested).toBe(true);
+    expect(client.snapshot()).toMatchObject({ pendingRpcCount: 32, peakPendingRpcCount: 32 });
+    expect(await outer).toMatchObject({ ok: false, error: { reason: "capacity" } });
+  });
+
   test("treats create disposed inside post before its handle returns as unknown", async () => {
     const context = harness();
     await connectHarness(context);

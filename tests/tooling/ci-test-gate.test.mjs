@@ -208,7 +208,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
 test("client public-contract suites reject missing and short discovery", async () => {
   const files = await readVitestOwnedTestFiles();
   for (const [name, minimumTests] of [
-    ["connection-rpc", 60],
+    ["connection-rpc", 61],
     ["compiled-client", 4],
     ["terminal-recovery", 46],
     ["terminal-state", 11],
