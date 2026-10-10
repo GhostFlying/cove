@@ -128,6 +128,8 @@ export function fakeView(fired, grid = geometry) {
     finishBaseline: async () => fire("finishBaseline"),
     applyEvent: async (event) => {
       state.applied.push(event.type);
+      // A test can hold the parse of an event by setting a promise here.
+      if (state.applyGate) await state.applyGate;
       fire("applyEvent");
     },
     measureGrid: () => {
