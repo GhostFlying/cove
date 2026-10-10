@@ -477,7 +477,8 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
   - unfocus（含隐藏引起的 blur）：立即记录目标丢失、推进目标版本、以锁存的原因关闭当前暂存世代，并记下要释放的 epoch。
   - fatal failure：按逻辑 view 对象（而非 backend incarnation）归属，立即锁存致命失败；backend 已退役也不丢弃。
     致命失败对该逻辑 view 与订阅是终局：之后登记的 focus、input 都立即被拒，不进入日志；只有显式的后继 view（`replaceView`）或新订阅
-    （attach）才清除它。
+    （attach）才清除它。attach 结果尚未给出订阅身份时到达的致命失败同样立即结束该 attach：此时无法按身份 detach，
+    按未识别 attach 的规则退役连接，而不是等到 attach 期限。
   - 意图的 `viewGeneration` 早于当前代时，输入以 `invalid-state` 拒绝，focus 被忽略。
 - 关闭先于工作：已记录的目标丢失与致命失败在登记时就关闭输入许可；输入谓词检查二者，`beforeSend` 在交出时也检查。
   目标丢失只能由之后登记的 focus 重新打开（新的 focus 登记开始新的目标版本），排在它之前的 focus 工作绝不能重新打开；致命失败不能被 focus 重新打开。
@@ -519,7 +520,8 @@ lane `send` 在登记 pending 之前编码帧；lane `receive` 解码帧。
 **4.4.7 结果约定。**
 
 - 只有证明从未交出的工作才以本地错误结束：被取代为 `invalid-state`，dispose 为 `disposed`，到期为 `timeout`。不新增公开错误原因。
-- 已交出的命令保留真实结果：成功、server 错误、`RESULT_UNKNOWN`、已写前缀与 `unknownBytes`。controller 总是完成内部对账
+- 已交出的命令保留真实结果：成功、server 错误、`RESULT_UNKNOWN`、已写前缀与 `unknownBytes`。任何种类的命令（输入、focus、blur、resize、
+  appearance）进入 `socket.send()` 后连接关闭或应答期限到期，都以 `RESULT_UNKNOWN`（acceptance 为 unknown）结束，不报告为本地错误。controller 总是完成内部对账
   （例如以结果的 epoch 释放过期 grant、抬高 fence），绝不把它转为重试候选。
 - focus 与 resize 的结果分两个阶段。第一阶段是命令结算：未被接受时按上两条报告。第二阶段是接受后的就绪：网格变化使 grant 要等恢复后
   才可用时，等待 grant 可用。就绪失败时返回 `{ ok: false, error, accepted: { epoch, atSeq } }`，其中 `error` 为 `invalid-state`（grant 经裁定丢失或被取代）、
