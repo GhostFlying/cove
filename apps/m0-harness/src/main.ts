@@ -224,8 +224,15 @@ function renderTerminalStatus(entry: OpenTerminal): void {
       signal ? `exited (signal ${signal})` : `exited (code ${exitCode === null ? "?" : exitCode})`,
     );
   }
-  if (entry.inputNotice) parts.push(entry.inputNotice);
-  terminalStatus.textContent = parts.join(" · ");
+  // The notice (an input or control failure, such as a result unknown) has its own line, so the
+  // state fields never push it out of view; a notice too long for the line is in its tooltip.
+  const state = document.createElement("div");
+  state.textContent = parts.join(" · ");
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = entry.inputNotice;
+  notice.title = entry.inputNotice;
+  terminalStatus.replaceChildren(state, notice);
   terminalStatus.dataset.phase = snapshot.phase;
   terminalStatus.dataset.execution = snapshot.execution.status;
   terminalStatus.dataset.renderer = entry.view.renderer;
