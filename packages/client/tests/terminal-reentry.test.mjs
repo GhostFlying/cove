@@ -1066,4 +1066,53 @@ describe("implementation review regressions (#86 round 1)", () => {
     );
     expect(h.server.state.holder).toBe(null);
   });
+
+  test("input typed during a reattach is held and sent after it, never carried over", async () => {
+    let armed = false;
+    let heldAttach;
+    const h = await reentryHarness({
+      onCommand: (entry) => {
+        if (armed && entry.command.type === "attach" && !heldAttach) {
+          heldAttach = entry;
+          return "drop";
+        }
+        return undefined;
+      },
+    });
+    h.inputs = [];
+    const notices = noticesOf(h);
+    // An input accepted just before the connection is lost fails with it; it is never replayed.
+    type(h, "before-loss");
+    h.server.close();
+    await settle();
+    expect(await h.client.reconnect()).toMatchObject({ ok: true });
+    armed = true;
+    h.controller.setInputTarget(true, true);
+    const attached = h.controller.attach();
+    await settle();
+    expect(heldAttach).toBeDefined();
+    // While the attach is unanswered the user clicks and types through the view.
+    h.mounted.focus(true);
+    h.mounted.input("during-attach");
+    type(h, "public");
+    await settle();
+    expect(h.server.written).not.toContain("during-attach");
+    // The attach result arrives; the view is still at its previous generation while it
+    // initializes for the new baseline, and input typed then is held as well.
+    let release;
+    h.mounted.state.initializeGate = new Promise((resolve) => (release = resolve));
+    h.server.process(heldAttach);
+    await settle();
+    h.mounted.input("while-initializing");
+    h.mounted.state.initializeGate = undefined;
+    release();
+    await h.finish();
+    expect(await outcomeOf(attached)).toBe("ok");
+    // The input lost with the old connection is reported unsent and never written on the new one.
+    expect(await h.inputs[0].outcome).toMatchObject({ ok: false, value: { notSentBytes: 11 } });
+    expect(h.server.written).toEqual(["during-attach", "public", "while-initializing"]);
+    const outcomes = notices.filter((notice) => notice.kind === "input").map((n) => n.outcome);
+    expect(outcomes.slice(1).every((outcome) => outcome.ok)).toBe(true);
+    expect(outcomes).toHaveLength(4);
+  });
 });

@@ -73,6 +73,9 @@ interface Operation {
   readonly resumeGeometry?: TerminalAppliedGeometry;
   markerAttempted: boolean;
   attachDisposition?: "not-accepted" | "accepted" | "unknown";
+  // The view generation this operation's baseline replaced. The view keeps reporting it until its
+  // initialize for the new baseline completes.
+  priorGeneration?: number;
 }
 
 // A registered focus request (terminal-architecture 4.4.4). Its identity is fixed at
@@ -122,7 +125,11 @@ interface InputItem {
   readonly inputId: number;
   readonly source: TerminalInputSource;
   readonly bytes: Uint8Array;
-  readonly ref: SubscriptionRef;
+  // Undefined for input accepted while an attach is in progress: it joins the subscription that
+  // attach produces (and only that one) when the attach result names it.
+  ref: SubscriptionRef | undefined;
+  // The operation token current at acceptance.
+  readonly token: number;
   readonly binding: NegotiatedConnection;
   readonly targetVersion: number;
   readonly deadlineAtMs: number;
@@ -748,7 +755,7 @@ export class RoutedTerminalController implements TerminalController {
     if (
       this.retiring ||
       this.fatal ||
-      !this.ref ||
+      (!this.ref && !this.recovering()) ||
       !binding ||
       !this.control.wantsFocus ||
       (this.phase !== "ready" && !this.recovering())
@@ -1128,8 +1135,38 @@ export class RoutedTerminalController implements TerminalController {
     return granted;
   }
 
+  // A recovery or an attach (including a reattach after a connection loss) is in progress. Both
+  // are recovery in relay-protocol 9.1: input accepted meanwhile is held and a focus is deferred
+  // until ready. Input is never carried over from a previous connection: losing it failed every
+  // input not yet handed off.
   private recovering(): boolean {
-    return this.phase !== "ready" && this.operation?.kind === "recover";
+    return (
+      this.phase !== "ready" &&
+      (this.operation?.kind === "recover" || this.operation?.kind === "attach")
+    );
+  }
+
+  // Whether a listener bound for (`ref`, `operation`) still serves the current subscription. One
+  // bound when an attach began (no subscription yet) keeps serving once that attach's result
+  // names the subscription, until the baseline rebinds the listeners.
+  private sameIntake(ref: SubscriptionRef | undefined, operation: Operation | undefined): boolean {
+    return (
+      ref === this.ref ||
+      (ref === undefined && operation?.kind === "attach" && operation === this.operation)
+    );
+  }
+
+  // An intent's view generation is current, or is the one an operation's baseline is replacing
+  // while the view has not finished initializing for it: what the user does meanwhile is held
+  // like any recovery-time intent rather than rejected.
+  private intentGenerationCurrent(generation: unknown): boolean {
+    const operation = this.operation;
+    return (
+      generation === this.viewGeneration ||
+      (this.phase !== "ready" &&
+        operation?.priorGeneration !== undefined &&
+        generation === operation.priorGeneration)
+    );
   }
 
   private recoveryBudget(binding: NegotiatedConnection | undefined): number {
@@ -1196,12 +1233,16 @@ export class RoutedTerminalController implements TerminalController {
     const ref = this.ref;
     const binding = this.host.binding();
     const view = this.view;
-    if (!ref || !binding) return Promise.resolve("invalid-state");
+    // During an attach there is no subscription yet: the wait is for that attach (its token), and
+    // the subscription its result names is the one the focus then goes to.
+    const token = this.token;
+    if (!binding || (!ref && this.operation?.kind !== "attach"))
+      return Promise.resolve("invalid-state");
     return this.waitUntil<"ready" | "invalid-state" | "timeout" | "disposed">(
       () => {
         if (this.phase === "disposed") return "disposed";
         if (
-          this.ref !== ref ||
+          (ref ? this.ref !== ref : this.token !== token) ||
           this.view !== view ||
           this.host.binding() !== binding ||
           !current() ||
@@ -1419,7 +1460,8 @@ export class RoutedTerminalController implements TerminalController {
     if (hold?.cause) return reject(hold.cause);
     const ref = this.ref;
     const binding = this.host.binding();
-    if (!ref || !binding || !this.control.wantsFocus) return reject(localError("invalid-state"));
+    if ((!ref && !this.recovering()) || !binding || !this.control.wantsFocus)
+      return reject(localError("invalid-state"));
     if (
       !this.recovering() &&
       (this.phase !== "ready" ||
@@ -1457,6 +1499,7 @@ export class RoutedTerminalController implements TerminalController {
       source: source as TerminalInputSource,
       bytes: owned,
       ref,
+      token: this.token,
       binding,
       targetVersion: this.control.targetVersion,
       deadlineAtMs: this.host.scheduler.nowMs() + this.recoveryBudget(binding),
@@ -1482,8 +1525,9 @@ export class RoutedTerminalController implements TerminalController {
     return promise;
   }
 
-  private inputSendableNow(ref: SubscriptionRef): boolean {
+  private inputSendableNow(ref: SubscriptionRef | undefined): boolean {
     return (
+      !!ref &&
       this.phase === "ready" &&
       !this.recovering() &&
       this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq) !== null &&
@@ -1699,6 +1743,8 @@ export class RoutedTerminalController implements TerminalController {
     if (item.started && (recovering || this.phase !== "ready")) return localError("invalid-state");
     if (this.host.scheduler.nowMs() >= item.deadlineAtMs) return localError("timeout");
     if (recovering) return "wait";
+    const ref = item.ref;
+    if (!ref) return localError("invalid-state");
     // Held input follows the user's current focus request until that focus is handed off or
     // ends: an older carried grant could otherwise send it just before the focus fails, and the
     // failure of the current relevant focus must fail the held input (relay-protocol 9.1).
@@ -1706,8 +1752,8 @@ export class RoutedTerminalController implements TerminalController {
     if (item.hold && !item.started && focus && !focus.handedOff) return "wait";
     if (this.phase !== "ready") return localError("invalid-state");
     const generation = this.viewGeneration;
-    const epoch = this.control.currentEpoch(item.ref, generation, this.appliedSeq);
-    if (epoch !== null && this.grantUsable(item.ref, generation)) {
+    const epoch = this.control.currentEpoch(ref, generation, this.appliedSeq);
+    if (epoch !== null && this.grantUsable(ref, generation)) {
       if (item.started && item.epoch !== epoch) return localError("invalid-state");
       return "go";
     }
@@ -1740,6 +1786,10 @@ export class RoutedTerminalController implements TerminalController {
         return;
       }
       const ref = item.ref;
+      if (!ref) {
+        this.failItem(item, localError("invalid-state"));
+        return;
+      }
       const epoch = this.control.currentEpoch(ref, this.viewGeneration, this.appliedSeq)!;
       const requestId = this.host.lane.nextRequestId(this.host.generation());
       // The ID supplier may reenter; the gate is evaluated again before anything is allocated.
@@ -2166,17 +2216,17 @@ export class RoutedTerminalController implements TerminalController {
     // handed off forms the barrier the held input must follow (relay-protocol 9.1).
     if (kind === "recover" && this.inputQueue.some((item) => !item.settled))
       this.joinHold(undefined);
-    if (kind === "recover") {
-      try {
-        if (!this.bindFailure(this.viewGeneration, token))
-          this.fail(localError("invalid-state"), token);
-        else if (!this.bindFocus(this.viewGeneration, token))
-          this.fail(localError("invalid-state"), token);
-        else if (!this.bindInput(this.viewGeneration, token))
-          this.fail(localError("invalid-state"), token);
-      } catch {
+    // Focus and input intake is bound from the moment the operation begins, for an attach too, so
+    // what the user does before the baseline arrives is held rather than dropped.
+    try {
+      if (!this.bindFailure(this.viewGeneration, token))
         this.fail(localError("invalid-state"), token);
-      }
+      else if (!this.bindFocus(this.viewGeneration, token))
+        this.fail(localError("invalid-state"), token);
+      else if (!this.bindInput(this.viewGeneration, token))
+        this.fail(localError("invalid-state"), token);
+    } catch {
+      this.fail(localError("invalid-state"), token);
     }
     if (operation.settled) return operation;
     this.publish();
@@ -2237,6 +2287,10 @@ export class RoutedTerminalController implements TerminalController {
           return;
         }
         this.ref = canonicalRef;
+        // Input held since this attach began joins the subscription it produced. Inline
+        // bookkeeping only; nothing is sent from here.
+        for (const item of this.inputQueue)
+          if (!item.ref && !item.settled && item.token === operation.token) item.ref = canonicalRef;
       }
       operation.mode = result.mode;
       operation.atSeq = result.atSeq;
@@ -2337,6 +2391,7 @@ export class RoutedTerminalController implements TerminalController {
       this.baselineBytes = 0;
       const generation = nextCounter(this.viewGeneration);
       if (generation === null) throw new Error("view generation");
+      operation.priorGeneration = this.viewGeneration;
       this.viewGeneration = generation;
       const view = this.view;
       const ref = this.ref;
@@ -2824,7 +2879,7 @@ export class RoutedTerminalController implements TerminalController {
         generation !== this.viewGeneration ||
         token !== this.token ||
         view !== this.view ||
-        ref !== this.ref ||
+        !this.sameIntake(ref, operation) ||
         this.phase === "disposed"
       )
         return;
@@ -2836,7 +2891,7 @@ export class RoutedTerminalController implements TerminalController {
       } catch {
         /* Rejected as malformed below. */
       }
-      if (intentGeneration !== this.viewGeneration) {
+      if (!this.intentGenerationCurrent(intentGeneration)) {
         const total = bytes instanceof Uint8Array ? bytes.byteLength : 0;
         const error = localError("invalid-state");
         this.publishRejection(
@@ -2878,14 +2933,16 @@ export class RoutedTerminalController implements TerminalController {
         generation !== this.viewGeneration ||
         token !== this.token ||
         view !== this.view ||
-        ref !== this.ref ||
+        !this.sameIntake(ref, operation) ||
         this.phase === "disposed" ||
-        intent.viewGeneration !== this.viewGeneration ||
+        !this.intentGenerationCurrent(intent.viewGeneration) ||
         !Number.isSafeInteger(intent.focusSeq) ||
         intent.focusSeq < 1
       )
         return;
-      const current = this.viewGeneration;
+      // focusSeq counts per view generation; intents of the generation being replaced keep
+      // their own count.
+      const current = intent.viewGeneration;
       if (this.localFocusGeneration !== current) {
         this.localFocusGeneration = current;
         this.localFocusSequence = 0;
@@ -2931,7 +2988,7 @@ export class RoutedTerminalController implements TerminalController {
     const listener = view.onFailure((error) => {
       // Attributed to the logical view, not to a backend incarnation or view generation: a
       // failure reported by a retired backend of this view is not dropped (4.4.4).
-      if (view !== this.view || ref !== this.ref) return;
+      if (view !== this.view || !this.sameIntake(ref, operation)) return;
       if (error.kind === "INPUT_REJECTED") this.rejectRendererInput(error);
       else this.registerFatal(error, view);
     });

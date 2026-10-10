@@ -146,6 +146,8 @@ export function fakeView(fired, grid = geometry) {
   };
   const terminalView = {
     initialize: async (input) => {
+      // A test can hold the view at its previous generation by setting a promise here.
+      if (state.initializeGate) await state.initializeGate;
       state.generation = input.viewGeneration;
       fire("initialize");
     },
