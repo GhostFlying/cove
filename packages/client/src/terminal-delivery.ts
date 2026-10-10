@@ -571,14 +571,20 @@ export class TerminalLane {
     this.focusSequences.clear();
     this.inputSequences.clear();
     this.lastSentRoute = undefined;
+    // A command that entered send() may have reached the server whatever kind it is, so closing
+    // reports it as RESULT_UNKNOWN, as the deadline timer and flush do (4.4.6, 4.4.7). Only a
+    // command that never entered send() fails with the local close reason.
     for (const pending of [...this.pending.values()]) {
       const uncertain = pending.attempting || pending.handedOff;
       this.finish(pending, {
         ok: false,
-        error:
-          uncertain && pending.command.type === "input"
-            ? domainError("RESULT_UNKNOWN", "unknown", "input")
-            : localError(reason),
+        error: uncertain
+          ? domainError(
+              "RESULT_UNKNOWN",
+              "unknown",
+              pending.command.type === "input" ? "input" : undefined,
+            )
+          : localError(reason),
         uncertain,
       });
     }

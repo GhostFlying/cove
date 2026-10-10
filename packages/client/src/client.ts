@@ -203,7 +203,10 @@ export type TerminalInputOutcome =
 // Two-stage control results (terminal-architecture 4.4.7). A failure carrying `accepted` means
 // the server accepted the focus or resize, but the grant did not become usable afterwards (it was
 // lost, superseded, timed out or the controller was disposed); without `accepted` the command
-// itself was not accepted or its result is reported as is.
+// itself was not accepted or its result is reported as is. A command that may have reached the
+// server without a known result (handed to the socket, then a closed connection or an expired
+// reply deadline) fails with `RESULT_UNKNOWN`, whose acceptance is "unknown"; a local error
+// always means it was never sent.
 export type TerminalControlOutcome =
   | { readonly ok: true; readonly value: TerminalControlReceipt }
   | {

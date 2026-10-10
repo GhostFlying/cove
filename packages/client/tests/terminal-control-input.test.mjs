@@ -1353,16 +1353,53 @@ describe("client control authority", () => {
     });
   });
 
-  test("noninput close stays local and completed input is not rewritten", async () => {
-    const { controller, peer } = await harness();
-    await grant(controller, peer);
-    const resize = controller.requestResize({ cols: 90, rows: 30 });
-    await settle();
-    expect(peer.commands.at(-1).command.type).toBe("resize");
-    peer.close();
-    const closed = await resize;
-    expect(closed.error).toEqual({ category: "local", reason: "transport" });
-    expect("subject" in closed.error).toBe(false);
+  // A control command handed to the socket may have been accepted, so a connection that closes
+  // before its reply leaves the result unknown, as for input (4.4.6, 4.4.7). A local transport
+  // error would claim it was never sent.
+  test("close after handoff reports every control command unknown and leaves completed input alone", async () => {
+    const unknown = domainError("RESULT_UNKNOWN", "unknown");
+    const cases = {
+      focus: async ({ controller }) => {
+        controller.setInputTarget(true, true);
+        const pending = controller.requestFocus();
+        await settle();
+        await settle();
+        return { pending };
+      },
+      blur: async ({ controller, peer }) => {
+        await grant(controller, peer);
+        const pending = controller.blur();
+        await settle();
+        return { pending };
+      },
+      resize: async ({ controller, peer }) => {
+        await grant(controller, peer);
+        const pending = controller.requestResize({ cols: 90, rows: 30 });
+        await settle();
+        return { pending };
+      },
+      appearance: async ({ controller, peer }) => {
+        await grant(controller, peer);
+        const pending = controller.updateAppearance({
+          ...DEFAULT_APPEARANCE,
+          background: "1111/2222/3333",
+        });
+        await settle();
+        return { pending };
+      },
+    };
+    for (const [type, start] of Object.entries(cases)) {
+      const setup = await harness();
+      const { pending } = await start(setup);
+      expect(setup.peer.commands.at(-1).command.type).toBe(type);
+      setup.peer.close();
+      const closed = await pending;
+      expect({ type, ok: closed.ok, error: closed.error }).toEqual({
+        type,
+        ok: false,
+        error: unknown,
+      });
+    }
 
     const writtenCase = await harness();
     await grant(writtenCase.controller, writtenCase.peer);
