@@ -2,7 +2,12 @@ import { execFile, spawn } from "node:child_process";
 import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createTerminalDecoder } from "@cove/protocol/terminal";
+import { domainError } from "@cove/protocol/errors";
+import {
+  createTerminalDecoder,
+  encodeTerminalFrame,
+  TERMINAL_FRAME_CLASSES,
+} from "@cove/protocol/terminal";
 import { expect, test } from "vitest";
 import { writeFitProbe } from "./fit-probe.mjs";
 import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
@@ -402,6 +407,14 @@ function decodeFrames(frameDecoder, bytes) {
   return frames;
 }
 
+// A terminal error frame as the server would send it in reply to a command.
+function errorFrame(fields) {
+  const metadata = new TextEncoder().encode(JSON.stringify({ type: "error", ...fields }));
+  const encoded = encodeTerminalFrame(TERMINAL_FRAME_CLASSES.error, metadata, new Uint8Array());
+  if (!encoded.ok) throw new Error("could not encode an error frame");
+  return Buffer.from(encoded.value);
+}
+
 const isResizeEvent = (frame) =>
   frame.metadata.type === "run-event" && frame.metadata.event?.type === "resize";
 
@@ -440,16 +453,14 @@ async function tapTerminalSocket(page) {
       tap.afterOutbound = predicate;
     },
     afterOutbound: undefined,
-    // Never deliver the next server message with a frame matching `predicate` (a command's
-    // result), so that command ends as RESULT_UNKNOWN while every other message, including the
-    // events the command caused, still reaches the page. The server sends one frame per message;
-    // a matching message carrying other frames too is recorded as a tap failure, not dropped.
-    dropInbound(predicate) {
-      tap.dropPredicate = predicate;
+    // Never forward the next page message with a frame matching `predicate` (a command) to the
+    // server. Without `error` the command just gets no reply, so it ends as RESULT_UNKNOWN; with
+    // it, the page gets that error for it at once, as a server refusal that changed nothing.
+    interceptOutbound(predicate, error) {
+      tap.intercept = { predicate, error };
     },
-    dropPredicate: undefined,
-    dropped: 0,
-    failures: [],
+    intercept: undefined,
+    intercepted: 0,
     // Release held messages in their original order, and stop holding.
     releaseInbound() {
       tap.holdingInbound = false;
@@ -468,6 +479,16 @@ async function tapTerminalSocket(page) {
     route.onMessage((message) => {
       const frames = typeof message === "string" ? [] : decodeFrames(outbound, message);
       tap.outbound.push(...frames);
+      const intercept = tap.intercept;
+      if (intercept && frames.length === 1 && intercept.predicate(frames[0])) {
+        tap.intercept = undefined;
+        tap.intercepted++;
+        if (intercept.error) {
+          const { requestId, run, type } = frames[0].metadata;
+          route.send(errorFrame({ requestId, run, commandType: type, error: intercept.error }));
+        }
+        return;
+      }
       if (tap.holdingOutbound) tap.heldOutbound.push({ server, message });
       else server.send(message);
       if (tap.afterOutbound && frames.some(tap.afterOutbound)) {
@@ -478,14 +499,6 @@ async function tapTerminalSocket(page) {
     server.onMessage((message) => {
       const frames = typeof message === "string" ? [] : decodeFrames(inbound, message);
       tap.inbound.push(...frames);
-      if (tap.dropPredicate && frames.some(tap.dropPredicate)) {
-        if (frames.length === 1) {
-          tap.dropPredicate = undefined;
-          tap.dropped++;
-          return;
-        }
-        tap.failures.push(`a matching server message carried ${frames.length} frames`);
-      }
       if (tap.holdingInbound) {
         tap.heldInbound.push({ route, message });
         return;
@@ -865,14 +878,21 @@ test("a focus or resize with an unknown result is shown as unknown and never res
   });
 });
 
+const gridOf = (target) =>
+  target.evaluate(
+    () => document.getElementById("terminal-status")?.textContent.match(/\d+×\d+/)?.[0],
+  );
+
 // A first click into a run created at another grid takes control and resizes the PTY. Its focus
 // ends as unknown, and only then does the recovery from that resize reach ready: the page must not
-// take control again by itself after it; a click does. A resize whose reply alone is lost (the
-// events it caused still arrive) ends as unknown after its own recovery has already reached ready:
-// that fact is in, so the next window change is decided from it and its resize is sent, once.
+// take control again by itself after it; a click does. A resize that never reaches the server is
+// still unanswered when another client's resize brings this page to ready at a different grid;
+// once it ends as unknown, that recovery is the fact that settles it, so the page later sends the
+// grid it then needs, once. A resize the server refuses blocks nothing and is not retried.
 test("a control command with an unknown result is not retried, and a fact unblocks resizing", async () => {
-  await withHarness(async ({ directory, server, page, pageErrors }) => {
+  await withHarness(async ({ directory, server, browser, page, pageErrors }) => {
     const socket = await tapTerminalSocket(page);
+    let other;
     const run = await createRun(
       server.env,
       directory,
@@ -912,22 +932,69 @@ test("a control command with an unknown result is not retried, and a fact unbloc
       await waitForSteadyControl(page);
       expect([sent("focus"), sent("resize")]).toEqual([2, 0]);
 
-      socket.dropInbound((frame) => frame.metadata.type === "resize-result");
+      // A second page, a viewer on a smaller window, is ready to take control at its own grid.
+      other = await browser.newPage({ viewport: { width: 900, height: 560 } });
+      other.setDefaultTimeout(15_000);
+      await openConnectedPage({ server, page: other });
+      await other.click(`#runs button[data-run-id="${run.runId}"]`);
+      await other.waitForFunction(
+        () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+      );
+      await other.waitForSelector("#terminal .xterm-screen");
+
+      // Grid A: the window grows and the page asks for A, which never reaches the server, so its
+      // result can only end as unknown. Before it does, the other page takes control at its grid
+      // X and this page recovers to ready at X, a grid other than A.
+      socket.interceptOutbound((frame) => frame.metadata.type === "resize");
       await page.setViewportSize({ width: 1200, height: 760 });
-      // The resize's own recovery reaches ready before its reply deadline passes.
-      await waitFor("the resize event", () => resizeEvents() === 2, 15_000);
+      await waitFor("the resize to A", () => socket.intercepted === 1, 15_000);
+      const requested = sentFrames(socket, "resize")[0].metadata.geometry;
+      await other.click("#terminal");
+      await waitForSteadyControl(other);
+      const otherGrid = await gridOf(other);
+      await page.waitForFunction((grid) => {
+        const status = document.getElementById("terminal-status");
+        return (
+          status?.dataset.phase === "ready" &&
+          status.textContent.includes(grid) &&
+          status.textContent.includes("viewing")
+        );
+      }, otherGrid);
+      expect(otherGrid).not.toBe(`${requested.cols}×${requested.rows}`);
+      // The recovery reached ready while the resize to A was still unanswered.
+      expect(await page.textContent("#terminal-status")).not.toMatch(/resize/);
       await waitForStatus(page, /resize result unknown/);
-      expect(socket.dropped).toBe(1);
+      await pause(500);
       expect([sent("focus"), sent("resize")]).toEqual([2, 1]);
+
+      // A click takes control at A, by focus. A later window change then needs grid B: the
+      // unknown resize to A blocks nothing any more, and B is sent exactly once.
+      await page.click("#terminal");
+      await waitForSteadyControl(page);
+      expect([sent("focus"), sent("resize")]).toEqual([3, 1]);
       await page.setViewportSize({ width: 1100, height: 700 });
       await waitForSteadyControl(page);
       await pause(500);
-      expect([sent("focus"), sent("resize")]).toEqual([2, 2]);
-      expect(resizeEvents()).toBe(3);
+      expect([sent("focus"), sent("resize")]).toEqual([3, 2]);
+      expect(sentFrames(socket, "resize")[1].metadata.geometry).not.toEqual(requested);
+
+      // A resize the server refuses (BUSY, not accepted) changed nothing: the page does not
+      // retry it for the same grid, and the next window change is sent.
+      socket.interceptOutbound((frame) => frame.metadata.type === "resize", domainError("BUSY"));
+      await page.setViewportSize({ width: 1200, height: 760 });
+      await waitForStatus(page, /resize refused/);
+      await pause(500);
+      expect([sent("focus"), sent("resize")]).toEqual([3, 3]);
+      await page.setViewportSize({ width: 1000, height: 640 });
+      await waitForSteadyControl(page);
+      await pause(500);
+      expect([sent("focus"), sent("resize")]).toEqual([3, 4]);
+      expect(socket.intercepted).toBe(2);
     } catch (error) {
       throw await describePage(page, error);
+    } finally {
+      await other?.close();
     }
-    expect(socket.failures).toEqual([]);
     expect(socket.sockets).toBe(1);
     expect(pageErrors).toEqual([]);
   });
