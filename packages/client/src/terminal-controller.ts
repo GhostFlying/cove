@@ -2585,12 +2585,17 @@ export class RoutedTerminalController implements TerminalController {
       if (this.token === operation.token && this.phase === "ready") {
         const reconnectFocus = this.control.takeReconnectFocus();
         this.publish();
+        // The reconnect focus only stands in for a user who held control before the loss. A focus
+        // the user requested during the attach is still deferred and is sent now with its own
+        // grid; a reconnect focus would supersede it, and the held input would follow the wrong
+        // request (relay-protocol 9.1).
         if (
           reconnectFocus &&
           this.token === operation.token &&
           this.phase === "ready" &&
           this.control.pendingIntent === undefined &&
-          this.control.epoch === undefined
+          this.control.epoch === undefined &&
+          !this.liveFocusCurrent()
         )
           void this.requestFocus();
       }

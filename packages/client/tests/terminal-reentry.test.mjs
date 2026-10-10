@@ -1225,4 +1225,44 @@ describe("implementation review regressions (#86 round 2)", () => {
     await h.finish();
     expect(h.controller.snapshot().phase).toBe("unavailable");
   });
+  test("a focus requested during a reattach is not replaced by the reconnect focus", async () => {
+    let armed = false;
+    let heldAttach;
+    const h = await reentryHarness({
+      onCommand: (entry) => {
+        if (armed && entry.command.type === "attach" && !heldAttach) {
+          heldAttach = entry;
+          return "drop";
+        }
+        return undefined;
+      },
+    });
+    h.inputs = [];
+    // The controller held control when the connection was lost, so it would take control again
+    // after the reattach on its own, at the grid the view measures (80x24).
+    h.server.close();
+    await settle();
+    expect(await h.client.reconnect()).toMatchObject({ ok: true });
+    armed = true;
+    h.controller.setInputTarget(true, true);
+    const attached = h.controller.attach();
+    await settle();
+    expect(heldAttach).toBeDefined();
+    const focusesBefore = h.server.ofType("focus").length;
+    // The user asks for 100x30 and types while the attach is unanswered.
+    const focused = h.controller.requestFocus(larger);
+    type(h, "held");
+    h.server.process(heldAttach);
+    await h.finish();
+    expect(await outcomeOf(attached)).toBe("ok");
+    expect(await outcomeOf(focused)).toBe("ok");
+    expect(
+      h.server
+        .ofType("focus")
+        .slice(focusesBefore)
+        .map(({ command }) => command.geometry),
+    ).toEqual([larger]);
+    expect(await h.inputs[0].outcome).toMatchObject({ ok: true });
+    expect(h.server.written).toEqual(["held"]);
+  });
 });
