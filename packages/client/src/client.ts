@@ -293,6 +293,9 @@ export interface TerminalSnapshot {
   readonly controlEpoch?: number;
   readonly retainedInputBytes: number;
   readonly pendingInputIntents: number;
+  // Focus, unfocus and fatal entries waiting in the control log (at most three; see
+  // docs/terminal-architecture.md 4.4.4).
+  readonly pendingControlIntents: number;
   // Counts attach and recover operations this controller has started, including automatic
   // recoveries. Coalesced snapshots can skip intermediate phases, so a consumer acts on a
   // recovery once it sees ready with a sequence it has not handled yet.

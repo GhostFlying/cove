@@ -546,7 +546,7 @@ describe("design review regressions (rounds 1-3)", () => {
     }
     const last = h.controller.requestFocus(larger);
     // Registration is synchronous bookkeeping: the log holds at most unfocus, focus and fatal.
-    expect(h.controller.snapshot().pendingInputIntents).toBeLessThanOrEqual(3);
+    expect(h.controller.snapshot().pendingControlIntents).toBeLessThanOrEqual(3);
     await h.finish();
     for (const outcome of outcomes) expect(await outcomeOf(outcome)).toBe("invalid-state");
     expect(await outcomeOf(last)).toBe("ok");
@@ -925,5 +925,21 @@ describe("implementation review regressions (#86 round 1)", () => {
     expect(await outcomeOf(older)).toBe("invalid-state");
     expect(await outcomeOf(newer)).toBe("ok");
     expect(superseded.server.written).toEqual(["held"]);
+  });
+
+  test("a blur storm merges into one unfocus that retains no per-call state", async () => {
+    const h = await reentryHarness();
+    const blurs = [];
+    for (let index = 0; index < 1_000; index++) {
+      blurs.push(h.controller.blur());
+      if (index % 2) h.controller.requestFocus();
+    }
+    // The log holds one unfocus (plus the last focus), and every blur shares that entry's single
+    // result rather than adding a callback to it.
+    expect(h.controller.snapshot().pendingControlIntents).toBeLessThanOrEqual(2);
+    expect(new Set(blurs).size).toBe(1);
+    await h.finish();
+    expect(await outcomeOf(blurs[0])).toBe("ok");
+    expect(h.server.ofType("blur")).toHaveLength(1);
   });
 });

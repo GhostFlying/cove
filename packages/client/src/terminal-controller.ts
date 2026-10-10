@@ -95,12 +95,17 @@ interface FocusEntry {
 
 // A registered input-target loss. The local effect (no further input, held input failed) took
 // place at registration; this entry only releases the epoch recorded then (relay-protocol 9.1).
+type BlurOutcome = TerminalOutcome<TerminalControlReceipt | undefined>;
+
 interface UnfocusEntry {
   readonly kind: "unfocus";
   epoch: number | null;
   readonly ref: SubscriptionRef;
   readonly deadlineAtMs: number;
-  readonly settle: ((outcome: TerminalOutcome<TerminalControlReceipt | undefined>) => void)[];
+  // One result shared by every blur() merged into this entry: merging keeps no per-call state,
+  // so the entry's size and the work to settle it do not grow with the number of callers.
+  readonly result: Promise<BlurOutcome>;
+  readonly resolve: (outcome: BlurOutcome) => void;
 }
 
 interface FatalEntry {
@@ -699,7 +704,7 @@ export class RoutedTerminalController implements TerminalController {
     if (this.retiring) return { ok: false, error: localError("invalid-state") };
     if (typeof foreground !== "boolean" || typeof focused !== "boolean")
       return { ok: false, error: localError("invalid-request") };
-    if (!foreground || !focused) this.registerUnfocus(foreground, undefined);
+    if (!foreground || !focused) void this.registerUnfocus(foreground);
     else this.control.setTarget(true, true);
     this.publish();
     return { ok: true, value: undefined };
@@ -718,13 +723,12 @@ export class RoutedTerminalController implements TerminalController {
     return new Promise((resolve) => this.registerFocus(requested, resolve));
   }
 
-  blur(): Promise<TerminalOutcome<TerminalControlReceipt | undefined>> {
+  blur(): Promise<BlurOutcome> {
     if (this.phase === "disposed")
       return Promise.resolve({ ok: false, error: localError("disposed") });
-    return new Promise((resolve) => {
-      this.registerUnfocus(this.control.hostForeground, resolve);
-      this.publish();
-    });
+    const result = this.registerUnfocus(this.control.hostForeground);
+    this.publish();
+    return result;
   }
 
   // A user's focus during a recovery (for example the baseline another client's resize forces on
@@ -768,10 +772,7 @@ export class RoutedTerminalController implements TerminalController {
 
   // Loss of the input target takes effect now: no further input is admitted or handed off and
   // every input not yet handed off fails. Releasing the epoch held now is left to the drain.
-  private registerUnfocus(
-    foreground: boolean,
-    settle: ((outcome: TerminalOutcome<TerminalControlReceipt | undefined>) => void) | undefined,
-  ): void {
+  private registerUnfocus(foreground: boolean): Promise<BlurOutcome> {
     const ref = this.ref;
     // A focus still awaiting its result releases its own epoch when the result arrives
     // (releaseStaleFocus); this records the grant held or carried now.
@@ -779,17 +780,23 @@ export class RoutedTerminalController implements TerminalController {
     this.control.setTarget(foreground, false);
     this.failUnsentInputs(localError("invalid-state"));
     if (!ref || this.fatal || this.phase === "disposed") {
-      settle?.({ ok: true, value: undefined });
       this.wake();
-      return;
+      return Promise.resolve({ ok: true, value: undefined });
     }
-    this.appendControl({
+    let resolve!: (outcome: BlurOutcome) => void;
+    const result = new Promise<BlurOutcome>((settle) => {
+      resolve = settle;
+    });
+    const kept = this.appendControl({
       kind: "unfocus",
       epoch,
       ref,
       deadlineAtMs: this.host.scheduler.nowMs() + this.recoveryBudget(this.host.binding()),
-      settle: settle ? [settle] : [],
+      result,
+      resolve,
     });
+    // Merged into an earlier unfocus: the caller shares that entry's result.
+    return kept.kind === "unfocus" ? kept.result : result;
   }
 
   private registerFatal(error: DomainError, view: TerminalView): void {
@@ -803,9 +810,11 @@ export class RoutedTerminalController implements TerminalController {
   // does: an unprocessed focus is replaced by a later focus and dropped by a later unfocus (it is
   // already superseded by either, so its caller settles now), and adjacent unfocus entries merge
   // keeping the earliest recorded epoch. Inputs never enter the log, so it holds at most an
-  // unfocus, a focus and a fatal entry (plus one unfocus after a fatal).
-  private appendControl(entry: ControlEntry): void {
+  // unfocus, a focus and a fatal entry (plus one unfocus after a fatal). Returns the entry that
+  // now represents `entry`: the earlier unfocus it was merged into, or `entry` itself.
+  private appendControl(entry: ControlEntry): ControlEntry {
     const log = this.controlLog;
+    let kept = entry;
     if (entry.kind === "fatal") {
       if (!log.some((queued) => queued.kind === "fatal")) log.push(entry);
     } else {
@@ -817,11 +826,12 @@ export class RoutedTerminalController implements TerminalController {
       }
       if (entry.kind === "unfocus" && tail?.kind === "unfocus" && tail.ref === entry.ref) {
         tail.epoch ??= entry.epoch;
-        tail.settle.push(...entry.settle);
+        kept = tail;
       } else log.push(entry);
     }
     this.wake();
     this.scheduleDrain();
+    return kept;
   }
 
   private scheduleDrain(): void {
@@ -1238,9 +1248,9 @@ export class RoutedTerminalController implements TerminalController {
 
   private runUnfocus(entry: UnfocusEntry): Promise<void> {
     return new Promise<void>((release) => {
-      const finish = (outcome: TerminalOutcome<TerminalControlReceipt | undefined>): void => {
+      const finish = (outcome: BlurOutcome): void => {
         release();
-        for (const settle of entry.settle) settle(outcome);
+        entry.resolve(outcome);
       };
       void this.unfocusFlow(entry, release).then(finish, () =>
         finish({ ok: false, error: localError("invalid-state") }),
@@ -1953,6 +1963,7 @@ export class RoutedTerminalController implements TerminalController {
       inputReady,
       retainedInputBytes: this.retainedInputBytes,
       pendingInputIntents: this.pendingInputIntents,
+      pendingControlIntents: this.controlLog.length,
       recoverySequence: this.recoverySequence,
       ...(this.control.epoch !== undefined ? { controlEpoch: this.control.epoch } : {}),
     });
@@ -2845,7 +2856,7 @@ export class RoutedTerminalController implements TerminalController {
         }
         void this.requestFocus(intent.geometry);
       } else {
-        this.registerUnfocus(this.control.hostForeground, undefined);
+        void this.registerUnfocus(this.control.hostForeground);
         this.publish();
       }
     });
