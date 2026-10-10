@@ -794,11 +794,14 @@ test("V1-L18 an operation superseded inside foreign code abandons without failin
   );
   // Hiding blurs xterm, whose focus observer shows the view again and types into it: the hide
   // stops without a later unfocus that would withdraw the new focus. A theme setter applying a newer appearance before failing the older one
-  // leaves no failure. A retired xterm whose cleanup disposes the view and then fails stops the
+  // leaves no failure. A theme setter that rebuilds the backend supersedes the outer call, whose
+  // red appearance is then not committed: the next rebuild keeps the white one the rebuilt
+  // backend took. A retired xterm whose cleanup disposes the view and then fails stops the
   // initialize with RESYNC_REQUIRED and publishes nothing.
   expect(result).toEqual({
     visibility: { threw: undefined, hidden: false, focused: [false, true], failures: [] },
     appearance: { threw: undefined, themeCalls: 2, failures: [], ownedRoots: 1 },
+    rebuilt: { error: undefined, foreground: "rgb(255, 255, 255)" },
     cleanup: { error: "RESYNC_REQUIRED", observed: [], ownedRoots: 0 },
   });
 });

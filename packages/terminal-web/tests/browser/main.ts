@@ -1195,6 +1195,32 @@ const fixture = {
       ownedRoots: ownedRoots(),
     };
 
+    // A theme setter that rebuilds the backend for a new baseline. The rebuilt xterm takes the
+    // appearance committed so far, so the outer call, superseded by the rebuild, must not commit
+    // its own: otherwise the next rebuild would take an appearance no backend ever showed.
+    await initialize();
+    await ready();
+    let rebuild: Promise<unknown> | undefined;
+    Object.defineProperty(capturedTerminal!.options, "theme", {
+      configurable: true,
+      set: () => {
+        rebuild ??= view!.beginBaseline(descriptor(1)).then(
+          () => undefined,
+          (caught) => kindOf(caught),
+        );
+      },
+    });
+    view!.setAppearance({ ...appearance, foreground: "ffff/0000/0000" });
+    const rebuildError = await rebuild;
+    await view!.writeBaselineChunk(encoder.encode("x"));
+    await view!.finishBaseline();
+    await ready();
+    const rebuilt = {
+      error: rebuildError,
+      foreground: (capturedTerminal!.options.theme as { foreground?: string } | undefined)
+        ?.foreground,
+    };
+
     // The retired xterm's cleanup disposes the view and then fails.
     const candidate = standaloneView();
     const observed: string[] = [];
@@ -1217,7 +1243,7 @@ const fixture = {
     );
     const cleanup = { error: initializeError, observed, ownedRoots: ownedRoots() };
     candidate.dispose();
-    return { visibility, appearance: appearanceResult, cleanup };
+    return { visibility, appearance: appearanceResult, rebuilt, cleanup };
   },
   disposeAfterPasteWithTimerProbe() {
     let cleared = 0;

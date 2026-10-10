@@ -735,8 +735,10 @@ export function createXtermTerminalView(
             failAndRetire(error, current.incarnation);
           }
         }
-        // A theme change runs xterm's own code; never hand this appearance to a successor.
-        if (superseded(entry) || seq !== appearanceSeq) return;
+        // A theme change runs xterm's own code; never hand this appearance to a successor. That
+        // includes a backend rebuilt meanwhile (a new baseline from the setter, say), which took
+        // the appearance committed before this call and never received this one.
+        if (abandoned()) return;
         appearance = nextAppearance;
       }),
 
