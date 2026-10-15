@@ -49,7 +49,10 @@ export function coalesce(...frames) {
 }
 export function fixture(changes = {}, limits = {}) {
   const budgets = { ...M0_LIMITS, ...changes };
-  const bytes = new RuntimeRetainedBytes(budgets.runtimeBytes, 2 * 1024 * 1024);
+  const bytes = new RuntimeRetainedBytes(
+    budgets.runtimeBytes,
+    limits.controlReserve ?? 2 * 1024 * 1024,
+  );
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const pipeWrites = [];
   const services = [];
@@ -125,6 +128,14 @@ export function fixture(changes = {}, limits = {}) {
       unblock: () => {
         blocked = false;
         delivery.drain();
+      },
+      // Runs every write callback not yet run, as a transport that finished writing would.
+      settleWrites: () => {
+        for (const write of writes)
+          if (!write.done) {
+            write.done = true;
+            write.settled();
+          }
       },
       onWrite: (callback) => {
         onWrite = callback;
