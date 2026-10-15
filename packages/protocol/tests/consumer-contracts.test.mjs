@@ -581,7 +581,8 @@ test("pipe fixture binds ready, spawn payload, status and preview to one incarna
 test("admission fixture compiles six method params and sanitized result shapes", async () => {
   const journey = await fixture("admission-rpc.json");
   const methods = journey.methodCalls.map((call) => call.method);
-  expect(methods).toEqual(Object.keys(RPC_METHODS));
+  // The frozen M0 fixture covers the six M0 methods, which stay first in the table.
+  expect(methods).toEqual(Object.keys(RPC_METHODS).slice(0, 6));
   const run = journey.methodCalls[2].params.run;
   const record = {
     run,

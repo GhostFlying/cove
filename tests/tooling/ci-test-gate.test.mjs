@@ -988,6 +988,15 @@ test("compiled protocol consumer journey suite is mandatory", async () => {
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
 
+test("M1 workspace contract suite is mandatory", async () => {
+  const suite = requiredSuites.find(
+    ({ file }) => file === "packages/protocol/tests/workspace-contract.test.mjs",
+  );
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 9 });
+  expect(await readVitestOwnedTestFiles()).toContain(suite.file);
+  expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
+});
+
 test("recovery state suite is mandatory with actual discovered cases", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/terminal-engine/probes/recovery-state.test.mjs",

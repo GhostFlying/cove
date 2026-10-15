@@ -7,26 +7,71 @@ import { DomainErrorSchema } from "./errors.js";
 import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./identity.js";
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { RunStatusSchema, SpawnArgumentsSchema } from "./pipe.js";
+import * as W from "./workspace.js";
+import {
+  TERMINAL_RESULT_KEYS,
+  OperationGetParamsSchema,
+  OperationProgressSchema,
+  OperationResultDataSchema,
+  OperationStateSchema,
+} from "./workspace.js";
 
-export const OperationMethodSchema = z.enum(["terminal.create", "terminal.stop"]);
+// Every method with class "write" in RPC_METHODS, in table order; checked against the table below.
+export const WRITE_RPC_METHODS = [
+  "terminal.create",
+  "terminal.stop",
+  "operation.continue",
+  "operation.abandon",
+  "config.set",
+  "repo.register",
+  "repo.update",
+  "repo.remove",
+  "task.create",
+  "task.update",
+  "task.archive",
+  "task.unarchive",
+  "mount.add",
+  "mount.remove",
+  "mount.retry",
+  "tab.create",
+  "tab.reopen",
+  "tab.stop",
+  "tab.close",
+  "binding.convert",
+  "binding.delete",
+] as const;
+export type WriteRpcMethod = (typeof WRITE_RPC_METHODS)[number];
+export const OperationMethodSchema = z.enum(WRITE_RPC_METHODS);
+const TERMINAL_OPERATION_METHODS: ReadonlySet<string> = new Set([
+  "terminal.create",
+  "terminal.stop",
+]);
+
 const OperationRecordFieldsSchema = z.object({
   operationId: OpaqueIdSchema,
   method: OperationMethodSchema,
   revision: SequenceSchema,
-  state: z.enum(["accepted", "running", "succeeded", "failed", "requires_attention"]),
+  state: OperationStateSchema,
+  // The run the operation acts on. A terminal operation always has one; it may belong to an
+  // earlier relay instance when the record is historical.
   run: RunRefSchema.optional(),
-  result: z
-    .object({
-      run: RunRefSchema.optional(),
-      exitCode: z.number().int().nullable().optional(),
-      signal: z.string().max(64).nullable().optional(),
-    })
-    .optional(),
+  result: OperationResultDataSchema.optional(),
+  progress: OperationProgressSchema.optional(),
   error: DomainErrorSchema.optional(),
 });
-export const OperationRecordSchema = OperationRecordFieldsSchema.refine(
-  (value) => !!value.run && (!value.result?.run || sameRunRef(value.run, value.result.run)),
-);
+// See the compact result policy in workspace.ts. Error details (blocking runs) belong to the RPC
+// error response, never to a stored record.
+export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) => {
+  const terminal = TERMINAL_OPERATION_METHODS.has(value.method);
+  const keys = Object.keys(value.result ?? {});
+  const terminalKeys: readonly string[] = TERMINAL_RESULT_KEYS;
+  return (
+    (!terminal || !!value.run) &&
+    keys.every((key) => terminalKeys.includes(key) === terminal) &&
+    value.error?.details === undefined &&
+    (!value.run || !value.result?.run || sameRunRef(value.run, value.result.run))
+  );
+});
 export type OperationRecord = z.infer<typeof OperationRecordSchema>;
 
 export const RunRecordSchema = z.object({
@@ -79,17 +124,63 @@ export const TerminalStopParamsSchema = z.object({
   expectedRelayInstanceId: OpaqueIdSchema,
   run: RunRefSchema,
 });
-export const OperationGetParamsSchema = z.object({
-  operationId: OpaqueIdSchema,
-  expectedRelayInstanceId: OpaqueIdSchema,
-});
 export const OperationResultSchema = z.object({ operation: OperationRecordSchema });
+
+// Server handler module that owns a method: apps/server/src/rpc/<domain>.ts.
+export const RPC_DOMAINS = [
+  "server",
+  "terminal",
+  "operation",
+  "config",
+  "repo",
+  "task",
+  "mount",
+  "tab",
+  "binding",
+] as const;
+export type RpcDomain = (typeof RPC_DOMAINS)[number];
+
+type MethodSpec = {
+  readonly params: z.ZodType<Record<string, unknown>>;
+  readonly result: z.ZodType;
+  readonly class: "read" | "write";
+  // "instance": params and results reference only the current relay instance (live terminal
+  // reads). "server": they may reference any instance of the same server, so that a resent write
+  // or a historical record is still accepted (m1 "操作身份跨重启").
+  readonly scope: "instance" | "server";
+  readonly domain: RpcDomain;
+  readonly capability: string;
+  readonly permission: "local-principal";
+  readonly cli: string;
+};
+
+// M1 methods are served under the negotiated operation-receipts capability; a separate
+// capability would change the bootstrap contract, which M1 does not need before the first release.
+const local = { permission: "local-principal", capability: "operation-receipts-v1" } as const;
+const read = <P extends MethodSpec["params"], R extends z.ZodType>(
+  domain: RpcDomain,
+  params: P,
+  result: R,
+  cli: string,
+) => ({ params, result, class: "read", scope: "server", domain, cli, ...local }) as const;
+const write = <P extends MethodSpec["params"]>(domain: RpcDomain, params: P, cli: string) =>
+  ({
+    params,
+    result: OperationResultSchema,
+    class: "write",
+    scope: "server",
+    domain,
+    cli,
+    ...local,
+  }) as const;
 
 export const RPC_METHODS = Object.freeze({
   "server.status": {
     params: ServerStatusParamsSchema,
     result: ServerStatusResultSchema,
     class: "read",
+    scope: "instance",
+    domain: "server",
     capability: "operation-receipts-v1",
     permission: "local-principal",
     cli: "status",
@@ -98,6 +189,8 @@ export const RPC_METHODS = Object.freeze({
     params: TerminalListParamsSchema,
     result: TerminalListResultSchema,
     class: "read",
+    scope: "instance",
+    domain: "terminal",
     capability: "terminal-preview-v1",
     permission: "local-principal",
     cli: "terminal list",
@@ -106,36 +199,72 @@ export const RPC_METHODS = Object.freeze({
     params: TerminalGetParamsSchema,
     result: TerminalGetResultSchema,
     class: "read",
+    scope: "instance",
+    domain: "terminal",
     capability: "terminal-preview-v1",
     permission: "local-principal",
     cli: "terminal get",
   },
-  "terminal.create": {
-    params: TerminalCreateParamsSchema,
-    result: OperationResultSchema,
-    class: "write",
-    capability: "operation-receipts-v1",
-    permission: "local-principal",
-    cli: "terminal create",
-  },
-  "terminal.stop": {
-    params: TerminalStopParamsSchema,
-    result: OperationResultSchema,
-    class: "write",
-    capability: "operation-receipts-v1",
-    permission: "local-principal",
-    cli: "terminal stop",
-  },
-  "operation.get": {
-    params: OperationGetParamsSchema,
-    result: OperationResultSchema,
-    class: "read",
-    capability: "operation-receipts-v1",
-    permission: "local-principal",
-    cli: "operation get/wait",
-  },
-} as const);
+  "terminal.create": write("terminal", TerminalCreateParamsSchema, "terminal create"),
+  "terminal.stop": write("terminal", TerminalStopParamsSchema, "terminal stop"),
+  "operation.get": read(
+    "operation",
+    OperationGetParamsSchema,
+    OperationResultSchema,
+    "operation get/wait",
+  ),
+  // In M1 only managed worktree creation can be continued or abandoned, so these are served by
+  // the mount module (T3b) rather than a generic recovery registry.
+  "operation.continue": write("mount", W.OperationTargetParamsSchema, "operation continue"),
+  "operation.abandon": write("mount", W.OperationTargetParamsSchema, "operation abandon"),
+  "config.get": read("config", W.ConfigGetParamsSchema, W.ConfigGetResultSchema, "config get"),
+  "config.set": write("config", W.ConfigSetParamsSchema, "config set"),
+  "repo.register": write("repo", W.RepoRegisterParamsSchema, "repo register"),
+  "repo.list": read("repo", W.RepoListParamsSchema, W.RepoListResultSchema, "repo list"),
+  "repo.get": read("repo", W.RepoGetParamsSchema, W.RepoGetResultSchema, "repo get"),
+  "repo.update": write("repo", W.RepoUpdateParamsSchema, "repo set"),
+  "repo.remove": write("repo", W.RepoRemoveParamsSchema, "repo remove"),
+  "task.create": write("task", W.TaskCreateParamsSchema, "task create"),
+  "task.list": read("task", W.TaskListParamsSchema, W.TaskListResultSchema, "task list"),
+  "task.get": read("task", W.TaskGetParamsSchema, W.TaskGetResultSchema, "task get"),
+  "task.update": write("task", W.TaskUpdateParamsSchema, "task rename"),
+  "task.archive": write("task", W.TaskArchiveParamsSchema, "task archive"),
+  "task.unarchive": write("task", W.TaskArchiveParamsSchema, "task unarchive"),
+  // Adding and removing mounts belong to the workspace module (T3a); retrying a failed worktree
+  // mount belongs to the worktree module (T3b).
+  "mount.add": write("task", W.MountAddParamsSchema, "mount add"),
+  "mount.remove": write("task", W.MountRemoveParamsSchema, "mount remove"),
+  "mount.retry": write("mount", W.MountRetryParamsSchema, "mount retry"),
+  "tab.create": write("tab", W.TabCreateParamsSchema, "tab create"),
+  "tab.list": read("tab", W.TabListParamsSchema, W.TabListResultSchema, "tab list"),
+  "tab.get": read("tab", W.TabGetParamsSchema, W.TabGetResultSchema, "tab get"),
+  "tab.runs": read("tab", W.TabRunsParamsSchema, W.TabRunsResultSchema, "tab runs"),
+  "tab.reopen": write("tab", W.TabReopenParamsSchema, "tab reopen"),
+  "tab.stop": write("tab", W.TabStopParamsSchema, "tab stop"),
+  "tab.close": write("tab", W.TabCloseParamsSchema, "tab close"),
+  "binding.convert": write("binding", W.BindingConvertParamsSchema, "mount convert"),
+  "binding.delete": write("binding", W.BindingDeleteParamsSchema, "mount delete-worktree"),
+  "binding.list": read(
+    "binding",
+    W.BindingListParamsSchema,
+    W.BindingListResultSchema,
+    "mount history",
+  ),
+} as const satisfies Record<string, MethodSpec>);
 export type RpcMethod = keyof typeof RPC_METHODS;
+
+const tableWrites = Object.entries(RPC_METHODS)
+  .filter(([, spec]) => spec.class === "write")
+  .map(([method]) => method);
+if (
+  tableWrites.length !== WRITE_RPC_METHODS.length ||
+  tableWrites.some((method, index) => method !== WRITE_RPC_METHODS[index])
+)
+  throw new Error("WRITE_RPC_METHODS must list the write methods of RPC_METHODS in order");
+
+export function isWriteRpcMethod(method: string): method is WriteRpcMethod {
+  return Object.hasOwn(RPC_METHODS, method) && RPC_METHODS[method as RpcMethod].class === "write";
+}
 
 export function validateRpcMethodParams(
   method: string,
@@ -150,10 +279,9 @@ export function validateRpcMethodParams(
     if (!stop.success || stop.data.run.relayInstanceId !== stop.data.expectedRelayInstanceId)
       return null;
   }
-  if (known === "terminal.create") {
-    const create = TerminalCreateParamsSchema.safeParse(parsed.data);
-    if (!create.success || (create.data.appearance && !validateAppearance(create.data.appearance)))
-      return null;
-  }
+  // Every launch that carries an appearance (terminal.create, tab.create, tab.reopen) gets the
+  // same semantic check, such as unique palette indices, before it can be accepted.
+  const appearance = (parsed.data as { appearance?: unknown }).appearance;
+  if (appearance !== undefined && !validateAppearance(appearance)) return null;
   return { method: known, params: parsed.data };
 }

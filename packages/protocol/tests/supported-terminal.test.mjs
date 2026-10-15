@@ -118,10 +118,19 @@ test("effective limits reject nonfinite, oversized and contradictory budgets", (
 });
 
 test("domain codes are complete and sequential without interpolating user bytes", () => {
-  expect(DOMAIN_ERROR_KINDS).toHaveLength(21);
+  // 21 M0 kinds keep their codes; the 18 M1 domain kinds are appended after them.
+  expect(DOMAIN_ERROR_KINDS).toHaveLength(39);
   expect(DOMAIN_ERROR_KINDS.map((kind) => ERROR_CODES[kind])).toEqual(
-    Array.from({ length: 21 }, (_, index) => 1000 + index),
+    Array.from({ length: 39 }, (_, index) => 1000 + index),
   );
+  expect(ERROR_CODES.COUNTER_EXHAUSTED).toBe(1020);
+  expect(ERROR_CODES.OPERATION_ID_CONFLICT).toBe(1015);
+  expect(domainError("MANAGED_WORKTREE_NOT_MOUNTABLE")).toMatchObject({
+    code: 1030,
+    acceptance: "not-accepted",
+    nextAction: "fix-request",
+  });
+  expect(DomainErrorSchema.safeParse(domainError("REVISION_CONFLICT")).success).toBe(true);
   expect(domainError("RESULT_UNKNOWN", "unknown")).toMatchObject({
     code: 1018,
     acceptance: "unknown",
@@ -137,6 +146,26 @@ test("error fields reject injected detail and mismatched next action", () => {
     false,
   );
   expect(DomainErrorSchema.safeParse({ ...valid, nextAction: "none" }).success).toBe(false);
+});
+
+test("only live-run refusals carry run references as error details", () => {
+  const run = { serverId: "s1", relayInstanceId: "i1", runId: "r1" };
+  const refusal = domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, { runs: [run] });
+  expect(refusal).toMatchObject({ nextAction: "inspect-run", details: { runs: [run] } });
+  expect(DomainErrorSchema.safeParse(refusal).success).toBe(true);
+  expect(
+    DomainErrorSchema.safeParse({ ...domainError("BUSY"), details: { runs: [run] } }).success,
+  ).toBe(false);
+  expect(
+    DomainErrorSchema.safeParse({ ...refusal, details: { runs: [run], cwd: "/private" } }).data
+      ?.details,
+  ).toEqual({ runs: [run] });
+  expect(() => domainError("BUSY", "not-accepted", undefined, { runs: [run] })).toThrow(
+    "Error details are not allowed for this kind",
+  );
+  expect(() => domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, { runs: [] })).toThrow(
+    "Error details are not allowed for this kind",
+  );
 });
 
 test("frozen lane and class header cannot enter provisional decoder", () => {
