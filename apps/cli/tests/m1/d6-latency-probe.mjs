@@ -431,7 +431,7 @@ async function main() {
     const phases = [];
     for (let round = 1; round <= config.rounds; round++) {
       for (const kind of ["none", "write", "control"]) {
-        process.kill(server.pid, kind === "control" ? "SIGUSR2" : "SIGUSR1");
+        await fixture.signalServer(server, kind === "control" ? "SIGUSR2" : "SIGUSR1");
         await sleep(500);
         const label = `${round}-${kind}`;
         const bytesBefore = outputs.map((counter) => counter.bytes);
@@ -452,7 +452,7 @@ async function main() {
         });
       }
     }
-    process.kill(server.pid, "SIGUSR1");
+    await fixture.signalServer(server, "SIGUSR1");
     typing = false;
     await typingDone;
     await sleep(ECHO_TIMEOUT_MS);

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readRendezvous } from "../../dist/session.js";
 import { waitFor } from "../recording-view.mjs";
-import { stopServer, within } from "../server-process.mjs";
+import { within } from "../server-process.mjs";
 import { isolatedEnv } from "../test-env.mjs";
 
 // Shared fixtures of the M1 CLI scenarios. Every scenario drives the compiled `cove` executable
@@ -18,16 +18,6 @@ import { isolatedEnv } from "../test-env.mjs";
 // or not the scenario passed.
 
 export const cli = resolve(import.meta.dirname, "../../dist/main.js");
-
-export function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === "ESRCH") return false;
-    throw error;
-  }
-}
 
 // macOS process start time with microseconds (kinfo_proc p_starttime via __sysctl), the same
 // reader as the server's store/processes.ts: `ps` lstart has one-second resolution and a PID can
@@ -70,12 +60,31 @@ async function startIdentity(pid) {
   return result.stdout.trim();
 }
 
-function kill(pid, signal) {
+// Whether `pid` is still the process recorded with `identity`.
+async function runsAs(pid, identity) {
+  return identity !== undefined && (await startIdentity(pid)) === identity;
+}
+
+// The only place the fixture signals a process by number. It signals `pid` only while it is the
+// process recorded with `identity` (start identity read while it was known to run); a PID that
+// ended or now belongs to another process is not signalled (false). An unreadable identity throws,
+// also without signalling. A process the fixture spawned itself is signalled through its
+// ChildProcess handle instead, which Node never signals after the child was reaped.
+async function signalIdentified(pid, identity, signal) {
+  if (!(await runsAs(pid, identity))) return false;
   try {
     process.kill(pid, signal);
+    return true;
   } catch (error) {
-    if (error.code !== "ESRCH") throw error;
+    if (error.code === "ESRCH") return false;
+    throw error;
   }
+}
+
+async function identify(pid) {
+  const identity = await startIdentity(pid);
+  if (identity === null) throw new Error(`process ${pid} is not running`);
+  return identity;
 }
 
 function run(file, args, options) {
@@ -103,8 +112,28 @@ export async function createM1Fixture() {
   const background = [];
   // Tracked processes by PID, with the start identity read while they were known to run.
   const pids = new Map();
-  // Whether the tracked process still runs: its PID exists with the recorded start identity.
-  const stillRuns = async (pid) => alive(pid) && (await startIdentity(pid)) === pids.get(pid);
+  const stillRuns = (pid) => runsAs(pid, pids.get(pid));
+  const serverGone = (server) =>
+    waitFor(
+      "the server process to exit",
+      async () => !(await runsAs(server.pid, server.identity)),
+      5_000,
+    );
+
+  // Orderly stop through the owned wrapper handle (SIGTERM). The fallback SIGKILLs the wrapper
+  // through its handle and the server only while it is the identified server process.
+  async function stopOwnedServer(server) {
+    server.wrapper.kill("SIGTERM");
+    const code = await within(server.exited, 15_000);
+    if (code === "timeout") {
+      server.wrapper.kill("SIGKILL");
+      await signalIdentified(server.pid, server.identity, "SIGKILL");
+      if ((await within(server.exited, 5_000)) === "timeout")
+        throw new Error("the server wrapper survived SIGKILL");
+    }
+    if (server.identity !== undefined) await serverGone(server);
+    return code;
+  }
 
   const fixture = {
     root,
@@ -197,6 +226,8 @@ export async function createM1Fixture() {
         throw new Error(`cove server start exited ${wrapper.exitCode}: ${stderr}`);
       server.report = JSON.parse(stdout);
       server.pid = server.report.pid;
+      // Read while the server is known to run (it just reported readiness).
+      server.identity = await identify(server.pid);
       server.record = await readRendezvous(server.report.rendezvous);
       return server;
     },
@@ -233,6 +264,7 @@ export async function createM1Fixture() {
       );
       if (child.exitCode !== null) throw new Error(`${entry} exited ${child.exitCode}: ${stderr}`);
       server.report = { rendezvous, pid: child.pid };
+      server.identity = await identify(child.pid);
       server.record = await readRendezvous(rendezvous);
       return server;
     },
@@ -240,14 +272,32 @@ export async function createM1Fixture() {
     // Orderly stop through the wrapper (SIGTERM), with SIGKILL as the bounded fallback.
     async stopServer(server) {
       servers.splice(servers.indexOf(server), 1);
-      return stopServer(server.wrapper, server.exited, server.pid);
+      return stopOwnedServer(server);
+    },
+
+    // Whether the server is still the process identified when it became ready.
+    serverRuns(server) {
+      return runsAs(server.pid, server.identity);
+    },
+
+    // Sends `signal` to the server process (e.g. the D6 mode switch): through the owned handle
+    // when the fixture spawned the server itself, otherwise only while the PID is the identified
+    // server. Throws instead of signalling anything else.
+    async signalServer(server, signal) {
+      const sent =
+        server.wrapper.pid === server.pid
+          ? server.wrapper.exitCode === null &&
+            server.wrapper.signalCode === null &&
+            server.wrapper.kill(signal)
+          : await signalIdentified(server.pid, server.identity, signal);
+      if (!sent) throw new Error(`the server ${server.pid} is no longer running`);
     },
 
     // `kill -9` of the server process itself. Its children (worker, PTY processes) are not
     // signalled; the caller tracks them with trackPid so cleanup ends them.
     async killServer(server) {
-      kill(server.pid, "SIGKILL");
-      await waitFor("the killed server to exit", () => !alive(server.pid), 5_000);
+      await fixture.signalServer(server, "SIGKILL");
+      await serverGone(server);
       if ((await within(server.exited, 5_000)) === "timeout")
         throw new Error("the cove server start wrapper outlived its server");
       servers.splice(servers.indexOf(server), 1);
@@ -269,20 +319,31 @@ export async function createM1Fixture() {
     // signals the PID only while it still carries that identity, so a process that reused the PID
     // in between is never killed.
     async trackPid(pid) {
-      const identity = await startIdentity(pid);
-      if (identity === null) throw new Error(`process ${pid} is not running`);
-      pids.set(pid, identity);
+      pids.set(pid, await identify(pid));
+    },
+
+    // Signals a tracked process only while it is the identified process; throws otherwise.
+    async signalTracked(pid, signal) {
+      if (!pids.has(pid)) throw new Error(`process ${pid} is not tracked`);
+      if (!(await signalIdentified(pid, pids.get(pid), signal)))
+        throw new Error(`process ${pid} is no longer the tracked process`);
     },
 
     // Ends every tracked process, confirms each exited and removes the root. Throws when any
     // process survived, after attempting every step.
     async cleanup() {
       const failures = [];
-      for (const pid of pids.keys()) if (await stillRuns(pid)) kill(pid, "SIGKILL");
+      for (const pid of pids.keys()) {
+        try {
+          await signalIdentified(pid, pids.get(pid), "SIGKILL");
+        } catch (error) {
+          failures.push(error);
+        }
+      }
       for (const { child } of background) if (child.exitCode === null) child.kill("SIGKILL");
       for (const server of servers.splice(0)) {
         try {
-          await stopServer(server.wrapper, server.exited, server.pid);
+          await stopOwnedServer(server);
         } catch (error) {
           failures.push(error);
         }
