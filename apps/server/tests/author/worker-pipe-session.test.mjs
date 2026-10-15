@@ -1,7 +1,10 @@
+import { PassThrough, Writable } from "node:stream";
 import { describe, it, expect } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError } from "@cove/protocol/errors";
 import {
+  HEADER_BYTES,
+  MAX_METADATA_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
   createPipeDecoder,
   encodePipeFrame,
@@ -9,6 +12,7 @@ import {
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { WorkerPipeSession } from "../../dist/terminal/worker-pipe-session.js";
+import { runWorkerPipe } from "@cove/terminal-worker/pipe";
 
 const codec = {
   encode: (text) => new TextEncoder().encode(text),
@@ -33,7 +37,8 @@ function frame(value, payload = new Uint8Array()) {
   if (!encoded.ok) throw new Error("Invalid fixture frame");
   return encoded.value;
 }
-function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32) {
+// `forward`, if given, also receives every written frame (to drive a real worker endpoint).
+function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32, forward = undefined) {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const writes = [];
@@ -48,6 +53,7 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32) {
     transport: {
       write: (data, settled) => {
         writes.push({ data, settled });
+        forward?.(data);
         return !blocked;
       },
     },
@@ -94,6 +100,17 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32) {
     reply,
     block: () => {
       blocked = true;
+    },
+    unblock: () => {
+      blocked = false;
+    },
+    // Runs every write callback not yet run, as a transport that finished writing would.
+    settleWrites: () => {
+      for (const write of writes)
+        if (!write.done) {
+          write.done = true;
+          write.settled();
+        }
     },
     clock: (value) => {
       now = value;
@@ -318,6 +335,8 @@ describe("bounded worker pipe session", () => {
     const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => route(index));
     const results = window.map((command) => f.session.request(command));
     expect(writtenIds(f, from)).toEqual(window.map((command) => command.requestId));
+    // The transport finishes these writes; only the window holds the rest back here.
+    f.settleWrites();
     // Past the window nothing is written for the worker to queue (it treats more than the
     // window as a protocol violation), and nothing is refused either: ACKs, progress reports and
     // unsubscribes of opened subscriptions wait unsent, in arrival order.
@@ -366,6 +385,7 @@ describe("bounded worker pipe session", () => {
       ack(f, index),
     );
     const results = acks.map((command) => f.session.request(command));
+    f.settleWrites();
     // The window answers at 90 with no tick (or other admission) since 0, so the session has no
     // fresher reading than 0; promotion reads the clock itself.
     f.clock(90);
@@ -383,6 +403,7 @@ describe("bounded worker pipe session", () => {
     for (const result of await Promise.all(results))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
     // A worker that never answers still loses contact at the deadline (189 + 100).
+    f.settleWrites();
     const silent = f.session.request(ack(f, 0, "silent"));
     f.clock(288);
     f.session.tick();
@@ -421,7 +442,11 @@ describe("bounded worker pipe session", () => {
       "status",
       "stop",
     ]);
-    for (const command of [...acks, unsubscribe]) f.session.receive(f.reply(command));
+    f.settleWrites();
+    for (const command of [...acks, unsubscribe]) {
+      f.session.receive(f.reply(command));
+      f.settleWrites();
+    }
     for (const result of await Promise.all([...results, unsubscribed]))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
     expect(f.lost()).toBe(0);
@@ -429,6 +454,218 @@ describe("bounded worker pipe session", () => {
     f.session.loseContact();
     await Promise.all([statusResult, stopResult]);
     filler.release();
+  });
+
+  it("holds a route-control frame's transport slot until its write callback, even after the reply", async () => {
+    const f = fixture();
+    f.start();
+    await openRoutes(f, 1);
+    f.settleWrites();
+    const before = f.bytes.snapshot();
+    const filler = f.bytes.reserve(before.limit - before.controlReserve - before.ordinary);
+    expect(filler).not.toBeNull();
+    const pressed = f.bytes.snapshot().total;
+    // One subscription's ACKs, one at a time as its route queue sends them. Every reply arrives
+    // before its frame's write callback, which lags by up to four frames.
+    const lagging = [];
+    for (let index = 0; index < 2500; index++) {
+      const command = ack(f, 0, `lag-${index}`);
+      const from = f.writes.length;
+      const result = f.session.request(command);
+      // Once every transport slot holds a frame whose reply already arrived, the ACK waits
+      // unsent until the oldest frame's callback frees one.
+      const full = lagging.length === PIPE_ROUTE_CONTROL_COMMANDS;
+      expect(f.writes.length - from).toBe(full ? 0 : 1);
+      if (full) lagging.shift().settled();
+      expect(writtenIds(f, from)).toEqual([command.requestId]);
+      lagging.push(f.writes.at(-1));
+      f.session.receive(f.reply(command));
+      expect(await result).toMatchObject({ type: "result", outcome: "accepted" });
+      // Every frame in transport is paid for by the arena; the account never grows.
+      expect(f.session.snapshot().prepaidFrames).toBeLessThanOrEqual(PIPE_ROUTE_CONTROL_COMMANDS);
+      expect(f.bytes.snapshot().total).toBe(pressed);
+    }
+    expect(f.lost()).toBe(0);
+    // Closing with frames still in transport keeps their storage until the callbacks run.
+    f.session.loseContact();
+    expect(f.session.snapshot().prepaidFrames).toBe(PIPE_ROUTE_CONTROL_COMMANDS);
+    expect(f.bytes.snapshot().total).toBeGreaterThan(filler.bytes);
+    for (const write of lagging) write.settled();
+    expect(f.session.snapshot()).toMatchObject({ prepaidFrames: 0, prepaidBytes: 0 });
+    expect(f.bytes.snapshot().total).toBe(filler.bytes);
+    filler.release();
+  });
+
+  it("queues route control, status and stop at the smallest valid queue budget behind blocked output", async () => {
+    // The smallest budgets validation accepts: one maximum frame of queue and one maximum
+    // metadata frame of control reserve.
+    const budgets = {
+      ...M0_LIMITS,
+      pipeQueuedBytes: HEADER_BYTES + MAX_METADATA_BYTES + 65_536,
+      reservedControlBytes: HEADER_BYTES + MAX_METADATA_BYTES,
+    };
+    const f = fixture(budgets);
+    f.start();
+    // Long identifiers make each ACK frame large, as a real deployment's may be.
+    const long = (prefix, index) => `${prefix}-${index}-`.padEnd(128, "x");
+    const wide = (index) => ({
+      ...subscription,
+      connection: { connectionId: long("connection", index), generation: 0 },
+      subscriptionId: long("subscription", index),
+      viewId: long("view", index),
+    });
+    for (let index = 0; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
+      const subscribe = f.command("subscribe", long("open", index), {
+        subscription: wide(index),
+        atSeq: 0,
+      });
+      const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+      f.session.receive(f.reply(subscribe, { recoveryMode: "baseline", atSeq: 0 }));
+      expect(await opened).toMatchObject({ outcome: "accepted" });
+    }
+    f.settleWrites();
+    const acks = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+      f.command("applied-ack", long("ack", index), { subscription: wide(index), appliedSeq: 1 }),
+    );
+    const status = f.command("status", "status");
+    const stop = f.command("stop", "stop", { operationId: "stop-operation" });
+    const size = (command) =>
+      encodePipeFrame(1, codec.encode(JSON.stringify(command)), new Uint8Array()).value.byteLength;
+    // The window's frames plus status and stop exceed the control reserve.
+    expect(
+      acks.reduce((total, command) => total + size(command), size(status) + size(stop)),
+    ).toBeGreaterThan(budgets.reservedControlBytes);
+    // An ordinary frame that takes the whole ordinary allowance is handed off and blocks.
+    const input = f.command("input", "input", { subscription: wide(0), epoch: 1, inputSeq: 1 });
+    const payload = new Uint8Array(
+      budgets.pipeQueuedBytes - budgets.reservedControlBytes - size(input),
+    );
+    f.block();
+    const inputResult = f.session.request(input, payload);
+    expect(f.session.snapshot().physicalBytes).toBe(
+      budgets.pipeQueuedBytes - budgets.reservedControlBytes,
+    );
+    const from = f.writes.length;
+    const statusResult = f.session.request(status);
+    const stopResult = f.session.request(stop);
+    const results = acks.map((command) => f.session.request(command));
+    expect(f.lost()).toBe(0);
+    expect(f.session.snapshot()).toMatchObject({ prepaidFrames: PIPE_ROUTE_CONTROL_COMMANDS });
+    f.unblock();
+    f.session.drain();
+    expect(writtenIds(f, from)).toEqual([
+      "status",
+      "stop",
+      ...acks.map((command) => command.requestId),
+    ]);
+    f.settleWrites();
+    for (const command of acks) f.session.receive(f.reply(command));
+    for (const result of await Promise.all(results))
+      expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(f.lost()).toBe(0);
+    f.session.loseContact();
+    await Promise.all([inputResult, statusResult, stopResult]);
+  });
+
+  it("agrees with the real worker endpoint on the window when replies are read before their write callbacks", async () => {
+    // The worker's output hands every write callback to the test, so the session can read a
+    // reply while the worker still waits for that reply's callback.
+    const toWorker = new PassThrough();
+    const replies = [];
+    const callbacks = [];
+    const output = new Writable({
+      highWaterMark: 1024 * 1024,
+      write(chunk, _encoding, callback) {
+        replies.push(Buffer.from(chunk));
+        callbacks.push(callback);
+      },
+    });
+    const executed = [];
+    const execution = {
+      execute(command) {
+        executed.push(command.requestId);
+        return Promise.resolve({
+          type: "result",
+          worker,
+          run,
+          requestId: command.requestId,
+          commandType: command.type,
+          outcome: "accepted",
+          ...(command.type === "subscribe" ? { recoveryMode: "baseline", atSeq: 0 } : {}),
+        });
+      },
+      snapshot: () => ({}),
+      shutdown: async () => [],
+    };
+    const pipe = runWorkerPipe(toWorker, output, {
+      buildVersion: "worker",
+      createExecution: () => execution,
+    });
+    const f = fixture(undefined, 32, (data) => toWorker.write(Buffer.from(data)));
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    let read = 0;
+    const deliver = () => {
+      const chunk = Buffer.concat(replies.slice(read));
+      read = replies.length;
+      if (chunk.length) f.session.receive(new Uint8Array(chunk));
+    };
+    try {
+      f.session.start();
+      f.settleWrites();
+      await turn();
+      callbacks.shift()();
+      deliver();
+      expect(f.session.ready).toBe(true);
+      f.session.registerRun(run);
+      const routes = PIPE_ROUTE_CONTROL_COMMANDS + 1;
+      for (let index = 0; index < routes; index++) {
+        const subscribe = f.command("subscribe", `open-${index}`, {
+          subscription: on(index),
+          atSeq: 0,
+        });
+        const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+        f.settleWrites();
+        await turn();
+        while (callbacks.length) callbacks.shift()();
+        deliver();
+        expect(await opened).toMatchObject({ outcome: "accepted" });
+      }
+      executed.length = 0;
+      const acks = Array.from({ length: routes }, (_, index) => ack(f, index));
+      const results = acks.map((command) => f.session.request(command));
+      f.settleWrites();
+      await turn();
+      // The worker answered the first ACK; its reply is on the wire, its callback still held.
+      expect(executed).toEqual([acks[0].requestId]);
+      expect(callbacks).toHaveLength(1);
+      // Reading that reply frees a session window slot, so the fifth ACK goes to the worker
+      // before the worker's write callback runs. The worker parks it instead of failing closed.
+      deliver();
+      expect(await results[0]).toMatchObject({ outcome: "accepted" });
+      f.settleWrites();
+      await turn();
+      expect(pipe.snapshot()).toMatchObject({
+        state: "ready",
+        parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS,
+      });
+      for (let step = 0; step < 4 * routes && executed.length < routes; step++) {
+        callbacks.shift()?.();
+        await turn();
+        deliver();
+        f.settleWrites();
+        await turn();
+      }
+      while (callbacks.length) callbacks.shift()();
+      deliver();
+      for (const result of await Promise.all(results))
+        expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+      expect(executed).toEqual(acks.map((command) => command.requestId));
+      expect(pipe.snapshot().state).toBe("ready");
+      expect(f.lost()).toBe(0);
+    } finally {
+      await pipe.shutdown("test-complete");
+      f.session.loseContact();
+    }
   });
 
   it("never lets prepaid route control exhaust the identities other commands need", async () => {
@@ -445,6 +682,7 @@ describe("bounded worker pipe session", () => {
     const status = f.command("status", "status");
     const statusResult = f.session.request(status);
     expect(writtenIds(f, from)).toEqual(["status"]);
+    f.settleWrites();
     for (const command of acks) f.session.receive(f.reply(command));
     for (const result of await Promise.all(results))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
@@ -607,6 +845,7 @@ describe("bounded worker pipe session", () => {
       f.session.receive(output(ref, 1));
       const unsubscribe = f.command("unsubscribe", `unsubscribe-${index}`, { subscription: ref });
       const closed = f.session.request(unsubscribe);
+      f.settleWrites();
       expect(f.session.snapshot().routes).toBe(1);
       // An outcome other than accepted still settles the route: it stays fenced either way.
       f.session.receive(
