@@ -93,8 +93,28 @@ export function encodeFrame(
   return { ok: true, value: output };
 }
 
+// Bounds compaction of exact body copies so many tiny reads cannot accumulate unbounded views.
+const MAX_BODY_SEGMENTS = 16;
+
+function copyRange(segments: readonly Uint8Array[], start: number, end: number): Uint8Array {
+  const output = new Uint8Array(end - start);
+  let offset = 0;
+  for (const segment of segments) {
+    const from = Math.max(start - offset, 0);
+    const to = Math.min(end - offset, segment.byteLength);
+    if (from < to) output.set(segment.subarray(from, to), offset + from - start);
+    offset += segment.byteLength;
+    if (offset >= end) break;
+  }
+  return output;
+}
+
 export class FrameDecoder {
-  private pending = new Uint8Array(HEADER_BYTES);
+  private readonly header = new Uint8Array(HEADER_BYTES);
+  // Body bytes received so far, held as exact copies of each consumed slice. A validated header
+  // does not allocate its declared frame length up front, so storageBytes is what the decoder
+  // really owns and a caller can bound its ingress exactly (issue #96).
+  private body: Uint8Array[] = [];
   private filled = 0;
   private expected = HEADER_BYTES;
   private metadataLength = 0;
@@ -109,6 +129,12 @@ export class FrameDecoder {
 
   get retainedBytes(): number {
     return this.filled;
+  }
+
+  // Storage owned for the partial frame: the fixed header buffer once a frame has started, then
+  // exactly the copied body bytes. An idle decoder owns no ingress.
+  get storageBytes(): number {
+    return this.filled === 0 ? 0 : Math.max(HEADER_BYTES, this.filled);
   }
 
   // The caller owns ingress beyond consumedBytes and resubmits it later; only one copied partial frame is retained.
@@ -131,14 +157,17 @@ export class FrameDecoder {
         input.byteLength - consumedBytes,
         MAX_READ_BYTES - consumedBytes,
       );
-      this.pending.set(input.subarray(consumedBytes, consumedBytes + count), this.filled);
+      const slice = input.subarray(consumedBytes, consumedBytes + count);
+      // expected stays HEADER_BYTES until the header completes, so one copy never spans both parts.
+      if (this.filled < HEADER_BYTES) this.header.set(slice, this.filled);
+      else this.appendBody(slice);
       this.filled += count;
       consumedBytes += count;
       this.offset += count;
       if (this.filled !== this.expected) continue;
       if (this.expected === HEADER_BYTES) {
-        // Reject the header before allocating its body; fatal failure releases pending bytes but preserves earlier frames.
-        const checked = inspectHeader(this.pending, this.lane, this.revision);
+        // Reject the header before accepting its body; fatal failure releases pending bytes but preserves earlier frames.
+        const checked = inspectHeader(this.header, this.lane, this.revision);
         if (!checked.ok) {
           this.close();
           return {
@@ -152,15 +181,13 @@ export class FrameDecoder {
         this.metadataLength = metadataLength;
         this.kind = kind;
         this.expected = length;
-        const body = new Uint8Array(length);
-        body.set(this.pending);
-        this.pending = body;
       }
       if (this.filled === this.expected) {
+        const bodyLength = this.expected - HEADER_BYTES;
         frames.push({
           kind: this.kind,
-          metadata: this.pending.slice(HEADER_BYTES, HEADER_BYTES + this.metadataLength),
-          payload: this.pending.slice(HEADER_BYTES + this.metadataLength),
+          metadata: copyRange(this.body, 0, this.metadataLength),
+          payload: copyRange(this.body, this.metadataLength, bodyLength),
         });
         emittedBytes += this.expected;
         this.resetPending();
@@ -177,15 +204,23 @@ export class FrameDecoder {
     return partial ? failure("TRUNCATED_FRAME", this.offset) : { ok: true, value: undefined };
   }
 
+  // Copies the slice (a Node Buffer slice would be a view of the caller's backing).
+  private appendBody(slice: Uint8Array): void {
+    this.body.push(new Uint8Array(slice));
+    if (this.body.length <= MAX_BODY_SEGMENTS) return;
+    const total = this.body.reduce((bytes, segment) => bytes + segment.byteLength, 0);
+    this.body = [copyRange(this.body, 0, total)];
+  }
+
   private resetPending(): void {
-    this.pending = new Uint8Array(HEADER_BYTES);
+    this.body = [];
     this.filled = 0;
     this.expected = HEADER_BYTES;
     this.metadataLength = 0;
   }
 
   private close(): void {
-    this.pending = new Uint8Array(0);
+    this.body = [];
     this.filled = 0;
     this.closed = true;
   }
