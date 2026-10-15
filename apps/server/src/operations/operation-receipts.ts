@@ -15,6 +15,12 @@ const TERMINAL_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
   "requires_attention",
 ]);
 
+const RECOVERY_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
+  "running",
+  "recovering",
+  "cancelled",
+]);
+
 type Entry = {
   key: OperationReceiptKey;
   canonicalIntent: string;
@@ -141,8 +147,9 @@ export class OperationReceipts {
     return checked;
   }
 
-  update(key: OperationReceiptKey, next: OperationRecord): boolean {
-    if (!this.valid(key)) return false;
+  // The committed entry when `next` is its successor: next revision, same method and run.
+  private successor(key: OperationReceiptKey, next: OperationRecord): Entry | null {
+    if (!this.valid(key)) return null;
     const entry = this.entries.get(this.id(key));
     if (
       !entry?.record ||
@@ -153,15 +160,40 @@ export class OperationReceipts {
       next.run?.relayInstanceId !== entry.record.run?.relayInstanceId ||
       next.run?.runId !== entry.record.run?.runId
     )
-      return false;
-    // Terminal states never change through an ordinary update: a late executor or recovery
-    // result must not replace them. Continuing a requires_attention operation is an explicit
-    // recovery command, not an update of this record.
-    if (TERMINAL_STATES.has(entry.record.state)) return false;
+      return null;
+    return entry;
+  }
+
+  private replace(entry: Entry, next: OperationRecord): boolean {
     const checked = this.validate(entry, next);
     if (!checked) return false;
     entry.record = structuredClone(checked);
     return true;
+  }
+
+  // Ordinary progress of a live operation. Terminal states never change here, so a late executor
+  // or verification result cannot replace succeeded, failed, cancelled or requires_attention.
+  update(key: OperationReceiptKey, next: OperationRecord): boolean {
+    const entry = this.successor(key, next);
+    if (!entry || TERMINAL_STATES.has(entry.record!.state)) return false;
+    return this.replace(entry, next);
+  }
+
+  // The only way out of requires_attention (relay-protocol §11.5): an explicit operation.continue
+  // moves the same operation to running or recovering, after which ordinary updates bring it to
+  // its normal terminal state; operation.abandon ends it as cancelled. The caller names the
+  // revision it inspected, so a recovery decided on a stale view is refused. succeeded, failed
+  // and cancelled never change.
+  recover(key: OperationReceiptKey, expectedRevision: number, next: OperationRecord): boolean {
+    const entry = this.successor(key, next);
+    if (
+      !entry ||
+      entry.record!.state !== "requires_attention" ||
+      entry.record!.revision !== expectedRevision ||
+      !RECOVERY_STATES.has(next.state)
+    )
+      return false;
+    return this.replace(entry, next);
   }
 
   get(key: OperationReceiptKey): OperationRecord | null {

@@ -256,6 +256,76 @@ describe("terminal operation states", () => {
   });
 });
 
+describe("explicit recovery of requires_attention", () => {
+  function attention(f, operationId) {
+    const key = { serverId: "server", principalId: "principal", operationId };
+    const record = {
+      operationId,
+      method: "terminal.create",
+      revision: 0,
+      state: "accepted",
+      run: oldRun,
+    };
+    expect(f.receipts.prepare(key, `intent-${operationId}`).commit(record)).toBe(true);
+    expect(f.receipts.update(key, { ...record, revision: 1, state: "requires_attention" })).toBe(
+      true,
+    );
+    return { key, record: f.receipts.get(key) };
+  }
+
+  it("continues to running or recovering and then finishes through ordinary updates", () => {
+    const f = fixture();
+    for (const resumed of ["running", "recovering"]) {
+      const { key, record } = attention(f, `continue-${resumed}`);
+      // A late executor result is still refused; only the explicit transition resumes.
+      expect(f.receipts.update(key, { ...record, revision: 2, state: "succeeded" })).toBe(false);
+      expect(f.receipts.recover(key, 1, { ...record, revision: 2, state: resumed })).toBe(true);
+      expect(f.receipts.update(key, { ...record, revision: 3, state: "succeeded" })).toBe(true);
+      expect(f.receipts.update(key, { ...record, revision: 4, state: "running" })).toBe(false);
+      expect(f.receipts.get(key)).toMatchObject({ revision: 3, state: "succeeded" });
+    }
+    f.close();
+  });
+
+  it("abandons to cancelled, which never changes again", () => {
+    const f = fixture();
+    const { key, record } = attention(f, "abandon");
+    expect(f.receipts.recover(key, 1, { ...record, revision: 2, state: "cancelled" })).toBe(true);
+    expect(f.receipts.update(key, { ...record, revision: 3, state: "running" })).toBe(false);
+    expect(f.receipts.recover(key, 2, { ...record, revision: 3, state: "running" })).toBe(false);
+    expect(f.receipts.get(key)).toMatchObject({ revision: 2, state: "cancelled" });
+    f.close();
+  });
+
+  it("refuses stale, out-of-order or non-recovery transitions", () => {
+    const f = fixture();
+    const { key, record } = attention(f, "guarded");
+    // Stale inspected revision, skipped revision, and a state recovery cannot jump to.
+    expect(f.receipts.recover(key, 0, { ...record, revision: 2, state: "running" })).toBe(false);
+    expect(f.receipts.recover(key, 1, { ...record, revision: 3, state: "running" })).toBe(false);
+    for (const state of ["succeeded", "failed", "accepted", "requires_attention"])
+      expect(f.receipts.recover(key, 1, { ...record, revision: 2, state })).toBe(false);
+    expect(
+      f.receipts.recover(key, 1, {
+        ...record,
+        revision: 2,
+        state: "running",
+        method: "terminal.stop",
+      }),
+    ).toBe(false);
+    expect(f.receipts.get(key)).toMatchObject({ revision: 1, state: "requires_attention" });
+    // Records that are not waiting for attention cannot be recovered.
+    for (const state of ["running", "succeeded", "failed", "cancelled"]) {
+      const other = { serverId: "server", principalId: "principal", operationId: `not-${state}` };
+      const base = { ...record, operationId: other.operationId, revision: 0, state: "accepted" };
+      expect(f.receipts.prepare(other, `intent-not-${state}`).commit(base)).toBe(true);
+      expect(f.receipts.update(other, { ...base, revision: 1, state })).toBe(true);
+      expect(f.receipts.recover(other, 1, { ...base, revision: 2, state: "running" })).toBe(false);
+    }
+    f.close();
+  });
+});
+
 describe("instance-bound operation receipts", () => {
   it("rejects a receipts store on an equal-limit separate ledger before operations can run", () => {
     const f = fixture();
