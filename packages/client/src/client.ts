@@ -23,7 +23,13 @@ import {
   type Appearance,
   type Geometry,
 } from "@cove/protocol/profile";
-import { canonicalOperationIntent, RPC_METHODS, type RpcMethod } from "@cove/protocol/rpc";
+import {
+  canonicalWriteIntent,
+  isWriteRpcMethod,
+  RPC_METHODS,
+  type RpcMethod,
+  type WriteRpcMethod,
+} from "@cove/protocol/rpc";
 import type { TerminalView } from "@cove/protocol/view";
 import {
   agreeBootstraps,
@@ -104,7 +110,7 @@ export type ConnectOutcome =
   | { readonly ok: false; readonly error: ClientError };
 
 export interface OperationReference {
-  readonly method: "terminal.create" | "terminal.stop";
+  readonly method: WriteRpcMethod;
   readonly operationId: string;
   readonly relayInstanceId: string;
 }
@@ -373,7 +379,7 @@ function localError(reason: LocalErrorReason): ClientError {
 }
 
 function immutableOperation(
-  method: "terminal.create" | "terminal.stop",
+  method: WriteRpcMethod,
   operationId: string,
   relayInstanceId: string,
 ): OperationReference {
@@ -662,11 +668,13 @@ class CoveClient implements Client {
     const prepared = prepareCall(method, params, requestId, binding);
     if (!prepared) return this.localCallFailure("instance-binding");
 
-    const writeMethod = method === "terminal.create" || method === "terminal.stop";
+    // Every write in the method table gets an operation reference, a local intent guard and
+    // operation-unknown handling; a new write method needs no client change.
+    const writeMethod = isWriteRpcMethod(method) ? method : undefined;
     const operation = writeMethod
       ? immutableOperation(
-          method,
-          (prepared.params as ParamsFor<"terminal.create">).operationId,
+          writeMethod,
+          (prepared.params as { operationId: string }).operationId,
           binding.relayInstanceId,
         )
       : undefined;
@@ -674,7 +682,7 @@ class CoveClient implements Client {
     if (writeMethod) {
       try {
         canonicalIntent =
-          canonicalOperationIntent(method, prepared.params, (text) =>
+          canonicalWriteIntent(writeMethod, prepared.params, (text) =>
             this.options.codec.encode(text),
           ) ?? undefined;
       } catch {

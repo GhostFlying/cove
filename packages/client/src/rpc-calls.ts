@@ -1,12 +1,10 @@
 import { M0_LIMITS, type EffectiveBudgets } from "@cove/protocol/budgets";
-import { sameRunRef, type RunRef } from "@cove/protocol/identity";
 import {
   RPC_METHODS,
   STANDARD_RPC_ERRORS,
   validateRpcMethodParams,
   validateRpcResponse,
   validateRpcResultForCall,
-  type OperationRecord,
   type RpcMethod,
   type RpcResponse,
 } from "@cove/protocol/rpc";
@@ -34,6 +32,12 @@ export type PreparedCall<M extends RpcMethod> = {
   }>;
 };
 
+// Transport binding and execution preconditions are separate (m1 "操作身份跨重启"). The
+// transport binding (server, current instance, protocol) is checked on every request and response
+// by headers. Params only have to name this server: a write may carry the execution precondition
+// of an earlier instance so that a resend reaches server-side deduplication, which decides whether
+// it is the original operation or a stale new one. Only instance-scoped reads must name the
+// current instance.
 export function prepareCall<M extends RpcMethod>(
   method: M,
   params: ParamsFor<M>,
@@ -43,7 +47,7 @@ export function prepareCall<M extends RpcMethod>(
   const parsed = validateRpcMethodParams(method, params);
   if (!parsed || parsed.method !== method) return null;
   const stableParams = parsed.params as ParamsFor<M>;
-  if (!paramsMatchInstance(method, stableParams, binding)) return null;
+  if (!referencesMatchBinding(stableParams, RPC_METHODS[method].scope, binding)) return null;
   return {
     method,
     params: stableParams,
@@ -56,28 +60,26 @@ export function prepareCall<M extends RpcMethod>(
   };
 }
 
-function paramsMatchInstance<M extends RpcMethod>(
-  method: M,
-  params: ParamsFor<M>,
+// Every server reference (any object with a string serverId, such as a RunRef) must name the bound
+// server; in an instance-scoped method it must also name the current relay instance. Inputs are
+// schema-validated, bounded JSON, so the walk is bounded too.
+function referencesMatchBinding(
+  value: unknown,
+  scope: "instance" | "server",
   binding: RpcBinding,
 ): boolean {
-  const value = params as Record<string, unknown>;
+  if (Array.isArray(value))
+    return value.every((element) => referencesMatchBinding(element, scope, binding));
+  if (!value || typeof value !== "object") return true;
+  const record = value as Record<string, unknown>;
+  if (typeof record.serverId === "string" && record.serverId !== binding.serverId) return false;
   if (
-    (method === "terminal.create" || method === "terminal.stop") &&
-    value.expectedRelayInstanceId !== binding.relayInstanceId
+    scope === "instance" &&
+    typeof record.relayInstanceId === "string" &&
+    record.relayInstanceId !== binding.relayInstanceId
   )
     return false;
-  if (method === "terminal.get" || method === "terminal.stop") return boundRun(value.run, binding);
-  return true;
-}
-
-function boundRun(value: unknown, binding: RpcBinding): value is RunRef {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    (value as RunRef).serverId === binding.serverId &&
-    (value as RunRef).relayInstanceId === binding.relayInstanceId
-  );
+  return Object.values(record).every((element) => referencesMatchBinding(element, scope, binding));
 }
 
 function sameBudgets(left: EffectiveBudgets, right: Readonly<EffectiveBudgets>): boolean {
@@ -102,21 +104,9 @@ function resultMatchesBinding<M extends RpcMethod>(
       sameBudgets(status.effectiveBudgets, binding.effectiveBudgets)
     );
   }
-  if (method === "terminal.list") {
-    return (result as ResultFor<"terminal.list">).runs.every((record) =>
-      boundRun(record.run, binding),
-    );
-  }
-  if (method === "terminal.get")
-    return boundRun((result as ResultFor<"terminal.get">).record.run, binding);
-  if (method === "terminal.create" || method === "terminal.stop" || method === "operation.get") {
-    const operation = (result as { operation: OperationRecord }).operation;
-    return (
-      boundRun(operation.run, binding) &&
-      (!operation.result?.run || sameRunRef(operation.run, operation.result.run))
-    );
-  }
-  return false;
+  // Server-scoped results, including every operation record, may reference runs of earlier
+  // instances of the same server: a resent write or operation.get returns the historical record.
+  return referencesMatchBinding(result, RPC_METHODS[method].scope, binding);
 }
 
 export type CheckedRpcResponse<M extends RpcMethod> =
