@@ -204,6 +204,47 @@ describe("store opening, migrations and the data directory lock", () => {
     expect(await digests(layout.serverDirectory)).toEqual(before);
   });
 
+  it("takes the instance lock before reading the database files", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    loadOrCreateIdentity(store);
+    close(store);
+    const newer = MIGRATIONS.length + 1;
+    expect(await crashAfter(layout.databasePath, [`PRAGMA user_version = ${newer}`])).toBe(
+      "SIGKILL",
+    );
+    const before = await digests(layout.serverDirectory);
+    // Another process holds only the instance lock, as a running server of this data directory
+    // does from before it reads its database until it has closed it.
+    const holder = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const Database = require(${JSON.stringify(require.resolve("better-sqlite3"))});
+         const lock = new Database(${JSON.stringify(join(layout.serverDirectory, "cove.lock"))}, { timeout: 0 });
+         lock.pragma("journal_mode = MEMORY");
+         lock.exec("BEGIN EXCLUSIVE");
+         console.log("locked");
+         process.stdin.on("end", () => { lock.close(); process.exit(0); });
+         process.stdin.resume();`,
+      ],
+      { stdio: ["pipe", "pipe", "inherit"] },
+    );
+    const exited = new Promise((done) => holder.once("exit", done));
+    try {
+      await new Promise((done) => holder.stdout.once("data", done));
+      // While it is held, the opener stops at the lock: in-use, not the newer schema it would
+      // read from the files, and nothing is touched.
+      await expect(open(layout)).rejects.toMatchObject({ category: "in-use" });
+      expect(await digests(layout.serverDirectory)).toEqual(before);
+    } finally {
+      holder.stdin.end();
+      await exited;
+    }
+    await expect(open(layout)).rejects.toMatchObject({ category: "newer-schema" });
+    expect(await digests(layout.serverDirectory)).toEqual(before);
+  });
+
   it("reads the committed schema version from the WAL exactly as SQLite recovers it", async () => {
     const cases = {
       committedInWal: ["CREATE TABLE t (x)", "PRAGMA user_version = 7"],
