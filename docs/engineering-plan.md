@@ -178,7 +178,8 @@ agent** 交互的 chat 形态（参考 Orca）。tend 的对话视图是与 **te
 | M4：Electron 外壳（RN 待定） | Electron 以窄宿主接口承载同一 Web UI；RN 是否进入依 M3 手机浏览器证据另定                        | Desktop 退出不影响 server；宿主能力（SSH、本机服务、系统凭据）可用；若含 RN，则原 M3 的 iOS/Android 真机证据 |
 | M5：迁移与容量/发布收敛      | 即原 M4                                                                                          | 即原 M4                                                                                                      |
 
-M3 的 tend 视图单独设出口门槛：tend 的 owner API（D42 修订后的 bearer 会话、读接口、SSE）未就绪时，
+M3 的 tend 视图单独设出口门槛：tend 的 owner API（D42 修订后的 bearer 会话、读接口、SSE）
+以及受浏览器信任的 tend HTTPS 源（HTTPS 页面不能访问 HTTP 源，不接受明文退化）未就绪时，
 Cove 自身的 Web 部分可以先完成验收，tend 视图顺延，不以 tend 进度阻塞 Cove 核心交付。
 
 #### 主要风险
@@ -187,9 +188,12 @@ Cove 自身的 Web 部分可以先完成验收，tend 视图顺延，不以 tend
 - 跨 host 的看板：tend 的任务可映射到不同 host 上的 Cove workspace，而每台 Cove server 提供各自的
   Web 源，跨 server 聚合尚无方案（Server §9.5）。首个版本建议从看板跳转到对应 host 的 Cove Web 源
   （各自配对），不在浏览器中跨源共享 Cove 凭据。
-- 外部契约变动：tend 的 owner API 仍在修订（D42 将改为 bearer token），Cove 消费方需随之调整；
+- 外部契约变动：tend 的 owner API 仍在修订（D42 将改为 bearer token），且本集成要求 tend 提供可信 HTTPS 源，
+  Cove 消费方需随之调整；tend 不满足时只禁用 tend 视图并给出诊断；
   连接方式见 [Server §9.6](server-architecture.md#96-提案cove-客户端直连-tend-api待用户-review)。
 - 手机浏览器的后台挂起、输入法与通知限制可能让 mobile 体验暂时弱于原生；RN 推迟需要用户接受这一点。
+- UI 的提供与分发：tend 视图由 Cove Web 承载，提供页面的 Cove host 离线时无法重新加载；
+  已加载的页面仍可直连 tend。由哪台 host 提供 UI、是否多处分发或离线缓存是未决的部署问题，在 M3 计划中决定。
 - 根 `AGENTS.md` 仍把 Web App、chat 与 Shepherd 集成列为首期不做；提案批准后须由该文件的指定写入者同步修改。
 
 #### 待用户决定的问题

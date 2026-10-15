@@ -379,7 +379,10 @@ tend 是用户的独立项目（Go 服务），定位为“用户只与一个主
   tend 现有设计中由 runner 自行管理工作区（tend D33–D37），接入 Cove 时如何改由 Cove 提供，
   需与 tend 另行设计。
 - Cove 一期仍不做 managed agent；驱动 worker 的是 tend-runner，不是 Cove server。
-- 人工接管就是在 Cove 中对同一 workspace 打开终端 tab（对应 tend v0.1 D07 的人工接管）。
+- 人工接管是 tend 的显式控制状态转换（tend v0.1 D07）：暂停对该执行的自动干预，保留观察，
+  恢复托管前先对齐状态；仅打开或查看终端不是接管。Cove 的终端 tab 是接管生效、交接确认之后
+  人在同一 workspace 上的操作入口，不能用“打开了终端”推断已接管。
+  这一接管与交接的协调协议是上述执行层集成的前置条件，随该集成一起设计，不在本提案中定义。
 
 UI 归属带来的优先级变化与连接方式分别见
 [工程计划 §4.1](engineering-plan.md#41-提案web-app-提前与-tend-集成待用户-review) 和

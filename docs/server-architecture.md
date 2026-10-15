@@ -375,21 +375,29 @@ tend 计划中的 owner API（按其接口契约的规划）：
   会话为 `POST/GET /api/v1/session`；读接口包括快照、任务详情、消息分页；
   事件流为 SSE `GET /api/v1/events`，以事件序号为游标，可从 `Last-Event-ID` 续传。
 - tend 计划把 D42 的 SameSite=Strict cookie 会话改为 bearer token，并用 CORS 白名单只放行 Cove 的源。
+- 本集成要求 tend 提供受浏览器信任的 HTTPS 源（例如 Tailscale 证书）。HTTPS 的 Cove 页面不能向 HTTP 源
+  发起 fetch 或 SSE（混合内容会被浏览器拦截），因此不接受 tend 退回明文 HTTP 的模式；
+  这与 D42 修订并列为 tend 侧的前提。tend 只有 HTTP 或证书不可信时，只禁用 tend 视图并给出明确诊断，
+  Cove 自身功能不受影响。
   每个请求仍经 tsnet WhoIs 取得 tailnet 登录名，确认是 owner（tend v0.2 §6.3）。
 - 领域与 API 类型以 tend 的 Go 定义为准，导出 JSON Schema 作为跨语言契约（tend D22）。
 
 #### 连接方式：建议客户端直连，不经 Cove server 代理
 
-| 方面         | 直连（建议）                                                                     | 经 Cove server 代理                                                          |
-| ------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| 身份         | tend 的 WhoIs 看到用户设备本身，owner 判定成立                                   | WhoIs 只看到 Cove server 节点；tend 须信任 Cove 转述的身份头，扩大信任面     |
-| 凭据位置     | tend 凭据只在用户设备上                                                          | Cove server 持有 tend 凭据，成为 tend 的认证中介                             |
-| 可用性与耦合 | tend 与 Cove 互不依赖；tend 离线不影响 Cove，Cove 某台 host 离线不影响 tend 视图 | tend 视图依赖某台 Cove server 在线；多台 Cove host 时代理归属不明            |
-| 浏览器同源   | 跨源，需要 CORS 与 bearer token                                                  | 同源，可沿用 Cove 的 cookie 会话                                             |
-| 实现成本     | 客户端维护两个后端的连接、凭据与重连                                             | Cove server 增加 tend 专用代理与凭据管理，违背“不预先实现 Shepherd 专用协议” |
+| 方面         | 直连（建议）                                                                                             | 经 Cove server 代理                                                            |
+| ------------ | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| 身份         | tend 的 WhoIs 看到用户设备本身，owner 判定成立                                                           | WhoIs 只看到 Cove server 节点；tend 须信任 Cove 转述的身份头，扩大信任面       |
+| 凭据位置     | tend 凭据只在用户设备上                                                                                  | Cove server 持有 tend 凭据，成为 tend 的认证中介                               |
+| 可用性与耦合 | tend 离线不影响 Cove；已加载的页面与 tend 直接通信，提供页面的 host 之外的执行 host 离线不影响 tend 视图 | tend 视图的每次请求都依赖代理所在的 Cove server；多台 Cove host 时代理归属不明 |
+| 浏览器同源   | 跨源，需要 CORS 与 bearer token                                                                          | 同源，可沿用 Cove 的 cookie 会话                                               |
+| 实现成本     | 客户端维护两个后端的连接、凭据与重连                                                                     | Cove server 增加 tend 专用代理与凭据管理，违背“不预先实现 Shepherd 专用协议”   |
 
 代理的主要收益是同源与单一连接，但它让 Cove server 承担 tend 的身份转述和凭据保管，
 与 §9.4“不接受普通请求自行声明的身份”及 design §7 的松耦合约束冲突。因此建议直连。
+
+直连不消除对“提供 Web UI 的那台 Cove host”的依赖：页面已加载后，即使该 host 离线，
+tend 视图仍可继续与 tend 通信；但该 host 离线时无法重新加载页面。
+UI 静态资源由哪台 host 提供、是否需要多处分发或离线缓存（如 PWA），是未决的部署问题，留待 Web App 阶段决定。
 
 CORS 与源：Cove 的 Web 由每台 Cove server 从自己的源提供（§9.5），tend 的 CORS 白名单须列出每个
 Cove Web 源；Electron 的 renderer 源取决于加载方式（自定义 scheme 或 `file:`），需在 Desktop 阶段确定。
@@ -414,8 +422,10 @@ Cove 不把 tend token 写进 URL，也不转交给 Cove server。tend 返回未
 可作为参照。RN 的 `fetch` 对流式响应体支持有限，需在 RN 阶段验证或改用其他传输。
 重连规则与 Cove 自身一致：先取带游标的快照，再从游标续传；断线后从最后收到的事件 ID 续传；
 回到前台先拉快照；游标失效（即使 tend 当前不清理事件表，客户端也不假定游标永不过期）时重取快照。
-tend 的事件只用于标记对象过期、由客户端重新读取（tend 阶段 C 计划 §6），
-与 Cove 的业务事件是两套语义，不合并游标，也不为两者建立通用同步框架。
+tend 的事件按类型处理（tend 阶段 C 计划 §6）：消息事件携带正文，客户端直接追加；消息状态事件更新对应消息的状态；
+任务、run、待决事项事件只标记对象过期，客户端合并后重新读取摘要或详情。
+因此消息历史依靠事件续传加消息分页接口恢复，不靠重读对象。
+这与 Cove 的业务事件是两套语义，不合并游标，也不为两者建立通用同步框架。
 
 **操作幂等。** 两边模型相近，客户端规则可以对齐，但不共用标识或去重域：
 
