@@ -120,16 +120,37 @@ export async function createM1Fixture() {
       5_000,
     );
 
-  // Orderly stop through the owned wrapper handle (SIGTERM). The fallback SIGKILLs the wrapper
-  // through its handle and the server only while it is the identified server process.
+  // Orderly stop through the owned wrapper handle (SIGTERM, which `cove server start` forwards).
+  // The wrapper exits only after its server child exited, so the wrapper's exit proves the server
+  // is gone; the wrapper is therefore never SIGKILLed while its server may still run, because
+  // that would orphan the server and lose the proof. The fallback SIGKILLs an entry server
+  // through its own handle, and a `cove server start` server only while it is the identified
+  // server process. A server that could not be identified (startup failed before its identity
+  // was read) is not signalled by number: if it does not stop, this throws and leaves the wrapper
+  // running. Every unconfirmed retirement throws; none is returned as a status.
   async function stopOwnedServer(server) {
-    server.wrapper.kill("SIGTERM");
-    const code = await within(server.exited, 15_000);
+    const { wrapper } = server;
+    const ownHandle = wrapper.pid === server.pid;
+    wrapper.kill("SIGTERM");
+    let code = await within(server.exited, 15_000);
     if (code === "timeout") {
-      server.wrapper.kill("SIGKILL");
-      await signalIdentified(server.pid, server.identity, "SIGKILL");
-      if ((await within(server.exited, 5_000)) === "timeout")
-        throw new Error("the server wrapper survived SIGKILL");
+      if (ownHandle) wrapper.kill("SIGKILL");
+      else if (server.identity === undefined)
+        throw new Error(
+          `the server started for ${server.home} did not stop after SIGTERM and was never ` +
+            `identified, so it was not signalled; its wrapper ${wrapper.pid} is left running`,
+        );
+      else await signalIdentified(server.pid, server.identity, "SIGKILL");
+      if (!ownHandle) await serverGone(server);
+      code = await within(server.exited, 5_000);
+      if (code === "timeout") {
+        if (ownHandle) throw new Error(`the server ${server.pid} survived SIGKILL`);
+        // The server is confirmed gone; only the wrapper is left.
+        wrapper.kill("SIGKILL");
+        if ((await within(server.exited, 5_000)) === "timeout")
+          throw new Error(`the server wrapper ${wrapper.pid} survived SIGKILL`);
+        throw new Error(`the server wrapper ${wrapper.pid} outlived its server`);
+      }
     }
     if (server.identity !== undefined) await serverGone(server);
     return code;
@@ -341,11 +362,14 @@ export async function createM1Fixture() {
         }
       }
       for (const { child } of background) if (child.exitCode === null) child.kill("SIGKILL");
+      // A server whose retirement was not confirmed may still use the root; it is kept.
+      let keepRoot = false;
       for (const server of servers.splice(0)) {
         try {
           await stopOwnedServer(server);
         } catch (error) {
           failures.push(error);
+          keepRoot = true;
         }
       }
       const waited = await Promise.all(background.map(({ done }) => within(done, 5_000)));
@@ -370,7 +394,8 @@ export async function createM1Fixture() {
       } catch (error) {
         failures.push(new Error(`${error.message}: ${(await running()).join(", ")}`));
       }
-      await rm(root, { recursive: true, force: true });
+      if (keepRoot) failures.push(new Error(`kept ${root} for a server that may still run`));
+      else await rm(root, { recursive: true, force: true });
       if (failures.length > 0) throw new AggregateError(failures, "M1 fixture cleanup failed");
     },
   };
