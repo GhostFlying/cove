@@ -99,8 +99,11 @@ type Request = {
   control: boolean;
   settled: boolean;
   domain?: ControlJob;
-  // The result of a route-control request that waits for a result slot.
+  // The result of a route-control request that waits for a result slot, and the gate the route
+  // queue waits on until that result is admitted to delivery (see run()).
   waitingReply?: Reply | undefined;
+  resultGate?: Promise<void>;
+  openResultGate?: () => void;
 };
 
 type Teardown = {
@@ -643,6 +646,11 @@ export class TerminalSubscriptions {
         this.inFlight++;
         try {
           await this.execute(request);
+          // A result waiting for a result slot keeps the route's order: the next command (a
+          // recover, say) must not publish its result first. The client would then send an
+          // ACK for the new attempt while this one is still unsettled, and get BUSY. The gate
+          // opens once the result is admitted to delivery (not written), or the request ends.
+          if (request.resultGate) await request.resultGate;
         } catch {
           this.retire(route, domainError("RESULT_UNKNOWN", "unknown"));
           this.finish(request, this.error(request.command, route.failure!));
@@ -1006,6 +1014,9 @@ export class TerminalSubscriptions {
       if (!lease) {
         if (request.waitingReply === undefined) {
           request.waitingReply = reply;
+          request.resultGate = new Promise((open) => {
+            request.openResultGate = open;
+          });
           route.waitingResults.push(request);
         }
         return;
@@ -1035,6 +1046,7 @@ export class TerminalSubscriptions {
     )
       this.retire(route, domainError("RESULT_UNKNOWN", "unknown"));
     request.resolve(structuredClone(reply));
+    request.openResultGate?.();
   }
 
   // A result slot comes back when its frame's write callback runs, or when delivery cancels or
