@@ -13,6 +13,7 @@ import { LocalRuntime } from "../terminal/local-runtime.js";
 import { ControlArbiter } from "../terminal/control-arbiter.js";
 import { OperationReceipts } from "../operations/operation-receipts.js";
 import { TerminalOperations } from "../operations/terminal-operations.js";
+import { createRecoveryVerifiers } from "../operations/recovery-verifiers.js";
 import { SESSION_CONTROL_RESERVE } from "../terminal/worker-pipe-session.js";
 import { WorkerProcess, type WorkerSpawn } from "../terminal/worker-process.js";
 import { LocalRuntimeClock, type LocalTimer } from "../terminal/local-runtime-clock.js";
@@ -240,7 +241,16 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
       },
     });
     try {
-      local.receipts?.recoverInterrupted();
+      // Method-specific verifiers (operations/recovery-verifiers.ts) prove what they can; the
+      // rest become requires_attention. Nothing is executed again.
+      await local.receipts?.recoverInterrupted(
+        createRecoveryVerifiers({
+          store,
+          serverId: identity.serverId,
+          relayInstanceId: identity.relayInstanceId,
+          now: Date.now,
+        }),
+      );
       local.runs?.interruptEarlier(identity.relayInstanceId);
       await replaceStaleRendezvous(persistence.layout, options.rendezvousPath);
     } catch (error) {
