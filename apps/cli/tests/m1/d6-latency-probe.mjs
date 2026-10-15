@@ -27,7 +27,9 @@
 // phases' latency is higher than the control phases' in every round. A only when neither holds and
 // both write phases match the no-write phase in every round. Anything else, or any disturbed or
 // incomplete measurement, is UNRESOLVED and needs a rerun or an investigation; it is not a
-// confirmation of A.
+// confirmation of A. A measurement is complete only when the workload ran as prescribed in every
+// phase (writes succeeded at the target rate with their SQLite transactions or, in control phases,
+// without any; output delivered at the target rate; the intended mode switches), see workloadGaps.
 //
 // Concentration is tested against the control: a delayed round trip is long and overlaps one of
 // the 20 writes per second almost regardless of its cause. Delayed echoes concentrate around SQLite
@@ -727,7 +729,52 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
       );
     })
     .map((phase) => phase.label);
+  // The prescribed workload must actually have run; latencies measured without it say nothing
+  // about the database. Per phase: the subscribed terminals received their output rate; the
+  // server was in the intended mode for the whole phase (the switch before the phase selected it,
+  // and none happened inside it); and in write phases the writes succeeded at the target rate with
+  // one SQLite transaction each, while in control phases they succeeded without any SQLite
+  // transaction (and, where recorded, with in-memory write units instead). Failing writes that
+  // return quickly, a missed mode switch or a stalled output stream make the phase incomplete.
+  const switches = serverDump.switches ?? null;
+  const intendedMode = { none: "sqlite", write: "sqlite", control: "memory" };
+  const workloadGaps = phases
+    .map((phase) => {
+      const gaps = [];
+      const info = { phase: phase.label, gaps };
+      const seconds = (phase.end - phase.start) / 1000;
+      const delivered = phase.outputBytes / 1024 / seconds / SUBSCRIBED_OUTPUTS;
+      if (delivered < (OUTPUT_BYTES_PER_SECOND / 1024) * 0.9)
+        gaps.push(`delivered ${delivered.toFixed(1)} KiB/s per subscribed terminal`);
+      if (!switches) gaps.push("no mode switches recorded");
+      else {
+        const before = switches.filter(([at]) => at <= phase.start).at(-1);
+        if (before?.[1] !== intendedMode[phase.kind])
+          gaps.push(`mode ${before?.[1] ?? "unselected"} instead of ${intendedMode[phase.kind]}`);
+        if (switches.some(([at]) => at > phase.start && at <= phase.end))
+          gaps.push("mode switched inside the phase");
+      }
+      if (phase.kind !== "none") {
+        const inPhase = ([start]) => start >= phase.start && start <= phase.end;
+        const succeeded = writes.filter(
+          (entry) => entry.phase === phase.label && entry.state === "succeeded",
+        ).length;
+        const committed = transactions.filter(inPhase).length;
+        if (succeeded < expectedWrites * 0.9) gaps.push(`${succeeded} writes succeeded`);
+        if (phase.kind === "write") {
+          if (committed < expectedWrites * 0.9) gaps.push(`${committed} SQLite transactions`);
+          if (memoryWrites?.some(inPhase)) gaps.push("in-memory writes in a SQLite phase");
+        } else {
+          if (committed > 0) gaps.push(`${committed} SQLite transactions in the control phase`);
+          if (memoryWrites && memoryWrites.filter(inPhase).length < expectedWrites * 0.9)
+            gaps.push(`${memoryWrites.filter(inPhase).length} in-memory writes`);
+        }
+      }
+      return info;
+    })
+    .filter((info) => info.gaps.length > 0);
   const incomplete =
+    workloadGaps.length > 0 ||
     lost > 0 ||
     refused > 0 ||
     echo.mismatched > 0 ||
@@ -767,6 +814,7 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     echoes: { lost, refused, mismatched: echo.mismatched, unmatched: echo.unmatched },
     unavailableSubscriptions: unavailable,
     disturbedPhases,
+    workloadGaps,
     concentration: {
       aroundTransactions: writeConcentration,
       aroundControlWrites: controlConcentration ?? "not recorded",
