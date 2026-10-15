@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/iden
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
 import { ConfigService, memoryConfigState, sqliteConfigState } from "../../dist/store/config.js";
 import { RunLog } from "../../dist/store/runs.js";
+import { ProcessLedger, processStartIdentity } from "../../dist/store/processes.js";
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
@@ -112,6 +113,7 @@ describe("store opening, migrations and the data directory lock", () => {
       "config",
       "managed_worktrees",
       "mounts",
+      "operation_processes",
       "operations",
       "principals",
       "relay_instances",
@@ -379,6 +381,97 @@ describe("durable operation receipts", () => {
       throws: "requires_attention",
     });
     receipts.dispose();
+  });
+});
+
+describe("operation process ownership", () => {
+  const operation = { serverId: "server", principalId: "principal", operationId: "git-op" };
+  const children = [];
+
+  afterEach(() => {
+    for (const pgid of children.splice(0))
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        /* Already gone. */
+      }
+  });
+
+  async function ledgerWithOperation(layout) {
+    const store = await open(layout ?? (await home()));
+    const receipts = durableReceipts(store);
+    expect(
+      receipts
+        .prepare(operation, "intent")
+        .commit({ operationId: "git-op", method: "config.set", revision: 0, state: "accepted" }),
+    ).toBe(true);
+    receipts.dispose();
+    return { store, ledger: new ProcessLedger(store, "instance", () => 5) };
+  }
+
+  // A command in a process group of its own, as T3b runs Git.
+  function spawnGroup(script) {
+    const child = spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" });
+    children.push(child.pid);
+    return child;
+  }
+
+  async function until(predicate) {
+    const deadline = Date.now() + 5_000;
+    while (!(await predicate())) {
+      if (Date.now() > deadline) throw new Error("timed out");
+      await new Promise((done) => setTimeout(done, 20));
+    }
+  }
+
+  it("identifies a recorded process by PID and start identity until it ends", async () => {
+    const layout = await home();
+    const { store, ledger } = await ledgerWithOperation(layout);
+    const child = spawnGroup("exec sleep 30");
+    const startIdentity = await processStartIdentity(child.pid);
+    expect(startIdentity).toMatch(/^(linux|darwin):/);
+    const recorded = ledger.record(operation, { pid: child.pid, pgid: child.pid, startIdentity });
+    expect(ledger.open(operation)).toEqual([recorded]);
+    expect(await ledger.check(operation)).toBe("alive");
+    close(store);
+    process.kill(-child.pid, "SIGKILL");
+    await until(() => ProcessLedger.liveness(recorded).then((state) => state === "ended"));
+    // The record survives a restart; the next instance observes the end and records it.
+    const reopened = await open(layout);
+    const next = new ProcessLedger(reopened, "next", () => 9);
+    expect(next.open(operation)).toEqual([recorded]);
+    expect(await next.check(operation)).toBe("ended");
+    expect(next.open(operation)).toEqual([]);
+    close(reopened);
+  });
+
+  it("treats a live PID with another start identity as a reused PID", async () => {
+    const { store, ledger } = await ledgerWithOperation();
+    const ended = spawnGroup("exit 0");
+    await until(() => {
+      try {
+        process.kill(-ended.pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    // This test process is alive but is not the process that was recorded.
+    ledger.record(operation, { pid: process.pid, pgid: ended.pid, startIdentity: "linux:other:1" });
+    expect(await ledger.check(operation)).toBe("ended");
+    close(store);
+  });
+
+  it("stays unverifiable while the group outlives its leader", async () => {
+    const { store, ledger } = await ledgerWithOperation();
+    const child = spawnGroup("sleep 30 & sleep 0.3; exit 0");
+    const startIdentity = await processStartIdentity(child.pid);
+    ledger.record(operation, { pid: child.pid, pgid: child.pid, startIdentity });
+    await new Promise((done) => child.once("exit", done));
+    expect(await ledger.check(operation)).toBe("unverifiable");
+    process.kill(-child.pid, "SIGKILL");
+    await until(() => ledger.check(operation).then((state) => state === "ended"));
+    close(store);
   });
 });
 

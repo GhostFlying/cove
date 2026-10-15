@@ -209,4 +209,29 @@ CREATE TABLE operations (
   PRIMARY KEY (server_id, principal_id, operation_id)
 ) STRICT;
 CREATE INDEX operations_by_state ON operations (state);
+
+-- Subprocesses an operation started that may outlive the server (T3b: each Git command runs in a
+-- process group of its own). A restarted server refuses operation.continue/abandon while a recorded
+-- process may still run (S8), so the record identifies the exact process, not a reusable PID:
+-- start_identity is the operating system's start identity of pid (boot plus start time, see
+-- store/processes.ts). Recorded before the server waits for the process; ended_at_ms is set once it
+-- was observed to have ended.
+CREATE TABLE operation_processes (
+  process_id TEXT PRIMARY KEY,
+  operation_server_id TEXT NOT NULL,
+  operation_principal_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  pid INTEGER NOT NULL CHECK (pid > 0),
+  -- Process group the command leads; it may hold children after the leader ended.
+  pgid INTEGER NOT NULL CHECK (pgid > 0),
+  start_identity TEXT NOT NULL,
+  started_by_instance_id TEXT NOT NULL,
+  started_at_ms INTEGER NOT NULL,
+  ended_at_ms INTEGER,
+  UNIQUE (pid, start_identity),
+  FOREIGN KEY (operation_server_id, operation_principal_id, operation_id)
+    REFERENCES operations (server_id, principal_id, operation_id)
+) STRICT;
+CREATE INDEX operation_processes_by_operation
+  ON operation_processes (operation_server_id, operation_principal_id, operation_id);
 `;

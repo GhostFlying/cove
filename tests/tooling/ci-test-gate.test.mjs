@@ -142,7 +142,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "worker-pipe-session", 11],
     ["author", "operation-receipts", 24],
     ["author", "rpc-dispatch", 5],
-    ["author", "store", 16],
+    ["author", "store", 19],
     ["author", "terminal-subscriptions", 14],
     ["author", "terminal-connection-delivery", 7],
     ["independent", "subscription-contract", 30],
