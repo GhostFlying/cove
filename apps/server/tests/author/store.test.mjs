@@ -1,6 +1,16 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  cp,
+  mkdtemp,
+  open as openFile,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +25,11 @@ import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/iden
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
 import { ConfigService, memoryConfigState, sqliteConfigState } from "../../dist/store/config.js";
 import { RunLog } from "../../dist/store/runs.js";
-import { bootIdentity, ProcessLedger, processStartIdentity } from "../../dist/store/processes.js";
+import {
+  parseStartIdentity,
+  ProcessLedger,
+  processStartIdentity,
+} from "../../dist/store/processes.js";
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
@@ -523,26 +537,39 @@ describe("durable operation receipts", () => {
 
 describe("operation process ownership", () => {
   const operation = { serverId: "server", principalId: "principal", operationId: "git-op" };
-  // Processes the test started, each with the start identity read while it was known to run.
-  // Teardown signals a PID only while it still carries that identity, so a PID (or group) that an
-  // unrelated process reused after the test reaped its own is never killed.
-  const tracked = [];
+  // Leaders the test spawned, as owned ChildProcess handles: registered at spawn, before anything
+  // is awaited, so teardown retires them even when a later step (readiness, identity) fails.
+  // Teardown closes their stdin (their release) and waits; only a leader that still has not exited
+  // is killed, through its handle, which Node never signals after the child was reaped.
+  const leaders = [];
+  // Group members the leaders started, by PID with the start identity read while they ran. They
+  // are released through a FIFO handshake; teardown signals one only while it still carries its
+  // recorded identity, so a PID an unrelated process reused is never signalled.
+  const members = [];
 
   afterEach(async () => {
-    for (const { pid, identity } of tracked.splice(0))
-      if ((await processStartIdentity(pid)) === identity)
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          /* Ended in between. */
-        }
+    for (const { child, exited } of leaders.splice(0)) {
+      child.stdin.destroy();
+      if ((await Promise.race([exited, delay(5_000).then(() => "timeout")])) === "timeout") {
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+    for (const { pid, identity } of members.splice(0)) await signalIfSame(pid, identity, "SIGKILL");
   });
 
-  async function track(pid) {
-    const identity = await processStartIdentity(pid);
-    expect(identity).not.toBeNull();
-    tracked.push({ pid, identity });
-    return identity;
+  const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+  // Signals `pid` only while it is the process recorded with `identity`; an unreadable or
+  // different identity means the recorded process is gone, and nothing is signalled.
+  async function signalIfSame(pid, identity, signal) {
+    if ((await processStartIdentity(pid)) !== identity) return false;
+    try {
+      process.kill(pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function ledgerWithOperation(layout) {
@@ -559,13 +586,15 @@ describe("operation process ownership", () => {
 
   // A shell leading a process group of its own, as T3b runs Git. It prints `ready` (after the
   // optional setup in `before`), then waits for one line on stdin before it exits, so the test
-  // decides when the leader ends. The exit promise is taken before anything else is awaited.
-  async function spawnLeader(before = "") {
+  // decides when the leader ends.
+  async function spawnLeader(before = "", env = {}) {
     const child = spawn("/bin/sh", ["-c", `${before} echo ready; read line; exit 0`], {
       detached: true,
       stdio: ["pipe", "pipe", "ignore"],
+      env: { ...process.env, ...env },
     });
     const exited = new Promise((done) => child.once("exit", done));
+    leaders.push({ child, exited });
     const lines = [];
     let buffered = "";
     const ready = new Promise((done) =>
@@ -574,29 +603,58 @@ describe("operation process ownership", () => {
         const parts = buffered.split("\n");
         buffered = parts.pop();
         for (const line of parts) {
-          if (line === "ready") done();
+          if (line === "ready") done("ready");
           else lines.push(line);
         }
       }),
     );
-    await ready;
-    const identity = await track(child.pid);
-    return { pid: child.pid, identity, lines, exited, release: () => child.stdin.end("go\n") };
+    if ((await Promise.race([ready, exited.then(() => "exited")])) !== "ready")
+      throw new Error("the leader exited before it was ready");
+    const identity = await processStartIdentity(child.pid);
+    if (identity === null) throw new Error(`the start identity of ${child.pid} is unreadable`);
+    return {
+      pid: child.pid,
+      identity,
+      lines,
+      exited,
+      release: () => child.stdin.end("go\n"),
+    };
   }
 
   async function until(predicate) {
     const deadline = Date.now() + 5_000;
     while (!(await predicate())) {
       if (Date.now() > deadline) throw new Error("timed out");
-      await new Promise((done) => setTimeout(done, 20));
+      await delay(20);
     }
+  }
+
+  // Inserted directly: record() accepts only identities in the current format.
+  function insertRaw(store, { pid, pgid, startIdentity }) {
+    store.db
+      .prepare(
+        `INSERT INTO operation_processes (process_id, operation_server_id, operation_principal_id,
+           operation_id, pid, pgid, start_identity, started_by_instance_id, started_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'instance', 1)`,
+      )
+      .run(
+        `raw-${startIdentity}`,
+        operation.serverId,
+        operation.principalId,
+        operation.operationId,
+        pid,
+        pgid,
+        startIdentity,
+      );
   }
 
   it("identifies a recorded process by PID and start identity until it ends", async () => {
     const layout = await home();
     const { store, ledger } = await ledgerWithOperation(layout);
     const leader = await spawnLeader();
-    expect(leader.identity).toMatch(/^(linux|darwin):[^:]+:\d+(\.\d{6})?$/);
+    expect(parseStartIdentity(leader.identity)).toMatchObject({
+      platform: process.platform,
+    });
     const recorded = ledger.record(operation, {
       pid: leader.pid,
       pgid: leader.pid,
@@ -622,19 +680,17 @@ describe("operation process ownership", () => {
     const ended = await spawnLeader();
     ended.release();
     await ended.exited;
-    await until(() => {
-      try {
-        process.kill(-ended.pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    });
     // This test process is alive but is not the process that was recorded: same boot, another
-    // start time.
-    const boot = await bootIdentity();
-    ledger.record(operation, { pid: process.pid, pgid: ended.pid, startIdentity: `${boot}:1` });
-    expect(await ledger.check(operation)).toBe("ended");
+    // start time; the recorded group (the ended leader's) has no members.
+    const { platform, boot } = parseStartIdentity(ended.identity);
+    const start = platform === "darwin" ? "1.000000" : "1";
+    ledger.record(operation, {
+      pid: process.pid,
+      pgid: ended.pid,
+      startIdentity: `${platform}:${boot}:${start}`,
+    });
+    await until(() => ledger.check(operation).then((state) => state === "ended"));
+    expect(ledger.open(operation)).toEqual([]);
     close(store);
   });
 
@@ -643,30 +699,70 @@ describe("operation process ownership", () => {
     // A live group under the recorded PID and PGID: after a reboot they belong to unrelated
     // processes, which must not keep the operation blocked.
     const unrelated = await spawnLeader();
-    const [platform] = unrelated.identity.split(":");
+    const { platform, boot, start } = parseStartIdentity(unrelated.identity);
+    const earlierBoot = "00000000-0000-4000-8000-000000000000";
+    expect(earlierBoot).not.toBe(boot);
     ledger.record(operation, {
       pid: unrelated.pid,
       pgid: unrelated.pid,
-      startIdentity: `${platform}:an-earlier-boot:1`,
+      startIdentity: `${platform}:${earlierBoot}:${start}`,
     });
     expect(await ledger.check(operation)).toBe("ended");
     expect(ledger.open(operation)).toEqual([]);
     close(store);
-    unrelated.release();
-    await unrelated.exited;
+  });
+
+  it("never ends a live group recorded with an identity it cannot parse", async () => {
+    const { store, ledger } = await ledgerWithOperation();
+    const live = await spawnLeader();
+    const { platform } = parseStartIdentity(live.identity);
+    // The macOS format before microsecond start times, a malformed value and an unknown format.
+    const identities = [
+      "darwin:1791441670:Thu Oct  8 14:41:10 2026",
+      `${platform}:not-a-boot-id:1`,
+      `v9:${live.identity}`,
+    ];
+    for (const startIdentity of identities) {
+      expect(() =>
+        ledger.record(operation, { pid: live.pid, pgid: live.pid, startIdentity }),
+      ).toThrow(/current format/);
+      insertRaw(store, { pid: live.pid, pgid: live.pid, startIdentity });
+    }
+    for (const record of ledger.open(operation))
+      expect(await ProcessLedger.liveness(record)).toBe("unverifiable");
+    expect(await ledger.check(operation)).toBe("unverifiable");
+    expect(ledger.open(operation)).toHaveLength(3);
+    // Once neither the PID nor its group exists, the records end.
+    live.release();
+    await live.exited;
+    await until(() => ledger.check(operation).then((state) => state === "ended"));
+    expect(ledger.open(operation)).toEqual([]);
+    close(store);
   });
 
   it("stays unverifiable while the group outlives its leader", async () => {
     const { store, ledger } = await ledgerWithOperation();
-    // The leader starts a member of its group and reports its PID before `ready`.
-    const leader = await spawnLeader("sleep 30 & echo $!;");
+    // The leader starts a member of its group that waits on a FIFO, and reports its PID before
+    // `ready`; the test releases the member by writing to the FIFO.
+    const directory = await mkdtemp(join(tmpdir(), "cove-ledger-"));
+    directories.push(directory);
+    const fifo = join(directory, "release");
+    await new Promise((done, fail) =>
+      execFile("mkfifo", [fifo], (error) => (error ? fail(error) : done())),
+    );
+    const leader = await spawnLeader(`sh -c 'read line < "$FIFO"' & echo $!;`, { FIFO: fifo });
     const member = Number(leader.lines[0]);
-    await track(member);
+    const memberIdentity = await processStartIdentity(member);
+    expect(memberIdentity).not.toBeNull();
+    members.push({ pid: member, identity: memberIdentity });
     ledger.record(operation, { pid: leader.pid, pgid: leader.pid, startIdentity: leader.identity });
     leader.release();
     await leader.exited;
     expect(await ledger.check(operation)).toBe("unverifiable");
-    process.kill(member, "SIGKILL");
+    // Release the member: O_NONBLOCK fails (ENXIO) instead of blocking if it is no longer reading.
+    const writer = await openFile(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+    await writer.write("go\n");
+    await writer.close();
     await until(() => ledger.check(operation).then((state) => state === "ended"));
     close(store);
   });
