@@ -4,7 +4,6 @@ import { domainError } from "@cove/protocol/errors";
 import { sameWorkerRef } from "@cove/protocol/identity";
 import {
   HEADER_BYTES,
-  MAX_FRAME_BYTES,
   MAX_METADATA_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_PREPAID_ROUTE_CONTROL_BYTES,
@@ -84,11 +83,13 @@ interface RequestRecord {
   readonly frames: Set<OutboundFrame>;
 }
 
-// The bound on ingress storage: the active chunk, the decoder's storage and the parked
-// route-control copies. The runtime may have pipeQueuedBytes of ordinary and control frames plus
-// PIPE_PREPAID_ROUTE_CONTROL_BYTES of prepaid route-control frames in flight (issue #96). The
-// prepaid allowance is counted twice: those frames can still sit in the active chunk or the
-// decoder while their parked copies exist. Past this bound the pipe still fails closed.
+// The bound on ingress storage as measured by #ingressBytes(). The runtime may have
+// pipeQueuedBytes of ordinary and control frames plus PIPE_PREPAID_ROUTE_CONTROL_BYTES of prepaid
+// route-control frames in flight (issue #96). The prepaid allowance is counted twice: those
+// frames can still sit in a not yet fully read chunk while their parked copies exist. Bytes of
+// in-flight frames are otherwise owned once: a fully read chunk is released before its frames
+// are handled, and the decoder owns only the partial-frame bytes it holds. Past this bound the
+// pipe still fails closed.
 function ingressLimit(pipeQueuedBytes: number): number {
   return pipeQueuedBytes + 2 * PIPE_PREPAID_ROUTE_CONTROL_BYTES;
 }
@@ -146,6 +147,10 @@ class WorkerPipeCore {
   #writableClosed = false;
   #writeCallbacksPending = 0;
   #writeGuardCallbackSettled: (() => void) | undefined;
+  // A chunk is in progress from #onData until every byte is decoded (#ingressActive gates flow
+  // control and overlapping-ingress detection). Its backing (#activeChunk) is released as soon as
+  // the decoder has consumed it, which can be before the frames it produced are handled.
+  #ingressActive = false;
   #activeChunk: Uint8Array | undefined;
   #activeOffset = 0;
   #peakDecodeSliceBytes = 0;
@@ -184,11 +189,7 @@ class WorkerPipeCore {
       parkedRequests: [...this.#pending.values()].filter((record) => record.phase === "parked")
         .length,
       responseItems: this.#unsettledFrames.size,
-      // The backing buffer stays live until the complete chunk is released.
-      ingressBytes:
-        (this.#activeChunk?.buffer.byteLength ?? 0) +
-        this.#decoderStorageBound() +
-        this.#parkedRouteBytes,
+      ingressBytes: this.#ingressBytes(),
       peakDecodeSliceBytes: this.#peakDecodeSliceBytes,
       queuedBytes: this.#queuedBytes,
       transportBytes: this.#transportBytes(),
@@ -217,6 +218,7 @@ class WorkerPipeCore {
     this.#writable.off("drain", this.#onDrain);
     this.#writable.off("error", this.#onWriteError);
     this.#activeChunk = undefined;
+    this.#ingressActive = false;
     this.#outbound.length = 0;
     this.#deferredControl.length = 0;
     this.#parkedRouteControl.length = 0;
@@ -271,11 +273,16 @@ class WorkerPipeCore {
     );
   }
 
-  #decoderStorageBound(): number {
-    const filled = this.#decoder.retainedBytes;
-    if (filled === 0) return 0;
-    // A complete header can allocate the full validated frame before its body arrives.
-    return filled < HEADER_BYTES ? HEADER_BYTES : MAX_FRAME_BYTES;
+  // The one measure of ingress storage the endpoint owns, used by every admission check and by
+  // snapshot(): the backing of a chunk still held (the whole ArrayBuffer, which may be a pooled
+  // slab), the decoder's exact partial-frame storage and the parked route-control copies.
+  // Frames a read produces are consumed synchronously and tracked as peakDecodeSliceBytes.
+  #ingressBytes(): number {
+    return (
+      (this.#activeChunk?.buffer.byteLength ?? 0) +
+      this.#decoder.storageBytes +
+      this.#parkedRouteBytes
+    );
   }
 
   #accountedBytes(): number {
@@ -388,37 +395,37 @@ class WorkerPipeCore {
       void this.shutdown("non-byte-ingress");
       return;
     }
-    if (this.#activeChunk) {
+    if (this.#ingressActive) {
       void this.shutdown("overlapping-ingress");
       return;
     }
     if (
-      chunk.buffer.byteLength + this.#decoder.retainedBytes + this.#parkedRouteBytes >
+      chunk.buffer.byteLength + this.#ingressBytes() >
       ingressLimit(this.#hello?.effectiveBudgets.pipeQueuedBytes ?? M0_LIMITS.pipeQueuedBytes)
     ) {
       void this.shutdown("ingress-capacity-exceeded");
       return;
     }
     this.#activeChunk = chunk;
+    this.#ingressActive = true;
     this.#activeOffset = 0;
     this.#processChunk();
   };
 
   #processChunk(): void {
-    if (this.#processing || !this.#activeChunk) return;
+    if (this.#processing || !this.#ingressActive) return;
     this.#processing = true;
     try {
-      while (this.#activeChunk && this.#state !== "closing" && this.#state !== "closed") {
-        const remaining = this.#activeChunk.subarray(this.#activeOffset);
-        if (remaining.length === 0) {
+      while (this.#ingressActive && this.#state !== "closing" && this.#state !== "closed") {
+        if (!this.#activeChunk || this.#activeOffset === this.#activeChunk.byteLength) {
           this.#activeChunk = undefined;
+          this.#ingressActive = false;
           this.#activeOffset = 0;
           if (this.#hello && !this.#blocked) this.#allowCommands = true;
           if (!this.#blocked) this.#readable.resume();
           break;
         }
-        const read = this.#decoder.read(remaining);
-        this.#activeOffset += read.consumedBytes;
+        const { read, provenanceFailed } = this.#readActiveChunk(this.#activeChunk);
         // Decoder-owned frame copies are consumed in this synchronous slice, not queued at the endpoint.
         this.#peakDecodeSliceBytes = Math.max(
           this.#peakDecodeSliceBytes,
@@ -434,17 +441,11 @@ class WorkerPipeCore {
           void this.shutdown(`decode-${read.error?.code ?? "error"}`);
           break;
         }
+        if (provenanceFailed) {
+          void this.shutdown("decoder-partial-provenance");
+          break;
+        }
         if (read.status === "budget") {
-          const partial = this.#decoder.retainedBytes;
-          if (partial !== 0) {
-            if (read.frames.length === 0 || partial > read.consumedBytes) {
-              void this.shutdown("decoder-partial-provenance");
-              break;
-            }
-            // Only the unproduced tail is rewound; completed frames already entered execution.
-            this.#activeOffset -= partial;
-            this.#decoder = createPipeDecoder();
-          }
           setImmediate(() => this.#processChunk());
           break;
         }
@@ -453,6 +454,32 @@ class WorkerPipeCore {
     } finally {
       this.#processing = false;
     }
+  }
+
+  // Reads the unconsumed rest of the chunk and settles its ownership before any returned frame is
+  // handled, so the parked-admission check in #handleFrame counts only storage still owned:
+  // - On a budget yield the decoder's unproduced tail is rewound into the chunk (it must have come
+  //   from this read, after a produced frame; otherwise provenanceFailed) and the decoder reset,
+  //   so those bytes are counted once, as chunk backing.
+  // - Once every byte has moved into the decoder or the returned frames, the chunk is released.
+  #readActiveChunk(chunk: Uint8Array): {
+    read: ReturnType<ReturnType<typeof createPipeDecoder>["read"]>;
+    provenanceFailed: boolean;
+  } {
+    const read = this.#decoder.read(chunk.subarray(this.#activeOffset));
+    this.#activeOffset += read.consumedBytes;
+    let provenanceFailed = false;
+    const partial = read.status === "budget" ? this.#decoder.retainedBytes : 0;
+    if (partial !== 0) {
+      if (read.frames.length === 0 || partial > read.consumedBytes) {
+        provenanceFailed = true;
+      } else {
+        this.#activeOffset -= partial;
+        this.#decoder = createPipeDecoder();
+      }
+    }
+    if (this.#activeOffset === chunk.byteLength) this.#activeChunk = undefined;
+    return { read, provenanceFailed };
   }
 
   #handleFrame(frame: { kind: 1 | 2 | 3 | 4; metadata: Uint8Array; payload: Uint8Array }): boolean {
@@ -485,11 +512,7 @@ class WorkerPipeCore {
         void this.shutdown("hello-mismatch");
         return false;
       }
-      if (
-        this.#activeChunk &&
-        this.#activeChunk.buffer.byteLength + this.#decoder.retainedBytes + this.#parkedRouteBytes >
-          ingressLimit(metadata.effectiveBudgets.pipeQueuedBytes)
-      ) {
+      if (this.#ingressBytes() > ingressLimit(metadata.effectiveBudgets.pipeQueuedBytes)) {
         void this.shutdown("ingress-capacity-exceeded");
         return false;
       }
@@ -564,10 +587,7 @@ class WorkerPipeCore {
       if (
         this.#routeWindowRecords() >= PIPE_ROUTE_CONTROL_COMMANDS ||
         frame.payload.byteLength !== 0 ||
-        (this.#activeChunk?.buffer.byteLength ?? 0) +
-          this.#decoderStorageBound() +
-          this.#parkedRouteBytes +
-          metadata.byteLength >
+        this.#ingressBytes() + metadata.byteLength >
           ingressLimit(this.#hello.effectiveBudgets.pipeQueuedBytes)
       ) {
         void this.shutdown("route-control-ingress-capacity");
@@ -725,7 +745,7 @@ class WorkerPipeCore {
     }
     this.#execution?.markerEnqueued?.(command, response);
     this.#processChunk();
-    if (!this.#activeChunk) this.#readable.resume();
+    if (!this.#ingressActive) this.#readable.resume();
   }
 
   #enqueue(
@@ -931,11 +951,11 @@ class WorkerPipeCore {
   #onDrain = (): void => {
     this.#blocked = false;
     this.#blockedFrameBytes = 0;
-    if (this.#hello && !this.#activeChunk) this.#allowCommands = true;
+    if (this.#hello && !this.#ingressActive) this.#allowCommands = true;
     this.#flush();
     this.#execution?.deliveryCapacity?.();
     this.#processChunk();
-    if (!this.#activeChunk && this.#state === "ready") this.#readable.resume();
+    if (!this.#ingressActive && this.#state === "ready") this.#readable.resume();
   };
 
   #onEnd = (): void => {

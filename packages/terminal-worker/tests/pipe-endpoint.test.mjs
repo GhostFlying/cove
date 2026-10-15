@@ -760,7 +760,8 @@ test("EOF with a decoder-owned partial remains truncated after yield repair", as
   await ready(h);
   const command = encode({ type: "preview-refresh", worker, run, requestId: "partial-eof" });
   h.input.write(command.subarray(0, 16));
-  expect(h.pipe.snapshot().ingressBytes).toBe(MAX_FRAME_BYTES);
+  // A validated header does not allocate its declared frame; the decoder owns what it holds.
+  expect(h.pipe.snapshot().ingressBytes).toBe(HEADER_BYTES);
   h.input.end();
   expect((await h.pipe.closed).reason).toBe("stdin-truncated-frame");
   expect(h.calls).toHaveLength(0);
@@ -801,6 +802,69 @@ test("pre-hello default and decoder partial count toward the ingress cap", async
   retainedBacking.input.write(Buffer.alloc(ingressCap(budgets.pipeQueuedBytes) + 1).subarray(0, 7));
   expect((await retainedBacking.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(retainedBacking.pipe.snapshot().ingressBytes).toBe(0);
+});
+
+// A max-size input frame: metadata padded with JSON whitespace to MAX_METADATA_BYTES.
+function maxFrame(index) {
+  const command = {
+    type: "input",
+    worker,
+    run,
+    subscription,
+    requestId: `max-${index}`,
+    epoch: 1,
+    inputSeq: index + 1,
+  };
+  const metadata = encoder.encode(JSON.stringify(command).padEnd(MAX_METADATA_BYTES, " "));
+  const frame = encodePipeFrame(1, metadata, new Uint8Array(65_536));
+  if (!frame.ok) throw new Error(frame.error.code);
+  return frame.value;
+}
+
+// After a valid max-frame header, admission and snapshot count the same owned storage: the
+// 16 header bytes, not the 69,648 bytes the header declares. `extra` bytes past the bound.
+async function afterMaxFrameHeader(extra) {
+  // The smallest valid budgets, so the max-size input is executed rather than refused BUSY.
+  const budgets = {
+    ...M0_LIMITS,
+    pipeQueuedBytes: MAX_FRAME_BYTES,
+    reservedControlBytes: HEADER_BYTES + MAX_METADATA_BYTES,
+  };
+  const cap = ingressCap(budgets.pipeQueuedBytes);
+  const first = maxFrame(0);
+  const second = maxFrame(1);
+  expect(first.byteLength).toBe(MAX_FRAME_BYTES);
+  const h = createHarness({ execute: () => new Promise(() => {}) });
+  await ready(h, { ...hello, effectiveBudgets: budgets });
+  h.input.write(new Uint8Array(first.subarray(0, HEADER_BYTES)));
+  expect(h.pipe.snapshot().ingressBytes).toBe(HEADER_BYTES);
+  // The rest of the first frame, then a prefix of the second, exactly filling the bound.
+  const restLength = cap - HEADER_BYTES + extra;
+  const rest = new Uint8Array(restLength);
+  rest.set(first.subarray(HEADER_BYTES));
+  rest.set(
+    second.subarray(0, restLength - (MAX_FRAME_BYTES - HEADER_BYTES)),
+    MAX_FRAME_BYTES - HEADER_BYTES,
+  );
+  h.input.write(rest);
+  await tick();
+  return { h, cap, held: restLength - (MAX_FRAME_BYTES - HEADER_BYTES) };
+}
+
+test("a max-frame header owns only its bytes, so the rest of the ingress bound is admitted", async () => {
+  const { h, cap, held } = await afterMaxFrameHeader(0);
+  expect(h.pipe.snapshot().state).toBe("ready");
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["max-0"]);
+  // The chunk is released; only the second frame's prefix remains, counted exactly.
+  expect(h.pipe.snapshot().ingressBytes).toBe(held);
+  expect(held).toBeLessThan(cap);
+  await h.pipe.shutdown("test-complete");
+});
+
+test("a max-frame header followed by one byte past the ingress bound fails closed", async () => {
+  const { h } = await afterMaxFrameHeader(1);
+  expect((await h.pipe.closed).reason).toBe("ingress-capacity-exceeded");
+  expect(h.calls).toHaveLength(0);
 });
 
 test("stub execution preserves correlated W2 unavailability through the pipe", async () => {
