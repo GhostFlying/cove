@@ -93,9 +93,6 @@ export function encodeFrame(
   return { ok: true, value: output };
 }
 
-// Bounds compaction of exact body copies so many tiny reads cannot accumulate unbounded views.
-const MAX_BODY_SEGMENTS = 16;
-
 function copyRange(segments: readonly Uint8Array[], start: number, end: number): Uint8Array {
   const output = new Uint8Array(end - start);
   let offset = 0;
@@ -204,12 +201,28 @@ export class FrameDecoder {
     return partial ? failure("TRUNCATED_FRAME", this.offset) : { ok: true, value: undefined };
   }
 
-  // Copies the slice (a Node Buffer slice would be a view of the caller's backing).
+  // Copies the slice (a Node Buffer slice would be a view of the caller's backing) into exactly
+  // sized segments merged geometrically: the new bytes absorb each trailing segment no larger
+  // than twice what has accumulated, in one copy. Afterwards every segment is more than twice the
+  // next, so a frame has at most ~log2(MAX_FRAME_BYTES) segments; and a byte is recopied only when
+  // its segment grows by at least half, so total copy work is O(n log n) even for one-byte reads,
+  // while storage stays exactly the bytes received.
   private appendBody(slice: Uint8Array): void {
-    this.body.push(new Uint8Array(slice));
-    if (this.body.length <= MAX_BODY_SEGMENTS) return;
-    const total = this.body.reduce((bytes, segment) => bytes + segment.byteLength, 0);
-    this.body = [copyRange(this.body, 0, total)];
+    let from = this.body.length;
+    let size = slice.byteLength;
+    while (from > 0 && this.body[from - 1]!.byteLength <= 2 * size) {
+      from -= 1;
+      size += this.body[from]!.byteLength;
+    }
+    const merged = new Uint8Array(size);
+    let offset = 0;
+    for (let index = from; index < this.body.length; index++) {
+      merged.set(this.body[index]!, offset);
+      offset += this.body[index]!.byteLength;
+    }
+    merged.set(slice, offset);
+    this.body.length = from;
+    this.body.push(merged);
   }
 
   private resetPending(): void {
