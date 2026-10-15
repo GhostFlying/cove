@@ -157,13 +157,17 @@ type MethodSpec = {
 // M1 methods are served under the negotiated operation-receipts capability; a separate
 // capability would change the bootstrap contract, which M1 does not need before the first release.
 const local = { permission: "local-principal", capability: "operation-receipts-v1" } as const;
-const read = <P extends MethodSpec["params"], R extends z.ZodType>(
-  domain: RpcDomain,
+const read = <D extends RpcDomain, P extends MethodSpec["params"], R extends z.ZodType>(
+  domain: D,
   params: P,
   result: R,
   cli: string,
 ) => ({ params, result, class: "read", scope: "server", domain, cli, ...local }) as const;
-const write = <P extends MethodSpec["params"]>(domain: RpcDomain, params: P, cli: string) =>
+const write = <D extends RpcDomain, P extends MethodSpec["params"]>(
+  domain: D,
+  params: P,
+  cli: string,
+) =>
   ({
     params,
     result: OperationResultSchema,
