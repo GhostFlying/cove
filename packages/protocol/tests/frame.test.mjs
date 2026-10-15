@@ -227,6 +227,50 @@ test("a validated header does not allocate its declared frame; storage tracks by
   expect(decoder.storageBytes).toBe(0);
 });
 
+// Counts the bytes the decoder allocates (new Uint8Array(length) or a copy of a typed array)
+// while fn runs; views made with subarray/species are not counted.
+function allocatedBytesDuring(fn) {
+  const Original = globalThis.Uint8Array;
+  let allocated = 0;
+  class Counting extends Original {
+    constructor(...args) {
+      super(...args);
+      if (typeof args[0] === "number" || ArrayBuffer.isView(args[0])) allocated += this.byteLength;
+    }
+  }
+  globalThis.Uint8Array = Counting;
+  try {
+    return { result: fn(), allocated };
+  } finally {
+    globalThis.Uint8Array = Original;
+  }
+}
+
+test("a max frame fed one byte at a time costs O(n log n) copy work, not O(n^2)", () => {
+  const meta = new Uint8Array(4096).fill(0x20);
+  const payload = new Uint8Array(65_536).map((_, index) => index % 251);
+  const encoded = encodeTerminalFrame("output", meta, payload);
+  expect(encoded.ok).toBe(true);
+  const frame = encoded.value;
+  expect(frame.byteLength).toBe(MAX_FRAME_BYTES);
+  const decoder = createTerminalDecoder();
+  let peakStorage = 0;
+  const { result: frames, allocated } = allocatedBytesDuring(() => {
+    const out = [];
+    for (let cursor = 0; cursor < frame.byteLength; cursor++) {
+      out.push(...decoder.read(frame.subarray(cursor, cursor + 1)).frames);
+      peakStorage = Math.max(peakStorage, decoder.storageBytes);
+    }
+    return out;
+  });
+  expect(frames).toHaveLength(1);
+  expect(Array.from(frames[0].payload)).toEqual(Array.from(payload));
+  // Storage stays exactly the bytes held, and a quadratic prefix recopy (~152 MB here) fails.
+  expect(peakStorage).toBe(MAX_FRAME_BYTES - 1);
+  const body = MAX_FRAME_BYTES - HEADER_BYTES;
+  expect(allocated).toBeLessThanOrEqual(body * Math.ceil(Math.log2(body)));
+});
+
 test("a frame fed one byte at a time decodes intact across body compaction", () => {
   const payload = new Uint8Array(300).map((_, index) => index % 251);
   const decoder = createTerminalDecoder();
