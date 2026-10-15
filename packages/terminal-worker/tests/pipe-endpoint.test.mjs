@@ -1136,6 +1136,62 @@ test("route control beyond the shared window is a protocol violation and fails c
   );
 });
 
+test("a reply handed to the writable frees its window slot before the write callback", async () => {
+  const { h, held } = await routeHarness();
+  const commands = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS + 2 }, (_, index) =>
+    routeControl(index),
+  );
+  h.input.write(
+    Buffer.concat(commands.slice(0, PIPE_ROUTE_CONTROL_COMMANDS).map((command) => encode(command))),
+  );
+  await tick();
+  // route-0's reply is on the wire (its write callback is held); the runtime can read it and
+  // send one more command before the callback runs, so that command parks.
+  expect(h.frames().map((frame) => frame.requestId)).toEqual([undefined, "route-0"]);
+  expect(held.callbacks).toHaveLength(1);
+  h.input.write(encode(commands[PIPE_ROUTE_CONTROL_COMMANDS]));
+  await tick();
+  expect(h.pipe.snapshot()).toMatchObject({
+    state: "ready",
+    parkedRequests: PIPE_ROUTE_CONTROL_COMMANDS,
+  });
+  // Still a window of PIPE_ROUTE_CONTROL_COMMANDS: one more before any reply is read overflows.
+  h.input.write(encode(commands[PIPE_ROUTE_CONTROL_COMMANDS + 1]));
+  const closed = await h.pipe.closed;
+  expect(closed.reason).toBe("route-control-ingress-capacity");
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(["route-0"]);
+});
+
+test("route control keeps executing in order while every reply's write callback lags", async () => {
+  const { h, held } = await routeHarness();
+  const total = 3 * PIPE_ROUTE_CONTROL_COMMANDS;
+  const commands = Array.from({ length: total }, (_, index) => routeControl(index));
+  let sent = 0;
+  const send = (count) => {
+    h.input.write(Buffer.concat(commands.slice(sent, sent + count).map((c) => encode(c))));
+    sent += count;
+  };
+  send(PIPE_ROUTE_CONTROL_COMMANDS);
+  await tick();
+  // A conforming runtime: each reply it reads frees one slot, which it refills at once, while
+  // the reply's write callback is released only afterwards.
+  let read = 1;
+  for (let turn = 0; turn < 4 * total && h.frames().length <= total; turn++) {
+    const frames = h.frames();
+    const fresh = frames.length - read;
+    read = frames.length;
+    if (fresh && sent < total) send(Math.min(fresh, total - sent));
+    await tick();
+    held.callbacks.shift()?.();
+    await tick();
+  }
+  expect(h.pipe.snapshot().state).toBe("ready");
+  expect(h.calls.map(({ command }) => command.requestId)).toEqual(
+    commands.map((command) => command.requestId),
+  );
+  await h.pipe.shutdown("test-complete");
+});
+
 test("ordinary response reservations stop before spending the control reserve", async () => {
   const budgets = {
     ...M0_LIMITS,

@@ -116,8 +116,8 @@ class WorkerPipeCore {
   readonly #deferredControl: RequestRecord[] = [];
   // Route-control frames that arrived while the single route slot was taken, in arrival
   // order. Each is an exact-size metadata copy charged to ingress until admitted. The runtime
-  // keeps at most PIPE_ROUTE_CONTROL_COMMANDS route commands outstanding, so together with
-  // the executing or still-unsettled one this never exceeds that bound.
+  // keeps at most PIPE_ROUTE_CONTROL_COMMANDS route commands outstanding (see
+  // #routeWindowRecords), so this never holds more than that many.
   readonly #parkedRouteControl: Uint8Array[] = [];
   #parkedRouteBytes = 0;
   #controlCursor = 0;
@@ -331,9 +331,26 @@ class WorkerPipeCore {
     );
   }
 
-  #routeRecords(): number {
+  // Route records the runtime still counts against its PIPE_ROUTE_CONTROL_COMMANDS window. The
+  // runtime frees a window slot as soon as it reads the reply, which it can do once the reply
+  // frame is handed to the writable: the write callback may run later, since neither a stream
+  // nor an OS pipe orders it before the peer's read. So a record whose reply frames have all
+  // been handed off no longer counts here, although it keeps the route execution slot and its
+  // reply's byte charge until the callback. Counting it until the callback made a conforming
+  // runtime that promoted the next command on reading the reply look like an overflow, and the
+  // worker failed closed (issue #96). Route execution is serial until that callback, so at
+  // most one such record exists at a time.
+  #routeWindowRecords(): number {
     let count = 0;
-    for (const record of this.#pending.values()) if (record.role === "route") count++;
+    for (const record of this.#pending.values())
+      if (
+        record.role === "route" &&
+        !(
+          record.phase === "response" &&
+          [...record.frames].every((frame) => frame.state !== "queued")
+        )
+      )
+        count++;
     return count;
   }
 
@@ -530,13 +547,12 @@ class WorkerPipeCore {
     // Route control runs one command at a time, end to end, in arrival order. A later one
     // parks while the slot is taken, and also behind any already parked one so it cannot
     // overtake it. The runtime's window is PIPE_ROUTE_CONTROL_COMMANDS outstanding commands,
-    // counted until it receives each reply; this worker holds each record until that reply's
-    // write callback, which runs before the runtime can have read the reply. So a record
-    // count past the window means the runtime broke the contract, and the pipe fails closed.
+    // counted until it reads each reply (see #routeWindowRecords). A count past the window
+    // means the runtime broke the contract, and the pipe fails closed.
     if (role === "route" && (!this.#slotAvailable(role) || this.#parkedRouteControl.length)) {
       const metadata = frame.metadata.slice();
       if (
-        this.#routeRecords() >= PIPE_ROUTE_CONTROL_COMMANDS ||
+        this.#routeWindowRecords() >= PIPE_ROUTE_CONTROL_COMMANDS ||
         frame.payload.byteLength !== 0 ||
         (this.#activeChunk?.buffer.byteLength ?? 0) +
           this.#decoderStorageBound() +
