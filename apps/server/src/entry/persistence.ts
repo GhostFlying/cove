@@ -1,7 +1,13 @@
-import { lstat, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, unlink } from "node:fs/promises";
+import { RendezvousSchema } from "@cove/protocol/bootstrap";
 import { Store, StoreError } from "../store/database.js";
 import { prepareHome, type HomeLayout } from "../store/home.js";
-import { loadOrCreateIdentity, type ServerIdentity } from "../store/identity.js";
+import {
+  isRecordedInstance,
+  loadOrCreateIdentity,
+  type ServerIdentity,
+} from "../store/identity.js";
 
 export type ServerPersistence = {
   readonly layout: HomeLayout;
@@ -38,24 +44,64 @@ export async function openPersistence(
   }
 }
 
-// D7: holding the database lock proves that no other server of this data directory is running,
-// so a rendezvous left at the data directory's own path is a crashed server's and can be removed
-// before publishing. A rendezvous elsewhere (explicit --rendezvous) is never removed: another data
-// directory's live server may own it.
+export class RendezvousConflictError extends Error {
+  constructor() {
+    super(
+      "Another server's rendezvous is published at this data directory's rendezvous path; it was " +
+        "left in place. Stop that server or point it at another rendezvous path.",
+    );
+    this.name = "RendezvousConflictError";
+  }
+}
+
+// D7: a record at the data directory's own rendezvous path is replaced only when it is provably
+// this data directory's stale record: it names this server's serverId and a relay instance this
+// database recorded earlier. Holding the database lock proves that no instance of this data
+// directory is running, so such a record was left by a crash. The pathname alone proves nothing:
+// a server of another data directory can be started with an explicit --rendezvous naming this
+// path while this server is stopped, and its live record must be preserved (a conflict, reported
+// to the operator). A rendezvous elsewhere (explicit --rendezvous) is never removed.
 export async function replaceStaleRendezvous(
   layout: HomeLayout,
   rendezvousPath: string,
+  owner: { readonly store: Store; readonly serverId: string; readonly relayInstanceId: string },
 ): Promise<boolean> {
   if (rendezvousPath !== layout.rendezvousPath) return false;
-  let info;
+  let handle;
   try {
-    info = await lstat(rendezvousPath);
+    handle = await open(rendezvousPath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return false;
+    if (code === "ELOOP") throw new Error("Unexpected file at the rendezvous path");
     throw error;
   }
-  if (!info.isFile() || info.uid !== process.getuid?.())
-    throw new Error("Unexpected file at the rendezvous path");
+  let read;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.uid !== process.getuid?.())
+      throw new Error("Unexpected file at the rendezvous path");
+    read = { dev: info.dev, ino: info.ino, text: await handle.readFile("utf8") };
+  } finally {
+    await handle.close();
+  }
+  let record;
+  try {
+    record = RendezvousSchema.safeParse(JSON.parse(read.text));
+  } catch {
+    record = null;
+  }
+  if (
+    !record?.success ||
+    record.data.serverId !== owner.serverId ||
+    record.data.relayInstanceId === owner.relayInstanceId ||
+    !isRecordedInstance(owner.store, record.data.relayInstanceId)
+  )
+    throw new RendezvousConflictError();
+  // Remove exactly the file that was read: a publisher only links a new file to a free path, so
+  // the same inode still being there means it is still the stale record.
+  const current = await lstat(rendezvousPath);
+  if (current.dev !== read.dev || current.ino !== read.ino) throw new RendezvousConflictError();
   await unlink(rendezvousPath);
   return true;
 }

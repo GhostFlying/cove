@@ -1391,7 +1391,7 @@ test("M1 CLI suites are registered per file and join the required inventory", as
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
   const registered = await readFileRegisteredSuites();
-  expect(registered).toContainEqual({ project: "cli", file, minimumTests: 4 });
+  expect(registered).toContainEqual({ project: "cli", file, minimumTests: 5 });
   expect(registered.every((suite) => suite.file.startsWith("apps/cli/tests/m1/"))).toBe(true);
   for (const name of fileRegisteredDirectories[0].required)
     expect(registered.map((suite) => suite.file)).toContain(`apps/cli/tests/m1/${name}.test.mjs`);

@@ -57,6 +57,15 @@ export function recordInstanceStart(store: Store, relayInstanceId: string, now: 
   });
 }
 
+// Whether this database recorded the relay instance (any start of this data directory's server).
+export function isRecordedInstance(store: Store, relayInstanceId: string): boolean {
+  return (
+    store.db
+      .prepare("SELECT 1 FROM relay_instances WHERE relay_instance_id = ?")
+      .get(relayInstanceId) !== undefined
+  );
+}
+
 export function recordInstanceStop(store: Store, relayInstanceId: string, now: number): void {
   store.transaction(() => {
     store.db
