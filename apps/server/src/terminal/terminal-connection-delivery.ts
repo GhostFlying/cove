@@ -22,6 +22,10 @@ export interface DeliveryAdmission {
   eligible(): boolean;
   handoff(): boolean;
 }
+// The overhead a prepaid result slot covers besides the encoded buffer: the record a
+// dynamically admitted item reserves (512) and retainBacking's per-buffer overhead (256).
+export const PREPAID_DELIVERY_OVERHEAD = 512 + 256;
+const NO_BACKING: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 type Item = {
   bytes: Uint8Array;
   backing: ByteReservation;
@@ -30,6 +34,7 @@ type Item = {
   fence: DeliveryFence | undefined;
   admission: DeliveryAdmission | undefined;
   owned: boolean;
+  prepaid: boolean;
 };
 
 export class TerminalConnectionDelivery {
@@ -40,6 +45,10 @@ export class TerminalConnectionDelivery {
   private queuedBytes = 0;
   private physicalBytes = 0;
   private ordinaryBytes = 0;
+  // Prepaid items queued or awaiting their write callback, and their bytes. They are outside
+  // itemLimit and the byte budgets above (see admit).
+  private prepaidItems = 0;
+  private prepaidBytes = 0;
   private blocked = false;
   private flushing = false;
   private encoding = false;
@@ -75,6 +84,12 @@ export class TerminalConnectionDelivery {
     return this.closedState;
   }
 
+  // `prepaid` is a reservation the caller already holds for this item: it replaces the item's
+  // record and backing, and the item stays outside itemLimit and the byte budgets, so shared
+  // pressure can never refuse it (issue #96: the result of a live subscription's ACK). The
+  // delivery owns the reservation from this call and releases it exactly once: on refusal, or
+  // when the item is cancelled or its write callback (or transportReleased) ends it. The
+  // caller bounds how many it hands out; a frame larger than the reservation covers is refused.
   admit(
     metadata: TerminalMetadata,
     payload: Uint8Array = new Uint8Array(),
@@ -83,21 +98,26 @@ export class TerminalConnectionDelivery {
       fence?: DeliveryFence;
       prepare?: (encodedBytes: number) => DeliveryAdmission | null;
       admitted?: () => void;
+      prepaid?: ByteReservation;
     },
   ): boolean {
+    const prepaid = options.prepaid;
     if (
       this.closed ||
       this.encoding ||
       (options.fence && !options.fence.current()) ||
       payload.buffer.byteLength > MAX_FRAME_BYTES ||
-      this.queue.length + this.handed.size >= this.options.itemLimit ||
+      (!prepaid &&
+        this.queue.length + this.handed.size - this.prepaidItems >= this.options.itemLimit) ||
       (!options.control &&
         this.queue.filter((item) => !item.control).length +
           [...this.handed].filter((item) => !item.control).length >=
           this.options.itemLimit - 4)
-    )
+    ) {
+      prepaid?.release();
       return false;
-    const record = this.composition.bytes.reserve(512, options.control);
+    }
+    const record = prepaid ?? this.composition.bytes.reserve(512, options.control);
     if (!record) return false;
     this.encoding = true;
     let bytes: Uint8Array;
@@ -125,17 +145,22 @@ export class TerminalConnectionDelivery {
     if (
       this.closed ||
       (options.fence && !options.fence.current()) ||
-      bytes.byteLength >
-        budgets.outboundConnectionBytes +
-          budgets.reservedControlBytes -
-          this.queuedBytes -
-          this.physicalBytes ||
-      (!options.control && bytes.byteLength > budgets.outboundConnectionBytes - this.ordinaryBytes)
+      (prepaid
+        ? bytes.buffer.byteLength + PREPAID_DELIVERY_OVERHEAD > prepaid.bytes
+        : bytes.byteLength >
+            budgets.outboundConnectionBytes +
+              budgets.reservedControlBytes -
+              this.queuedBytes -
+              this.physicalBytes ||
+          (!options.control &&
+            bytes.byteLength > budgets.outboundConnectionBytes - this.ordinaryBytes))
     ) {
       record.release();
       return false;
     }
-    const backing = this.composition.bytes.retainBacking(bytes, options.control);
+    const backing = prepaid
+      ? NO_BACKING
+      : this.composition.bytes.retainBacking(bytes, options.control);
     if (!backing) {
       record.release();
       return false;
@@ -165,9 +190,13 @@ export class TerminalConnectionDelivery {
       fence: options.fence,
       admission,
       owned: true,
+      prepaid: !!prepaid,
     };
     this.queue.push(item);
-    this.queuedBytes += bytes.byteLength;
+    if (item.prepaid) {
+      this.prepaidItems++;
+      this.prepaidBytes += bytes.byteLength;
+    } else this.queuedBytes += bytes.byteLength;
     if (!item.control) this.ordinaryBytes += bytes.byteLength;
     try {
       options.admitted?.();
@@ -190,7 +219,7 @@ export class TerminalConnectionDelivery {
       if (fence && (item.fence?.route !== fence.route || item.fence.attempt !== fence.attempt))
         continue;
       this.queue.splice(index, 1);
-      this.queuedBytes -= item.bytes.byteLength;
+      this.unaccount(item, false);
       if (!item.control) this.ordinaryBytes -= item.bytes.byteLength;
       item.owned = false;
       item.backing.release();
@@ -223,8 +252,10 @@ export class TerminalConnectionDelivery {
           this.queue.splice(index, 0, item);
           break;
         }
-        this.queuedBytes -= item.bytes.byteLength;
-        this.physicalBytes += item.bytes.byteLength;
+        if (!item.prepaid) {
+          this.queuedBytes -= item.bytes.byteLength;
+          this.physicalBytes += item.bytes.byteLength;
+        }
         this.handed.add(item);
         const generation = this.drainGeneration;
         try {
@@ -247,12 +278,22 @@ export class TerminalConnectionDelivery {
     if (!item.owned) return false;
     item.owned = false;
     this.handed.delete(item);
-    this.physicalBytes -= item.bytes.byteLength;
+    this.unaccount(item, true);
     if (!item.control) this.ordinaryBytes -= item.bytes.byteLength;
     item.backing.release();
     item.record.release();
     this.releaseArena();
     return true;
+  }
+
+  // Removes an item's bytes from the counter it is in: prepaid items have their own, others are
+  // queued until handed to the transport and physical after.
+  private unaccount(item: Item, handed: boolean): void {
+    if (item.prepaid) {
+      this.prepaidItems--;
+      this.prepaidBytes -= item.bytes.byteLength;
+    } else if (handed) this.physicalBytes -= item.bytes.byteLength;
+    else this.queuedBytes -= item.bytes.byteLength;
   }
 
   wake(): void {
@@ -291,6 +332,8 @@ export class TerminalConnectionDelivery {
       queuedBytes: this.queuedBytes,
       physicalBytes: this.physicalBytes,
       ordinaryBytes: this.ordinaryBytes,
+      prepaidItems: this.prepaidItems,
+      prepaidBytes: this.prepaidBytes,
       queued: this.queue.length,
       handed: this.handed.size,
       closed: this.closed,

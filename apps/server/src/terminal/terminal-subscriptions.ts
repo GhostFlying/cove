@@ -14,6 +14,8 @@ import {
   TerminalCommandSchema,
   validateTerminalResultForCommand,
   externalEventSubscription,
+  HEADER_BYTES,
+  MAX_METADATA_BYTES,
   type TerminalCommand,
   type TerminalError,
   type TerminalResult,
@@ -24,7 +26,11 @@ import type { RuntimeResult } from "@cove/protocol/runtime";
 import { LocalRuntime } from "./local-runtime.js";
 import { RuntimeComposition } from "./runtime-composition.js";
 import type { ByteReservation } from "./runtime-retained-bytes.js";
-import { TerminalConnectionDelivery, type DeliveryFence } from "./terminal-connection-delivery.js";
+import {
+  PREPAID_DELIVERY_OVERHEAD,
+  TerminalConnectionDelivery,
+  type DeliveryFence,
+} from "./terminal-connection-delivery.js";
 import { TerminalDeliveryCredit } from "./terminal-delivery-credit.js";
 import type { ResultHandoff } from "./worker-pipe-session.js";
 import { ControlArbiter, type ControlCommand, type ControlJob } from "./control-arbiter.js";
@@ -41,6 +47,16 @@ const REQUEST_BYTES = 6 * 4096 + 2048;
 // worker pipe prepays their onward storage in the same way (see worker-pipe-session).
 const ROUTE_CONTROL_BYTES = 3 * REQUEST_BYTES;
 const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
+// The result frames of those commands are prepaid too. Each route reserves ROUTE_RESULT_SLOTS
+// result slots at attach, each enough for one result frame with its delivery record and
+// backing. A result holds a slot from its delivery admission until the frame's write callback,
+// which may run after the client has read the result and sent the next command. A result that
+// finds every slot of its route taken waits in the route, still unsettled, until one frees;
+// the per-route bound of one unsettled command per type therefore also bounds the waiting
+// results. Results never draw on the connection's shared item or byte budgets, so other
+// connections' output cannot make the server retire a route whose ACK the worker accepted.
+const ROUTE_RESULT_SLOTS = 3;
+const RESULT_SLOT_BYTES = HEADER_BYTES + MAX_METADATA_BYTES + PREPAID_DELIVERY_OVERHEAD;
 
 type Supported =
   | Extract<
@@ -64,6 +80,13 @@ type Route = {
   teardown?: Promise<RuntimeResult> | undefined;
   queue: Request[];
   running: boolean;
+  // Free prepaid result slots (see RESULT_SLOT_BYTES), the number handed to delivery, and the
+  // route-control requests whose result waits for a slot. `dropped` is set once the route's
+  // storage is released; a slot that comes back after that is released too.
+  resultSlots: ByteReservation[];
+  resultSlotsOut: number;
+  waitingResults: Request[];
+  dropped: boolean;
 };
 type Request = {
   command: Supported;
@@ -76,6 +99,8 @@ type Request = {
   control: boolean;
   settled: boolean;
   domain?: ControlJob;
+  // The result of a route-control request that waits for a result slot.
+  waitingReply?: Reply | undefined;
 };
 
 type Teardown = {
@@ -313,7 +338,9 @@ export class TerminalSubscriptions {
       // not queued, so a route never holds more than one of each (see the admission above).
       if (
         control &&
-        route.queue.some((value) => !value.settled && value.command.type === command.type)
+        [...route.queue, ...route.waitingResults].some(
+          (value) => !value.settled && value.command.type === command.type,
+        )
       )
         return this.reject(command, "BUSY");
       if (
@@ -332,7 +359,15 @@ export class TerminalSubscriptions {
     let internalId: string | null;
     if (command.type === "attach") {
       const lease = this.composition.bytes.reserve(8192 + ROUTE_CONTROL_BYTES);
-      if (!lease) {
+      const resultSlots: ByteReservation[] = [];
+      for (let index = 0; lease && index < ROUTE_RESULT_SLOTS; index++) {
+        const slot = this.composition.bytes.reserve(RESULT_SLOT_BYTES);
+        if (!slot) break;
+        resultSlots.push(slot);
+      }
+      if (!lease || resultSlots.length < ROUTE_RESULT_SLOTS) {
+        lease?.release();
+        for (const slot of resultSlots) slot.release();
         requestLease.release();
         return this.reject(command, "BUSY");
       }
@@ -348,6 +383,7 @@ export class TerminalSubscriptions {
         this.routes.has(subscriptionId)
       ) {
         lease.release();
+        for (const slot of resultSlots) slot.release();
         requestLease.release();
         return this.reject(command, "COUNTER_EXHAUSTED");
       }
@@ -368,6 +404,10 @@ export class TerminalSubscriptions {
         teardownSent: false,
         queue: [],
         running: false,
+        resultSlots,
+        resultSlotsOut: 0,
+        waitingResults: [],
+        dropped: false,
       };
       this.routes.set(subscriptionId, route);
     } else internalId = this.id("r");
@@ -457,13 +497,15 @@ export class TerminalSubscriptions {
       route.phase !== "retired" ||
       route.running ||
       route.queue.length ||
+      route.waitingResults.length ||
+      route.resultSlotsOut ||
       !route.teardownSent ||
       route.teardown ||
       this.routes.get(id) !== route
     )
       return;
     this.routes.delete(id);
-    route.lease.release();
+    this.dropRoute(route);
     if (!route.failure) return;
     // As with settledIds, only the window size evicts; without byte capacity the entry
     // is remembered unaccounted (still bounded by identityLimit).
@@ -953,18 +995,74 @@ export class TerminalSubscriptions {
   }
   private finish(request: Request, reply: Reply, published = false): void {
     if (request.settled) return;
+    const route = request.route;
+    const deliver = !published && !this.closed;
+    // A route-control result is delivered in a prepaid slot (see RESULT_SLOT_BYTES). Without a
+    // free one it waits, unsettled, until returnResultSlot hands it the next. A closed delivery
+    // refuses every result, so nothing waits for it.
+    let slot: ByteReservation | undefined;
+    if (deliver && request.control && !route.dropped && !this.delivery.closed) {
+      const lease = route.resultSlots.pop();
+      if (!lease) {
+        if (request.waitingReply === undefined) {
+          request.waitingReply = reply;
+          route.waitingResults.push(request);
+        }
+        return;
+      }
+      route.resultSlotsOut++;
+      let owned = true;
+      slot = {
+        bytes: lease.bytes,
+        release: () => {
+          if (!owned) return;
+          owned = false;
+          this.returnResultSlot(route, lease);
+        },
+      };
+    }
     request.settled = true;
     this.requests.delete(request.internalId);
     this.settleId(request.command.requestId);
     if (request.control) this.controlPending--;
     else this.ordinaryPending--;
     if (
-      !published &&
-      !this.closed &&
-      !this.delivery.admit(reply, new Uint8Array(), { control: true })
+      deliver &&
+      !this.delivery.admit(reply, new Uint8Array(), {
+        control: true,
+        ...(slot ? { prepaid: slot } : {}),
+      })
     )
-      this.retire(request.route, domainError("RESULT_UNKNOWN", "unknown"));
+      this.retire(route, domainError("RESULT_UNKNOWN", "unknown"));
     request.resolve(structuredClone(reply));
+  }
+
+  // A result slot comes back when its frame's write callback runs, or when delivery cancels or
+  // refuses the frame. It goes to the oldest waiting result of the route, or back to the
+  // route's free slots; once the route's storage is released, it is released as well.
+  private returnResultSlot(route: Route, lease: ByteReservation): void {
+    route.resultSlotsOut--;
+    if (route.dropped) {
+      lease.release();
+      return;
+    }
+    route.resultSlots.push(lease);
+    const next = route.waitingResults.shift();
+    if (next) {
+      const reply = next.waitingReply!;
+      next.waitingReply = undefined;
+      this.finish(next, reply);
+    }
+    this.reap(route);
+  }
+
+  // Releases a route's lease and free result slots. Slots still held by delivery are released
+  // when they come back.
+  private dropRoute(route: Route): void {
+    if (route.dropped) return;
+    route.dropped = true;
+    route.lease.release();
+    for (const slot of route.resultSlots.splice(0)) slot.release();
   }
   tick(): void {
     this.options.arbiter?.tick();
@@ -1002,6 +1100,12 @@ export class TerminalSubscriptions {
       for (const request of route.queue)
         if (!(request.command.type === "input" && request.domain?.dispatched))
           this.finish(request, this.error(request.command, route.failure!));
+      // The worker applied these; their results can no longer be delivered.
+      for (const request of route.waitingResults.splice(0)) {
+        const reply = request.waitingReply!;
+        request.waitingReply = undefined;
+        this.finish(request, reply);
+      }
       this.unsubscribe(route);
     }
     this.releaseClosedRecords();
@@ -1010,7 +1114,7 @@ export class TerminalSubscriptions {
     if (!this.closed || this.inFlight || this.teardownQueue.length || this.released) return;
     this.released = true;
     for (const route of this.routes.values()) {
-      route.lease.release();
+      this.dropRoute(route);
       route.queue.length = 0;
     }
     this.routes.clear();

@@ -8,6 +8,8 @@ const { createClient } = await import(
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { PIPE_ROUTE_CONTROL_COMMANDS } from "@cove/protocol/pipe";
+import { M0_LIMITS } from "@cove/protocol/budgets";
+import { SESSION_CONTROL_RESERVE } from "../../dist/terminal/worker-pipe-session.js";
 import {
   fixture,
   decode,
@@ -369,6 +371,9 @@ describe("private terminal subscription delivery", () => {
         f.session.receive(f.reply(sent));
         expect((await detach).type).toBe("detach-result");
         await turns();
+        // The route's storage outlives its last result frame until the transport finishes it.
+        expect(a.service.snapshot()).toMatchObject({ routes: 1, active: 0, pending: 0 });
+        a.settleWrites();
         expect(a.service.snapshot()).toMatchObject({ routes: 0, active: 0, pending: 0 });
       }
       expect(new Set(refs.map((ref) => ref.subscriptionId)).size).toBe(refs.length);
@@ -470,6 +475,8 @@ describe("private terminal subscription delivery", () => {
           atSeq: 0,
         }),
       );
+      // The earlier results used the route's result slots; the transport finished them.
+      a.settleWrites();
       const ack = a.service.handle(command("applied-ack", ref, "final", { appliedSeq: 0 }));
       await turns();
       f.session.receive(f.reply());
@@ -732,6 +739,87 @@ describe("private terminal subscription delivery", () => {
     } finally {
       await f.dispose();
     }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("delivers every accepted ACK's result across many connections while outbound writes lag", async () => {
+    // The production control reserve (see entry/main.ts), shared by every connection.
+    const controlReserve = SESSION_CONTROL_RESERVE + M0_LIMITS.reservedControlBytes;
+    const f = fixture({}, { controlReserve });
+    const connections = Array.from({ length: M0_LIMITS.authenticatedSockets }, (_, index) =>
+      f.connect(`connection-${index}`),
+    );
+    const rounds = 3;
+    try {
+      const refs = [];
+      for (const [index, a] of connections.entries())
+        for (let view = 0; view < M0_LIMITS.subscriptionsPerConnection; view++)
+          refs.push({ a, ref: (await f.attach(a, 0, `attach-${index}-${view}`)).subscription });
+      for (const { ref } of refs)
+        for (let seq = 1; seq <= rounds + 1; seq++) f.session.receive(f.output(ref, seq));
+      // Exhaust every ordinary byte before the ACKs, and never run an outbound write callback:
+      // every result frame stays owned by its connection's transport. The held attach results
+      // already use more than the control reserve, so this leaves no shared headroom at all.
+      const account = f.bytes.snapshot();
+      const filler = f.bytes.reserve(
+        Math.min(
+          account.limit - account.controlReserve - account.ordinary,
+          account.limit - account.total,
+        ),
+      );
+      expect(filler).not.toBeNull();
+      let replied = f.pipeWrites.length;
+      const replyAll = async () => {
+        for (let turn = 0; turn < 4 * refs.length && replied < f.pipeWrites.length; turn++) {
+          f.session.receive(f.reply(decode(f.pipeWrites[replied++].data, true).metadata));
+          await turns();
+        }
+      };
+      const round = (seq) =>
+        refs.map(({ a, ref }) =>
+          a.service.handle(
+            command("applied-ack", ref, `ack-${ref.subscriptionId}-${seq}`, {
+              appliedSeq: seq,
+            }),
+          ),
+        );
+      // Each round's results fit the routes' prepaid result slots.
+      for (let seq = 1; seq <= rounds; seq++) {
+        const acks = round(seq);
+        await replyAll();
+        expect((await Promise.all(acks)).map((value) => value.type)).toEqual(
+          Array(refs.length).fill("applied-ack-result"),
+        );
+      }
+      // With every slot held by a lagging frame, the next results wait for a callback.
+      let settled = 0;
+      const last = round(rounds + 1).map((reply) => reply.then((value) => (settled++, value)));
+      await replyAll();
+      expect(settled).toBe(0);
+      for (const a of connections) a.settleWrites();
+      expect((await Promise.all(last)).map((value) => value.type)).toEqual(
+        Array(refs.length).fill("applied-ack-result"),
+      );
+      // Every subscription is still live; none was retired for shared reply capacity.
+      const sent = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
+      expect(sent).not.toContain("unsubscribe");
+      for (const { a, ref } of refs)
+        expect(a.service.snapshot(ref.subscriptionId).route).toMatchObject({
+          phase: "active",
+          credit: { appliedSeq: rounds + 1 },
+        });
+      // Lag the next results again, then close with them in transport.
+      const unsettled = round(rounds + 2);
+      await replyAll();
+      filler.release();
+      await Promise.all(unsettled);
+    } finally {
+      await f.dispose();
+    }
+    // Results were still in transport at close; the carriers' release receipts return their
+    // slots, which are released once each connection's serial teardowns finish.
+    for (let turn = 0; turn < 64 && f.bytes.snapshot().total; turn++)
+      await new Promise((resolve) => setImmediate(resolve));
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
