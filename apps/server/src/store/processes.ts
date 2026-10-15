@@ -54,8 +54,7 @@ my $size = unpack("Q", $len);
 exit 1 if $size == 0;
 exit 3 if $size < 648 || unpack("l", substr($buf, 40, 4)) != $pid;
 my ($sec, $usec) = unpack("q l", $buf);
-printf("%d.%06d
-", $sec, $usec);
+printf("%d.%06d\n", $sec, $usec);
 `;
 
 // This boot's identity: `<platform>:<boot ID>`, or null when it cannot be read.
@@ -78,6 +77,12 @@ export async function bootIdentity(): Promise<string | null> {
 // not exist or cannot be read. Linux: start time in clock ticks since boot (/proc/<pid>/stat field
 // 22). macOS: p_starttime with microseconds (DARWIN_START_TIME).
 export async function processStartIdentity(pid: number): Promise<string | null> {
+  const identity = await readStartIdentity(pid);
+  // Only identities in the current format are handed out (see parseStartIdentity).
+  return identity !== null && parseStartIdentity(identity) !== null ? identity : null;
+}
+
+async function readStartIdentity(pid: number): Promise<string | null> {
   if (!Number.isSafeInteger(pid) || pid <= 0) return null;
   const boot = await bootIdentity();
   if (boot === null) return null;
@@ -97,6 +102,39 @@ export async function processStartIdentity(pid: number): Promise<string | null> 
     return start && /^\d+\.\d{6}$/.test(start) ? `${boot}:${start}` : null;
   }
   return null;
+}
+
+// A start identity in the current format, split into its parts; null for anything else (an older
+// format, a malformed value, or a format of a later build). Only parsed identities support the
+// reboot shortcut in ProcessLedger.liveness; anything else is judged conservatively.
+//   linux:<boot_id UUID>:<start ticks>
+//   darwin:<kern.bootsessionuuid UUID>:<p_starttime seconds>.<microseconds, 6 digits>
+// The earlier macOS format `darwin:<kern.boottime seconds>:<ps lstart text>` (second resolution)
+// does not parse.
+const IDENTITY_FORMATS: Record<string, { boot: RegExp; start: RegExp }> = {
+  linux: { boot: /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/, start: /^\d+$/ },
+  darwin: { boot: /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/, start: /^\d+\.\d{6}$/ },
+};
+
+export type ParsedStartIdentity = { platform: string; boot: string; start: string };
+
+export function parseStartIdentity(identity: string): ParsedStartIdentity | null {
+  const [platform, boot, start, ...rest] = identity.split(":");
+  const format = platform === undefined ? undefined : IDENTITY_FORMATS[platform];
+  if (!format || boot === undefined || start === undefined || rest.length > 0) return null;
+  return format.boot.test(boot) && format.start.test(start)
+    ? { platform: platform!, boot, start }
+    : null;
+}
+
+// A boot identity (`<platform>:<boot ID>`) in the current format, or null.
+function parseBootIdentity(identity: string | null): { platform: string; boot: string } | null {
+  if (identity === null) return null;
+  const [platform, boot, ...rest] = identity.split(":");
+  const format = platform === undefined ? undefined : IDENTITY_FORMATS[platform];
+  return format && boot !== undefined && rest.length === 0 && format.boot.test(boot)
+    ? { platform: platform!, boot }
+    : null;
 }
 
 function exists(pid: number): boolean | null {
@@ -175,6 +213,10 @@ export class ProcessLedger {
     operation: OperationReceiptKey,
     process: { pid: number; pgid: number; startIdentity: string },
   ): ProcessRecord {
+    // A record must be comparable after a restart; an identity this build cannot parse would leave
+    // the operation unverifiable until both the PID and the group are gone.
+    if (parseStartIdentity(process.startIdentity) === null)
+      throw new Error("The process start identity is not in the current format");
     const processId = randomUUID();
     const at = this.now();
     this.store.transaction(() =>
@@ -219,10 +261,24 @@ export class ProcessLedger {
   // can leave children in the group after the leader ended, and the group ID cannot be reused while
   // any member exists.
   static async liveness(record: ProcessRecord): Promise<ProcessLiveness> {
+    const recorded = parseStartIdentity(record.startIdentity);
+    if (recorded === null) {
+      // An identity this build cannot interpret (an older or later format, or malformed) cannot
+      // be compared, so neither a reboot nor a reused PID can be proven. Only the absence of both
+      // the PID and its group proves the end; anything else may still be the recorded process.
+      const leader = exists(record.pid);
+      return leader === false && exists(-record.pgid) === false ? "ended" : "unverifiable";
+    }
     // Recorded during another boot: the process and every member of its group ended with that
     // boot. The current numeric PID and PGID belong to unrelated processes, so they are not probed.
-    const boot = await bootIdentity();
-    if (boot !== null && !record.startIdentity.startsWith(`${boot}:`)) return "ended";
+    // Only applied when the current boot identity is readable and in the same platform's format.
+    const current = parseBootIdentity(await bootIdentity());
+    if (
+      current !== null &&
+      current.platform === recorded.platform &&
+      current.boot !== recorded.boot
+    )
+      return "ended";
     const leader = exists(record.pid);
     if (leader === null) return "unverifiable";
     if (leader) {
