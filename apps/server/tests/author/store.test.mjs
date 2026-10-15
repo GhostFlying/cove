@@ -542,12 +542,28 @@ describe("operation process ownership", () => {
   // Teardown closes their stdin (their release) and waits; only a leader that still has not exited
   // is killed, through its handle, which Node never signals after the child was reaped.
   const leaders = [];
-  // Group members the leaders started, by PID with the start identity read while they ran. They
-  // are released through a FIFO handshake; teardown signals one only while it still carries its
-  // recorded identity, so a PID an unrelated process reused is never signalled.
+  // Group members the leaders start, each waiting on a FIFO: `{ fifo, pid, identity }`. A member
+  // is registered before its leader is spawned, so teardown releases it through the FIFO whatever
+  // step failed, and then confirms it exited: by its recorded identity disappearing or, if its
+  // identity was never read, by its PID disappearing (a probe, no signal). A member that does not
+  // exit is SIGKILLed only while it carries its recorded identity; one that still does not exit
+  // fails the test.
   const members = [];
 
   afterEach(async () => {
+    const failures = [];
+    for (const member of members.splice(0)) {
+      if (!member.released) await releaseFifo(member.fifo, 1_000);
+      if (member.pid === undefined) continue;
+      const gone = async () =>
+        member.identity === undefined
+          ? !pidExists(member.pid)
+          : (await processStartIdentity(member.pid)) !== member.identity;
+      if (await waitUntil(gone, 2_000)) continue;
+      if (member.identity !== undefined) await signalIfSame(member.pid, member.identity, "SIGKILL");
+      if (!(await waitUntil(gone, 3_000)))
+        failures.push(new Error(`group member ${member.pid} did not exit`));
+    }
     for (const { child, exited } of leaders.splice(0)) {
       child.stdin.destroy();
       if ((await Promise.race([exited, delay(5_000).then(() => "timeout")])) === "timeout") {
@@ -555,10 +571,52 @@ describe("operation process ownership", () => {
         await exited;
       }
     }
-    for (const { pid, identity } of members.splice(0)) await signalIfSame(pid, identity, "SIGKILL");
+    if (failures.length > 0) throw new AggregateError(failures, "process teardown failed");
   });
 
   const delay = (ms) => new Promise((done) => setTimeout(done, ms));
+
+  async function waitUntil(predicate, ms) {
+    const deadline = Date.now() + ms;
+    while (!(await predicate())) {
+      if (Date.now() > deadline) return false;
+      await delay(20);
+    }
+    return true;
+  }
+
+  // Existence probe (signal 0 sends nothing).
+  function pidExists(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+  }
+
+  // Writes the release line to a FIFO member. The open is non-blocking, so it fails with ENXIO
+  // instead of hanging while no reader has the FIFO open; that is retried until `ms` passes.
+  // Returns whether the line was written.
+  async function releaseFifo(fifo, ms) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      let writer;
+      try {
+        writer = await openFile(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
+      } catch (error) {
+        if (error.code !== "ENXIO" || Date.now() > deadline) return false;
+        await delay(20);
+        continue;
+      }
+      try {
+        await writer.write("go\n");
+        return true;
+      } finally {
+        await writer.close();
+      }
+    }
+  }
 
   // Signals `pid` only while it is the process recorded with `identity`; an unreadable or
   // different identity means the recorded process is gone, and nothing is signalled.
@@ -587,7 +645,7 @@ describe("operation process ownership", () => {
   // A shell leading a process group of its own, as T3b runs Git. It prints `ready` (after the
   // optional setup in `before`), then waits for one line on stdin before it exits, so the test
   // decides when the leader ends.
-  async function spawnLeader(before = "", env = {}) {
+  async function spawnLeader(before = "", env = {}, onLine = () => {}) {
     const child = spawn("/bin/sh", ["-c", `${before} echo ready; read line; exit 0`], {
       detached: true,
       stdio: ["pipe", "pipe", "ignore"],
@@ -595,7 +653,6 @@ describe("operation process ownership", () => {
     });
     const exited = new Promise((done) => child.once("exit", done));
     leaders.push({ child, exited });
-    const lines = [];
     let buffered = "";
     const ready = new Promise((done) =>
       child.stdout.on("data", (chunk) => {
@@ -604,7 +661,7 @@ describe("operation process ownership", () => {
         buffered = parts.pop();
         for (const line of parts) {
           if (line === "ready") done("ready");
-          else lines.push(line);
+          else onLine(line);
         }
       }),
     );
@@ -615,7 +672,6 @@ describe("operation process ownership", () => {
     return {
       pid: child.pid,
       identity,
-      lines,
       exited,
       release: () => child.stdin.end("go\n"),
     };
@@ -747,27 +803,35 @@ describe("operation process ownership", () => {
 
   it("stays unverifiable while the group outlives its leader", async () => {
     const { store, ledger } = await ledgerWithOperation();
-    // The leader starts a member of its group that waits on a FIFO, and reports its PID before
-    // `ready`; the test releases the member by writing to the FIFO.
     const directory = await mkdtemp(join(tmpdir(), "cove-ledger-"));
     directories.push(directory);
     const fifo = join(directory, "release");
     await new Promise((done, fail) =>
       execFile("mkfifo", [fifo], (error) => (error ? fail(error) : done())),
     );
-    const leader = await spawnLeader(`sh -c 'read line < "$FIFO"' & echo $!;`, { FIFO: fifo });
-    const member = Number(leader.lines[0]);
-    const memberIdentity = await processStartIdentity(member);
-    expect(memberIdentity).not.toBeNull();
-    members.push({ pid: member, identity: memberIdentity });
+    // Registered before the member can start (see teardown).
+    const member = { fifo, pid: undefined, identity: undefined, released: false };
+    members.push(member);
+    // The member opens the FIFO read-write (which does not wait for a writer), so it is a reader
+    // before it announces its PID; it then waits for the release line.
+    const leader = await spawnLeader(
+      `sh -c 'exec 3<>"$FIFO"; echo member $$; read line <&3' &`,
+      { FIFO: fifo },
+      (line) => {
+        const announced = /^member (\d+)$/.exec(line);
+        if (announced) member.pid = Number(announced[1]);
+      },
+    );
+    await until(() => member.pid !== undefined);
+    member.identity = await processStartIdentity(member.pid);
+    expect(member.identity).not.toBeNull();
     ledger.record(operation, { pid: leader.pid, pgid: leader.pid, startIdentity: leader.identity });
     leader.release();
     await leader.exited;
     expect(await ledger.check(operation)).toBe("unverifiable");
-    // Release the member: O_NONBLOCK fails (ENXIO) instead of blocking if it is no longer reading.
-    const writer = await openFile(fifo, constants.O_WRONLY | constants.O_NONBLOCK);
-    await writer.write("go\n");
-    await writer.close();
+    expect(await releaseFifo(fifo, 5_000)).toBe(true);
+    member.released = true;
+    await until(async () => (await processStartIdentity(member.pid)) !== member.identity);
     await until(() => ledger.check(operation).then((state) => state === "ended"));
     close(store);
   });
