@@ -28,6 +28,7 @@ import { RunLog } from "../store/runs.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
+import { D6Probe } from "./d6-probe.js";
 import {
   localAuthority,
   parseLocalOptions,
@@ -45,7 +46,7 @@ export function createLocalApplication(
     timer?: LocalTimer;
     workerSpawn?: WorkerSpawn;
     // The opened data directory (M1 T1). identity.serverId must be its persistent serverId.
-    persistence?: { store: Store; home: string; principalId: string };
+    persistence?: { store: Store; home: string; principalId: string; probe?: D6Probe };
   },
 ) {
   const options = validateLocalOptions(input);
@@ -101,9 +102,7 @@ export function createLocalApplication(
     : new OperationReceipts(
         composition,
         encodeUtf8,
-        persistence
-          ? new SqliteReceiptBackend(persistence.store, identity.relayInstanceId)
-          : undefined,
+        persistence ? receiptBackend(persistence, identity.relayInstanceId) : undefined,
       );
   const core: LocalCore = injected?.core ?? {
     runtime,
@@ -124,7 +123,9 @@ export function createLocalApplication(
             home: persistence.home,
             serverId: identity.serverId,
             receipts: receipts!,
-            state: sqliteConfigState(persistence.store),
+            state: persistence.probe
+              ? persistence.probe.config(sqliteConfigState(persistence.store))
+              : sqliteConfigState(persistence.store),
             encodeUtf8,
           }),
         }
@@ -204,10 +205,15 @@ export class LocalEntryStartupError extends Error {
   }
 }
 
+function receiptBackend(persistence: { store: Store; probe?: D6Probe }, relayInstanceId: string) {
+  const sqlite = new SqliteReceiptBackend(persistence.store, relayInstanceId);
+  return persistence.probe ? persistence.probe.receipts(sqlite) : sqlite;
+}
+
 // Opens the data directory first (M1 T1): the database lock decides whether this process may run
 // at all, before a worker, listener or rendezvous exists. Startup verification of the previous
 // instance's operations and runs completes before any request can be served.
-async function openLocalApplication(input: M0LocalOptions) {
+async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
   const options = validateLocalOptions(input);
   if (options.home === undefined) return { local: createLocalApplication(options), store: null };
   let persistence;
@@ -230,6 +236,7 @@ async function openLocalApplication(input: M0LocalOptions) {
         store,
         home: persistence.layout.home,
         principalId: persistence.identity.principalId,
+        ...(probe ? { probe } : {}),
       },
     });
     try {
@@ -240,6 +247,7 @@ async function openLocalApplication(input: M0LocalOptions) {
       local.disposeCore();
       throw error;
     }
+    probe?.start(store);
     return { local, store };
   } catch {
     store.close();
@@ -247,8 +255,13 @@ async function openLocalApplication(input: M0LocalOptions) {
   }
 }
 
-export async function startLocalEntry(input: M0LocalOptions, shutdown?: { signal?: AbortSignal }) {
-  const { local, store } = await openLocalApplication(input);
+export async function startLocalEntry(
+  input: M0LocalOptions,
+  shutdown?: { signal?: AbortSignal },
+  // Only the D6 latency probe passes this (COVE_D6_PROBE_DIR); see d6-probe.ts.
+  probe?: D6Probe,
+) {
+  const { local, store } = await openLocalApplication(input, probe);
   const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
   const worker = local.createWorker();
   const instance = local.identity.relayInstanceId;
@@ -449,6 +462,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         server = await startLocalEntry(
           { ...options, home: options.home ?? resolveHome(undefined) },
           { signal: controller.signal },
+          D6Probe.fromEnvironment(),
         );
         if (controller.signal.aborted) await close();
       } catch (error) {
