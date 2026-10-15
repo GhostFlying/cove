@@ -1107,7 +1107,9 @@ describe("P2-B2 independent shared worker progress capacity", () => {
     }
   });
 
-  test("R2-CAP active background unsubscribe occupies one original shared progress slot", async () => {
+  // Issue #96: a peer ACK past the shared window used to be refused with BUSY at the worker
+  // pipe, which retired that healthy peer route and tore it down. It now waits for the slot.
+  test("R2-CAP active background unsubscribe occupies one shared progress slot and a peer ACK waits for it", async () => {
     const r = controlFixture({ pipeHold: true });
     const trace = { case: "background-one-slot", steps: [] };
     const record = (phase) =>
@@ -1131,44 +1133,40 @@ describe("P2-B2 independent shared worker progress capacity", () => {
       const background = r.last("unsubscribe");
       expect(background.subscription).toEqual(ar);
       expect(r.count("unsubscribe")).toBe(1);
-      const replies = peerRefs.map((ref) =>
-        b.service.handle(r.command("applied-ack", ref, { appliedSeq: 10 })),
+      const settled = new Set();
+      const replies = peerRefs.map((ref, index) =>
+        b.service
+          .handle(r.command("applied-ack", ref, { appliedSeq: 10 }))
+          .then((reply) => (settled.add(index), reply)),
       );
       await turns();
-      const acknowledgements = r.commands.filter((x) => x.type === "applied-ack");
-      expect(acknowledgements).toHaveLength(3);
-      const refused = await replies[3];
-      trace.fourthPeerReply = refused;
-      expect(refused.type).toBe("error");
-      expect(refused.error.kind).toBe("BUSY");
-      expect(refused.error.acceptance).toBe("not-accepted");
-      record("background-plus-three-ACKs-held-fourth-refused");
+      // The background unsubscribe and three ACKs fill the window; the fourth ACK waits unsent.
+      const acknowledgements = () => r.commands.filter((x) => x.type === "applied-ack");
+      expect(acknowledgements()).toHaveLength(3);
+      expect(settled.has(3)).toBe(false);
+      expect(b.service.snapshot(peerRefs[3].subscriptionId).route.phase).toBe("active");
+      record("background-plus-three-ACKs-held-fourth-waiting");
       r.accept(background);
-      for (const acknowledgement of acknowledgements) r.accept(acknowledgement);
-      expect((await Promise.all(replies.slice(0, 3))).map((x) => x.type)).toEqual(
-        Array(3).fill("applied-ack-result"),
+      await turns();
+      // The freed slot goes to the waiting ACK.
+      expect(acknowledgements()).toHaveLength(4);
+      expect(acknowledgements()[3].subscription).toEqual(peerRefs[3]);
+      for (const acknowledgement of acknowledgements()) r.accept(acknowledgement);
+      expect((await Promise.all(replies)).map((x) => x.type)).toEqual(
+        Array(4).fill("applied-ack-result"),
       );
       await turns();
+      // No peer route was retired, so the only teardown is the closed connection's.
       const teardowns = r.commands.filter((x) => x.type === "unsubscribe");
-      expect(teardowns.map((x) => x.subscription)).toEqual([ar, peerRefs[3]]);
-      expect(teardowns[0].requestId).toBe(background.requestId);
-      const peerTeardown = teardowns[1];
-      expect(peerTeardown.worker).toEqual(background.worker);
-      expect(peerTeardown.run).toEqual(run);
-      expect(new Set(teardowns.map((x) => x.requestId)).size).toBe(2);
-      trace.peerTeardown = structuredClone(peerTeardown);
-      record("exact-owned-teardowns-before-peer-receipt");
-      r.accept(peerTeardown);
-      await turns();
+      expect(teardowns.map((x) => x.requestId)).toEqual([background.requestId]);
+      for (const ref of peerRefs)
+        expect(b.service.snapshot(ref.subscriptionId).route.phase).toBe("active");
+      record("all-peer-ACKs-accepted-without-teardown");
       a.service.close();
       r.advance(0);
       await turns();
       const completedTeardowns = r.commands.filter((x) => x.type === "unsubscribe");
-      expect(completedTeardowns.map((x) => x.subscription)).toEqual([ar, peerRefs[3]]);
-      expect(completedTeardowns.map((x) => x.requestId)).toEqual([
-        background.requestId,
-        peerTeardown.requestId,
-      ]);
+      expect(completedTeardowns.map((x) => x.requestId)).toEqual([background.requestId]);
       expect(r.count("stop")).toBe(0);
       expect(r.count("set-control")).toBe(0);
       record("real-results-settled-without-cap-increase");

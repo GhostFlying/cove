@@ -7,6 +7,7 @@ const { createClient } = await import(
 );
 import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
+import { PIPE_ROUTE_CONTROL_COMMANDS } from "@cove/protocol/pipe";
 import {
   fixture,
   decode,
@@ -640,6 +641,86 @@ describe("private terminal subscription delivery", () => {
       await f.dispose();
     }
     expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  // Issue #96: the connection used to refuse every route-control command past
+  // PIPE_ROUTE_CONTROL_COMMANDS with BUSY, which ended the fifth streaming subscription.
+  it("admits one ACK per subscription beyond the worker window and sends the rest as slots free", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const refs = [];
+      for (let index = 0; index < 2 * PIPE_ROUTE_CONTROL_COMMANDS; index++)
+        refs.push((await f.attach(a, 0, `attach-${index}`)).subscription);
+      for (const ref of refs) f.session.receive(f.output(ref, 1));
+      const start = f.pipeWrites.length;
+      const settled = new Set();
+      const acks = refs.map((ref, index) =>
+        a.service
+          .handle(command("applied-ack", ref, `ack-${index}`, { appliedSeq: 1 }))
+          .then((reply) => (settled.add(index), reply)),
+      );
+      await turns();
+      const sent = () => f.pipeWrites.slice(start).map((item) => decode(item.data, true).metadata);
+      // The worker window holds four; the others wait unsent and none is refused.
+      expect(sent().map((value) => value.type)).toEqual(
+        Array(PIPE_ROUTE_CONTROL_COMMANDS).fill("applied-ack"),
+      );
+      expect(settled.size).toBe(0);
+      expect(a.service.snapshot().pending).toBe(refs.length);
+      // Each answer frees the slot for the next waiting ACK, in arrival order.
+      for (let index = 0; index < refs.length; index++) {
+        f.session.receive(f.reply(sent()[index]));
+        await turns();
+      }
+      expect(sent().map((value) => value.subscription)).toEqual(refs);
+      expect((await Promise.all(acks)).map((value) => value.type)).toEqual(
+        Array(refs.length).fill("applied-ack-result"),
+      );
+      for (const ref of refs)
+        expect(a.service.snapshot(ref.subscriptionId).route).toMatchObject({
+          phase: "active",
+          credit: { appliedSeq: 1 },
+        });
+      expect(a.service.snapshot().pending).toBe(0);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
+  it("refuses a second unsettled ACK of one subscription without retiring it", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const ref = (await f.attach(a)).subscription;
+      f.session.receive(f.output(ref, 1));
+      f.session.receive(f.output(ref, 2));
+      const first = a.service.handle(command("applied-ack", ref, "first", { appliedSeq: 1 }));
+      await turns();
+      const sentFirst = f.latest();
+      expect(sentFirst).toMatchObject({ type: "applied-ack", appliedSeq: 1 });
+      const second = await a.service.handle(
+        command("applied-ack", ref, "second", { appliedSeq: 2 }),
+      );
+      expect(second).toMatchObject({
+        type: "error",
+        requestId: "second",
+        error: { kind: "BUSY", acceptance: "not-accepted" },
+      });
+      expect(f.latest()).toEqual(sentFirst);
+      expect(a.service.snapshot(ref.subscriptionId).route.phase).toBe("active");
+      f.session.receive(f.reply(sentFirst));
+      expect(await first).toMatchObject({ type: "applied-ack-result", appliedSeq: 1 });
+      // Once the first settles, the cumulative successor is admitted as usual.
+      const retried = a.service.handle(command("applied-ack", ref, "retried", { appliedSeq: 2 }));
+      await turns();
+      f.session.receive(f.reply(f.latest()));
+      expect(await retried).toMatchObject({ type: "applied-ack-result", appliedSeq: 2 });
+      expect(a.service.snapshot(ref.subscriptionId).route.credit.appliedSeq).toBe(2);
+    } finally {
+      await f.dispose();
+    }
   });
 
   it("serializes owned close unsubscribe at the worker progress cap plus one without stopping any run", async () => {
