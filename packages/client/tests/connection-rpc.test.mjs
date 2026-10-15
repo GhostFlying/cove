@@ -1854,3 +1854,217 @@ describe("bounded typed RPC", () => {
     expect(context.client.snapshot()).toMatchObject({ status: "unverifiable", pendingRpcCount: 0 });
   });
 });
+
+describe("method-table classification and durable operation identity", () => {
+  const oldRun = { ...ids, relayInstanceId: "instance-old", runId: "run-old" };
+
+  async function send(context, method, params) {
+    const call = context.client.call(method, params);
+    await flush();
+    const index = context.http.requests.length - 1;
+    const request = JSON.parse(fatalDecoder.decode(context.http.requests[index].request.body));
+    return { call, index, request };
+  }
+
+  test("a resend with old-instance preconditions reaches the server and accepts the historical record", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const params = { ...createParams("op-resend"), expectedRelayInstanceId: "instance-old" };
+    const { call, index, request } = await send(context, "terminal.create", params);
+    expect(request).toMatchObject({ method: "terminal.create", params });
+    // The transport binding is still the current instance.
+    expect(context.http.requests[index].request.headers["Cove-Instance-Id"]).toBe(
+      ids.relayInstanceId,
+    );
+    const record = operation("op-resend", "terminal.create", {
+      revision: 2,
+      state: "succeeded",
+      run: oldRun,
+      result: { run: oldRun },
+    });
+    context.http.respond(index, rpcResult(request.id, { operation: record }), {
+      headers: headers(),
+    });
+    expect(await call).toEqual({ ok: true, value: { operation: record } });
+
+    const stop = {
+      operationId: "op-stop-old",
+      expectedRelayInstanceId: "instance-old",
+      run: oldRun,
+    };
+    const stopped = await send(context, "terminal.stop", stop);
+    const stopRecord = operation("op-stop-old", "terminal.stop", { run: oldRun, state: "running" });
+    context.http.respond(stopped.index, rpcResult(stopped.request.id, { operation: stopRecord }), {
+      headers: headers(),
+    });
+    expect(await stopped.call).toEqual({ ok: true, value: { operation: stopRecord } });
+
+    const query = context.client.getOperation("op-resend");
+    await flush();
+    const queried = context.http.requests.length - 1;
+    const queryRequest = JSON.parse(
+      fatalDecoder.decode(context.http.requests[queried].request.body),
+    );
+    expect(queryRequest.params).toEqual({ operationId: "op-resend" });
+    context.http.respond(queried, rpcResult(queryRequest.id, { operation: record }), {
+      headers: headers(),
+    });
+    expect(await query).toEqual({ ok: true, value: { operation: record } });
+  });
+
+  test("writes naming another server are refused before sending, and responses naming one are invalid", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const foreign = { ...run, serverId: "server-2" };
+    const refused = await context.client.call("terminal.stop", {
+      operationId: "op-foreign",
+      expectedRelayInstanceId: ids.relayInstanceId,
+      run: foreign,
+    });
+    expect(refused).toMatchObject({
+      ok: false,
+      kind: "local-error",
+      error: { reason: "instance-binding" },
+    });
+    expect(context.http.requests).toHaveLength(1);
+
+    const { call, index, request } = await send(context, "terminal.create", createParams("op-x"));
+    context.http.respond(
+      index,
+      rpcResult(request.id, {
+        operation: operation("op-x", "terminal.create", { run: { ...run, serverId: "server-2" } }),
+      }),
+      { headers: headers() },
+    );
+    expect(await call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { method: "terminal.create", operationId: "op-x" },
+    });
+  });
+
+  test("live terminal reads stay bound to the current instance", async () => {
+    const context = harness();
+    await connectHarness(context);
+    expect(await context.client.call("terminal.get", { run: oldRun })).toMatchObject({
+      ok: false,
+      error: { reason: "instance-binding" },
+    });
+    expect(context.http.requests).toHaveLength(1);
+    const { call, index, request } = await send(context, "terminal.list", { limit: 2 });
+    context.http.respond(
+      index,
+      rpcResult(request.id, { runs: [runRecord(), runRecord({ run: oldRun })] }),
+      { headers: headers() },
+    );
+    expect(await call).toMatchObject({ ok: false, error: { reason: "invalid-response" } });
+  });
+
+  test("domain writes get operation records, operation-unknown handling and the local intent guard", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const params = {
+      operationId: "op-task",
+      title: "Investigate",
+      mounts: [{ source: "checkout", repoId: "repo-1" }],
+    };
+    const first = await send(context, "task.create", params);
+    expect(first.request).toMatchObject({ method: "task.create", params });
+    // Same operation ID with another intent while the first is in flight.
+    expect(
+      await context.client.call("task.create", { ...params, title: "Different" }),
+    ).toMatchObject({ ok: false, error: { reason: "operation-conflict" } });
+    const record = {
+      operationId: "op-task",
+      method: "task.create",
+      revision: 1,
+      state: "succeeded",
+      result: { resource: { kind: "task", id: "task-1", revision: 0 } },
+    };
+    context.http.respond(first.index, rpcResult(first.request.id, { operation: record }), {
+      headers: headers(),
+    });
+    expect(await first.call).toEqual({ ok: true, value: { operation: record } });
+
+    const lost = await send(context, "repo.register", { operationId: "op-repo", path: "/src/a" });
+    context.http.fail(lost.index, "handed-off");
+    expect(await lost.call).toMatchObject({
+      ok: false,
+      kind: "operation-unknown",
+      operation: { method: "repo.register", operationId: "op-repo" },
+      error: { kind: "RESULT_UNKNOWN" },
+    });
+
+    const refused = await send(context, "mount.add", {
+      operationId: "op-mount",
+      taskId: "task-1",
+      mount: { source: "checkout", repoId: "repo-1" },
+    });
+    const error = domainError("MANAGED_WORKTREE_NOT_MOUNTABLE");
+    context.http.respond(
+      refused.index,
+      rpcError(refused.request.id, error.code, error.message, error),
+      { headers: headers() },
+    );
+    expect(await refused.call).toEqual({ ok: false, kind: "rpc-error", error });
+
+    // A record for another method is not this write's result.
+    const mismatched = await send(context, "task.archive", {
+      operationId: "op-task",
+      taskId: "task-1",
+    });
+    context.http.respond(
+      mismatched.index,
+      rpcResult(mismatched.request.id, { operation: record }),
+      {
+        headers: headers(),
+      },
+    );
+    expect(await mismatched.call).toMatchObject({ ok: false, kind: "operation-unknown" });
+  });
+
+  test("domain reads are server-scoped and unconfirmed deletion never leaves the client", async () => {
+    const context = harness();
+    await connectHarness(context);
+    const latestRun = {
+      run: oldRun,
+      tabId: "tab-1",
+      taskId: "task-1",
+      workspaceRevision: 1,
+      cwd: "/w/task-1",
+      mounts: [],
+      lifecycle: "interrupted",
+      verification: "unverifiable",
+      startedAtMs: 1,
+      endedAtMs: null,
+      lastObservedAtMs: 2,
+      exitCode: null,
+      signal: null,
+    };
+    const value = {
+      tab: {
+        tabId: "tab-1",
+        taskId: "task-1",
+        revision: 0,
+        name: "shell",
+        recipe: { kind: "shell" },
+        cwd: { kind: "entry" },
+        createdAtMs: 1,
+        latestRun: oldRun,
+      },
+      latestRun,
+    };
+    const { call, index, request } = await send(context, "tab.get", { tabId: "tab-1" });
+    context.http.respond(index, rpcResult(request.id, value), { headers: headers() });
+    expect(await call).toEqual({ ok: true, value });
+
+    expect(
+      await context.client.call("binding.delete", {
+        operationId: "op-delete",
+        taskId: "task-1",
+        mountId: "mount-1",
+      }),
+    ).toMatchObject({ ok: false, kind: "local-error", error: { reason: "instance-binding" } });
+    expect(context.http.requests).toHaveLength(2);
+  });
+});
