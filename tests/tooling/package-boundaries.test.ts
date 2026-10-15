@@ -159,9 +159,15 @@ function assertServerBoundary(manifest: Record<string, unknown>): void {
         "@cove/terminal-worker": "workspace:*",
         fastify: "5.12.5",
         "@fastify/websocket": "11.3.3",
+        // M1 T1: the server-only SQLite store (docs/milestones/m1.md D5, D6).
+        "better-sqlite3": "13.0.3",
       }) ||
     JSON.stringify(manifest.devDependencies) !==
-      JSON.stringify({ "@types/node": "26.6.2", "@types/ws": "8.18.2" })
+      JSON.stringify({
+        "@types/node": "26.6.2",
+        "@types/ws": "8.18.2",
+        "@types/better-sqlite3": "9.6.0",
+      })
   )
     throw new Error("Server dependencies escaped the approved D Node boundary");
 }

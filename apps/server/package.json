@@ -12,11 +12,13 @@
     "@cove/protocol": "workspace:*",
     "@cove/terminal-worker": "workspace:*",
     "fastify": "5.12.5",
-    "@fastify/websocket": "11.3.3"
+    "@fastify/websocket": "11.3.3",
+    "better-sqlite3": "13.0.3"
   },
   "devDependencies": {
     "@types/node": "26.6.2",
-    "@types/ws": "8.18.2"
+    "@types/ws": "8.18.2",
+    "@types/better-sqlite3": "9.6.0"
   },
   "bin": {
     "cove-server": "./dist/entry/main.js"
