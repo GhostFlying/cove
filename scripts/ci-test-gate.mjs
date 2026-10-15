@@ -263,7 +263,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/rpc-dispatch.test.mjs",
-    minimumTests: 4,
+    minimumTests: 5,
   },
   {
     project: "server",

@@ -4,6 +4,7 @@ import { ERROR_CODES } from "@cove/protocol/errors";
 import { RPC_DOMAINS, RPC_METHODS } from "@cove/protocol/rpc";
 import { dispatchRpc } from "../../dist/rpc/dispatch.js";
 import { rpcBody } from "../../dist/transport/http-rpc.js";
+import { prepareWorktreeMount } from "../../dist/domain/worktrees.js";
 
 const encoder = new TextEncoder();
 const unimplemented = new Set(["config", "repo", "task", "mount", "tab", "binding"]);
@@ -109,5 +110,28 @@ describe("table-driven RPC dispatch", () => {
       await expect(
         Promise.resolve(dispatchRpc(core, method, { operationId: "o" })),
       ).resolves.toBeTruthy();
+  });
+});
+
+describe("managed worktree preparation seam", () => {
+  it("refuses every worktree mount as unavailable until T3b replaces it", async () => {
+    const { core, calls } = fakeCore();
+    const outcome = await prepareWorktreeMount(core, {
+      principalId: "m0-local",
+      operationId: "o1",
+      taskId: "task-1",
+      mountId: "mount-1",
+      path: "/w/task-1/app",
+      slug: "task-1",
+      spec: { source: "worktree", repoId: "repo-1", base: "origin/main" },
+    });
+    expect(outcome).toEqual({
+      ok: false,
+      error: expect.objectContaining({
+        kind: "CAPABILITY_UNAVAILABLE",
+        acceptance: "not-accepted",
+      }),
+    });
+    expect(calls).toHaveLength(0);
   });
 });
