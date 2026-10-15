@@ -7,6 +7,7 @@ import {
   MAX_FRAME_BYTES,
   MAX_METADATA_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
+  PIPE_PREPAID_ROUTE_CONTROL_BYTES,
   PIPE_VERSION,
   createPipeDecoder,
   encodePipeFrame,
@@ -81,6 +82,15 @@ interface RequestRecord {
   readonly role: "ordinary" | "status" | "stop" | "route" | "rejection";
   phase: "parked" | "deferred" | "executing" | "response";
   readonly frames: Set<OutboundFrame>;
+}
+
+// The bound on ingress storage: the active chunk, the decoder's storage and the parked
+// route-control copies. The runtime may have pipeQueuedBytes of ordinary and control frames plus
+// PIPE_PREPAID_ROUTE_CONTROL_BYTES of prepaid route-control frames in flight (issue #96). The
+// prepaid allowance is counted twice: those frames can still sit in the active chunk or the
+// decoder while their parked copies exist. Past this bound the pipe still fails closed.
+function ingressLimit(pipeQueuedBytes: number): number {
+  return pipeQueuedBytes + 2 * PIPE_PREPAID_ROUTE_CONTROL_BYTES;
 }
 
 function guardTerminalErrors(stream: Readable | Writable, pendingCallbacks = 0): () => void {
@@ -384,7 +394,7 @@ class WorkerPipeCore {
     }
     if (
       chunk.buffer.byteLength + this.#decoder.retainedBytes + this.#parkedRouteBytes >
-      (this.#hello?.effectiveBudgets.pipeQueuedBytes ?? M0_LIMITS.pipeQueuedBytes)
+      ingressLimit(this.#hello?.effectiveBudgets.pipeQueuedBytes ?? M0_LIMITS.pipeQueuedBytes)
     ) {
       void this.shutdown("ingress-capacity-exceeded");
       return;
@@ -478,7 +488,7 @@ class WorkerPipeCore {
       if (
         this.#activeChunk &&
         this.#activeChunk.buffer.byteLength + this.#decoder.retainedBytes + this.#parkedRouteBytes >
-          metadata.effectiveBudgets.pipeQueuedBytes
+          ingressLimit(metadata.effectiveBudgets.pipeQueuedBytes)
       ) {
         void this.shutdown("ingress-capacity-exceeded");
         return false;
@@ -558,7 +568,7 @@ class WorkerPipeCore {
           this.#decoderStorageBound() +
           this.#parkedRouteBytes +
           metadata.byteLength >
-          this.#hello.effectiveBudgets.pipeQueuedBytes
+          ingressLimit(this.#hello.effectiveBudgets.pipeQueuedBytes)
       ) {
         void this.shutdown("route-control-ingress-capacity");
         return false;

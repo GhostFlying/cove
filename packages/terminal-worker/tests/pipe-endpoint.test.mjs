@@ -9,6 +9,7 @@ import {
   MAX_METADATA_BYTES,
   MAX_FRAME_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
+  PIPE_PREPAID_ROUTE_CONTROL_BYTES,
   composeSpawnPayload,
   createPipeDecoder,
   encodePipeFrame,
@@ -43,6 +44,9 @@ const hello = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+// Ingress storage may exceed pipeQueuedBytes by the runtime's prepaid route-control frames and
+// their parked copies (issue #96).
+const ingressCap = (pipeQueuedBytes) => pipeQueuedBytes + 2 * PIPE_PREPAID_ROUTE_CONTROL_BYTES;
 const status = {
   run,
   status: "live",
@@ -669,7 +673,12 @@ test("exact pipe ingress cap crosses decoder slices while cap plus one is reject
 
   const invalid = createHarness();
   await ready(invalid);
-  invalid.input.write(Buffer.concat([fixture.bytes, Buffer.of(0)]));
+  invalid.input.write(
+    Buffer.concat([
+      fixture.bytes,
+      Buffer.alloc(ingressCap(M0_LIMITS.pipeQueuedBytes) - fixture.bytes.length + 1),
+    ]),
+  );
   expect((await invalid.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(invalid.pipe.snapshot().ingressBytes).toBe(0);
   expect(invalid.calls).toHaveLength(0);
@@ -772,7 +781,7 @@ test("readable close during a decoder yield freezes only admitted request IDs", 
 
 test("pre-hello default and decoder partial count toward the ingress cap", async () => {
   const before = createHarness();
-  before.input.write(Buffer.alloc(M0_LIMITS.pipeQueuedBytes + 1));
+  before.input.write(Buffer.alloc(ingressCap(M0_LIMITS.pipeQueuedBytes) + 1));
   expect((await before.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(before.pipe.snapshot().ingressBytes).toBe(0);
 
@@ -783,13 +792,13 @@ test("pre-hello default and decoder partial count toward the ingress cap", async
   partial.input.write(command.subarray(0, 7));
   await tick();
   expect(partial.pipe.snapshot().ingressBytes).toBe(16);
-  partial.input.write(Buffer.alloc(budgets.pipeQueuedBytes - 6));
+  partial.input.write(Buffer.alloc(ingressCap(budgets.pipeQueuedBytes) - 6));
   expect((await partial.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(partial.calls).toHaveLength(0);
 
   const retainedBacking = createHarness();
   await ready(retainedBacking, { ...hello, effectiveBudgets: budgets });
-  retainedBacking.input.write(Buffer.alloc(budgets.pipeQueuedBytes + 1).subarray(0, 7));
+  retainedBacking.input.write(Buffer.alloc(ingressCap(budgets.pipeQueuedBytes) + 1).subarray(0, 7));
   expect((await retainedBacking.pipe.closed).reason).toBe("ingress-capacity-exceeded");
   expect(retainedBacking.pipe.snapshot().ingressBytes).toBe(0);
 });

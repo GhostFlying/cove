@@ -10,6 +10,7 @@ import {
 } from "./identity.js";
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { ControlHolderSchema, TerminalEventSchema } from "./terminal-events.js";
+import { HEADER_BYTES, MAX_METADATA_BYTES } from "./provisional/frame.js";
 
 export const PIPE_VERSION = 2;
 // Route-control commands (applied-ack, baseline-progress, unsubscribe) a runtime may have
@@ -18,6 +19,14 @@ export const PIPE_VERSION = 2;
 // so a worker that receives more treats it as a protocol violation and fails closed. Both sides
 // read this one constant so the sender's window can never exceed the receiver's queue.
 export const PIPE_ROUTE_CONTROL_COMMANDS = 4;
+// The largest route-control frame: these commands carry no payload.
+export const PIPE_ROUTE_CONTROL_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
+// Route-control frames of live subscriptions are prepaid by the runtime and kept outside
+// pipeQueuedBytes (issue #96): it may have this many bytes of them queued or in transport on
+// top of pipeQueuedBytes. The worker's ingress bound includes them; both sides read this one
+// constant.
+export const PIPE_PREPAID_ROUTE_CONTROL_BYTES =
+  PIPE_ROUTE_CONTROL_COMMANDS * PIPE_ROUTE_CONTROL_FRAME_BYTES;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };

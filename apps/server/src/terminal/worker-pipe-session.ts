@@ -8,8 +8,8 @@ import {
   MAX_FRAME_BYTES,
   MAX_READ_BYTES,
   MAX_METADATA_BYTES,
-  HEADER_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
+  PIPE_ROUTE_CONTROL_FRAME_BYTES,
   type PipeCommand,
   type PipeMetadata,
   type PipeEvent,
@@ -46,7 +46,8 @@ export const SESSION_CONTROL_RESERVE = 6 * (6 * MAX_METADATA_BYTES + 2048) + 64 
 // reservedControlBytes: ordinary traffic cannot consume their space, and the bytes queued or
 // in transport stay within pipeQueuedBytes plus the transport slots.
 const ROUTE_CONTROL_IDENTITY_BYTES = 6 * MAX_METADATA_BYTES + 2048;
-const ROUTE_CONTROL_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
+// The worker's ingress bound counts the transport slots too (PIPE_PREPAID_ROUTE_CONTROL_BYTES).
+const ROUTE_CONTROL_FRAME_BYTES = PIPE_ROUTE_CONTROL_FRAME_BYTES;
 const ROUTE_CONTROL_WAIT_BYTES = ROUTE_CONTROL_FRAME_BYTES + MAX_METADATA_BYTES + 1024;
 const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 
