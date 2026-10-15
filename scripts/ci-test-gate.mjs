@@ -268,6 +268,11 @@ export const requiredSuites = [
   },
   {
     project: "server",
+    file: "apps/server/tests/author/store.test.mjs",
+    minimumTests: 15,
+  },
+  {
+    project: "server",
     file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
     minimumTests: 14,
   },
