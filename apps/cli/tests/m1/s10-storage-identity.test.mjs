@@ -66,6 +66,35 @@ test("a second server on the same data directory is refused and the first keeps 
   expect(set.state).toBe("succeeded");
 });
 
+test("a live record of another server at the data directory's rendezvous path is preserved", async () => {
+  const home = fixture.home("home");
+  const own = await fixture.startServer(home);
+  const path = own.report.rendezvous;
+  await fixture.stopServer(own);
+  // While this data directory's server is stopped, a server of another data directory publishes
+  // its record at this data directory's default rendezvous path.
+  const foreign = await fixture.startServer(fixture.home("other-home"), ["--rendezvous", path]);
+  expect(foreign.record.serverId).not.toBe(own.record.serverId);
+  const before = await readFile(path);
+
+  const refused = await fixture.cove(["server", "start"], { home });
+  expect(refused.code).not.toBe(0);
+  expect(refused.stderr).toContain("Another server's rendezvous is published");
+  expect(await readFile(path)).toEqual(before);
+  expect(alive(foreign.pid)).toBe(true);
+  expect(await fixture.coveJson(["--rendezvous", path, "status"], { home })).toMatchObject({
+    serverId: foreign.record.serverId,
+  });
+
+  // This data directory's own stale record (left by kill -9) is still replaced.
+  await fixture.stopServer(foreign);
+  const crashed = await fixture.startServer(home);
+  await fixture.killServer(crashed);
+  const restarted = await fixture.startServer(home);
+  expect(restarted.record).toMatchObject({ serverId: own.record.serverId });
+  expect(restarted.record.relayInstanceId).not.toBe(crashed.record.relayInstanceId);
+});
+
 test("a database with a newer schema is refused and left byte-for-byte unchanged", async () => {
   const home = fixture.home("home");
   const init = await fixture.coveJson(["server", "init"], { home });

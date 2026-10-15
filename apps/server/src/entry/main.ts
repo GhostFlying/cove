@@ -27,7 +27,7 @@ import { recordInstanceStart, recordInstanceStop } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
 import { RunLog } from "../store/runs.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
-import { openPersistence, replaceStaleRendezvous } from "./persistence.js";
+import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
 // Type only: the instrumentation is constructed by the separate probe entry (d6-probe-main.ts), so
 // this executable cannot enable it, whatever its environment.
@@ -254,15 +254,21 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
         }),
       );
       local.runs?.interruptEarlier(identity.relayInstanceId);
-      await replaceStaleRendezvous(persistence.layout, options.rendezvousPath);
+      await replaceStaleRendezvous(persistence.layout, options.rendezvousPath, {
+        store,
+        serverId: identity.serverId,
+        relayInstanceId: identity.relayInstanceId,
+      });
     } catch (error) {
       local.disposeCore();
       throw error;
     }
     probe?.start(store);
     return { local, store };
-  } catch {
+  } catch (error) {
     store.close();
+    if (error instanceof RendezvousConflictError)
+      throw new LocalEntryStartupError("rendezvous", "verified", error.message);
     throw new LocalEntryStartupError("store", "verified", "The Cove data directory is unusable");
   }
 }
