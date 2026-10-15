@@ -153,6 +153,42 @@ export async function createM1Fixture() {
       return server;
     },
 
+    // Starts a server entry file directly, with the arguments `cove server start` passes and the
+    // data directory's default rendezvous; the D6 probe starts its instrumented entry this way.
+    // The result has the same shape as startServer's; the entry process is its own wrapper.
+    async startServerEntry(entry, home) {
+      await mkdir(join(home, "server"), { recursive: true, mode: 0o700 });
+      const rendezvous = join(home, "server", "run", "rendezvous.json");
+      const child = spawn(
+        process.execPath,
+        [
+          entry,
+          ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", "0"],
+          ...["--rendezvous", rendezvous, "--home", home],
+        ],
+        { env, stdio: ["ignore", "ignore", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      const exited = new Promise((done) => child.once("exit", (code) => done(code)));
+      const server = { home, wrapper: child, exited, stderr: () => stderr, pid: child.pid };
+      servers.push(server);
+      const published = () =>
+        readRendezvous(rendezvous).then(
+          () => true,
+          () => false,
+        );
+      await waitFor(
+        "the server rendezvous",
+        async () => child.exitCode !== null || (await published()),
+        20_000,
+      );
+      if (child.exitCode !== null) throw new Error(`${entry} exited ${child.exitCode}: ${stderr}`);
+      server.report = { rendezvous, pid: child.pid };
+      server.record = await readRendezvous(rendezvous);
+      return server;
+    },
+
     // Orderly stop through the wrapper (SIGTERM), with SIGKILL as the bounded fallback.
     async stopServer(server) {
       servers.splice(servers.indexOf(server), 1);

@@ -9,9 +9,11 @@
 // the probe or the server stalled as a whole (host sleep) is reported as disturbed, which makes the
 // verdict UNRESOLVED.
 //
-// It starts the compiled server through the compiled CLI on a temporary data directory, with
-// COVE_D6_PROBE_DIR set so the server records the synchronous interval of every store transaction,
-// samples its event-loop delay and accepts the control-mode switch (apps/server/src/entry/d6-probe.ts).
+// It starts the compiled probe server entry (apps/server/src/entry/d6-probe-main.ts; not the
+// cove-server executable, which cannot enable the instrumentation) on a temporary data directory,
+// with COVE_D6_PROBE_DIR set so the server records the synchronous interval of every store
+// transaction, samples its event-loop delay and accepts the control-mode switch
+// (apps/server/src/entry/d6-probe.ts). Clients use the compiled CLI.
 //
 // Bounded workload: 8 terminals each print 64 KiB/s from a fixed script, all subscribed by one
 // client; another client sends one keystroke every 50 ms to a terminal whose line discipline echoes
@@ -38,11 +40,17 @@
 import { spawnSync } from "node:child_process";
 import { cpus, release, totalmem } from "node:os";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { createSessionClient } from "../../dist/session.js";
 import { createM1Fixture } from "./fixtures.mjs";
 
+// Located through the installed @cove/server package, like the CLI locates cove-server.
+const PROBE_ENTRY = join(
+  dirname(createRequire(import.meta.url).resolve("@cove/server/package.json")),
+  "dist/entry/d6-probe-main.js",
+);
 const TERMINALS = 8;
 // Output terminals with a subscribed client. The M0 worker pipe admits at most
 // PIPE_ROUTE_CONTROL_COMMANDS (4) progress commands at once across all subscriptions of a worker,
@@ -283,7 +291,7 @@ async function main() {
     const script = join(fixture.root, "output.cjs");
     await writeFile(script, OUTPUT_SCRIPT);
     const home = fixture.home("home");
-    server = await fixture.startServer(home);
+    server = await fixture.startServerEntry(PROBE_ENTRY, home);
     const create = async (command) =>
       fixture.coveJson(
         [

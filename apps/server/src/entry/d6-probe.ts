@@ -8,8 +8,9 @@ import type { Store } from "../store/database.js";
 
 // Instrumentation for the D6 latency probe (docs/milestones/m1.md D6;
 // apps/cli/tests/m1/d6-latency-probe.mjs).
-// It exists only when the server is started with COVE_D6_PROBE_DIR, which the probe script sets;
-// no other caller sets it, and without it nothing here is constructed.
+// Only the separate probe entry (d6-probe-main.ts, not a package executable) constructs it; the
+// normal cove-server entry imports no part of it, so neither its environment nor a signal can
+// switch a normal server to the non-durable memory backend.
 //
 // It records, on the runtime main thread:
 // - the synchronous execution interval of every outermost store transaction, and in the control
@@ -70,11 +71,6 @@ export class D6Probe {
   private memoryConfig: ConfigBackend | undefined;
 
   constructor(private readonly directory: string) {}
-
-  static fromEnvironment(): D6Probe | undefined {
-    const directory = process.env.COVE_D6_PROBE_DIR;
-    return directory ? new D6Probe(directory) : undefined;
-  }
 
   private static now(): number {
     return performance.timeOrigin + performance.now();
