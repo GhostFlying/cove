@@ -63,6 +63,10 @@ Lynx + WebGL / WebGPU is a later evaluation path.
 - A phase-two Tailscale-only Web App with separate Cove pairing and revocation. The proposed
   deployment serves the UI and API from one HTTPS/WSS origin, using
   Tailscale-managed certificates without a desktop intermediary.
+  (Proposal pending user review, not in effect: move the Web App ahead of
+  Electron/React Native, directly after remote access and device authorization,
+  because it would also host the UI of tend; see
+  [engineering plan §4.1](docs/engineering-plan.md#41-提案web-app-提前与-tend-集成待用户-review).)
 - No embedded Tailscale in the initial mobile client; use the system Tailscale
   connection. Mobile SSH support remains a later consideration.
 - Relay-managed data transfers to support moving tasks between hosts.
@@ -92,3 +96,11 @@ first release. Optional rollout copying is still under consideration.
 
 Shepherd is outside the first release. A later integration will treat it as an
 independent board system. Detailed implementation choices and validation remain open.
+A pending proposal, not yet approved, would fill this role with
+[tend](https://github.com/GhostFlying/tend), the user's separate ledger and board
+service: Cove keeps hosts, tasks/workspaces, worktrees, terminals, device
+authorization, and clients; tend keeps its main agent, specs, follow-up actions,
+scheduling, acceptance, and pending decisions. The two integrate only through
+explicit interfaces and external ID mappings, Cove's core workflows keep working
+when tend is offline, and Cove's Web UI would serve all tend views. See
+[design §7.1](docs/design.md#71-提案tend-作为看板与账本系统待用户-review).

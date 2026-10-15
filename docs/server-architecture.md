@@ -324,6 +324,9 @@ Cove 自建公共 CA 签发流程、自签名证书固定信任、应用层 E2EE
 ### 9.5 Web App 与 Electron 共享边界
 
 已确认：macOS desktop 使用 Electron；Web App 纳入二期，当前仅考虑经 Tailscale 访问。
+（提案，待用户 review，未生效：Web App 提前到 M2 之后、Electron/RN 之前，并承载 tend 的全部 UI，
+见 [工程计划 §4.1](engineering-plan.md#41-提案web-app-提前与-tend-集成待用户-review)。
+本节的 HTTPS、浏览器会话与共享边界建议不因提前而改变。）
 Web 不要求 desktop 在线，不在浏览器内嵌 Tailscale 或提供 SSH 客户端。
 浏览器所在设备须有可用的系统 Tailnet 路径，且满足访问策略。
 一期保持共享 UI/client 与宿主能力分离；Web 静态资源部署、浏览器会话和 HTTPS 集成在二期实现。
@@ -358,6 +361,93 @@ Web 不要求 desktop 在线，不在浏览器内嵌 Tailscale 或提供 SSH 客
 [Tailscale Serve](https://tailscale.com/docs/reference/tailscale-cli/serve)、
 [tsnet API](https://tailscale.com/docs/reference/tsnet-server-api)、
 [浏览器 WebSocket 安全要求](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API/Writing_WebSocket_client_applications)。
+
+### 9.6 提案：Cove 客户端直连 tend API（待用户 review）
+
+状态：2026-10-15 提出的提案，未获用户批准，不改变上文已选设计。背景与分工见
+[design §7.1](design.md#71-提案tend-作为看板与账本系统待用户-review)。下文所述 tend 接口按 tend
+公开的设计与接口契约（v0.2 D42、阶段 C 计划中的 owner API）及其计划中的修订书写；
+修订尚未定稿，接入前以 tend 届时导出的 JSON Schema 与接口文档为准。
+
+tend 计划中的 owner API（按其接口契约的规划）：
+
+- 写入统一为 `POST /api/v1/ops`，请求体是带 `request_id` 的信封，响应是 Operation；
+  会话为 `POST/GET /api/v1/session`；读接口包括快照、任务详情、消息分页；
+  事件流为 SSE `GET /api/v1/events`，以事件序号为游标，可从 `Last-Event-ID` 续传。
+- tend 计划把 D42 的 SameSite=Strict cookie 会话改为 bearer token，并用 CORS 白名单只放行 Cove 的源。
+  每个请求仍经 tsnet WhoIs 取得 tailnet 登录名，确认是 owner（tend v0.2 §6.3）。
+- 领域与 API 类型以 tend 的 Go 定义为准，导出 JSON Schema 作为跨语言契约（tend D22）。
+
+#### 连接方式：建议客户端直连，不经 Cove server 代理
+
+| 方面         | 直连（建议）                                                                     | 经 Cove server 代理                                                          |
+| ------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| 身份         | tend 的 WhoIs 看到用户设备本身，owner 判定成立                                   | WhoIs 只看到 Cove server 节点；tend 须信任 Cove 转述的身份头，扩大信任面     |
+| 凭据位置     | tend 凭据只在用户设备上                                                          | Cove server 持有 tend 凭据，成为 tend 的认证中介                             |
+| 可用性与耦合 | tend 与 Cove 互不依赖；tend 离线不影响 Cove，Cove 某台 host 离线不影响 tend 视图 | tend 视图依赖某台 Cove server 在线；多台 Cove host 时代理归属不明            |
+| 浏览器同源   | 跨源，需要 CORS 与 bearer token                                                  | 同源，可沿用 Cove 的 cookie 会话                                             |
+| 实现成本     | 客户端维护两个后端的连接、凭据与重连                                             | Cove server 增加 tend 专用代理与凭据管理，违背“不预先实现 Shepherd 专用协议” |
+
+代理的主要收益是同源与单一连接，但它让 Cove server 承担 tend 的身份转述和凭据保管，
+与 §9.4“不接受普通请求自行声明的身份”及 design §7 的松耦合约束冲突。因此建议直连。
+
+CORS 与源：Cove 的 Web 由每台 Cove server 从自己的源提供（§9.5），tend 的 CORS 白名单须列出每个
+Cove Web 源；Electron 的 renderer 源取决于加载方式（自定义 scheme 或 `file:`），需在 Desktop 阶段确定。
+CORS 只约束浏览器，不是认证；tend 的认证依据仍是 bearer token 加 WhoIs owner 判定。
+Cove Web 源上不加载第三方脚本，并配置严格 CSP，以降低 token 被页面脚本读取的风险。
+
+#### 客户端层的评估
+
+**凭据存储。** tend 的 bearer token 与 Cove 设备凭据分开保存、分开撤销，互不派生。
+
+| 平台     | 建议                                                                                                                           |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| 浏览器   | 存于该源的 IndexedDB，与 tend 的 client_id 一起；无法 HttpOnly，依靠 CSP、无第三方脚本和 tend 的 WhoIs 绑定限制泄露影响        |
+| Electron | 由 main 进程用系统凭据存储（如 safeStorage/Keychain）保存；优先由 main 经注入的 HTTP 端口代发 tend 请求，token 不进入 renderer |
+| RN       | 存于 iOS Keychain / Android Keystore 支持的安全存储；具体库随 RN 工程方案（Expo 待定）选择                                     |
+
+token 的领取经 `POST /api/v1/session`，由 tend 依据 WhoIs 判定 owner 后签发，不需要 Cove 配对参与；
+Cove 不把 tend token 写进 URL，也不转交给 Cove server。tend 返回未认证时重新领取，不能用 Cove 设备凭据代替。
+
+**事件流与重连。** 浏览器原生 `EventSource` 不能设置 `Authorization` 头，而 token 不应放进 URL。
+建议用 `fetch` 流式读取并自行解析 SSE，手动携带 `Last-Event-ID`；现有 web 端口已有响应体 reader，
+可作为参照。RN 的 `fetch` 对流式响应体支持有限，需在 RN 阶段验证或改用其他传输。
+重连规则与 Cove 自身一致：先取带游标的快照，再从游标续传；断线后从最后收到的事件 ID 续传；
+回到前台先拉快照；游标失效（即使 tend 当前不清理事件表，客户端也不假定游标永不过期）时重取快照。
+tend 的事件只用于标记对象过期、由客户端重新读取（tend 阶段 C 计划 §6），
+与 Cove 的业务事件是两套语义，不合并游标，也不为两者建立通用同步框架。
+
+**操作幂等。** 两边模型相近，客户端规则可以对齐，但不共用标识或去重域：
+
+| 方面       | Cove `operationId`（relay-protocol §11） | tend `request_id`（tend v0.1 §8、v0.2 §9）                             |
+| ---------- | ---------------------------------------- | ---------------------------------------------------------------------- |
+| 生成与保存 | 客户端首次提交前生成并保存，重试不变     | 客户端先存入本地发件箱再发送，重试不变                                 |
+| 去重域     | `(serverId, principalId, operationId)`   | owner 的全部客户端共用一个去重域                                       |
+| 参数不同   | `OPERATION_ID_CONFLICT`                  | 以 payload_hash 识别，返回参数冲突（如 HTTP 409），不覆盖原请求        |
+| 结果未知   | `operation.get` 查询，不重新执行         | `GET /api/v1/requests/{id}` 查询，不重新执行                           |
+| 并发前提   | 资源 revision                            | `expected_control_revision` / decision 版本，冲突返回 `stale_revision` |
+
+差异需要在 UI 中显式处理：tend 的发件箱会在恢复联网后用原 `request_id` 重发离线时写下的消息，
+这是 tend 对自身写入的契约；Cove 自身的执行性操作仍按 §3“不自动排队并重放”。UI 将 tend 的待发送项
+明确标为待发送，不把这一行为推广到 Cove 操作。一次用户动作若涉及两个系统，分别生成两边的标识，
+各自查询结果，不呈现为一个原子操作。
+
+**Schema 与类型。** 在 tend client 包中固定一份 tend 导出的 JSON Schema，并记录其来源版本；
+由它在构建时生成 TS 类型和运行时校验（Cove 的其他边界用 Zod 校验，生成工具待选），
+CI 检查生成结果与固定的 schema 一致。更新 schema 是显式 PR，由该包的单一写入者完成。
+客户端在会话阶段核对 tend 的 API 版本，不兼容时只把 tend 视图标为不可用；需要 tend 在会话或单独接口中
+返回 API 版本，属于待与 tend 对齐的契约项。tend 的 schema 不进入 `@cove/protocol`。
+
+**包边界。** 建议在 Web App 阶段新建独立包（暂名 `packages/tend-client`），不扩展 `@cove/client`：
+
+- 这是真实的依赖与所有权边界：外部系统的协议、认证与版本节奏都不同，契约由 tend 所有。
+- 依赖方向保持 Cove 核心不依赖 tend：`@cove/client` 与 `@cove/protocol` 不引用 tend 类型，
+  tend 未安装时 Cove 客户端照常构建运行；只有 Web UI（及后续的 Electron/RN 宿主）同时依赖两者。
+- 与 `@cove/client` 相同，tend client 只依赖注入的平台端口（HTTP、流式响应、计时器、凭据存储），
+  不引用 Node 原生模块或 server 依赖，可用于浏览器、Electron renderer 与 RN。
+- `@cove/client` 现有的 HTTP 端口只支持 POST 与完整响应体，不足以承载 tend 的 GET 与 SSE。
+  先在 tend client 中定义所需的最小端口；两边端口确有重复后再考虑提取，不预先建立通用传输层。
+- 本提案不创建该包；它随 Web App 阶段的具体任务建立。
 
 ## 10. Server 主语言比较与决策（已选择 Node）
 

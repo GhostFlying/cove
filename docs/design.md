@@ -9,6 +9,8 @@
 - 首期原生平台：macOS desktop、macOS/Linux server、iOS/Android mobile。macOS desktop 使用 Electron。
 - Web App 已纳入二期，当前只考虑经 Tailscale 访问；一期保留共享 UI/client 边界，不以 Web 交付为前置。
   Desktop renderer 与 Web App 共用 Web UI 和客户端协议层，Electron 提供宿主能力。
+  （提案，待用户 review，未生效：为承载 tend 的 UI，Web App 提前到 M2 之后、Electron/RN 之前，
+  见 [§7.1](#71-提案tend-作为看板与账本系统待用户-review) 与 [工程计划 §4.1](engineering-plan.md#41-提案web-app-提前与-tend-集成待用户-review)。）
 - 初版 mobile 使用 React Native + WebView 承载终端，首个终端后端已选 xterm.js。
   Lynx + WebGL / WebGPU 留作后续评估，不作为首期交付前置条件。
 - 调查等轻量任务可以直接使用已有主仓库，不必创建独立 worktree。
@@ -51,6 +53,7 @@
 - 定时任务纳入后续范围，明确不首发；具体触发与执行语义在对应阶段设计。
 - Relay 承载任务迁移所需的数据传输；具体传输范围和首发迁移能力另行收敛。
 - Shepherd 不进入一期，未来作为独立看板系统接入。
+  （提案，待用户 review，未生效：由用户的独立项目 tend 承担该看板/账本系统，UI 由 Cove Web 承载，见 [§7.1](#71-提案tend-作为看板与账本系统待用户-review)。）
 
 ## 2. 核心模型与建议约束
 
@@ -342,6 +345,52 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 
 一期只需要保留这些身份边界，不预先实现事件总线、复杂同步系统或 Shepherd 专用协议。
 
+### 7.1 提案：tend 作为看板与账本系统（待用户 review）
+
+状态：2026-10-15 提出的提案，尚未获用户批准；批准前本节不覆盖上文和 §1、§8 的已确认内容。
+本节只依据 tend 公开的设计文档与接口契约（[tend](https://github.com/GhostFlying/tend)
+`docs/design.md` v0.2 的 D15–D44、`docs/design-v0.1.md` §1–§5），不引用其内部实现。
+
+tend 是用户的独立项目（Go 服务），定位为“用户只与一个主 Agent 交流，由系统承担任务关联、分派、
+跟进和独立验收”；任务账本而非聊天记忆保存事实与承诺（tend v0.1 §1、D01–D05）。
+它正好填补本节预留的“独立看板系统”。建议的分工：
+
+| 方面       | Cove 负责                                                               | tend 负责                                                   |
+| ---------- | ----------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 执行环境   | host、task/workspace/挂载、worktree、终端（tab/run）                    | 不直接管理 Cove 的这些资源                                  |
+| 人与设备   | 设备授权、客户端（Web/Desktop/Mobile/CLI）                              | owner 身份与 tend 自身的会话凭据（tend D42）                |
+| 账本与组织 | 不实现                                                                  | 主 Agent、spec、后续动作、调度、验收、待决事项、看板数据    |
+| UI         | Cove Web UI 承载全部 tend 视图：主 Agent 对话、待决事项、看板、任务详情 | 不再自建 Web UI；提供 owner API、事件流与导出的 JSON Schema |
+
+集成约束（与上文一致，具体化到 tend）：
+
+- 两者只通过显式接口与外部 ID 映射集成，不互写数据库。一个 tend task 与一个 Cove task/workspace
+  一一对应，映射以命名空间化的外部 ID 记录（tend v0.1 §4.2）；tend 的 ID 不替代 Cove task ID。
+- tend 离线、未安装或升级时，Cove 的核心工作流（task/workspace/终端/CLI）不受影响；
+  Cove UI 只将 tend 视图标为不可用。Cove server 不依赖 tend 启动或运行。
+- tend 判断任务完成或验收通过，不授权 Cove 停止 session 或删除 worktree；Cove 观察到进程退出，
+  也不是 tend 任务的完成结论。两边各自的写操作各自去重，不构成跨系统事务。
+- Cove 的 CLI first-class 原则只覆盖 Cove 自身能力；tend 的操作通过 tend 自己的接口完成，
+  Cove CLI 不为 tend 视图补齐对应命令。
+
+执行层（长期方向，M1 之后再设计，本提案不展开细节）：
+
+- Cove 创建 workspace；tend-runner 在 Cove 管理的 workspace 内驱动无人值守 worker。
+  tend 现有设计中由 runner 自行管理工作区（tend D33–D37），接入 Cove 时如何改由 Cove 提供，
+  需与 tend 另行设计。
+- Cove 一期仍不做 managed agent；驱动 worker 的是 tend-runner，不是 Cove server。
+- 人工接管就是在 Cove 中对同一 workspace 打开终端 tab（对应 tend v0.1 D07 的人工接管）。
+
+UI 归属带来的优先级变化与连接方式分别见
+[工程计划 §4.1](engineering-plan.md#41-提案web-app-提前与-tend-集成待用户-review) 和
+[Server 架构 §9.6](server-architecture.md#96-提案cove-客户端直连-tend-api待用户-review)。
+
+本节待用户决定的事项：
+
+- 是否保留“Shepherd”这个名称（例如作为集成角色名继续使用，或在文档中直接改称 tend）。
+  本提案不作决定，暂保留 §7 标题与已有文字。
+- §8“一期明确不做”中的 Web App、Chat UI 与 Shepherd 条目是否随之修改，见工程计划 §4.1 的待决问题。
+
 ## 8. 一期范围建议与待讨论项
 
 ### 建议纳入
@@ -365,9 +414,10 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 - managed agent、接管 agent 执行循环。
 - 独立 PTY keeper 与 server 重启后的活进程无损恢复。
 - Chat UI 与 Web App（均为二期），以及 mobile 内嵌 Tailscale。
+  （提案待 review：Web App 与 tend 视图提前，见 §7.1；Cove 自身面向终端 agent 的 chat UI 仍后置。）
 - agent 原生 session 无损迁移、活进程热迁移。
 - 为会话迁移改写远端 agent 索引库或 session 数据库。
-- Shepherd 运行时依赖或看板同步实现。
+- Shepherd 运行时依赖或看板同步实现。（提案待 review：见 §7.1，不改变“无运行时依赖”。）
 
 ### 尚未承诺的一期能力
 
