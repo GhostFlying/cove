@@ -717,11 +717,16 @@ describe("operation process ownership", () => {
     const live = await spawnLeader();
     const { platform } = parseStartIdentity(live.identity);
     // The macOS format before microsecond start times, a malformed value and an unknown format.
+    // Platform names that are inherited object properties must not find a format either.
     const identities = [
       "darwin:1791441670:Thu Oct  8 14:41:10 2026",
       `${platform}:not-a-boot-id:1`,
       `v9:${live.identity}`,
+      "__proto__:bad:1",
+      "constructor:bad:1",
+      "toString:bad:1",
     ];
+    for (const startIdentity of identities) expect(parseStartIdentity(startIdentity)).toBeNull();
     for (const startIdentity of identities) {
       expect(() =>
         ledger.record(operation, { pid: live.pid, pgid: live.pid, startIdentity }),
@@ -731,7 +736,7 @@ describe("operation process ownership", () => {
     for (const record of ledger.open(operation))
       expect(await ProcessLedger.liveness(record)).toBe("unverifiable");
     expect(await ledger.check(operation)).toBe("unverifiable");
-    expect(ledger.open(operation)).toHaveLength(3);
+    expect(ledger.open(operation)).toHaveLength(identities.length);
     // Once neither the PID nor its group exists, the records end.
     live.release();
     await live.exited;

@@ -111,16 +111,18 @@ async function readStartIdentity(pid: number): Promise<string | null> {
 //   darwin:<kern.bootsessionuuid UUID>:<p_starttime seconds>.<microseconds, 6 digits>
 // The earlier macOS format `darwin:<kern.boottime seconds>:<ps lstart text>` (second resolution)
 // does not parse.
-const IDENTITY_FORMATS: Record<string, { boot: RegExp; start: RegExp }> = {
-  linux: { boot: /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/, start: /^\d+$/ },
-  darwin: { boot: /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/, start: /^\d+\.\d{6}$/ },
-};
+// A Map, not an object literal: the platform field comes from stored text, and a lookup such as
+// `__proto__` or `constructor` must miss rather than find an inherited property.
+const IDENTITY_FORMATS: ReadonlyMap<string, { boot: RegExp; start: RegExp }> = new Map([
+  ["linux", { boot: /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/, start: /^\d+$/ }],
+  ["darwin", { boot: /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/, start: /^\d+\.\d{6}$/ }],
+]);
 
 export type ParsedStartIdentity = { platform: string; boot: string; start: string };
 
 export function parseStartIdentity(identity: string): ParsedStartIdentity | null {
   const [platform, boot, start, ...rest] = identity.split(":");
-  const format = platform === undefined ? undefined : IDENTITY_FORMATS[platform];
+  const format = platform === undefined ? undefined : IDENTITY_FORMATS.get(platform);
   if (!format || boot === undefined || start === undefined || rest.length > 0) return null;
   return format.boot.test(boot) && format.start.test(start)
     ? { platform: platform!, boot, start }
@@ -131,7 +133,7 @@ export function parseStartIdentity(identity: string): ParsedStartIdentity | null
 function parseBootIdentity(identity: string | null): { platform: string; boot: string } | null {
   if (identity === null) return null;
   const [platform, boot, ...rest] = identity.split(":");
-  const format = platform === undefined ? undefined : IDENTITY_FORMATS[platform];
+  const format = platform === undefined ? undefined : IDENTITY_FORMATS.get(platform);
   return format && boot !== undefined && rest.length === 0 && format.boot.test(boot)
     ? { platform: platform!, boot }
     : null;
