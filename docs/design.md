@@ -345,11 +345,12 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 ### 7.1 提案：以 tend 实现 Shepherd，经 CLI 集成（待用户审阅）
 
 状态：提案，不是已接受的决策，也不属于 M1 或任何已排期 milestone。以下 2026-10-16 的方向由用户给出，
-具体接口、字段与控制模型是待审阅的建议。
+具体接口、字段与控制模型是待审阅的建议；其中程序化输入的方向 A（不抢控制权）是用户倾向的方向。
 
 角色名仍为 Shepherd，拟由 [tend](https://github.com/GhostFlying/tend) 实现：以持久任务账本为中心，
 包含主 agent、pull 模式的 runner 与独立验收，并有自己的服务与 UI。依据 tend 公开设计（提交 `648d921`）：
-`docs/design-v0.1.md` D07、§12.2 ExecutionAdapter、§13.1 人工接管，`docs/design.md` D19、§4 Runner 协议。
+`docs/design-v0.1.md` D02（任务账本）、D05（独立验收）、D07 与 §13.1（人工接管）、§12.2（ExecutionAdapter）、
+§14.1（Web MVP）；`docs/design.md`（v0.2）D19 与 §4（pull runner 协议）、D38（worker 当前驱动方式）、§7（Web 客户端）。
 
 **边界**
 
@@ -376,18 +377,33 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 按 tend 的接管设计（v0.1 D07、§13.1）暂停对该 run 的自动干预、继续观测；人在 tend 中明确交回后，
 tend 先对齐当前状态，再恢复托管执行；人仍持有 Cove 控制权时，程序化输入一律被拒绝。Cove 不知道 tend 的托管状态，只发布控制权事实。
 
-**程序化输入的控制模型（建议 A）**
+**程序化输入的控制模型（A，用户倾向的方向）**
 
-首版需要向运行中的 agent 追加指令，例如 `cove tab send <tab> --operation-id <id> --if-control-epoch <E> -- <文本>`。
+2026-10-16 用户认可方向 A：tend 发送输入时不抢控制权。以下具体规则仍是待审阅的建议。
+示例：`cove tab send <tab> --operation-id <id> --run <runId> --relay-instance <relayInstanceId> --control-epoch <E> -- <文本>`。
 
-- A（建议）：不抢占、以 epoch 隔离的一次性写入。自动化输入不取得控制权，也不 resize。
-  Server 在控制权仲裁的同一串行顺序中检查：当前没有控制者，且当前 controlEpoch 等于调用方观测到的 E；
-  否则以明确错误拒绝（有人控制 / 控制权已变化），不写入任何字节。接受后，该输入以 E 进入执行侧队列；
+- 绑定观测到的确切 run：runId、relayInstanceId（[relay-protocol §2](relay-protocol.md#2-服务构建协议和运行实例的身份分开)
+  的执行身份）与 controlEpoch E 都是必填项。controlEpoch 按 run 计数且从 0 开始，仅凭 tab 与 E 无法区分重开后的新 run：
+  针对 run A（epoch 0）的指令，可能在 tab 重开为 run B（同样无人控制、epoch 0）后被写进 B。tab 只用于展示与解析。
+- 这些字段是执行前提，不是传输绑定（按 [M1 操作身份](milestones/m1.md#操作身份跨重启) 的划分）：与文本一起写入
+  操作参数与不可变指纹，执行时始终写向该确切 run，不改投到 tab 的当前 run。Server 先按
+  `(serverId, principalId, operationId)` 查找已有记录，指纹相同则返回原记录（即使 run 已结束或属于旧实例）；
+  没有记录时才检查前提：run 属于当前 relay 实例且存活、当前没有控制者、当前 controlEpoch 等于 E。
+  任一项不符即以明确错误拒绝（run 已变化 / 有人控制 / 控制权已变化），不写入任何字节。
+- 不抢占：自动化输入不取得控制权，也不 resize；前提检查与控制权仲裁处于同一串行顺序。接受后输入以 E 进入执行侧队列，
   若其间有人取得控制权（epoch 变为 E+1），按 [终端 §3.5](terminal-architecture.md#35-focusresize-与输入)
-  的过期输入规则在执行侧丢弃并报告。E 让 tend 发现“接管后又释放”的中间变化，必须先对齐再发送。
-- 一次 send 是一个有界的输入单元，按 `(serverId, principalId, operationId)` 去重（[M1 操作身份](milestones/m1.md#操作身份跨重启)）。
-  结果区分未写入、已完整写入与不确定；不确定时不自动重发，同一 operationId 重发只返回原记录。
-  重启后遗留的未决 send 只能核实或放弃，不提供“继续”，避免重复终端输入。
+  的过期输入规则在执行侧丢弃并报告。
+- 观测到的 epoch 对每次程序化输入都是强制的。若只检查“当前没有控制者”，人接管后又释放时，迟到的请求仍会通过。
+  tend 在接管结束并对齐状态后，读取新的 epoch 再发送。
+- 一次 send 有大小上限，但不是原子的 PTY 写入，可能只写入一部分。结果沿用
+  [终端 §4.4](terminal-architecture.md#44-回调通知与重入client-controller-与-view) 第 4.4.7 条的回执：
+  成功、明确拒绝（未写入）、部分写入或不确定，并保留已写前缀与 `unknownBytes` 证据。
+  部分写入与不确定都不自动重发；同一 operationId 重发只返回原记录。重启后遗留的未决 send 只能核实或放弃，不提供“继续”。
+- 依赖输入按 [relay-protocol §9.1](relay-protocol.md#91-focus控制权与自动-resize) 的前缀封闭处理。
+  Server 侧：同一 run 上任一程序化 send 没有完整写入（拒绝、部分写入、不确定、执行侧丢弃）时，
+  排在其后、尚未写入的程序化 send 全部以同一原因失败，不写入任何字节，直到这些排队输入都已结算；
+  例如文本 A 只写入一半时，排在后面的回车 B 不会提交截断的指令。tend 侧：只有收到前一个 send 完整写入的确认后，
+  才发出依赖它的下一个输入。
 - 理由：沿用已有的单控制者与 epoch 隔离，不增加新的控制状态；人始终优先，自动化不能从人手里拿走控制权；
   “持有控制权”这一个事实同时用于输入仲裁和接管观测。
 - 备选 B：自动化租约。CLI 主体取得带期限的控制权，人的 focus 可抢占。需要定义无网格的控制者、
@@ -420,9 +436,10 @@ Esc 中断等补充（`codex-transcript-poll.ts`），终端标题仅作后备�
 
 **待用户决定**
 
-1. 是否接受以上方向与建议 A；`--if-control-epoch` 是否对所有程序化输入强制。
+1. 是否接受整体方向；方向 A 已是用户倾向，其绑定、回执与前缀封闭规则待审阅。
 2. 放在哪个 milestone。建议在 M1 之后、与 M3 的业务事件订阅一起或之前单独安排；由用户选择。
-3. 文本与提交键：send 是否提供与文本分开的回车（不同 TUI 对粘贴中的换行处理不同）。
+3. 提交键：send 是否在同一操作内提供“文本后接回车”（作为最后一块，前面未完整写入时不发送），
+   还是只由 tend 在确认文本完整写入后单独发送回车（不同 TUI 对粘贴中的换行处理不同）。
 4. tend 用 agent resume 继续中断的 worker 时，使用新 tab，还是允许 `tab reopen` 临时覆盖启动参数。
 5. 环境变量的具体条数与字节上限，是否允许覆盖 `PATH` 等常用变量；是否另设只用于本次 run、
    不落库也不随 reopen 复用的临时值（Orca 以此类方式注入 hook 令牌）。
