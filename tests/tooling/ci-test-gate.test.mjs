@@ -138,7 +138,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "local-entry", 50],
     ["independent", "qualified-local-admission", 4],
     ["author", "worker-pipe-session", 11],
-    ["author", "operation-receipts", 15],
+    ["author", "operation-receipts", 21],
     ["author", "terminal-subscriptions", 14],
     ["author", "terminal-connection-delivery", 7],
     ["independent", "subscription-contract", 30],
@@ -992,7 +992,7 @@ test("M1 workspace contract suite is mandatory", async () => {
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/workspace-contract.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 9 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 11 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });

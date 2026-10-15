@@ -141,11 +141,7 @@ export async function dispatchLocalRpc(
     case "terminal.stop":
       return core.operations.stop("m0-local", params);
     case "operation.get":
-      return core.operations.get(
-        "m0-local",
-        params.operationId as string,
-        params.expectedRelayInstanceId as string,
-      );
+      return core.operations.get("m0-local", params.operationId as string);
   }
 }
 

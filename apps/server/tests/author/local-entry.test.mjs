@@ -4608,11 +4608,7 @@ describe("H1 RPC domain errors", () => {
       const run = { serverId: identity.serverId, relayInstanceId: identity.relayInstanceId };
       const calls = [
         ["terminal.get", { run: { ...run, runId: "missing" } }, "RUN_NOT_FOUND"],
-        [
-          "operation.get",
-          { operationId: "missing", expectedRelayInstanceId: identity.relayInstanceId },
-          "OPERATION_NOT_FOUND",
-        ],
+        ["operation.get", { operationId: "missing" }, "OPERATION_NOT_FOUND"],
         [
           "terminal.stop",
           {

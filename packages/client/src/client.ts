@@ -721,10 +721,7 @@ class CoveClient implements Client {
   }
 
   getOperation(operationId: string): Promise<CallOutcome<ResultFor<"operation.get">>> {
-    return this.call("operation.get", {
-      operationId,
-      expectedRelayInstanceId: this.offer.expectedRelayInstanceId,
-    });
+    return this.call("operation.get", { operationId });
   }
 
   openTerminal(options: TerminalOpenOptions): TerminalOpenOutcome {

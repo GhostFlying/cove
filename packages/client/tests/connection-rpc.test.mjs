@@ -606,7 +606,7 @@ describe("bounded typed RPC", () => {
       ],
       [
         "operation.get",
-        { operationId: "op-query", expectedRelayInstanceId: ids.relayInstanceId },
+        { operationId: "op-query" },
         { operation: operation("op-query", "terminal.create", { state: "running" }) },
       ],
     ];
@@ -1453,7 +1453,7 @@ describe("bounded typed RPC", () => {
     const request = JSON.parse(fatalDecoder.decode(context.http.requests[3].request.body));
     expect(request).toMatchObject({
       method: "operation.get",
-      params: { operationId: "stable-operation", expectedRelayInstanceId: ids.relayInstanceId },
+      params: { operationId: "stable-operation" },
     });
     context.http.respond(
       3,

@@ -35,12 +35,7 @@ export class TerminalOperations {
   }
 
   private key(principalId: string, operationId: string): OperationReceiptKey {
-    return {
-      serverId: this.options.composition.serverId,
-      relayInstanceId: this.options.composition.relayInstanceId,
-      principalId,
-      operationId,
-    };
+    return { serverId: this.options.composition.serverId, principalId, operationId };
   }
   private failure(kind: Parameters<typeof domainError>[0]): OperationOutcome {
     return { error: domainError(kind) };
@@ -55,14 +50,18 @@ export class TerminalOperations {
     if (this.disposed || !OpaqueIdSchema.safeParse(principalId).success || !parsed.success)
       return this.failure("CAPABILITY_UNAVAILABLE");
     const params = parsed.data;
-    if (params.expectedRelayInstanceId !== this.options.composition.relayInstanceId)
-      return this.failure("INSTANCE_MISMATCH");
     const intent = canonicalOperationIntent("terminal.create", params, this.options.encodeUtf8);
     if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
+    // Look the receipt up before checking execution preconditions (m1 "操作身份跨重启"): a
+    // same-intent resend returns the original record even when its run belongs to an earlier
+    // instance, and a changed intent is a conflict. Only a request without a record is new work,
+    // and only new work must target the current instance.
     const key = this.key(principalId, params.operationId);
     const found = this.options.receipts.lookup(key, intent);
     if (found.kind === "existing") return { operation: found.record };
     if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
+    if (params.expectedRelayInstanceId !== this.options.composition.relayInstanceId)
+      return this.failure("INSTANCE_MISMATCH");
     if (found.kind !== "reserve") return this.failure("BUSY");
     if (this.runCounter === Number.MAX_SAFE_INTEGER) return this.failure("COUNTER_EXHAUSTED");
     const requestId = this.nextRequest();
@@ -121,18 +120,19 @@ export class TerminalOperations {
     if (this.disposed || !OpaqueIdSchema.safeParse(principalId).success || !parsed.success)
       return this.failure("CAPABILITY_UNAVAILABLE");
     const params = parsed.data;
+    const intent = canonicalOperationIntent("terminal.stop", params, this.options.encodeUtf8);
+    if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
+    // Same order as create: the receipt decides before the stale-instance precondition.
+    const key = this.key(principalId, params.operationId);
+    const found = this.options.receipts.lookup(key, intent);
+    if (found.kind === "existing") return { operation: found.record };
+    if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
     if (
       params.expectedRelayInstanceId !== this.options.composition.relayInstanceId ||
       params.run.serverId !== this.options.composition.serverId ||
       params.run.relayInstanceId !== this.options.composition.relayInstanceId
     )
       return this.failure("INSTANCE_MISMATCH");
-    const intent = canonicalOperationIntent("terminal.stop", params, this.options.encodeUtf8);
-    if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
-    const key = this.key(principalId, params.operationId);
-    const found = this.options.receipts.lookup(key, intent);
-    if (found.kind === "existing") return { operation: found.record };
-    if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
     if (found.kind !== "reserve") return this.failure("BUSY");
     const entry = this.options.runtime.registry.get(params.run);
     if (!entry) return this.failure("RUN_NOT_FOUND");
@@ -216,9 +216,8 @@ export class TerminalOperations {
     return { operation: this.options.receipts.get(key)! };
   }
 
-  get(principalId: string, operationId: string, expectedRelayInstanceId: string): OperationOutcome {
-    if (expectedRelayInstanceId !== this.options.composition.relayInstanceId)
-      return this.failure("INSTANCE_MISMATCH");
+  // Queried by durable identity only; the record may reference a run of an earlier instance.
+  get(principalId: string, operationId: string): OperationOutcome {
     const key = this.key(principalId, operationId);
     let record = this.options.receipts.get(key);
     if (record?.method === "terminal.stop" && record.state === "running" && record.run) {

@@ -424,10 +424,7 @@ export type OperationState = z.infer<typeof OperationStateSchema>;
 
 // Continue and abandon are explicit writes with their own operation ID; resending the target's
 // own operation ID only returns its record.
-export const OperationGetParamsSchema = z.object({
-  operationId: OpaqueIdSchema,
-  expectedRelayInstanceId: OpaqueIdSchema,
-});
+export const OperationGetParamsSchema = z.object({ operationId: OpaqueIdSchema });
 export const OperationTargetParamsSchema = z.object({
   operationId: OpaqueIdSchema,
   targetOperationId: OpaqueIdSchema,
