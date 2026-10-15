@@ -993,6 +993,91 @@ export const finiteRuntimeExpansions = [
   },
 ];
 
+// Directories whose suites are registered per file instead of in requiredSuites, so that
+// concurrent tasks add tests without editing this shared list (docs/milestones/m1.md). Each
+// `<name>.test.mjs` directly in the directory has a `<name>.suite.json` beside it containing exactly
+// `{ "minimumTests": N }`; a test without a registration, a registration without a test, a nested
+// directory or another test file name fails the gate.
+export const fileRegisteredDirectories = [{ project: "cli", directory: "apps/cli/tests/m1" }];
+
+const SUITE_SUFFIX = ".suite.json";
+const TEST_SUFFIX = ".test.mjs";
+
+function parseSuiteRegistration(text, file) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error(`Suite registration is not JSON: ${file}`);
+  }
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).join() !== "minimumTests" ||
+    !Number.isSafeInteger(value.minimumTests) ||
+    value.minimumTests < 1
+  )
+    throw new Error(
+      `Suite registration must be exactly { "minimumTests": N } with N >= 1: ${file}`,
+    );
+  return value.minimumTests;
+}
+
+export async function readFileRegisteredSuites(
+  checkoutRoot = root,
+  directories = fileRegisteredDirectories,
+) {
+  const suites = [];
+  for (const { project, directory } of directories) {
+    let entries;
+    try {
+      entries = await readdir(join(checkoutRoot, directory), { withFileTypes: true });
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    const tests = new Set();
+    const registrations = new Set();
+    for (const entry of entries) {
+      const file = `${directory}/${entry.name}`;
+      if (entry.isDirectory())
+        throw new Error(`Per-file registered test directory has a subdirectory: ${file}`);
+      if (entry.name.endsWith(SUITE_SUFFIX))
+        registrations.add(entry.name.slice(0, -SUITE_SUFFIX.length));
+      else if (entry.name.endsWith(TEST_SUFFIX))
+        tests.add(entry.name.slice(0, -TEST_SUFFIX.length));
+      else if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(entry.name))
+        throw new Error(`Per-file registered tests must be named <name>${TEST_SUFFIX}: ${file}`);
+    }
+    for (const name of [...tests].sort()) {
+      if (!registrations.has(name))
+        throw new Error(
+          `Test file has no ${SUITE_SUFFIX} registration: ${directory}/${name}${TEST_SUFFIX}`,
+        );
+      const registration = `${directory}/${name}${SUITE_SUFFIX}`;
+      suites.push({
+        project,
+        file: `${directory}/${name}${TEST_SUFFIX}`,
+        minimumTests: parseSuiteRegistration(
+          await readFile(join(checkoutRoot, registration), "utf8"),
+          registration,
+        ),
+      });
+    }
+    for (const name of registrations)
+      if (!tests.has(name))
+        throw new Error(`Suite registration has no test file: ${directory}/${name}${SUITE_SUFFIX}`);
+  }
+  return suites;
+}
+
+// The complete inventory: the static list plus every per-file registration. A file registered
+// both ways is a duplicate and fails discovery.
+export async function readRequiredSuites(checkoutRoot = root) {
+  return [...requiredSuites, ...(await readFileRegisteredSuites(checkoutRoot))];
+}
+
 function repositoryPath(path) {
   const local = relative(root, path).split(sep).join("/");
   if (!local || local.startsWith("../") || local === "..") {
@@ -1913,8 +1998,9 @@ async function main() {
     }
     const discovered = JSON.parse(discovery.stdout);
     const sources = await readVitestOwnedTestFiles();
+    const suites = await readRequiredSuites();
     // Validate discovery before running, then validate actual execution from a fresh report.
-    verifyDiscovery(discovered, sources);
+    verifyDiscovery(discovered, sources, suites);
     stage = "qualification-evidence";
     process.env.COVE_QUALIFICATION_EVIDENCE_DIR = await prepareWorkerQualificationEvidence({
       sourceCommit,
@@ -1959,7 +2045,7 @@ async function main() {
     stage = "report-validation";
     const report = JSON.parse(await readFile(resultPath, "utf8"));
     if ((await stat(junitPath)).size === 0) throw new Error("Vitest JUnit report is empty");
-    const inventory = verifyInventory(discovered, report, sources);
+    const inventory = verifyInventory(discovered, report, sources, suites);
     await writeFile(join(evidenceDir, "inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
     await recordViewEvidence(report, inventory);
     console.log(

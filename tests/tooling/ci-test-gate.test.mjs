@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  readFileRegisteredSuites,
+  readRequiredSuites,
   readVitestOwnedTestFiles,
   recordedCommand,
   prepareBrowserCleanupEvidence,
@@ -1374,6 +1376,87 @@ test("rejects removal of a gate test below the required floor", () => {
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
     /discovered 37 tests; needs 38/,
   );
+});
+
+test("M1 CLI suites are registered per file and join the required inventory", async () => {
+  const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
+  const registered = await readFileRegisteredSuites();
+  expect(registered).toContainEqual({ project: "cli", file, minimumTests: 4 });
+  expect(registered.every((suite) => suite.file.startsWith("apps/cli/tests/m1/"))).toBe(true);
+  const files = await readVitestOwnedTestFiles();
+  for (const suite of registered) expect(files).toContain(suite.file);
+  const all = await readRequiredSuites();
+  expect(all).toHaveLength(requiredSuites.length + registered.length);
+  expect(new Set(all.map((suite) => `${suite.project}:${suite.file}`)).size).toBe(all.length);
+  const suite = registered.find((item) => item.file === file);
+  const complete = Array.from({ length: suite.minimumTests }, (_, index) => ({
+    projectName: "cli",
+    file: resolve(root, file),
+    name: `s10 ${index}`,
+  }));
+  expect(() => verifyDiscovery(complete, [file], [suite])).not.toThrow();
+  expect(() => verifyDiscovery(complete.slice(0, -1), [file], [suite])).toThrow(
+    `discovered ${suite.minimumTests - 1} tests; needs ${suite.minimumTests}`,
+  );
+  // Without its registration the file is an unregistered suite.
+  expect(() => verifyDiscovery(complete, [file], [requiredSuites[0]])).toThrow(
+    /Unregistered Vitest suite: cli:apps\/cli\/tests\/m1\//,
+  );
+  // Registering the same file statically as well is a duplicate.
+  expect(() => verifyDiscovery(complete, [file], [suite, { ...suite }])).toThrow(/duplicates/);
+});
+
+test("per-file suite registrations must pair one-to-one with valid minimum counts", async () => {
+  const directories = [{ project: "cli", directory: "tests/m1" }];
+  const checkout = async (files) => {
+    const directory = await mkdtemp(resolve(tmpdir(), "cove-ci-suites-"));
+    temporaryDirectories.push(directory);
+    await mkdir(resolve(directory, "tests/m1"), { recursive: true });
+    for (const [name, content] of Object.entries(files)) {
+      await mkdir(dirname(resolve(directory, "tests/m1", name)), { recursive: true });
+      await writeFile(resolve(directory, "tests/m1", name), content);
+    }
+    return directory;
+  };
+  const read = async (files) => readFileRegisteredSuites(await checkout(files), directories);
+
+  expect(
+    await read({
+      "b.test.mjs": "",
+      "b.suite.json": '{ "minimumTests": 2 }',
+      "a.test.mjs": "",
+      "a.suite.json": '{"minimumTests":1}',
+      "fixtures.mjs": "",
+    }),
+  ).toEqual([
+    { project: "cli", file: "tests/m1/a.test.mjs", minimumTests: 1 },
+    { project: "cli", file: "tests/m1/b.test.mjs", minimumTests: 2 },
+  ]);
+  const missing = await mkdtemp(resolve(tmpdir(), "cove-ci-suites-"));
+  temporaryDirectories.push(missing);
+  expect(await readFileRegisteredSuites(missing, directories)).toEqual([]);
+
+  await expect(read({ "a.test.mjs": "" })).rejects.toThrow(/has no \.suite\.json registration/);
+  await expect(read({ "a.suite.json": '{"minimumTests":1}' })).rejects.toThrow(
+    /registration has no test file/,
+  );
+  await expect(read({ "a.test.mjs": "", "a.suite.json": "{" })).rejects.toThrow(/not JSON/);
+  for (const invalid of [
+    "{}",
+    "[]",
+    "null",
+    '{"minimumTests":0}',
+    '{"minimumTests":1.5}',
+    '{"minimumTests":"1"}',
+    '{"minimumTests":1,"project":"server"}',
+  ])
+    await expect(read({ "a.test.mjs": "", "a.suite.json": invalid })).rejects.toThrow(
+      /must be exactly/,
+    );
+  await expect(read({ "a.test.ts": "" })).rejects.toThrow(/must be named <name>\.test\.mjs/);
+  await expect(
+    read({ "nested/a.test.mjs": "", "nested/a.suite.json": '{"minimumTests":1}' }),
+  ).rejects.toThrow(/has a subdirectory/);
 });
 
 test("scans Vitest-owned tooling tests without capturing browser specs", async () => {
