@@ -5,9 +5,10 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { PIPE_ROUTE_CONTROL_COMMANDS } from "@cove/protocol/pipe";
-import { createSessionClient, readRendezvous } from "../dist/session.js";
+import { readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
+import { createTappedClient } from "./wire-tap.mjs";
 
 // Regression for issue #96. Every streaming subscription keeps one applied-ack in flight, and
 // the server has a single worker whose route-control window is PIPE_ROUTE_CONTROL_COMMANDS
@@ -108,7 +109,8 @@ function seqRecordingView() {
 
 test("one client keeps eight streaming subscriptions beyond the route-control window", async () => {
   expect(STREAMS).toBeGreaterThan(PIPE_ROUTE_CONTROL_COMMANDS);
-  const client = createSessionClient(fixture.record);
+  // The tap records the server's replies, so the test can see each final ACK accepted.
+  const { client, tap } = createTappedClient(fixture.record);
   fixture.clients.push(client);
   expect((await client.connect()).ok).toBe(true);
   const streams = [];
@@ -190,10 +192,18 @@ test("one client keeps eight streaming subscriptions beyond the route-control wi
     const seqs = recording.seqs.slice(firstLiveSeq[index]);
     expect(seqs.length).toBeGreaterThan(0);
     expect(seqs.slice(1)).toEqual(seqs.slice(0, -1).map((seq) => seq + 1));
-    await waitFor(`terminal ${stream}'s last ack`, () => {
-      const snapshot = controller.snapshot();
-      return snapshot.appliedSeq === recording.seqs.at(-1);
-    });
+    // The ACK covering the last event was sent and the server accepted it. The client's own
+    // appliedSeq advances before its ACK is even sent (a newer one may wait folded behind
+    // the one in flight), so only the server's reply proves the boundary.
+    const { subscriptionId } = controller.snapshot().subscription;
+    await waitFor(`terminal ${stream}'s last ack accepted`, () =>
+      tap.inbound.some(
+        ({ metadata }) =>
+          metadata.type === "applied-ack-result" &&
+          metadata.subscription.subscriptionId === subscriptionId &&
+          metadata.appliedSeq === recording.seqs.at(-1),
+      ),
+    );
   }
   for (const { controller } of streams)
     expect(await controller.detach()).toMatchObject({ ok: true });
