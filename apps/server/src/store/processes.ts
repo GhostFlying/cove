@@ -38,33 +38,63 @@ function run(file: string, args: readonly string[]): Promise<string | null> {
   );
 }
 
-// The start identity of a running process, or null when it does not exist or cannot be read.
-// Linux: boot ID plus the start time in clock ticks since boot (/proc/<pid>/stat field 22).
-// macOS: boot time plus `ps` start time (UTC, one-second resolution; a PID is not reused within
-// the same second in practice).
-export async function processStartIdentity(pid: number): Promise<string | null> {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+// macOS start time with microseconds: kinfo_proc.kp_proc.p_starttime from sysctl
+// {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid}. Neither `ps` (lstart has one-second resolution, and
+// XNU may reuse a PID within a second) nor the sysctl(8) tool (no kern.proc.pid node) exposes it,
+// and Node has no API for another process; /usr/bin/perl's syscall(2) calls __sysctl (202)
+// without a native dependency. The struct layout is checked (size and p_pid) before use. Exit
+// status 1: no such process; anything else: unreadable.
+const DARWIN_START_TIME = String.raw`
+my $pid = shift;
+my $mib = pack("i4", 1, 14, 1, $pid);
+my $buf = "\0" x 4096;
+my $len = pack("Q", length $buf);
+syscall(202, $mib, 4, $buf, $len, 0, 0) == 0 or exit 2;
+my $size = unpack("Q", $len);
+exit 1 if $size == 0;
+exit 3 if $size < 648 || unpack("l", substr($buf, 40, 4)) != $pid;
+my ($sec, $usec) = unpack("q l", $buf);
+printf("%d.%06d
+", $sec, $usec);
+`;
+
+// This boot's identity: `<platform>:<boot ID>`, or null when it cannot be read.
+export async function bootIdentity(): Promise<string | null> {
   if (process.platform === "linux") {
     try {
-      const [boot, stat] = await Promise.all([
-        readFile("/proc/sys/kernel/random/boot_id", "utf8"),
-        readFile(`/proc/${pid}/stat`, "utf8"),
-      ]);
-      // Field 2 (comm) may contain spaces and parentheses; fields after the last ')' are fixed.
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      const start = fields[19];
-      return start && /^\d+$/.test(start) ? `linux:${boot.trim()}:${start}` : null;
+      return `linux:${(await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim()}`;
     } catch {
       return null;
     }
   }
   if (process.platform === "darwin") {
-    const [boot, start] = await Promise.all([
-      run("/usr/sbin/sysctl", ["-n", "kern.boottime"]),
-      run("/bin/ps", ["-o", "lstart=", "-p", String(pid)]),
-    ]);
-    const bootSeconds = boot?.match(/sec = (\d+)/)?.[1];
-    return bootSeconds && start ? `darwin:${bootSeconds}:${start.replace(/\s+/g, " ")}` : null;
+    const boot = await run("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"]);
+    return boot ? `darwin:${boot}` : null;
+  }
+  return null;
+}
+
+// The start identity of a running process, `<boot identity>:<start time>`, or null when it does
+// not exist or cannot be read. Linux: start time in clock ticks since boot (/proc/<pid>/stat field
+// 22). macOS: p_starttime with microseconds (DARWIN_START_TIME).
+export async function processStartIdentity(pid: number): Promise<string | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const boot = await bootIdentity();
+  if (boot === null) return null;
+  if (process.platform === "linux") {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      // Field 2 (comm) may contain spaces and parentheses; fields after the last ')' are fixed.
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      const start = fields[19];
+      return start && /^\d+$/.test(start) ? `${boot}:${start}` : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "darwin") {
+    const start = await run("/usr/bin/perl", ["-e", DARWIN_START_TIME, String(pid)]);
+    return start && /^\d+\.\d{6}$/.test(start) ? `${boot}:${start}` : null;
   }
   return null;
 }
@@ -189,6 +219,10 @@ export class ProcessLedger {
   // can leave children in the group after the leader ended, and the group ID cannot be reused while
   // any member exists.
   static async liveness(record: ProcessRecord): Promise<ProcessLiveness> {
+    // Recorded during another boot: the process and every member of its group ended with that
+    // boot. The current numeric PID and PGID belong to unrelated processes, so they are not probed.
+    const boot = await bootIdentity();
+    if (boot !== null && !record.startIdentity.startsWith(`${boot}:`)) return "ended";
     const leader = exists(record.pid);
     if (leader === null) return "unverifiable";
     if (leader) {
