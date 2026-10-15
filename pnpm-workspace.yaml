@@ -16,6 +16,9 @@ saveExact: true
 engineStrict: true
 strictPeerDependencies: true
 allowBuilds:
+  # better-sqlite3 13 ships N-API prebuilds inside its tarball. Its implicit node-gyp build never
+  # runs, so every install loads the published prebuild (scripts/native-prepare.mjs checks this).
+  better-sqlite3@13.0.3: false
   node-pty@1.1.0: true
 strictDepBuilds: true
 verifyDepsBeforeRun: error

@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { runRecordedSetup } from "../../scripts/ci-environment-setup.mjs";
 import { prepareNodePty } from "../../scripts/node-pty-install.mjs";
+import { prepareBetterSqlite3 } from "../../scripts/better-sqlite3-prepare.mjs";
 
 const directories = [];
 
@@ -119,6 +120,29 @@ test("native preparation rejects a stock addon before treating it as usable", as
   lookup.resolve = () => join(packageRoot, "package.json");
   lookup.cache = { [await realpath(native)]: {} };
   await expect(prepareNodePty(lookup, directory)).rejects.toThrow(/capability/);
+});
+
+test("better-sqlite3 preparation loads the in-package prebuild of this checkout", async () => {
+  const result = await prepareBetterSqlite3();
+  expect(result.version).toBe("13.0.3");
+  expect(result.target).toBe(`${process.platform}-${process.arch}`);
+  expect(result.nativeBinary.endsWith(`/prebuilds/${result.target}.node`)).toBe(true);
+  expect(result.nativeSha256).toMatch(/^[0-9a-f]{64}$/);
+  expect(result.sqliteVersion).toMatch(/^3\.\d+\.\d+$/);
+});
+
+test("better-sqlite3 preparation rejects another version before loading it", async () => {
+  const directory = await isolatedDirectory();
+  const packageRoot = join(directory, "node_modules/.pnpm/better-sqlite3@12.0.0/node_modules/x");
+  await mkdir(packageRoot, { recursive: true });
+  await writeFile(join(packageRoot, "package.json"), JSON.stringify({ version: "12.0.0" }));
+  const lookup = vi.fn(() => {
+    throw new Error("must not load");
+  });
+  lookup.resolve = () => join(packageRoot, "package.json");
+  lookup.cache = {};
+  await expect(prepareBetterSqlite3(lookup, directory)).rejects.toThrow(/Unexpected/);
+  expect(lookup).not.toHaveBeenCalled();
 });
 
 function binaryControlProgram(directory, bytes, exitCode = 0, tail = "") {
