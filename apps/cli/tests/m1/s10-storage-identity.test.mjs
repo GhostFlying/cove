@@ -154,7 +154,7 @@ test("saved requests resent after kill -9 return their records and never execute
   const kept = await create("s10-create");
   const stopped = await create("s10-create-stopped");
   await waitFor("both commands to start", async () => (await markerLines(markers)).length === 2);
-  for (const pid of await markerLines(markers)) fixture.trackPid(pid);
+  for (const pid of await markerLines(markers)) await fixture.trackPid(pid);
   await fixture.coveJson(["terminal", "stop", "--operation-id", "s10-stop", stopped.runId], {
     home,
   });
@@ -185,18 +185,27 @@ test("saved requests resent after kill -9 return their records and never execute
   const workers = await fixture.childrenOf(first.pid);
   expect(workers).toHaveLength(1);
   const [worker] = workers;
-  fixture.trackPid(worker);
+  await fixture.trackPid(worker);
   process.kill(worker, "SIGSTOP");
   const pending = fixture.spawnCove(
     ["terminal", "create", "--cwd", fixture.root, "--operation-id", "s10-suspended", ...command],
     { home },
   );
+  // Bounded observation (5 s): each read gets only the remaining budget, and an observation
+  // counts only when it completed within the budget.
   const deadline = Date.now() + 5_000;
   let suspended;
-  while (suspended?.state !== "running") {
-    if (Date.now() > deadline) throw new Error(`s10-suspended is ${suspended?.state ?? "absent"}`);
-    const read = await fixture.cove(["operation", "get", "s10-suspended"], { home });
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0)
+      throw new Error(`s10-suspended is ${suspended?.state ?? "absent"} after 5 s`);
+    const read = await fixture.cove(["operation", "get", "s10-suspended"], {
+      home,
+      timeoutMs: remaining,
+    });
+    if (Date.now() > deadline) throw new Error(`s10-suspended was not observed running within 5 s`);
     if (read.code === 0) suspended = JSON.parse(read.stdout);
+    if (suspended?.state === "running") break;
     await new Promise((done) => setTimeout(done, 50));
   }
   await fixture.killServer(first);

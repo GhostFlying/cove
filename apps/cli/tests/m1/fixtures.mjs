@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readRendezvous } from "../../dist/session.js";
@@ -27,6 +27,31 @@ export function alive(pid) {
     if (error.code === "ESRCH") return false;
     throw error;
   }
+}
+
+// The operating-system start identity of a live process, or null when it does not exist: the
+// PID plus this identity names one process, which a later process reusing the PID does not share.
+// Linux: boot ID and start ticks (/proc/<pid>/stat field 22); macOS: `ps` start time.
+async function startIdentity(pid) {
+  if (process.platform === "linux") {
+    try {
+      const [boot, stat] = await Promise.all([
+        readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+        readFile(`/proc/${pid}/stat`, "utf8"),
+      ]);
+      return `${boot.trim()}:${stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]}`;
+    } catch (error) {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+  const result = await run("ps", ["-o", "lstart=", "-p", String(pid)], {
+    env: { PATH: process.env.PATH, LC_ALL: "C", TZ: "UTC" },
+  });
+  // ps exits 1 when no such process exists.
+  if (result.code === 1 && result.stdout.trim() === "") return null;
+  if (result.code !== 0) throw new Error(`ps failed: ${result.stderr}`);
+  return result.stdout.trim().replace(/\s+/g, " ");
 }
 
 function kill(pid, signal) {
@@ -60,7 +85,10 @@ export async function createM1Fixture() {
   for (const name of ["GIT_DIR", "GIT_WORK_TREE"]) delete env[name];
   const servers = [];
   const background = [];
-  const pids = new Set();
+  // Tracked processes by PID, with the start identity read while they were known to run.
+  const pids = new Map();
+  // Whether the tracked process still runs: its PID exists with the recorded start identity.
+  const stillRuns = async (pid) => alive(pid) && (await startIdentity(pid)) === pids.get(pid);
 
   const fixture = {
     root,
@@ -98,8 +126,12 @@ export async function createM1Fixture() {
     },
 
     // Runs `cove [--home H] ...args` to completion.
-    cove(args, { home } = {}) {
-      return run(process.execPath, [cli, ...(home ? ["--home", home] : []), ...args], { env });
+    // `timeoutMs` bounds the command (it is killed when the time is up).
+    cove(args, { home, timeoutMs } = {}) {
+      return run(process.execPath, [cli, ...(home ? ["--home", home] : []), ...args], {
+        env,
+        ...(timeoutMs === undefined ? {} : { timeout: timeoutMs, killSignal: "SIGKILL" }),
+      });
     },
 
     async coveJson(args, options) {
@@ -216,16 +248,21 @@ export async function createM1Fixture() {
         .map(Number);
     },
 
-    // A process that cleanup must end with SIGKILL (never SIGCONT first) and confirm exited.
-    trackPid(pid) {
-      pids.add(pid);
+    // A process that cleanup must end with SIGKILL (never SIGCONT first) and confirm exited. Call
+    // it while the process is known to run: its start identity is recorded now, and cleanup
+    // signals the PID only while it still carries that identity, so a process that reused the PID
+    // in between is never killed.
+    async trackPid(pid) {
+      const identity = await startIdentity(pid);
+      if (identity === null) throw new Error(`process ${pid} is not running`);
+      pids.set(pid, identity);
     },
 
     // Ends every tracked process, confirms each exited and removes the root. Throws when any
     // process survived, after attempting every step.
     async cleanup() {
       const failures = [];
-      for (const pid of pids) kill(pid, "SIGKILL");
+      for (const pid of pids.keys()) if (await stillRuns(pid)) kill(pid, "SIGKILL");
       for (const { child } of background) if (child.exitCode === null) child.kill("SIGKILL");
       for (const server of servers.splice(0)) {
         try {
@@ -234,15 +271,27 @@ export async function createM1Fixture() {
           failures.push(error);
         }
       }
-      await Promise.all(background.map(({ done }) => within(done, 5_000)));
+      const waited = await Promise.all(background.map(({ done }) => within(done, 5_000)));
+      const survivors = background.filter((_, index) => waited[index] === "timeout");
+      if (survivors.length > 0)
+        failures.push(
+          new Error(
+            `background cove commands survived SIGKILL: ${survivors.map(({ child }) => child.pid).join(", ")}`,
+          ),
+        );
+      const running = async () => {
+        const left = [];
+        for (const pid of pids.keys()) if (await stillRuns(pid)) left.push(pid);
+        return left;
+      };
       try {
         await waitFor(
           "every tracked process to exit",
-          () => [...pids].every((pid) => !alive(pid)),
+          async () => (await running()).length === 0,
           5_000,
         );
       } catch (error) {
-        failures.push(new Error(`${error.message}: ${[...pids].filter(alive).join(", ")}`));
+        failures.push(new Error(`${error.message}: ${(await running()).join(", ")}`));
       }
       await rm(root, { recursive: true, force: true });
       if (failures.length > 0) throw new AggregateError(failures, "M1 fixture cleanup failed");
