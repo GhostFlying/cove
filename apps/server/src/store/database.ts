@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { MIGRATIONS, SCHEMA_VERSION, type Migration } from "./migrations.js";
+import { committedSchemaVersion } from "./schema-version.js";
 
 export type StoreErrorCategory = "in-use" | "newer-schema" | "unavailable" | "migration";
 
@@ -60,6 +61,20 @@ export class Store {
     const migrations = options.migrations ?? MIGRATIONS;
     const target = migrations.length;
     const now = options.now ?? Date.now;
+    // A newer build's database is refused before SQLite opens it: opening could checkpoint a WAL
+    // that build left behind (see schema-version.ts). The check after opening stays for a version
+    // written in between.
+    let committed: number;
+    try {
+      committed = await committedSchemaVersion(options.databasePath);
+    } catch {
+      throw new StoreError("unavailable", "The Cove database cannot be opened");
+    }
+    if (committed > target)
+      throw new StoreError(
+        "newer-schema",
+        `The Cove database schema ${committed} is newer than this build (${target})`,
+      );
     let db: Database.Database;
     try {
       db = new Database(options.databasePath, { timeout: 0 });
