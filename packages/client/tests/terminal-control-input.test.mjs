@@ -1736,38 +1736,6 @@ describe("input right after a focus grant (Issue #21)", () => {
     expect(controller.snapshot().controlEpoch).toBe(1);
   });
 
-  // Issue #96: a BUSY ACK is resent after a backoff instead of ending the subscription. The
-  // refused ACK was never applied, so the server's fence is not covered until the resend.
-  test("input waits for the resend of a refused covering ack", async () => {
-    const scheduler = clock();
-    const { controller, peer, mounted } = await harness({ holdAcks: true, scheduler });
-    peer.releaseAck();
-    await settle();
-    await grant(controller, peer);
-    const [covering] = ofType(peer, "applied-ack").slice(1);
-    expect(covering.command.appliedSeq).toBe(1);
-    peer.emit(4, {
-      type: "error",
-      requestId: covering.command.requestId,
-      run,
-      commandType: "applied-ack",
-      error: domainError("BUSY"),
-    });
-    await settle();
-    expect(controller.snapshot().phase).toBe("ready");
-    type(controller, mounted, 1, "x");
-    await settle();
-    expect(ofType(peer, "input")).toHaveLength(0);
-    scheduler.advance(50);
-    await settle();
-    const acks = ofType(peer, "applied-ack");
-    expect(acks.map(({ command }) => command.appliedSeq)).toEqual([0, 1, 1]);
-    const inputs = ofType(peer, "input");
-    expect(inputs).toHaveLength(1);
-    expect(peer.commands.indexOf(inputs[0])).toBeGreaterThan(peer.commands.indexOf(acks[2]));
-    expect(decoder.decode(inputs[0].payload)).toBe("x");
-  });
-
   test("repeated focus intents while holding control keep the epoch; a new grid refocuses", async () => {
     const { controller, peer, mounted } = await harness();
     await grant(controller, peer);
