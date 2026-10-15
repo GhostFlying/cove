@@ -29,9 +29,25 @@ export function alive(pid) {
   }
 }
 
+// macOS process start time with microseconds (kinfo_proc p_starttime via __sysctl), the same
+// reader as the server's store/processes.ts: `ps` lstart has one-second resolution and a PID can
+// be reused within a second. Exit status 1: no such process.
+const DARWIN_START_TIME = String.raw`
+my $pid = shift;
+my $mib = pack("i4", 1, 14, 1, $pid);
+my $buf = "\0" x 4096;
+my $len = pack("Q", length $buf);
+syscall(202, $mib, 4, $buf, $len, 0, 0) == 0 or exit 2;
+my $size = unpack("Q", $len);
+exit 1 if $size == 0;
+exit 3 if $size < 648 || unpack("l", substr($buf, 40, 4)) != $pid;
+my ($sec, $usec) = unpack("q l", $buf);
+printf("%d.%06d\n", $sec, $usec);
+`;
+
 // The operating-system start identity of a live process, or null when it does not exist: the
 // PID plus this identity names one process, which a later process reusing the PID does not share.
-// Linux: boot ID and start ticks (/proc/<pid>/stat field 22); macOS: `ps` start time.
+// Linux: boot ID and start ticks (/proc/<pid>/stat field 22); macOS: start time in microseconds.
 async function startIdentity(pid) {
   if (process.platform === "linux") {
     try {
@@ -45,13 +61,13 @@ async function startIdentity(pid) {
       throw error;
     }
   }
-  const result = await run("ps", ["-o", "lstart=", "-p", String(pid)], {
-    env: { PATH: process.env.PATH, LC_ALL: "C", TZ: "UTC" },
+  const result = await run("/usr/bin/perl", ["-e", DARWIN_START_TIME, String(pid)], {
+    env: { PATH: process.env.PATH },
   });
-  // ps exits 1 when no such process exists.
-  if (result.code === 1 && result.stdout.trim() === "") return null;
-  if (result.code !== 0) throw new Error(`ps failed: ${result.stderr}`);
-  return result.stdout.trim().replace(/\s+/g, " ");
+  if (result.code === 1) return null;
+  if (result.code !== 0 || !/^\d+\.\d{6}\n$/.test(result.stdout))
+    throw new Error(`reading the start time of ${pid} failed (${result.code}): ${result.stderr}`);
+  return result.stdout.trim();
 }
 
 function kill(pid, signal) {
