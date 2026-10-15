@@ -13,6 +13,7 @@ import { writeFitProbe } from "./fit-probe.mjs";
 import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
 import { waitFor } from "./recording-view.mjs";
 import { stopServer, within } from "./server-process.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 const cli = resolve(import.meta.dirname, "../dist/main.js");
 // The repository's one managed Chromium, installed for the pinned Playwright by
@@ -28,14 +29,9 @@ const SECOND_MARKER = "cove-harness-dom";
 const MARKER_GLYPH_PIXELS = 100;
 
 async function startServer(directory) {
-  const env = {
-    ...process.env,
-    // The CLI keeps its start lock and default rendezvous under ~/.cove; the server must never
-    // touch the user's real home.
-    HOME: directory,
-    SHELL: "/bin/sh",
-  };
-  delete env.COVE_RENDEZVOUS;
+  // The CLI keeps its data directory, start lock and default rendezvous under the test's
+  // directory; the server must never touch the user's real home or data directory.
+  const env = isolatedEnv(directory, { SHELL: "/bin/sh" });
   const wrapper = spawn(process.execPath, [cli, "server", "start", "--harness"], {
     cwd: directory,
     env,

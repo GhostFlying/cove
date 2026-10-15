@@ -8,6 +8,7 @@ import { readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
 import { createTappedClient } from "./wire-tap.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 // Every resize makes each attached client recover its baseline and then ack it, so with three
 // clients on one run three applied-acks reach the run's worker together. Here two clients with
@@ -34,11 +35,11 @@ let fixture;
 
 beforeEach(async () => {
   // Realpath the temp root: on macOS /var is a symlink and the server refuses a rendezvous
-  // reached through a symlinked ancestor. HOME points there so the CLI's start lock under
-  // ~/.cove never touches the user's real home.
+  // reached through a symlinked ancestor. isolatedEnv points HOME and COVE_HOME there so
+  // a test never touches the user's real home or data directory.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-cli-")));
   const rendezvous = join(directory, "state", "run", "rendezvous.json");
-  const env = { ...process.env, HOME: directory, COVE_RENDEZVOUS: rendezvous };
+  const env = isolatedEnv(directory, { COVE_RENDEZVOUS: rendezvous });
   const server = spawn(process.execPath, [cli, "--rendezvous", rendezvous, "server", "start"], {
     stdio: ["ignore", "pipe", "pipe"],
     env,

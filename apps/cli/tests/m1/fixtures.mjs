@@ -5,11 +5,12 @@ import { join, resolve } from "node:path";
 import { readRendezvous } from "../../dist/session.js";
 import { waitFor } from "../recording-view.mjs";
 import { stopServer, within } from "../server-process.mjs";
+import { isolatedEnv } from "../test-env.mjs";
 
 // Shared fixtures of the M1 CLI scenarios. Every scenario drives the compiled `cove` executable
 // against temporary data directories and temporary Git repositories under one temporary root;
-// HOME points into that root, so no scenario can read or write the operator's real ~/.cove,
-// Git configuration or repositories.
+// HOME and COVE_HOME point into that root (isolatedEnv), so no scenario can read or write the
+// operator's real data directory, Git configuration or repositories.
 //
 // A fixture tracks every process a scenario creates or learns about (servers, background CLI
 // commands, workers, PTY processes reported by marker files). `cleanup()` ends all of them,
@@ -55,8 +56,8 @@ export async function createM1Fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "cove-m1-")));
   const userHome = join(root, "user-home");
   await mkdir(userHome, { mode: 0o700 });
-  const env = { ...process.env, HOME: userHome, GIT_CONFIG_NOSYSTEM: "1" };
-  for (const name of ["COVE_HOME", "COVE_RENDEZVOUS", "GIT_DIR", "GIT_WORK_TREE"]) delete env[name];
+  const env = isolatedEnv(userHome, { GIT_CONFIG_NOSYSTEM: "1" });
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE"]) delete env[name];
   const servers = [];
   const background = [];
   const pids = new Set();

@@ -9,6 +9,7 @@ import { readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
 import { createTappedClient } from "./wire-tap.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 // Regression for issue #96. Every streaming subscription keeps one applied-ack in flight, and
 // the server has a single worker whose route-control window is PIPE_ROUTE_CONTROL_COMMANDS
@@ -27,10 +28,11 @@ let fixture;
 
 beforeEach(async () => {
   // Realpath the temp root: macOS /var is a symlink and the server refuses a symlinked
-  // rendezvous ancestor. HOME points at the temp directory so ~/.cove is never touched.
+  // rendezvous ancestor. isolatedEnv points HOME and COVE_HOME there so a test never touches
+  // the user's real home or data directory.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-acks-")));
   const rendezvous = join(directory, "state", "run", "rendezvous.json");
-  const env = { ...process.env, HOME: directory, COVE_RENDEZVOUS: rendezvous };
+  const env = isolatedEnv(directory, { COVE_RENDEZVOUS: rendezvous });
   const server = spawn(process.execPath, [cli, "--rendezvous", rendezvous, "server", "start"], {
     stdio: ["ignore", "pipe", "pipe"],
     env,
