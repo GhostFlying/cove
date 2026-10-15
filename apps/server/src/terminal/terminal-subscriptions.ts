@@ -31,6 +31,17 @@ import { ControlArbiter, type ControlCommand, type ControlJob } from "./control-
 import { publishPreview } from "./preview-transfer.js";
 import type { PreviewPicture } from "./preview-cache.js";
 
+// The record of one request while it is queued or executing.
+const REQUEST_BYTES = 6 * 4096 + 2048;
+// Route control (detach, applied-ack, baseline-progress) is never refused for capacity on a
+// live subscription (issue #96). The client counts an ACK handed to the connection as covering
+// the commands it sends after it, so the server must apply every ACK it receives in order;
+// a refusal after the handoff could never be repaired. Each route therefore pays at attach for
+// one unsettled record of each of the three types, the most a conforming client sends, and the
+// worker pipe prepays their onward storage in the same way (see worker-pipe-session).
+const ROUTE_CONTROL_BYTES = 3 * REQUEST_BYTES;
+const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
+
 type Supported =
   | Extract<
       TerminalCommand,
@@ -261,24 +272,22 @@ export class TerminalSubscriptions {
     if (!this.composition.owns(command.run)) return this.reject(command, "INSTANCE_MISMATCH");
     if (this.knownId(command.requestId)) return this.reject(command, "COUNTER_EXHAUSTED");
     // Route control (detach, applied-ack, baseline-progress) is bounded per subscription, not
-    // by the worker's route-control window. A subscription holds at most one unsettled command
-    // of each of these types (checked below once its route is known); the client keeps at most
-    // one ACK and one progress report in flight per subscription and coalesces newer ones to
-    // the latest, so a conforming client is never refused here. The route queue runs them one
-    // at a time, and the worker pipe holds any that find its window full until a slot frees.
-    // A fixed connection-wide window of PIPE_ROUTE_CONTROL_COMMANDS used to refuse the fifth
-    // streaming subscription's ACK with BUSY, which ended that subscription (issue #96).
-    // controlLimit() caps the records one connection may hold in total, so a connection whose
-    // retired routes still drain cannot grow them without bound either.
+    // by request or byte capacity (see ROUTE_CONTROL_BYTES). A subscription holds at most one
+    // unsettled command of each of these types (checked below once its route is known); the
+    // client keeps at most one ACK and one progress report in flight per subscription and
+    // folds newer ones into the latest, so a conforming client is never refused. The route
+    // queue runs them one at a time, and the worker pipe holds any that find its window full
+    // until a slot frees. A fixed connection-wide window of PIPE_ROUTE_CONTROL_COMMANDS used to
+    // refuse the fifth streaming subscription's ACK with BUSY, ending it for good (issue #96).
+    // Their identities may exceed requestLimit by at most three per route.
     const control =
       command.type === "detach" ||
       command.type === "applied-ack" ||
       command.type === "baseline-progress";
     if (
-      this.externalIds.size >= this.options.requestLimit ||
-      (control
-        ? this.controlPending >= this.controlLimit()
-        : this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands)
+      !control &&
+      (this.externalIds.size >= this.options.requestLimit ||
+        this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands)
     )
       return this.reject(command, "BUSY");
     if (command.type === "preview") return this.preview(command);
@@ -318,11 +327,11 @@ export class TerminalSubscriptions {
     const placement = this.runtime.pool.get(command.run);
     if (!placement || (route && !sameWorkerRef(route.worker, placement.worker)))
       return this.reject(command, "WORKER_UNAVAILABLE");
-    const requestLease = this.composition.bytes.reserve(6 * 4096 + 2048, control);
+    const requestLease = control ? PREPAID : this.composition.bytes.reserve(REQUEST_BYTES);
     if (!requestLease) return this.reject(command, "BUSY");
     let internalId: string | null;
     if (command.type === "attach") {
-      const lease = this.composition.bytes.reserve(8192);
+      const lease = this.composition.bytes.reserve(8192 + ROUTE_CONTROL_BYTES);
       if (!lease) {
         requestLease.release();
         return this.reject(command, "BUSY");
@@ -427,12 +436,6 @@ export class TerminalSubscriptions {
     return promise;
   }
 
-  // One unsettled detach, applied-ack and baseline-progress for each subscription the
-  // connection may hold live (see handle()).
-  private controlLimit(): number {
-    return 3 * this.composition.budgets.subscriptionsPerConnection;
-  }
-
   private retiredFailure(command: Exclude<Supported, { type: "attach" }>): DomainError | undefined {
     const entry = this.retiredFailures.get(command.subscription.subscriptionId);
     return entry &&
@@ -445,8 +448,8 @@ export class TerminalSubscriptions {
   // Drops a retired route once nothing can still reference it through this connection:
   // its queue has drained (each request holds the route directly until dequeued) and its
   // unsubscribe settled, so the worker no longer routes events to it and no teardown
-  // still needs the record. The arbiter was already told at retirement. The 8 KiB route
-  // lease is released with it.
+  // still needs the record. The arbiter was already told at retirement. The route
+  // lease, with its prepaid route-control records, is released with it.
   private reap(route: Route): void {
     const id = route.ref.subscriptionId;
     if (

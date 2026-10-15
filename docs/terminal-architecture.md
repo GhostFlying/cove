@@ -160,9 +160,13 @@ worker 仍是输出/resize 等终端事件顺序的仲裁方，命令执行结�
 同一 worker 的路由控制命令（applied-ack、baseline-progress、unsubscribe）由 worker 按到达顺序逐条执行；
 runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CONTROL_COMMANDS`，超出即协议违规、worker 失败关闭。
 窗口已满时 runtime 不拒绝路由控制命令，而是让它在 pipe 中未发送地按到达顺序等待，有空位时再发出（#96）；
-等待量以订阅数为界：每个订阅的这类命令经其路由队列逐条到达 pipe（另加至多一次 unsubscribe），同一订阅同类型的第二条等待命令被拒绝。
-等待中的命令尚未到达 worker，其应答期限从占得空位时起算。连接层按订阅限界：每个订阅同时至多一条未结算的
-applied-ack、baseline-progress 与 detach，第二条以 BUSY（not-accepted）拒绝；遵守协议的客户端每类只有一条在途，不会触发。
+等待中的命令尚未到达 worker，其应答期限从占得空位时读取的时钟起算。
+活订阅的路由控制命令（applied-ack、baseline-progress、detach/unsubscribe）从不因容量被拒绝：客户端把已交出的 ACK 视为覆盖其后发出的命令，
+交出后的拒绝无法补救。为此存储预先支付：连接层每个订阅在 attach 时为未结算的 applied-ack、baseline-progress 与 detach 各预留一条记录，
+pipe 的每个订阅路由在打开时为一条等待中的 ACK/进度和一条等待中的 unsubscribe 预留空间，在途窗口的身份与帧字节由会话 arena 预留。
+它们不占共享的控制预留与 identityLimit，status、stop 与应答的余量不变；等待量以订阅数为界。每个订阅同类命令同时至多一条未结算，
+第二条以 BUSY（not-accepted）拒绝；遵守协议的客户端每类只有一条在途，不会触发。pipe 不认识的订阅（从未在此打开或已释放）没有 worker 路由需要保护，
+其路由控制只在窗口有空位时接纳。
 
 进程池可从 devbox 已测的 4 个子进程起步，作为配置与验证起点，不是固定容量承诺。
 node-pty 官方明确不保证 worker_threads 安全，PTY 并行采用子进程。
