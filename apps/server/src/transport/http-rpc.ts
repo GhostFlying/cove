@@ -9,9 +9,8 @@ import {
   type AdmissionKind,
   type BootstrapFailure,
 } from "@cove/protocol/bootstrap";
-import { PROFILE } from "@cove/protocol/profile";
 import { boundedJsonStructure } from "@cove/protocol/terminal";
-import { domainError, ERROR_CODES, type DomainError } from "@cove/protocol/errors";
+import { ERROR_CODES, type DomainError } from "@cove/protocol/errors";
 import {
   classifyRpcEnvelope,
   composeRpcResponse,
@@ -22,15 +21,11 @@ import {
   type RpcId,
   type RpcMethod,
 } from "@cove/protocol/rpc";
-import type { LocalRuntime } from "../terminal/local-runtime.js";
-import type { TerminalOperations } from "../operations/terminal-operations.js";
+import type { LocalCore } from "../rpc/context.js";
+import { dispatchRpc } from "../rpc/dispatch.js";
 import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 
-export type LocalCore = {
-  runtime: LocalRuntime;
-  operations: TerminalOperations;
-  buildVersion: string;
-};
+export type { LocalCore } from "../rpc/context.js";
 const encoder = new TextEncoder();
 export const encodeUtf8 = (text: string): Uint8Array => encoder.encode(text);
 const admissionFailureKinds: readonly BootstrapFailure["kind"][] = [
@@ -106,43 +101,17 @@ const domain = (id: RpcId, error: DomainError) => {
   };
 };
 
+// The method table names the module that serves each method (apps/server/src/rpc/<domain>.ts).
 export async function dispatchLocalRpc(
   core: LocalCore,
   method: RpcMethod,
   params: Record<string, unknown>,
-) {
-  const runtime = core.runtime;
-  switch (method) {
-    case "server.status": {
-      const pool = runtime.pool.snapshot();
-      return {
-        serverId: runtime.composition.serverId,
-        relayInstanceId: runtime.composition.relayInstanceId,
-        buildVersion: core.buildVersion,
-        protocolVersion: 2,
-        profile: PROFILE,
-        effectiveBudgets: runtime.composition.budgets,
-        workerCount: pool.workers,
-        runCount: runtime.registry.count,
-        admission: pool.readyWorkers ? "ready" : "unavailable",
-        health: pool.readyWorkers ? "live" : "unverifiable",
-      };
-    }
-    case "terminal.list":
-      return runtime.previews.cache.list(params as { limit: number; afterRunId?: string });
-    case "terminal.get": {
-      const record = runtime.previews.cache.getRecord(
-        params.run as Parameters<typeof runtime.previews.cache.getRecord>[0],
-      );
-      return record ? { record } : { error: domainError("RUN_NOT_FOUND") };
-    }
-    case "terminal.create":
-      return core.operations.create("m0-local", params);
-    case "terminal.stop":
-      return core.operations.stop("m0-local", params);
-    case "operation.get":
-      return core.operations.get("m0-local", params.operationId as string);
-  }
+): Promise<unknown> {
+  return dispatchRpc(core, method, params);
+}
+
+function isDomainFailure(value: unknown): value is { error: DomainError } {
+  return !!value && typeof value === "object" && Object.hasOwn(value, "error");
 }
 
 export function boundRpcResponseBody(body: string, responseBytes: number) {
@@ -206,7 +175,7 @@ export async function rpcBody(
     else {
       try {
         const result = await dispatchLocalRpc(core, item.method, item.params);
-        if (result && "error" in result) response = domain(item.id, result.error);
+        if (isDomainFailure(result)) response = domain(item.id, result.error);
         else
           response = validateRpcResultForCall(item.method, item.params, result)
             ? { jsonrpc: "2.0" as const, id: item.id, result }

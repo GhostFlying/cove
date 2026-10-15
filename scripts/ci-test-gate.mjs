@@ -262,6 +262,11 @@ export const requiredSuites = [
   },
   {
     project: "server",
+    file: "apps/server/tests/author/rpc-dispatch.test.mjs",
+    minimumTests: 4,
+  },
+  {
+    project: "server",
     file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
     minimumTests: 14,
   },
