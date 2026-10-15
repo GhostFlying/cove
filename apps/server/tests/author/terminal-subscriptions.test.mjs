@@ -689,6 +689,52 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  // Review of #99: an ACK the client already handed off must never be refused for capacity, or
+  // the client's commands after it would follow an ACK the server never applied.
+  it("applies every ACK of a live subscription under byte and request-identity pressure", async () => {
+    const f = fixture({}, { requestLimit: 2 });
+    const a = f.connect();
+    try {
+      const refs = [];
+      for (let index = 0; index < 2 * PIPE_ROUTE_CONTROL_COMMANDS; index++)
+        refs.push((await f.attach(a, 0, `attach-${index}`)).subscription);
+      for (const ref of refs) f.session.receive(f.output(ref, 1));
+      // Exhaust every ordinary byte, as sustained output would, before the ACKs arrive.
+      const account = f.bytes.snapshot();
+      const filler = f.bytes.reserve(account.limit - account.controlReserve - account.ordinary);
+      expect(filler).not.toBeNull();
+      const pressed = f.bytes.snapshot().total;
+      const start = f.pipeWrites.length;
+      // More ACKs than the connection's requestLimit (2) and the worker window (4).
+      const acks = refs.map((ref, index) =>
+        a.service.handle(command("applied-ack", ref, `ack-${index}`, { appliedSeq: 1 })),
+      );
+      await turns();
+      // Nothing was refused, and route control took no new bytes: it is prepaid per route.
+      expect(f.bytes.snapshot().total).toBeLessThanOrEqual(pressed);
+      const sent = () => f.pipeWrites.slice(start).map((item) => decode(item.data, true).metadata);
+      expect(sent()).toHaveLength(PIPE_ROUTE_CONTROL_COMMANDS);
+      for (let index = 0; index < refs.length; index++) {
+        f.session.receive(f.reply(sent()[index]));
+        await turns();
+      }
+      expect((await Promise.all(acks)).map((value) => value.type)).toEqual(
+        Array(refs.length).fill("applied-ack-result"),
+      );
+      // No route was retired or torn down.
+      expect(sent().map((value) => value.type)).toEqual(Array(refs.length).fill("applied-ack"));
+      for (const ref of refs)
+        expect(a.service.snapshot(ref.subscriptionId).route).toMatchObject({
+          phase: "active",
+          credit: { appliedSeq: 1 },
+        });
+      filler.release();
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
   it("refuses a second unsettled ACK of one subscription without retiring it", async () => {
     const f = fixture();
     const a = f.connect();

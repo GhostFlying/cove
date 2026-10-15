@@ -8,6 +8,7 @@ import {
   MAX_FRAME_BYTES,
   MAX_READ_BYTES,
   MAX_METADATA_BYTES,
+  HEADER_BYTES,
   PIPE_ROUTE_CONTROL_COMMANDS,
   type PipeCommand,
   type PipeMetadata,
@@ -28,6 +29,18 @@ import type { ByteReservation } from "./runtime-retained-bytes.js";
 import { RuntimeComposition } from "./runtime-composition.js";
 
 export const SESSION_CONTROL_RESERVE = 6 * (6 * MAX_METADATA_BYTES + 2048) + 64 * 1024;
+// Route control (applied-ack, baseline-progress, unsubscribe) of a subscription the pipe knows is
+// never refused for capacity (issue #96): an ACK the server refused after the client handed it
+// off would break the client's rule that a handed-off ACK covers the commands sent after it.
+// Its storage is therefore paid for in advance. Each subscription's pipe route reserves one
+// waiting record for an ACK or progress report (its route queue sends them one at a time) and one
+// for its unsubscribe; the session arena holds the identity and frame bytes of the
+// PIPE_ROUTE_CONTROL_COMMANDS admitted ones. None of it draws on the shared control reserve,
+// which stays for status, stop and replies.
+const ROUTE_CONTROL_IDENTITY_BYTES = 6 * MAX_METADATA_BYTES + 2048;
+const ROUTE_CONTROL_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
+const ROUTE_CONTROL_WAIT_BYTES = ROUTE_CONTROL_FRAME_BYTES + MAX_METADATA_BYTES + 1024;
+const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 
 export interface PipeByteTransport {
   write(bytes: Uint8Array, settled: (error?: unknown) => void): boolean;
@@ -55,6 +68,8 @@ type Outgoing = {
   role: Role;
   request: Pending | undefined;
   owned: boolean;
+  // A prepaid route-control command waiting for a window slot holds its route's record.
+  slot?: { route: Route; unsubscribe: boolean } | undefined;
 };
 // `unsubscribed` records that an unsubscribe for the ref settled, so the route can be
 // reclaimed by whichever of that unsubscribe and the last pending opener settles last.
@@ -63,6 +78,9 @@ type Route = {
   active: boolean;
   unsubscribed: boolean;
   lease: ByteReservation;
+  // The prepaid waiting records (see ROUTE_CONTROL_WAIT_BYTES) currently in use.
+  waitingProgress: boolean;
+  waitingUnsubscribe: boolean;
 };
 
 export class WorkerPipeSession {
@@ -78,8 +96,9 @@ export class WorkerPipeSession {
   // resent after a not-accepted BUSY), so an executed ID is never issued again and
   // retaining it would only exhaust identityLimit (formerly wedging the whole worker
   // with BUSY after identityLimit lifetime requests). identityLimit therefore
-  // bounds concurrent in-flight requests, never the lifetime total. Duplicate
-  // in-flight IDs are still refused, and a reply for a settled ID still loses contact.
+  // bounds concurrent in-flight requests, never the lifetime total, and does not count
+  // prepaid route control (see ownedIdentities()). Duplicate in-flight IDs are still
+  // refused, and a reply for a settled ID still loses contact.
   private readonly identities = new Map<string, ByteReservation>();
   private readonly pending = new Map<string, Pending>();
   private readonly queue: Outgoing[] = [];
@@ -102,6 +121,8 @@ export class WorkerPipeSession {
   private lastNow = 0;
   private handshakeDeadline = 0;
   private released = false;
+  private promoting = false;
+  private prepaidIdentities = 0;
 
   constructor(
     private readonly options: {
@@ -136,7 +157,11 @@ export class WorkerPipeSession {
       buildVersion: options.buildVersion,
     };
     const arena = options.composition.bytes.reserve(
-      2 * MAX_READ_BYTES + 3 * MAX_FRAME_BYTES + 6 * MAX_METADATA_BYTES + 1024,
+      2 * MAX_READ_BYTES +
+        3 * MAX_FRAME_BYTES +
+        6 * MAX_METADATA_BYTES +
+        1024 +
+        PIPE_ROUTE_CONTROL_COMMANDS * (ROUTE_CONTROL_IDENTITY_BYTES + ROUTE_CONTROL_FRAME_BYTES),
     );
     if (!arena) throw new Error("Session byte capacity unavailable");
     this.arena = arena;
@@ -268,19 +293,53 @@ export class WorkerPipeSession {
 
   // A waiting command has not reached the worker, so the time it spent waiting is no evidence
   // of lost contact: the admitted commands ahead of it carry the liveness deadline (tick()
-  // ignores waiting ones). Its own deadline therefore starts when it takes a slot. lastNow is
-  // the latest validated clock reading; using it, rather than calling the clock supplier from
-  // this reply path, can only make the deadline earlier, never later.
+  // ignores waiting ones). Its own deadline therefore starts when it takes a slot, read from
+  // the clock at that moment. The clock supplier may reenter (and promote, or close the session)
+  // or fail; a reentrant call returns at once and leaves the work to this loop, which rechecks
+  // its condition after the read, and an invalid clock fails the session closed as tick() does.
   private promoteProgress(): void {
-    if (this.closed) return;
-    while (this.waitingProgress.length && this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS) {
-      const item = this.waitingProgress.shift()!;
-      item.request!.admitted = true;
-      item.request!.deadline = Math.max(
-        item.request!.deadline,
-        this.lastNow + this.options.timeoutMs,
-      );
-      this.queue.push(item);
+    if (this.closed || this.promoting) return;
+    this.promoting = true;
+    try {
+      while (
+        !this.closed &&
+        this.waitingProgress.length &&
+        this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS
+      ) {
+        let now: number;
+        try {
+          now = this.now();
+        } catch {
+          this.loseContact();
+          return;
+        }
+        if (
+          this.closed ||
+          !this.waitingProgress.length ||
+          this.progressCount() >= PIPE_ROUTE_CONTROL_COMMANDS
+        )
+          break;
+        const item = this.waitingProgress.shift()!;
+        if (item.slot) {
+          if (item.slot.unsubscribe) item.slot.route.waitingUnsubscribe = false;
+          else item.slot.route.waitingProgress = false;
+          item.slot = undefined;
+        }
+        // An admitted route-control frame is paid for by the session arena, and at most
+        // PIPE_ROUTE_CONTROL_COMMANDS of them plus status and stop are queued at once, well
+        // within reservedControlBytes. Failing that bound is a defect, so fail closed.
+        if (!this.queueBudget(item.bytes, "progress")) {
+          item.owned = false;
+          this.loseContact();
+          return;
+        }
+        this.queuedBytes += item.bytes.buffer.byteLength;
+        item.request!.admitted = true;
+        item.request!.deadline = now + this.options.timeoutMs;
+        this.queue.push(item);
+      }
+    } finally {
+      this.promoting = false;
     }
     if (!this.receiving) this.flush();
   }
@@ -313,18 +372,21 @@ export class WorkerPipeSession {
           ? // The worker's route-control queue bound; exceeding it shuts the worker down.
             PIPE_ROUTE_CONTROL_COMMANDS
           : 1;
-    // Route control (applied-ack, baseline-progress, unsubscribe) is never refused for a full
-    // window: it waits unsent, in arrival order, and takes the next free slot (see
-    // promoteProgress). Refusing an ACK here used to retire a healthy subscription whenever more
-    // than PIPE_ROUTE_CONTROL_COMMANDS streaming subscriptions shared this worker (issue #96).
-    // The wait stays bounded by the route count: each subscription's commands reach this pipe
-    // one at a time from its route queue (TerminalSubscriptions), apart from its single
-    // unsubscribe, and routeControlWaiting() refuses a second waiting command of one type for
-    // one subscription, which a conforming caller never sends.
+    // Route control of a subscription this pipe knows (see ROUTE_CONTROL_WAIT_BYTES) is never
+    // refused for a full window or for capacity: it waits unsent, in arrival order, and takes
+    // the next free slot (see promoteProgress). Refusing an ACK here used to retire a healthy
+    // subscription whenever more than PIPE_ROUTE_CONTROL_COMMANDS streaming subscriptions shared
+    // this worker (issue #96). The wait is bounded by the routes' prepaid records: each
+    // subscription's ACKs and progress reports reach this pipe one at a time from its route
+    // queue (TerminalSubscriptions), and it sends one unsubscribe. A second waiting command in
+    // an occupied record is refused; a conforming caller never sends one. Route control for a
+    // subscription the pipe does not know (it was never opened here, or already released) has
+    // no worker route to protect, so it is only admitted into a free slot, as before.
+    const known = role === "progress" ? this.routeFor(command) : undefined;
     if (
       (role !== "progress" && count >= cap) ||
-      this.identities.size >= this.options.identityLimit ||
-      this.routeControlWaiting(command)
+      (!known && role === "progress" && (count >= cap || this.waitingProgress.length > 0)) ||
+      (!known && this.ownedIdentities() >= this.options.identityLimit)
     )
       return Promise.resolve(this.error(command, "BUSY"));
     if ((command.type === "subscribe" || command.type === "recover") && !handoff)
@@ -360,18 +422,22 @@ export class WorkerPipeSession {
     const currentCount = [...this.pending.values()].filter(
       (entry) => entry.role === role && entry.admitted,
     ).length;
+    const prepaid = role === "progress" ? this.routeFor(snapshot) : undefined;
+    if (prepaid && bytes.buffer.byteLength > ROUTE_CONTROL_FRAME_BYTES)
+      return Promise.resolve(this.error(command, "CAPABILITY_UNAVAILABLE"));
     // A command also waits behind an earlier waiting one, so it can never overtake it.
-    const waiting = role === "progress" && (currentCount >= cap || this.waitingProgress.length > 0);
+    const waiting = !!prepaid && (currentCount >= cap || this.waitingProgress.length > 0);
+    const unsubscribe = snapshot.type === "unsubscribe";
     if (
       (!waiting && currentCount >= cap) ||
-      this.identities.size >= this.options.identityLimit ||
-      this.routeControlWaiting(snapshot)
+      (!prepaid && role === "progress" && this.waitingProgress.length > 0) ||
+      (!prepaid && this.ownedIdentities() >= this.options.identityLimit) ||
+      (waiting && (unsubscribe ? prepaid.waitingUnsubscribe : prepaid.waitingProgress))
     )
       return Promise.resolve(this.error(command, "BUSY"));
-    const identityLease = this.composition.bytes.reserve(
-      6 * MAX_METADATA_BYTES + 2048,
-      role !== "ordinary",
-    );
+    const identityLease = prepaid
+      ? PREPAID
+      : this.composition.bytes.reserve(ROUTE_CONTROL_IDENTITY_BYTES, role !== "ordinary");
     if (!identityLease) return Promise.resolve(this.error(command, "BUSY"));
     let route: Route | undefined;
     let newRoute = false;
@@ -385,7 +451,7 @@ export class WorkerPipeSession {
           identityLease.release();
           return Promise.resolve(this.error(command, "BUSY"));
         }
-        const lease = this.composition.bytes.reserve(4096);
+        const lease = this.composition.bytes.reserve(4096 + 2 * ROUTE_CONTROL_WAIT_BYTES);
         if (!lease) {
           identityLease.release();
           return Promise.resolve(this.error(command, "BUSY"));
@@ -395,6 +461,8 @@ export class WorkerPipeSession {
           active: false,
           unsubscribed: false,
           lease,
+          waitingProgress: false,
+          waitingUnsubscribe: false,
         };
         this.routes.push(route);
         newRoute = true;
@@ -414,7 +482,29 @@ export class WorkerPipeSession {
       sent: false,
       admitted: !waiting,
     };
-    if (!this.enqueue(bytes, role, pending, waiting)) {
+    if (prepaid) {
+      if (waiting) {
+        // Held in the route's prepaid record; it joins the queue's budget on promotion.
+        if (unsubscribe) prepaid.waitingUnsubscribe = true;
+        else prepaid.waitingProgress = true;
+        this.waitingProgress.push({
+          bytes,
+          lease: PREPAID,
+          role,
+          request: pending,
+          owned: true,
+          slot: { route: prepaid, unsubscribe },
+        });
+      } else if (!this.queueBudget(bytes, role)) {
+        // The arena pays for the admitted window and reservedControlBytes covers its frames;
+        // missing that bound is a defect, so fail closed rather than refuse the command.
+        this.loseContact();
+        return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
+      } else {
+        this.queuedBytes += bytes.buffer.byteLength;
+        this.queue.push({ bytes, lease: PREPAID, role, request: pending, owned: true });
+      }
+    } else if (!this.enqueue(bytes, role, pending)) {
       if (newRoute && route) {
         this.routes.splice(this.routes.indexOf(route), 1);
         route.lease.release();
@@ -430,6 +520,7 @@ export class WorkerPipeSession {
       if (retiring) retiring.active = false;
     }
     this.identities.set(snapshot.requestId, identityLease);
+    if (identityLease === PREPAID) this.prepaidIdentities++;
     this.pending.set(snapshot.requestId, pending);
     // A command that queued only to stay behind an earlier waiting one may find a slot that a
     // reentrant settlement freed meanwhile; promotion hands it over in order.
@@ -438,45 +529,33 @@ export class WorkerPipeSession {
     return promise;
   }
 
-  private routeControlWaiting(command: PipeCommand): boolean {
-    if (this.role(command) !== "progress" || !("subscription" in command)) return false;
-    return this.waitingProgress.some(
-      (item) =>
-        item.request?.command.type === command.type &&
-        "subscription" in item.request.command &&
-        sameSubscriptionRef(item.request.command.subscription, command.subscription),
-    );
+  // The pipe route that holds a route-control command's prepaid records, if the pipe knows it.
+  private routeFor(command: PipeCommand): Route | undefined {
+    if (this.role(command) !== "progress" || !("subscription" in command)) return undefined;
+    return this.routes.find((entry) => sameSubscriptionRef(entry.ref, command.subscription));
   }
 
-  private enqueue(
-    bytes: Uint8Array,
-    role: Role,
-    request: Pending | undefined,
-    waiting = false,
-  ): boolean {
-    const control = role !== "ordinary";
+  private queueBudget(bytes: Uint8Array, role: Role): boolean {
     const size = bytes.buffer.byteLength;
-    if (
+    return !(
       size > this.composition.budgets.pipeQueuedBytes - this.queuedBytes - this.physicalBytes ||
-      (!control &&
+      (role === "ordinary" &&
         size >
           this.composition.budgets.pipeQueuedBytes -
             this.composition.budgets.reservedControlBytes -
             this.ordinaryBytes)
-    )
-      return false;
+    );
+  }
+
+  private enqueue(bytes: Uint8Array, role: Role, request: Pending | undefined): boolean {
+    const control = role !== "ordinary";
+    const size = bytes.buffer.byteLength;
+    if (!this.queueBudget(bytes, role)) return false;
     const lease = this.composition.bytes.reserve(size, control);
     if (!lease) return false;
     this.queuedBytes += size;
     if (!control) this.ordinaryBytes += size;
-    // Waiting route-control backing uses the same byte budget, but owns no progress slot yet.
-    (waiting ? this.waitingProgress : this.queue).push({
-      bytes,
-      lease,
-      role,
-      request,
-      owned: true,
-    });
+    this.queue.push({ bytes, lease, role, request, owned: true });
     return true;
   }
 
@@ -692,11 +771,16 @@ export class WorkerPipeSession {
     if (this.closed) return;
     this.state = "closed";
     this.decoder.finish();
-    for (const item of [...this.queue.splice(0), ...this.waitingProgress.splice(0)]) {
+    for (const item of this.queue.splice(0)) {
       this.queuedBytes -= item.bytes.buffer.byteLength;
       if (item.role === "ordinary") this.ordinaryBytes -= item.bytes.buffer.byteLength;
       item.owned = false;
       item.lease.release();
+    }
+    // Waiting commands live in their routes' prepaid records, outside the queue's budget.
+    for (const item of this.waitingProgress.splice(0)) {
+      item.owned = false;
+      item.slot = undefined;
     }
     for (const pending of this.pending.values())
       pending.resolve(
@@ -722,8 +806,17 @@ export class WorkerPipeSession {
   // Settlement ends both the correlation and its identity; see `identities`.
   private settle(requestId: string): void {
     this.pending.delete(requestId);
-    this.identities.get(requestId)?.release();
+    const lease = this.identities.get(requestId);
+    if (lease === PREPAID) this.prepaidIdentities--;
+    lease?.release();
     this.identities.delete(requestId);
+  }
+
+  // Identities that hold their own reservation. Prepaid route control (see
+  // ROUTE_CONTROL_WAIT_BYTES) is bounded by the routes instead, so it never takes an identity
+  // another command needs.
+  private ownedIdentities(): number {
+    return this.identities.size - this.prepaidIdentities;
   }
 
   private releaseClosedRecords(): void {
@@ -731,6 +824,7 @@ export class WorkerPipeSession {
     this.released = true;
     for (const lease of this.identities.values()) lease.release();
     this.identities.clear();
+    this.prepaidIdentities = 0;
     this.arena.release();
   }
 

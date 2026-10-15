@@ -279,34 +279,51 @@ describe("bounded worker pipe session", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  // Route-control fixtures (issue #96). Route control is prepaid only for a subscription the
+  // pipe has opened, so each test opens its routes first.
+  const on = (index) => ({ ...subscription, subscriptionId: `subscription-${index}` });
+  async function openRoutes(f, count) {
+    for (let index = 0; index < count; index++) {
+      const subscribe = f.command("subscribe", `open-${index}`, {
+        subscription: on(index),
+        atSeq: 0,
+      });
+      const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+      f.session.receive(f.reply(subscribe, { recoveryMode: "baseline", atSeq: 0 }));
+      expect(await opened).toMatchObject({ type: "result", outcome: "accepted" });
+    }
+  }
+  // Request IDs of the commands handed to the transport after `from` writes, in write order.
+  const writtenIds = (f, from) =>
+    f.writes.slice(from).map(({ data }) => {
+      const read = createPipeDecoder().read(data);
+      return JSON.parse(codec.decode(read.frames[0].metadata)).requestId;
+    });
+  const ack = (f, index, requestId = `ack-${index}`) =>
+    f.command("applied-ack", requestId, { subscription: on(index), appliedSeq: index });
+
   it("keeps route control within the worker's window and queues the rest in arrival order", async () => {
     const f = fixture();
     f.start();
-    // Request IDs of the route-control commands handed to the transport, in write order.
-    const written = () =>
-      f.writes.slice(1).map(({ data }) => {
-        const read = createPipeDecoder().read(data);
-        return JSON.parse(codec.decode(read.frames[0].metadata)).requestId;
-      });
-    const on = (index) => ({ ...subscription, subscriptionId: `subscription-${index}` });
-    const route = (index, requestId = `route-${index}`) =>
+    await openRoutes(f, 8);
+    const from = f.writes.length;
+    const route = (index) =>
       index % 2
-        ? f.command("baseline-progress", requestId, {
+        ? f.command("baseline-progress", `route-${index}`, {
             subscription: on(index),
             baselineId: "baseline",
             lastParsedOrdinal: index,
           })
-        : f.command("applied-ack", requestId, { subscription: on(index), appliedSeq: index });
+        : ack(f, index, `route-${index}`);
     const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => route(index));
     const results = window.map((command) => f.session.request(command));
-    expect(written()).toEqual(window.map((command) => command.requestId));
+    expect(writtenIds(f, from)).toEqual(window.map((command) => command.requestId));
     // Past the window nothing is written for the worker to queue (it treats more than the
     // window as a protocol violation), and nothing is refused either: ACKs, progress reports and
-    // unsubscribes of other subscriptions wait unsent, in arrival order (issue #96).
-    const first = f.command("unsubscribe", "unsubscribe-first", { subscription: on(0) });
+    // unsubscribes of opened subscriptions wait unsent, in arrival order.
     const waiting = [
       route(PIPE_ROUTE_CONTROL_COMMANDS),
-      first,
+      f.command("unsubscribe", "unsubscribe-first", { subscription: on(0) }),
       route(PIPE_ROUTE_CONTROL_COMMANDS + 1),
       f.command("unsubscribe", "unsubscribe-second", { subscription: on(1) }),
     ];
@@ -315,22 +332,23 @@ describe("bounded worker pipe session", () => {
         ? f.session.requestUnsubscribe(command)
         : f.session.request(command),
     );
-    // The bound per subscription: a second waiting command of one type for one subscription is
-    // refused unsent; its route queue never sends one.
-    const duplicate = await f.session.request(route(PIPE_ROUTE_CONTROL_COMMANDS, "duplicate"));
+    // Each subscription has one prepaid waiting record for an ACK or progress report and one for
+    // its unsubscribe; a second command for an occupied record is refused unsent. Its route queue
+    // never sends one.
+    const duplicate = await f.session.request(ack(f, PIPE_ROUTE_CONTROL_COMMANDS, "duplicate"));
     expect(duplicate.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
-    expect(written()).toHaveLength(PIPE_ROUTE_CONTROL_COMMANDS);
+    expect(writtenIds(f, from)).toHaveLength(PIPE_ROUTE_CONTROL_COMMANDS);
     expect(f.session.snapshot().pending).toBe(PIPE_ROUTE_CONTROL_COMMANDS + waiting.length);
     // Each reply frees one slot, and only then is the oldest waiting command written.
     f.session.receive(f.reply(window[0]));
-    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([waiting[0].requestId]);
+    expect(writtenIds(f, from).slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([waiting[0].requestId]);
     f.session.receive(f.reply(window[1]));
     f.session.receive(f.reply(window[2]));
-    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
+    expect(writtenIds(f, from).slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
       waiting.slice(0, 3).map((command) => command.requestId),
     );
     for (const command of [window[3], ...waiting]) f.session.receive(f.reply(command));
-    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
+    expect(writtenIds(f, from).slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
       waiting.map((command) => command.requestId),
     );
     for (const result of await Promise.all([...results, ...waited]))
@@ -339,37 +357,100 @@ describe("bounded worker pipe session", () => {
     expect(f.lost()).toBe(0);
   });
 
-  it("starts a waiting route-control command's deadline when it takes a slot", async () => {
+  it("starts a waiting command's deadline at its slot even when replies precede any tick", async () => {
     const f = fixture();
     f.start();
-    const ack = (index) =>
-      f.command("applied-ack", `ack-${index}`, {
-        subscription: { ...subscription, subscriptionId: `subscription-${index}` },
-        appliedSeq: index,
-      });
-    const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => ack(index));
-    const results = window.map((command) => f.session.request(command));
-    const late = ack(PIPE_ROUTE_CONTROL_COMMANDS);
-    const lateResult = f.session.request(late);
-    // Admitted at 0 with timeoutMs 100. The window answers just before its deadline.
+    await openRoutes(f, 2 * PIPE_ROUTE_CONTROL_COMMANDS);
+    // Admitted at 0 with timeoutMs 100: four in the window, four waiting.
+    const acks = Array.from({ length: 2 * PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+      ack(f, index),
+    );
+    const results = acks.map((command) => f.session.request(command));
+    // The window answers at 90 with no tick (or other admission) since 0, so the session has no
+    // fresher reading than 0; promotion reads the clock itself.
     f.clock(90);
-    f.session.tick();
-    for (const command of window) f.session.receive(f.reply(command));
-    // The waiting ACK took its slot at 90: measured from its admission it would have expired
-    // at 100, but it has been with the worker for 60 of its 100 ms.
-    f.clock(150);
+    for (const command of acks.slice(0, PIPE_ROUTE_CONTROL_COMMANDS))
+      f.session.receive(f.reply(command));
+    // Measured from admission, or from the stale reading, the promoted ACKs would expire at 100.
+    f.clock(101);
     f.session.tick();
     expect(f.lost()).toBe(0);
-    f.session.receive(f.reply(late));
-    for (const result of await Promise.all([...results, lateResult]))
+    f.clock(189);
+    f.session.tick();
+    expect(f.lost()).toBe(0);
+    for (const command of acks.slice(PIPE_ROUTE_CONTROL_COMMANDS))
+      f.session.receive(f.reply(command));
+    for (const result of await Promise.all(results))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
-    // A worker that never answers a promoted command still loses contact at its deadline.
-    const silent = ack(PIPE_ROUTE_CONTROL_COMMANDS + 1);
-    const silentResult = f.session.request(silent);
-    f.clock(250);
+    // A worker that never answers still loses contact at the deadline (189 + 100).
+    const silent = f.session.request(ack(f, 0, "silent"));
+    f.clock(288);
+    f.session.tick();
+    expect(f.lost()).toBe(0);
+    f.clock(289);
     f.session.tick();
     expect(f.lost()).toBe(1);
-    expect((await silentResult).error.kind).toBe("RESULT_UNKNOWN");
+    expect((await silent).error.kind).toBe("RESULT_UNKNOWN");
+  });
+
+  it("never refuses an opened route's control for byte pressure and keeps essential headroom", async () => {
+    const f = fixture();
+    f.start();
+    await openRoutes(f, 2 * PIPE_ROUTE_CONTROL_COMMANDS);
+    // Fill every ordinary byte the account allows, as sustained output would.
+    const before = f.bytes.snapshot();
+    const filler = f.bytes.reserve(before.limit - before.controlReserve - before.ordinary);
+    expect(filler).not.toBeNull();
+    const pressed = f.bytes.snapshot().total;
+    const from = f.writes.length;
+    const acks = Array.from({ length: 2 * PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+      ack(f, index),
+    );
+    const results = acks.map((command) => f.session.request(command));
+    const unsubscribe = f.command("unsubscribe", "unsubscribe", { subscription: on(0) });
+    const unsubscribed = f.session.requestUnsubscribe(unsubscribe);
+    // Waiting and admitted route control is prepaid: the account did not move, so the control
+    // reserve is still whole for status and stop, which are admitted into their own slots.
+    expect(f.bytes.snapshot().total).toBe(pressed);
+    const status = f.command("status", "status");
+    const stop = f.command("stop", "stop", { operationId: "stop-operation" });
+    const statusResult = f.session.request(status);
+    const stopResult = f.session.request(stop);
+    expect(writtenIds(f, from)).toEqual([
+      ...acks.slice(0, PIPE_ROUTE_CONTROL_COMMANDS).map((command) => command.requestId),
+      "status",
+      "stop",
+    ]);
+    for (const command of [...acks, unsubscribe]) f.session.receive(f.reply(command));
+    for (const result of await Promise.all([...results, unsubscribed]))
+      expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(f.lost()).toBe(0);
+    // Status and stop were admitted and written; their own replies are not the point here.
+    f.session.loseContact();
+    await Promise.all([statusResult, stopResult]);
+    filler.release();
+  });
+
+  it("never lets prepaid route control exhaust the identities other commands need", async () => {
+    const f = fixture(undefined, 3);
+    f.start();
+    await openRoutes(f, 2 * PIPE_ROUTE_CONTROL_COMMANDS);
+    const acks = Array.from({ length: 2 * PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+      ack(f, index),
+    );
+    const results = acks.map((command) => f.session.request(command));
+    // Eight route-control identities are outstanding against a limit of three, yet status is
+    // still admitted: prepaid route control is bounded by the routes, not by identityLimit.
+    const from = f.writes.length;
+    const status = f.command("status", "status");
+    const statusResult = f.session.request(status);
+    expect(writtenIds(f, from)).toEqual(["status"]);
+    for (const command of acks) f.session.receive(f.reply(command));
+    for (const result of await Promise.all(results))
+      expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+    expect(f.lost()).toBe(0);
+    f.session.loseContact();
+    await statusResult;
   });
 
   it("activates same-chunk events only after synchronous result-marker admission", async () => {
