@@ -342,6 +342,95 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 
 一期只需要保留这些身份边界，不预先实现事件总线、复杂同步系统或 Shepherd 专用协议。
 
+### 7.1 提案：以 tend 实现 Shepherd，经 CLI 集成（待用户审阅）
+
+状态：提案，不是已接受的决策，也不属于 M1 或任何已排期 milestone。以下 2026-10-16 的方向由用户给出，
+具体接口、字段与控制模型是待审阅的建议。
+
+角色名仍为 Shepherd，拟由 [tend](https://github.com/GhostFlying/tend) 实现：以持久任务账本为中心，
+包含主 agent、pull 模式的 runner 与独立验收，并有自己的服务与 UI。依据 tend 公开设计（提交 `648d921`）：
+`docs/design-v0.1.md` D07、§12.2 ExecutionAdapter、§13.1 人工接管，`docs/design.md` D19、§4 Runner 协议。
+
+**边界**
+
+- tend 的服务与 UI 完全独立于 Cove。Cove 不承载 tend 的 UI，不为此提前 Web App；
+  Web App、RN 与 chat UI 的排期不变（[工程 §4](engineering-plan.md#4-建议的里程碑与退出条件)）。
+- 集成方式是 Cove CLI：每台执行主机上的 tend-runner 调用本机的 `cove` CLI。
+  tend 不需要与远端 Cove server 建立协议连接；tend 与 runner 之间是 tend 自己的协议。
+  Cove 客户端仍各自直连多台 server（[Server 架构 §1](server-architecture.md#1-relay-的定位)），两者互不中转。
+- Worker 是普通 Cove 终端 run：tend-runner 用 CLI 创建 task/workspace/挂载，再
+  `cove tab create -- claude|codex <初始指令>`。Cove 只看到一个带启动配方的 tab，不知道它属于 tend。
+- tend 不解析 VT 字节流。它通过 agent 自身的 hook（Claude Code hooks，Codex 的 hooks 或 notify）及读取 agent 的
+  rollout/transcript 文件观测 worker，与 Orca 的做法同类。Hook 配置与 rollout 读取是 tend-runner 的职责；
+  Cove 保持与 agent 无关，不实现 agent 状态 hook。[工程 §3.4](engineering-plan.md#34-不把未选择的功能变成首期前置条件)
+  延后的“agent 最后业务状态 hook”在此提案下意味着 Cove 自身不做这项能力。
+- 无人值守的 TUI agent 必须以不阻塞的权限模式启动；这属于 tend 的启动配方，Cove 不检查也不改写。
+- Cove server 重启时 worker run 按 [M1 D9](milestones/m1.md#d9-重启后的-run-显示选-a) 标为会话中断，
+  不重跑。是否用 agent 自身的 resume 继续由 tend 决定，Cove 不推断业务进度。
+- tend 判断任务完成不授权 Cove 停止 run 或删除 worktree；这些仍是带 operationId 的显式 CLI 操作。
+
+**人工接管经由 Cove 的控制权**
+
+人在任一 Cove 客户端 attach 同一个 tab 即可看到 live TUI。观看不是接管；按 [终端 §7](terminal-architecture.md#7-多客户端的尺寸与输入跟随当前操作者)，
+人的有效 focus 取得控制权（新的 controlEpoch）才是接管事实。tend-runner 通过事件接口看到控制者变化后，
+按 tend 的接管设计（v0.1 D07、§13.1）暂停对该 run 的自动干预、继续观测；人在 tend 中明确交回后，
+tend 先对齐当前状态，再恢复托管执行；人仍持有 Cove 控制权时，程序化输入一律被拒绝。Cove 不知道 tend 的托管状态，只发布控制权事实。
+
+**程序化输入的控制模型（建议 A）**
+
+首版需要向运行中的 agent 追加指令，例如 `cove tab send <tab> --operation-id <id> --if-control-epoch <E> -- <文本>`。
+
+- A（建议）：不抢占、以 epoch 隔离的一次性写入。自动化输入不取得控制权，也不 resize。
+  Server 在控制权仲裁的同一串行顺序中检查：当前没有控制者，且当前 controlEpoch 等于调用方观测到的 E；
+  否则以明确错误拒绝（有人控制 / 控制权已变化），不写入任何字节。接受后，该输入以 E 进入执行侧队列；
+  若其间有人取得控制权（epoch 变为 E+1），按 [终端 §3.5](terminal-architecture.md#35-focusresize-与输入)
+  的过期输入规则在执行侧丢弃并报告。E 让 tend 发现“接管后又释放”的中间变化，必须先对齐再发送。
+- 一次 send 是一个有界的输入单元，按 `(serverId, principalId, operationId)` 去重（[M1 操作身份](milestones/m1.md#操作身份跨重启)）。
+  结果区分未写入、已完整写入与不确定；不确定时不自动重发，同一 operationId 重发只返回原记录。
+  重启后遗留的未决 send 只能核实或放弃，不提供“继续”，避免重复终端输入。
+- 理由：沿用已有的单控制者与 epoch 隔离，不增加新的控制状态；人始终优先，自动化不能从人手里拿走控制权；
+  “持有控制权”这一个事实同时用于输入仲裁和接管观测。
+- 备选 B：自动化租约。CLI 主体取得带期限的控制权，人的 focus 可抢占。需要定义无网格的控制者、
+  租约续期与崩溃后的释放，并让控制者信息混入自动化持有者，接管事实不再等于“有人控制”。
+- 备选 C：把 CLI 视为普通 focus 客户端。会从人手里抢走控制权并按无意义的尺寸 resize，不满足接管要求。
+
+**Cove 需要提供的能力（M1 之后）**
+
+- 只读的事件/等待接口，例如 `cove tab watch <tab> --json` 或 `cove events --json --since <cursor>`：
+  按 [Server 架构 §3](server-architecture.md#3-同步命令提交给-serverserver-发布事实) 的快照加 cursor 语义发布 run 启动/退出/中断与控制者变化；
+  缺口时要求重新取快照，tend-runner 不需要轮询。
+- `tab get` 展示控制者：持有控制权的人类设备与 controlEpoch，或无控制者。
+- 程序化输入，即上文的 `tab send`。
+- 启动配方可携带有界的环境变量（tend 需要例如任务 ID 与 hook 回调地址）。M1 D8 只注入少量 Cove 标识、
+  不保存环境变量；扩展为显式的名称到值映射，限制条数与总字节数，禁止覆盖 `COVE_` 前缀，并随配方用于 reopen。
+  值按非机密数据保存在 SQLite 并出现在 `tab get` 与操作记录中，因此配方中不得放凭据；
+  需要凭据时由 tend-runner 在 Cove 之外提供，Cove 也不把环境变量值写入日志。
+- CLI JSON 输出成为有版本的稳定机器契约：版本独立于应用发布，也独立于协议版本；
+  同一主版本只做可选字段等兼容扩展，枚举新增值时消费者按未知处理，移除或改变语义需升级主版本；
+  错误码与退出码同样稳定。与协议版本一样，首个正式发布（含 alpha）之前不承诺兼容。
+
+**Orca 对照**（公开上游 `stablyai/orca` 提交 `55687fb`，只读源码调查，未运行）：
+Orca 的 agent 状态主要来自 hook。`src/main/claude/hook-service.ts` 把 hook 写入用户的 Claude 设置；
+Codex 使用 `hooks.json` 的 hook 而不是 `notify`，放在 Orca 管理的 `CODEX_HOME`（`src/main/codex/`）。
+Hook 脚本把事件 POST 到本机端口，端口与令牌经每个终端的环境变量注入（`src/main/agent-hooks/server/server-runtime-env.ts`）；
+`src/shared/agent-hook-listener/providers/` 将事件映射为 working/waiting/done。Rollout 只用于 Codex 的子 agent、
+Esc 中断等补充（`codex-transcript-poll.ts`），终端标题仅作后备。优点是事件驱动、精确；缺陷是改写用户全局配置、
+随 agent 版本频繁打补丁、漏掉最终 hook 时状态陈旧（30 分钟衰减），且 rollout 格式未公开。
+据此本提案把这些适配完全留给 tend-runner，Cove 只提供启动环境与控制权事实，不复制 Orca 的 hook 服务。
+
+**待用户决定**
+
+1. 是否接受以上方向与建议 A；`--if-control-epoch` 是否对所有程序化输入强制。
+2. 放在哪个 milestone。建议在 M1 之后、与 M3 的业务事件订阅一起或之前单独安排；由用户选择。
+3. 文本与提交键：send 是否提供与文本分开的回车（不同 TUI 对粘贴中的换行处理不同）。
+4. tend 用 agent resume 继续中断的 worker 时，使用新 tab，还是允许 `tab reopen` 临时覆盖启动参数。
+5. 环境变量的具体条数与字节上限，是否允许覆盖 `PATH` 等常用变量；是否另设只用于本次 run、
+   不落库也不随 reopen 复用的临时值（Orca 以此类方式注入 hook 令牌）。
+6. 接受后，§1 与 [终端 §12](terminal-architecture.md#12-tab-状态与-server-重启后的重开) 中“agent 最后业务状态后续由 hook 提供”的表述
+   需改为由 Shepherd（tend）负责。
+7. tend 当前 MVP 的 worker 直接驱动 app-server（tend v0.2 D38），Cove 终端 run 是 tend 新增的执行后端；
+   何时接入由 tend 决定。
+
 ## 8. 一期范围建议与待讨论项
 
 ### 建议纳入
