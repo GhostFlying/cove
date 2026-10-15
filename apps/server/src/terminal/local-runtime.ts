@@ -120,14 +120,16 @@ export class LocalRuntime implements RuntimeTerminalPort {
   private async request(
     command: PipeCommand,
     payload?: Uint8Array,
-    waitForProgress = false,
+    unsubscribe = false,
   ): Promise<RuntimeResult> {
     const placement = this.pool.get(command.run);
     if (this.disposed || !placement || !sameWorkerRef(command.worker, placement.worker))
       return this.unavailable(command);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
     if (command.type === "spawn") this.registry.markDispatched(command.run, command.worker);
-    const result = await (waitForProgress && command.type === "unsubscribe"
+    // An unsubscribe carries no result handoff; every route-control command, this one
+    // included, waits for a free slot in the worker's route-control window.
+    const result = await (unsubscribe && command.type === "unsubscribe"
       ? placement.session.requestUnsubscribe(command)
       : placement.session.request(command, payload, this.resultHandoff));
     if (result.type === "result" && result.runStatus)

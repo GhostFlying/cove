@@ -92,8 +92,6 @@ export class TerminalSubscriptions {
   private readonly requests = new Map<string, Request>();
   private readonly teardownQueue: Teardown[] = [];
   private teardownActive = false;
-  private backgroundTeardownActive = false;
-  private progressInFlight = 0;
   // Client request IDs are opaque, so the server cannot prove ordering. It rejects reuse
   // of an in-flight ID and of one in a bounded FIFO window of recently settled IDs; the
   // client mints a fresh ID per request, so an ID older than the window is never reused
@@ -262,6 +260,16 @@ export class TerminalSubscriptions {
       return this.reject(command, "CAPABILITY_UNAVAILABLE");
     if (!this.composition.owns(command.run)) return this.reject(command, "INSTANCE_MISMATCH");
     if (this.knownId(command.requestId)) return this.reject(command, "COUNTER_EXHAUSTED");
+    // Route control (detach, applied-ack, baseline-progress) is bounded per subscription, not
+    // by the worker's route-control window. A subscription holds at most one unsettled command
+    // of each of these types (checked below once its route is known); the client keeps at most
+    // one ACK and one progress report in flight per subscription and coalesces newer ones to
+    // the latest, so a conforming client is never refused here. The route queue runs them one
+    // at a time, and the worker pipe holds any that find its window full until a slot frees.
+    // A fixed connection-wide window of PIPE_ROUTE_CONTROL_COMMANDS used to refuse the fifth
+    // streaming subscription's ACK with BUSY, which ended that subscription (issue #96).
+    // controlLimit() caps the records one connection may hold in total, so a connection whose
+    // retired routes still drain cannot grow them without bound either.
     const control =
       command.type === "detach" ||
       command.type === "applied-ack" ||
@@ -269,7 +277,7 @@ export class TerminalSubscriptions {
     if (
       this.externalIds.size >= this.options.requestLimit ||
       (control
-        ? this.controlPending + (this.backgroundTeardownActive ? 1 : 0) >= 4
+        ? this.controlPending >= this.controlLimit()
         : this.ordinaryPending >= this.composition.budgets.pendingWorkerCommands)
     )
       return this.reject(command, "BUSY");
@@ -291,6 +299,14 @@ export class TerminalSubscriptions {
       if (!route) return this.reject(command, this.retiredFailure(command) ?? "STALE_CONNECTION");
       if (route.phase === "retired")
         return this.reject(command, route.failure ?? "STALE_CONNECTION");
+      // An ACK or progress report is cumulative and its successor covers it, but the client
+      // sends the successor only after this one settles. A second unsettled one is refused,
+      // not queued, so a route never holds more than one of each (see the admission above).
+      if (
+        control &&
+        route.queue.some((value) => !value.settled && value.command.type === command.type)
+      )
+        return this.reject(command, "BUSY");
       if (
         command.type === "recover" &&
         (!this.resumeValid(command) ||
@@ -409,6 +425,12 @@ export class TerminalSubscriptions {
     route!.queue.push(request);
     void this.run(route!);
     return promise;
+  }
+
+  // One unsettled detach, applied-ack and baseline-progress for each subscription the
+  // connection may hold live (see handle()).
+  private controlLimit(): number {
+    return 3 * this.composition.budgets.subscriptionsPerConnection;
   }
 
   private retiredFailure(command: Exclude<Supported, { type: "attach" }>): DomainError | undefined {
@@ -573,10 +595,7 @@ export class TerminalSubscriptions {
           this.dequeue(route);
           continue;
         }
-        const progress =
-          request.command.type === "applied-ack" || request.command.type === "baseline-progress";
         this.inFlight++;
-        if (progress) this.progressInFlight++;
         try {
           await this.execute(request);
         } catch {
@@ -584,7 +603,6 @@ export class TerminalSubscriptions {
           this.finish(request, this.error(request.command, route.failure!));
         } finally {
           this.inFlight--;
-          if (progress) this.progressInFlight--;
           this.flushTeardown();
           this.releaseClosedRecords();
         }
@@ -886,12 +904,14 @@ export class TerminalSubscriptions {
     this.flushTeardown();
     return promise;
   }
+  // Unsubscribes leave one at a time. They need no share of the worker's route-control window
+  // reserved here: the worker pipe holds a route-control command that finds the window full
+  // until a slot frees, in arrival order, so a teardown neither waits for this connection's
+  // ACKs to drain nor is refused for them.
   private flushTeardown(): void {
-    if (this.teardownActive || this.progressInFlight >= 4 || !this.teardownQueue.length) return;
-    // Preserve the four-slot progress capacity without waiting for ordinary B2 results.
+    if (this.teardownActive || !this.teardownQueue.length) return;
     const { route, requestId, resolve, reject } = this.teardownQueue.shift()!;
     this.teardownActive = true;
-    this.backgroundTeardownActive = !this.requests.has(requestId);
     this.inFlight++;
     let completed = false;
     const complete = () => {
@@ -899,7 +919,6 @@ export class TerminalSubscriptions {
       completed = true;
       route.teardown = undefined;
       this.teardownActive = false;
-      this.backgroundTeardownActive = false;
       this.inFlight--;
       this.flushTeardown();
       this.releaseClosedRecords();

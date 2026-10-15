@@ -245,20 +245,20 @@ export class WorkerPipeSession {
     payload: Uint8Array = new Uint8Array(),
     handoff?: ResultHandoff,
   ): Promise<RuntimeResult> {
-    return this.admit(command, payload, handoff, false);
+    return this.admit(command, payload, handoff);
   }
 
   requestUnsubscribe(
     command: Extract<PipeCommand, { type: "unsubscribe" }>,
   ): Promise<RuntimeResult> {
-    return this.admit(command, new Uint8Array(), undefined, true);
+    return this.admit(command, new Uint8Array(), undefined);
   }
 
   requestPreview(
     command: Extract<PipeCommand, { type: "preview-refresh" }>,
     seal: PreviewResultSeal,
   ): Promise<RuntimeResult> {
-    return this.admit(command, new Uint8Array(), undefined, false, seal);
+    return this.admit(command, new Uint8Array(), undefined, seal);
   }
 
   private progressCount(): number {
@@ -266,11 +266,20 @@ export class WorkerPipeSession {
       .length;
   }
 
+  // A waiting command has not reached the worker, so the time it spent waiting is no evidence
+  // of lost contact: the admitted commands ahead of it carry the liveness deadline (tick()
+  // ignores waiting ones). Its own deadline therefore starts when it takes a slot. lastNow is
+  // the latest validated clock reading; using it, rather than calling the clock supplier from
+  // this reply path, can only make the deadline earlier, never later.
   private promoteProgress(): void {
     if (this.closed) return;
     while (this.waitingProgress.length && this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS) {
       const item = this.waitingProgress.shift()!;
       item.request!.admitted = true;
+      item.request!.deadline = Math.max(
+        item.request!.deadline,
+        this.lastNow + this.options.timeoutMs,
+      );
       this.queue.push(item);
     }
     if (!this.receiving) this.flush();
@@ -280,7 +289,6 @@ export class WorkerPipeSession {
     command: PipeCommand,
     payload: Uint8Array,
     handoff: ResultHandoff | undefined,
-    waitForProgress: boolean,
     previewSeal?: PreviewResultSeal,
   ): Promise<RuntimeResult> {
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
@@ -305,7 +313,19 @@ export class WorkerPipeSession {
           ? // The worker's route-control queue bound; exceeding it shuts the worker down.
             PIPE_ROUTE_CONTROL_COMMANDS
           : 1;
-    if ((!waitForProgress && count >= cap) || this.identities.size >= this.options.identityLimit)
+    // Route control (applied-ack, baseline-progress, unsubscribe) is never refused for a full
+    // window: it waits unsent, in arrival order, and takes the next free slot (see
+    // promoteProgress). Refusing an ACK here used to retire a healthy subscription whenever more
+    // than PIPE_ROUTE_CONTROL_COMMANDS streaming subscriptions shared this worker (issue #96).
+    // The wait stays bounded by the route count: each subscription's commands reach this pipe
+    // one at a time from its route queue (TerminalSubscriptions), apart from its single
+    // unsubscribe, and routeControlWaiting() refuses a second waiting command of one type for
+    // one subscription, which a conforming caller never sends.
+    if (
+      (role !== "progress" && count >= cap) ||
+      this.identities.size >= this.options.identityLimit ||
+      this.routeControlWaiting(command)
+    )
       return Promise.resolve(this.error(command, "BUSY"));
     if ((command.type === "subscribe" || command.type === "recover") && !handoff)
       return Promise.resolve(this.error(command, "BUSY"));
@@ -340,8 +360,13 @@ export class WorkerPipeSession {
     const currentCount = [...this.pending.values()].filter(
       (entry) => entry.role === role && entry.admitted,
     ).length;
-    const waiting = waitForProgress && currentCount >= cap;
-    if ((!waiting && currentCount >= cap) || this.identities.size >= this.options.identityLimit)
+    // A command also waits behind an earlier waiting one, so it can never overtake it.
+    const waiting = role === "progress" && (currentCount >= cap || this.waitingProgress.length > 0);
+    if (
+      (!waiting && currentCount >= cap) ||
+      this.identities.size >= this.options.identityLimit ||
+      this.routeControlWaiting(snapshot)
+    )
       return Promise.resolve(this.error(command, "BUSY"));
     const identityLease = this.composition.bytes.reserve(
       6 * MAX_METADATA_BYTES + 2048,
@@ -406,8 +431,21 @@ export class WorkerPipeSession {
     }
     this.identities.set(snapshot.requestId, identityLease);
     this.pending.set(snapshot.requestId, pending);
+    // A command that queued only to stay behind an earlier waiting one may find a slot that a
+    // reentrant settlement freed meanwhile; promotion hands it over in order.
+    if (waiting) this.promoteProgress();
     this.flush();
     return promise;
+  }
+
+  private routeControlWaiting(command: PipeCommand): boolean {
+    if (this.role(command) !== "progress" || !("subscription" in command)) return false;
+    return this.waitingProgress.some(
+      (item) =>
+        item.request?.command.type === command.type &&
+        "subscription" in item.request.command &&
+        sameSubscriptionRef(item.request.command.subscription, command.subscription),
+    );
   }
 
   private enqueue(
@@ -431,7 +469,7 @@ export class WorkerPipeSession {
     if (!lease) return false;
     this.queuedBytes += size;
     if (!control) this.ordinaryBytes += size;
-    // Waiting unsubscribe backing uses the same byte budget, but owns no progress slot yet.
+    // Waiting route-control backing uses the same byte budget, but owns no progress slot yet.
     (waiting ? this.waitingProgress : this.queue).push({
       bytes,
       lease,
@@ -630,7 +668,7 @@ export class WorkerPipeSession {
     const now = this.now();
     if (
       (this.state === "hello" && now >= this.handshakeDeadline) ||
-      [...this.pending.values()].some((entry) => now >= entry.deadline)
+      [...this.pending.values()].some((entry) => entry.admitted && now >= entry.deadline)
     )
       this.loseContact();
   }

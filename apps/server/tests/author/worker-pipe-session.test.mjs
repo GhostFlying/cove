@@ -279,7 +279,7 @@ describe("bounded worker pipe session", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
-  it("keeps route control within the worker's window and queues unsubscribe in order", async () => {
+  it("keeps route control within the worker's window and queues the rest in arrival order", async () => {
     const f = fixture();
     f.start();
     // Request IDs of the route-control commands handed to the transport, in write order.
@@ -288,41 +288,88 @@ describe("bounded worker pipe session", () => {
         const read = createPipeDecoder().read(data);
         return JSON.parse(codec.decode(read.frames[0].metadata)).requestId;
       });
-    const route = (index) =>
+    const on = (index) => ({ ...subscription, subscriptionId: `subscription-${index}` });
+    const route = (index, requestId = `route-${index}`) =>
       index % 2
-        ? f.command("baseline-progress", `route-${index}`, {
-            subscription,
+        ? f.command("baseline-progress", requestId, {
+            subscription: on(index),
             baselineId: "baseline",
             lastParsedOrdinal: index,
           })
-        : f.command("applied-ack", `route-${index}`, { subscription, appliedSeq: index });
+        : f.command("applied-ack", requestId, { subscription: on(index), appliedSeq: index });
     const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => route(index));
     const results = window.map((command) => f.session.request(command));
     expect(written()).toEqual(window.map((command) => command.requestId));
-    // Past the window, ordinary progress is refused before it is written, never sent for the
-    // worker to queue: the worker treats more than the window as a protocol violation.
-    const overflow = await f.session.request(route(PIPE_ROUTE_CONTROL_COMMANDS));
-    expect(overflow.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
-    // Unsubscribe is never refused for a full window; it waits unsent, in arrival order.
-    const first = f.command("unsubscribe", "unsubscribe-first", { subscription });
-    const second = f.command("unsubscribe", "unsubscribe-second", {
-      subscription: { ...subscription, subscriptionId: "other" },
-    });
-    const unsubscribed = [first, second].map((command) => f.session.requestUnsubscribe(command));
+    // Past the window nothing is written for the worker to queue (it treats more than the
+    // window as a protocol violation), and nothing is refused either: ACKs, progress reports and
+    // unsubscribes of other subscriptions wait unsent, in arrival order (issue #96).
+    const first = f.command("unsubscribe", "unsubscribe-first", { subscription: on(0) });
+    const waiting = [
+      route(PIPE_ROUTE_CONTROL_COMMANDS),
+      first,
+      route(PIPE_ROUTE_CONTROL_COMMANDS + 1),
+      f.command("unsubscribe", "unsubscribe-second", { subscription: on(1) }),
+    ];
+    const waited = waiting.map((command) =>
+      command.type === "unsubscribe"
+        ? f.session.requestUnsubscribe(command)
+        : f.session.request(command),
+    );
+    // The bound per subscription: a second waiting command of one type for one subscription is
+    // refused unsent; its route queue never sends one.
+    const duplicate = await f.session.request(route(PIPE_ROUTE_CONTROL_COMMANDS, "duplicate"));
+    expect(duplicate.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
     expect(written()).toHaveLength(PIPE_ROUTE_CONTROL_COMMANDS);
-    // Each reply frees one slot, and only then is the oldest waiting unsubscribe written.
+    expect(f.session.snapshot().pending).toBe(PIPE_ROUTE_CONTROL_COMMANDS + waiting.length);
+    // Each reply frees one slot, and only then is the oldest waiting command written.
     f.session.receive(f.reply(window[0]));
-    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([first.requestId]);
+    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([waiting[0].requestId]);
     f.session.receive(f.reply(window[1]));
-    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual([
-      first.requestId,
-      second.requestId,
-    ]);
-    for (const command of [...window.slice(2), first, second]) f.session.receive(f.reply(command));
-    for (const result of await Promise.all([...results, ...unsubscribed]))
+    f.session.receive(f.reply(window[2]));
+    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
+      waiting.slice(0, 3).map((command) => command.requestId),
+    );
+    for (const command of [window[3], ...waiting]) f.session.receive(f.reply(command));
+    expect(written().slice(PIPE_ROUTE_CONTROL_COMMANDS)).toEqual(
+      waiting.map((command) => command.requestId),
+    );
+    for (const result of await Promise.all([...results, ...waited]))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
     expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
     expect(f.lost()).toBe(0);
+  });
+
+  it("starts a waiting route-control command's deadline when it takes a slot", async () => {
+    const f = fixture();
+    f.start();
+    const ack = (index) =>
+      f.command("applied-ack", `ack-${index}`, {
+        subscription: { ...subscription, subscriptionId: `subscription-${index}` },
+        appliedSeq: index,
+      });
+    const window = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) => ack(index));
+    const results = window.map((command) => f.session.request(command));
+    const late = ack(PIPE_ROUTE_CONTROL_COMMANDS);
+    const lateResult = f.session.request(late);
+    // Admitted at 0 with timeoutMs 100. The window answers just before its deadline.
+    f.clock(90);
+    f.session.tick();
+    for (const command of window) f.session.receive(f.reply(command));
+    // The waiting ACK took its slot at 90: measured from its admission it would have expired
+    // at 100, but it has been with the worker for 60 of its 100 ms.
+    f.clock(150);
+    f.session.tick();
+    expect(f.lost()).toBe(0);
+    f.session.receive(f.reply(late));
+    for (const result of await Promise.all([...results, lateResult]))
+      expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+    // A worker that never answers a promoted command still loses contact at its deadline.
+    const silent = ack(PIPE_ROUTE_CONTROL_COMMANDS + 1);
+    const silentResult = f.session.request(silent);
+    f.clock(250);
+    f.session.tick();
+    expect(f.lost()).toBe(1);
+    expect((await silentResult).error.kind).toBe("RESULT_UNKNOWN");
   });
 
   it("activates same-chunk events only after synchronous result-marker admission", async () => {

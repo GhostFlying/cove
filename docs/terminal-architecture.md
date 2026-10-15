@@ -159,6 +159,10 @@ worker 仍是输出/resize 等终端事件顺序的仲裁方，命令执行结�
 当前操作者相关工作优先，优先级只调整不同终端/请求间尚未发送的工作，不打乱同一终端事件顺序。
 同一 worker 的路由控制命令（applied-ack、baseline-progress、unsubscribe）由 worker 按到达顺序逐条执行；
 runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CONTROL_COMMANDS`，超出即协议违规、worker 失败关闭。
+窗口已满时 runtime 不拒绝路由控制命令，而是让它在 pipe 中未发送地按到达顺序等待，有空位时再发出（#96）；
+等待量以订阅数为界：每个订阅的这类命令经其路由队列逐条到达 pipe（另加至多一次 unsubscribe），同一订阅同类型的第二条等待命令被拒绝。
+等待中的命令尚未到达 worker，其应答期限从占得空位时起算。连接层按订阅限界：每个订阅同时至多一条未结算的
+applied-ack、baseline-progress 与 detach，第二条以 BUSY（not-accepted）拒绝；遵守协议的客户端每类只有一条在途，不会触发。
 
 进程池可从 devbox 已测的 4 个子进程起步，作为配置与验证起点，不是固定容量承诺。
 node-pty 官方明确不保证 worker_threads 安全，PTY 并行采用子进程。
