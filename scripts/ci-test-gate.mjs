@@ -998,7 +998,19 @@ export const finiteRuntimeExpansions = [
 // `<name>.test.mjs` directly in the directory has a `<name>.suite.json` beside it containing exactly
 // `{ "minimumTests": N }`; a test without a registration, a registration without a test, a nested
 // directory or another test file name fails the gate.
-export const fileRegisteredDirectories = [{ project: "cli", directory: "apps/cli/tests/m1" }];
+//
+// The discovered pairs alone fail open: deleting a test together with its registration (or the
+// whole directory) would remove it from the expected inventory. `required` is the independent
+// floor: suites (by name) that must be present, and the directory itself must exist. A task adding
+// a suite only adds its pair; the suite joins `required` when its acceptance must not silently
+// disappear.
+export const fileRegisteredDirectories = [
+  {
+    project: "cli",
+    directory: "apps/cli/tests/m1",
+    required: ["d6-probe-entry", "pending-operations", "s10-storage-identity", "test-isolation"],
+  },
+];
 
 const SUITE_SUFFIX = ".suite.json";
 const TEST_SUFFIX = ".test.mjs";
@@ -1029,12 +1041,13 @@ export async function readFileRegisteredSuites(
   directories = fileRegisteredDirectories,
 ) {
   const suites = [];
-  for (const { project, directory } of directories) {
+  for (const { project, directory, required = [] } of directories) {
     let entries;
     try {
       entries = await readdir(join(checkoutRoot, directory), { withFileTypes: true });
     } catch (error) {
-      if (error.code === "ENOENT") continue;
+      if (error.code === "ENOENT")
+        throw new Error(`Per-file registered test directory is missing: ${directory}`);
       throw error;
     }
     const tests = new Set();
@@ -1068,6 +1081,9 @@ export async function readFileRegisteredSuites(
     for (const name of registrations)
       if (!tests.has(name))
         throw new Error(`Suite registration has no test file: ${directory}/${name}${SUITE_SUFFIX}`);
+    for (const name of required)
+      if (!tests.has(name))
+        throw new Error(`Required per-file suite is missing: ${directory}/${name}${TEST_SUFFIX}`);
   }
   return suites;
 }

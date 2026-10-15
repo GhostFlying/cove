@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  fileRegisteredDirectories,
   readFileRegisteredSuites,
   readRequiredSuites,
   readVitestOwnedTestFiles,
@@ -1379,10 +1380,21 @@ test("rejects removal of a gate test below the required floor", () => {
 });
 
 test("M1 CLI suites are registered per file and join the required inventory", async () => {
+  // Pinned independently of the directory listing: these suites cannot leave the inventory by
+  // deleting a test together with its registration.
+  expect(fileRegisteredDirectories).toEqual([
+    {
+      project: "cli",
+      directory: "apps/cli/tests/m1",
+      required: ["d6-probe-entry", "pending-operations", "s10-storage-identity", "test-isolation"],
+    },
+  ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
   const registered = await readFileRegisteredSuites();
   expect(registered).toContainEqual({ project: "cli", file, minimumTests: 4 });
   expect(registered.every((suite) => suite.file.startsWith("apps/cli/tests/m1/"))).toBe(true);
+  for (const name of fileRegisteredDirectories[0].required)
+    expect(registered.map((suite) => suite.file)).toContain(`apps/cli/tests/m1/${name}.test.mjs`);
   const files = await readVitestOwnedTestFiles();
   for (const suite of registered) expect(files).toContain(suite.file);
   const all = await readRequiredSuites();
@@ -1432,9 +1444,20 @@ test("per-file suite registrations must pair one-to-one with valid minimum count
     { project: "cli", file: "tests/m1/a.test.mjs", minimumTests: 1 },
     { project: "cli", file: "tests/m1/b.test.mjs", minimumTests: 2 },
   ]);
+  // A missing directory fails instead of contributing an empty inventory.
   const missing = await mkdtemp(resolve(tmpdir(), "cove-ci-suites-"));
   temporaryDirectories.push(missing);
-  expect(await readFileRegisteredSuites(missing, directories)).toEqual([]);
+  await expect(readFileRegisteredSuites(missing, directories)).rejects.toThrow(
+    "Per-file registered test directory is missing: tests/m1",
+  );
+  // A required suite deleted together with its registration fails.
+  const requiring = [{ ...directories[0], required: ["a", "s10"] }];
+  await expect(
+    readFileRegisteredSuites(
+      await checkout({ "a.test.mjs": "", "a.suite.json": '{"minimumTests":1}' }),
+      requiring,
+    ),
+  ).rejects.toThrow("Required per-file suite is missing: tests/m1/s10.test.mjs");
 
   await expect(read({ "a.test.mjs": "" })).rejects.toThrow(/has no \.suite\.json registration/);
   await expect(read({ "a.suite.json": '{"minimumTests":1}' })).rejects.toThrow(
