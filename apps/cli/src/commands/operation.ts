@@ -10,7 +10,7 @@ import {
   withSession,
   type Arguments,
 } from "./_common.js";
-import { readPending } from "./_pending.js";
+import { readPending, syncPendingPublication } from "./_pending.js";
 
 export const usage = `  operation get <operationId>
   operation resend <operationId>`;
@@ -28,7 +28,11 @@ export async function run(args: Arguments): Promise<number> {
   if (sub === "resend") {
     takeFlags(args, []);
     const operationId = one(args, "operation id");
-    const pending = await readPending(homeDirectory(args), operationId);
+    const home = homeDirectory(args);
+    const pending = await readPending(home, operationId);
+    // The command that saved the record may have died before making it durable; this resend may
+    // be the request's first transmission.
+    await syncPendingPublication(home);
     return withSession(args, async ({ client, record }) => {
       // An operation ID is only meaningful to the server that recorded it. Another server would
       // treat the saved request as new work, so it is never sent there. A different relay
