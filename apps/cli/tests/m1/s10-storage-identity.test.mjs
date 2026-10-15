@@ -225,14 +225,15 @@ test("saved requests resent after kill -9 return their records and never execute
   expect(await markerLines(markers)).toHaveLength(2);
   expect((await fixture.coveJson(["terminal", "list"], { home })).runs).toEqual([]);
 
-  // The same operation ID with other params is a conflict, including the create rebuilt against
-  // the new instance and a config change to another value.
+  // The same operation ID with other params: the CLI refuses it before sending (its saved request
+  // differs), including the create rebuilt against the new instance and a config change to
+  // another value. Sent anyway, the server answers OPERATION_ID_CONFLICT (below).
   const rebuilt = await fixture.cove(
     ["terminal", "create", "--cwd", fixture.root, "--operation-id", "s10-create", ...command],
     { home },
   );
   expect(rebuilt.code).not.toBe(0);
-  expect(rebuilt.stderr).toContain("OPERATION_ID_CONFLICT");
+  expect(rebuilt.stderr).toContain("already has a saved request");
   const changed = await fixture.cove(
     [
       "config",
@@ -245,7 +246,7 @@ test("saved requests resent after kill -9 return their records and never execute
     { home },
   );
   expect(changed.code).not.toBe(0);
-  expect(changed.stderr).toContain("OPERATION_ID_CONFLICT");
+  expect(changed.stderr).toContain("already has a saved request");
 
   // A new operation ID carrying the old instance as its precondition is refused as stale.
   const client = createSessionClient(second.record);
@@ -260,6 +261,23 @@ test("saved requests resent after kill -9 return their records and never execute
       expectedRelayInstanceId: oldInstance,
     });
     expect(staleCreate).toMatchObject({ ok: false, error: { kind: "INSTANCE_MISMATCH" } });
+    const conflict = { ok: false, error: { kind: "OPERATION_ID_CONFLICT" } };
+    expect(
+      await client.call("terminal.create", {
+        executable: "/bin/sh",
+        argv: ["-c", `echo $$ >> '${markers}'; exec sleep 600`],
+        cwd: fixture.root,
+        geometry: { cols: 80, rows: 24 },
+        operationId: "s10-create",
+        expectedRelayInstanceId: second.record.relayInstanceId,
+      }),
+    ).toMatchObject(conflict);
+    expect(
+      await client.call("config.set", {
+        operationId: "s10-config",
+        patch: { workspaceRoot: join(fixture.root, "other-root") },
+      }),
+    ).toMatchObject(conflict);
     const staleStop = await client.call("terminal.stop", {
       run: kept,
       operationId: "s10-stale-stop",
