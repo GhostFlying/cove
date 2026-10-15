@@ -217,8 +217,8 @@ Reset 不删除 task、workspace、仓库目录或 rollout。旧 session 保留�
   不因任何容量拒绝或丢弃它们及其结果，包括请求与字节预算、worker 的路由控制窗口、pipe 与出站队列。它们至多等待
   按订阅预先支付的槽位释放。因此一个连接订阅多个持续输出的终端时不会丢失订阅，客户端也可以把已交出的确认视为
   覆盖其后发出的命令。确认仍可能因失联、连接关闭或取值被拒而失败。同一订阅同类的第二条未结算命令以 BUSY
-  （not-accepted）拒绝；遵守协议的客户端不会收到。确认的任何失败都结束该订阅（#96，细节见
-  [终端架构](terminal-architecture.md) 3.3 节）。
+  （not-accepted）拒绝，不结束该订阅；遵守协议的客户端不会收到。客户端在确认的任何失败后结束该订阅；
+  取值被拒（如 RESYNC_REQUIRED）时 server 不一定退役路由（#96，细节见 [终端架构](terminal-architecture.md) 3.3 节）。
 - 预览（preview）事件不带请求 ID，只靠 previewId 与请求关联：`preview-result` 在 `status` 为 `transfer` 时必须携带它完成的
   `previewId`，为 `unchanged` 时不得携带。客户端只在结果与实际收到的传输 ID 精确匹配时完成预览；同一请求出现第二个或不匹配的
   传输、或结果 ID 不符时按无效应答结束该预览，不能把迟到的旧传输归到同一 run 的新请求上。
