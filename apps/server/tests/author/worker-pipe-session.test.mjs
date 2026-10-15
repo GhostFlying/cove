@@ -668,136 +668,145 @@ describe("bounded worker pipe session", () => {
     }
   });
 
-  for (const delivery of ["coalesced", "fragmented"])
-    it(`lets the real worker take prepaid route control beyond pipeQueuedBytes, ${delivery}`, async () => {
-      // The smallest valid budgets; the runtime legally sends a full ordinary allowance, status,
-      // stop and four prepaid ACKs, more than pipeQueuedBytes in all.
-      const budgets = {
-        ...M0_LIMITS,
-        pipeQueuedBytes: HEADER_BYTES + MAX_METADATA_BYTES + 65_536,
-        reservedControlBytes: HEADER_BYTES + MAX_METADATA_BYTES,
-      };
-      const toWorker = new PassThrough();
-      const replies = [];
-      const output = new Writable({
-        highWaterMark: 1024 * 1024,
-        write(chunk, _encoding, callback) {
-          replies.push(Buffer.from(chunk));
-          callback();
-        },
-      });
-      const executed = [];
-      const pipe = runWorkerPipe(toWorker, output, {
-        buildVersion: "worker",
-        createExecution: () => ({
-          execute(command, payload = new Uint8Array()) {
-            executed.push(command.requestId);
-            const correlated = {
-              worker,
-              run,
-              requestId: command.requestId,
-              commandType: command.type,
-            };
-            // Status and stop only need to reach the worker and be answered here.
-            if (command.type === "status" || command.type === "stop")
-              return Promise.resolve({
-                ...correlated,
-                type: "error",
-                error: domainError("CAPABILITY_UNAVAILABLE"),
-              });
+  // Drives the real worker endpoint at the smallest valid budgets; `delivery` chooses how the
+  // runtime's bytes reach it.
+  async function prepaidBeyondQueue(delivery) {
+    // The smallest valid budgets; the runtime legally sends a full ordinary allowance, status,
+    // stop and four prepaid ACKs, more than pipeQueuedBytes in all.
+    const budgets = {
+      ...M0_LIMITS,
+      pipeQueuedBytes: HEADER_BYTES + MAX_METADATA_BYTES + 65_536,
+      reservedControlBytes: HEADER_BYTES + MAX_METADATA_BYTES,
+    };
+    const toWorker = new PassThrough();
+    const replies = [];
+    const output = new Writable({
+      highWaterMark: 1024 * 1024,
+      write(chunk, _encoding, callback) {
+        replies.push(Buffer.from(chunk));
+        callback();
+      },
+    });
+    const executed = [];
+    const pipe = runWorkerPipe(toWorker, output, {
+      buildVersion: "worker",
+      createExecution: () => ({
+        execute(command, payload = new Uint8Array()) {
+          executed.push(command.requestId);
+          const correlated = {
+            worker,
+            run,
+            requestId: command.requestId,
+            commandType: command.type,
+          };
+          // Status and stop only need to reach the worker and be answered here.
+          if (command.type === "status" || command.type === "stop")
             return Promise.resolve({
               ...correlated,
-              type: "result",
-              outcome: "accepted",
-              ...(command.type === "subscribe" ? { recoveryMode: "baseline", atSeq: 0 } : {}),
-              ...(command.type === "input"
-                ? { inputSeq: command.inputSeq, writtenBytes: payload.byteLength }
-                : {}),
+              type: "error",
+              error: domainError("CAPABILITY_UNAVAILABLE"),
             });
-          },
-          snapshot: () => ({}),
-          shutdown: async () => [],
-        }),
-      });
-      // The session's writes are held here and handed to the worker as the test chooses.
-      const outbox = [];
-      const f = fixture(budgets, 32, (data) => outbox.push(Buffer.from(data)));
-      const turn = () => new Promise((resolve) => setImmediate(resolve));
-      const send = () => {
-        if (outbox.length) toWorker.write(Buffer.concat(outbox.splice(0)));
-      };
-      let read = 0;
-      const exchange = async () => {
-        send();
-        f.settleWrites();
-        await turn();
-        const chunk = Buffer.concat(replies.slice(read));
-        read = replies.length;
-        if (chunk.length) f.session.receive(new Uint8Array(chunk));
-      };
-      const long = (prefix, index) => `${prefix}-${index}-`.padEnd(128, "x");
-      const wide = (index) => ({
-        ...subscription,
-        connection: { connectionId: long("connection", index), generation: 0 },
-        subscriptionId: long("subscription", index),
-        viewId: long("view", index),
-      });
-      try {
-        f.session.start();
-        await exchange();
-        expect(f.session.ready).toBe(true);
-        f.session.registerRun(run);
-        for (let index = 0; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
-          const subscribe = f.command("subscribe", long("open", index), {
-            subscription: wide(index),
-            atSeq: 0,
+          return Promise.resolve({
+            ...correlated,
+            type: "result",
+            outcome: "accepted",
+            ...(command.type === "subscribe" ? { recoveryMode: "baseline", atSeq: 0 } : {}),
+            ...(command.type === "input"
+              ? { inputSeq: command.inputSeq, writtenBytes: payload.byteLength }
+              : {}),
           });
-          const opened = f.session.request(subscribe, new Uint8Array(), () => true);
-          await exchange();
-          expect(await opened).toMatchObject({ outcome: "accepted" });
-        }
-        const size = (command, payload = 0) =>
-          encodePipeFrame(1, codec.encode(JSON.stringify(command)), new Uint8Array(payload)).value
-            .byteLength;
-        const input = f.command("input", "input", { subscription: wide(0), epoch: 1, inputSeq: 1 });
-        const payload = budgets.pipeQueuedBytes - budgets.reservedControlBytes - size(input);
-        const status = f.command("status", "status");
-        const stop = f.command("stop", "stop", { operationId: "stop-operation" });
-        const acks = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
-          f.command("applied-ack", long("ack", index), {
-            subscription: wide(index),
-            appliedSeq: 1,
-          }),
-        );
-        const results = [
-          f.session.request(input, new Uint8Array(payload)),
-          ...acks.map((command) => f.session.request(command)),
-        ];
-        const answered = [f.session.request(status), f.session.request(stop)];
-        const burst = Buffer.concat(outbox.splice(0));
-        expect(burst.length).toBeGreaterThan(budgets.pipeQueuedBytes);
-        if (delivery === "coalesced") toWorker.write(burst);
-        else {
-          // The decoder holds the partial ordinary frame when the ACKs arrive. Each read owns
-          // its own exactly sized buffer (Buffer.from may copy into Node's shared pool).
-          toWorker.write(new Uint8Array(burst.subarray(0, 65_535)));
-          await turn();
-          toWorker.write(new Uint8Array(burst.subarray(65_535)));
-        }
-        for (let step = 0; step < 16 && executed.length < 4 + 3 + acks.length; step++)
-          await exchange();
-        const state = pipe.snapshot().state;
-        expect(state === "ready" ? state : (await pipe.closed).reason).toBe("ready");
-        for (const result of await Promise.all(results))
-          expect(result).toMatchObject({ type: "result", outcome: "accepted" });
-        for (const result of await Promise.all(answered))
-          expect(result.error).toMatchObject({ kind: "CAPABILITY_UNAVAILABLE" });
-        expect(f.lost()).toBe(0);
-      } finally {
-        await pipe.shutdown("test-complete");
-        f.session.loseContact();
-      }
+        },
+        snapshot: () => ({}),
+        shutdown: async () => [],
+      }),
     });
+    // The session's writes are held here and handed to the worker as the test chooses.
+    const outbox = [];
+    const f = fixture(budgets, 32, (data) => outbox.push(Buffer.from(data)));
+    const turn = () => new Promise((resolve) => setImmediate(resolve));
+    const send = () => {
+      if (outbox.length) toWorker.write(Buffer.concat(outbox.splice(0)));
+    };
+    let read = 0;
+    const exchange = async () => {
+      send();
+      f.settleWrites();
+      await turn();
+      const chunk = Buffer.concat(replies.slice(read));
+      read = replies.length;
+      if (chunk.length) f.session.receive(new Uint8Array(chunk));
+    };
+    const long = (prefix, index) => `${prefix}-${index}-`.padEnd(128, "x");
+    const wide = (index) => ({
+      ...subscription,
+      connection: { connectionId: long("connection", index), generation: 0 },
+      subscriptionId: long("subscription", index),
+      viewId: long("view", index),
+    });
+    try {
+      f.session.start();
+      await exchange();
+      expect(f.session.ready).toBe(true);
+      f.session.registerRun(run);
+      for (let index = 0; index < PIPE_ROUTE_CONTROL_COMMANDS; index++) {
+        const subscribe = f.command("subscribe", long("open", index), {
+          subscription: wide(index),
+          atSeq: 0,
+        });
+        const opened = f.session.request(subscribe, new Uint8Array(), () => true);
+        await exchange();
+        expect(await opened).toMatchObject({ outcome: "accepted" });
+      }
+      const size = (command, payload = 0) =>
+        encodePipeFrame(1, codec.encode(JSON.stringify(command)), new Uint8Array(payload)).value
+          .byteLength;
+      const input = f.command("input", "input", { subscription: wide(0), epoch: 1, inputSeq: 1 });
+      const payload = budgets.pipeQueuedBytes - budgets.reservedControlBytes - size(input);
+      const status = f.command("status", "status");
+      const stop = f.command("stop", "stop", { operationId: "stop-operation" });
+      const acks = Array.from({ length: PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
+        f.command("applied-ack", long("ack", index), {
+          subscription: wide(index),
+          appliedSeq: 1,
+        }),
+      );
+      const results = [
+        f.session.request(input, new Uint8Array(payload)),
+        ...acks.map((command) => f.session.request(command)),
+      ];
+      const answered = [f.session.request(status), f.session.request(stop)];
+      const burst = Buffer.concat(outbox.splice(0));
+      expect(burst.length).toBeGreaterThan(budgets.pipeQueuedBytes);
+      if (delivery === "coalesced") toWorker.write(burst);
+      else {
+        // The decoder holds the partial ordinary frame when the ACKs arrive. Each read owns
+        // its own exactly sized buffer (Buffer.from may copy into Node's shared pool).
+        toWorker.write(new Uint8Array(burst.subarray(0, 65_535)));
+        await turn();
+        toWorker.write(new Uint8Array(burst.subarray(65_535)));
+      }
+      for (let step = 0; step < 16 && executed.length < 4 + 3 + acks.length; step++)
+        await exchange();
+      const state = pipe.snapshot().state;
+      expect(state === "ready" ? state : (await pipe.closed).reason).toBe("ready");
+      for (const result of await Promise.all(results))
+        expect(result).toMatchObject({ type: "result", outcome: "accepted" });
+      for (const result of await Promise.all(answered))
+        expect(result.error).toMatchObject({ kind: "CAPABILITY_UNAVAILABLE" });
+      expect(f.lost()).toBe(0);
+    } finally {
+      await pipe.shutdown("test-complete");
+      f.session.loseContact();
+    }
+  }
+
+  it("lets the real worker take prepaid route control beyond pipeQueuedBytes in one chunk", async () => {
+    await expect(prepaidBeyondQueue("coalesced")).resolves.toBeUndefined();
+  });
+
+  it("lets the real worker take prepaid route control beyond pipeQueuedBytes in fragments", async () => {
+    await expect(prepaidBeyondQueue("fragmented")).resolves.toBeUndefined();
+  });
 
   it("never lets prepaid route control exhaust the identities other commands need", async () => {
     const f = fixture(undefined, 3);
