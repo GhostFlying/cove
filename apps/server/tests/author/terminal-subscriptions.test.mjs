@@ -823,6 +823,62 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  it("keeps a waiting ACK result ahead of a following recover, so the recovery's ACK is accepted", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const ref = (await f.attach(a)).subscription;
+      for (let seq = 1; seq <= 4; seq++) f.session.receive(f.output(ref, seq));
+      // Three ACK results take the route's result slots; their write callbacks lag.
+      for (let seq = 1; seq <= 3; seq++) {
+        const ack = a.service.handle(
+          command("applied-ack", ref, `ack-${seq}`, { appliedSeq: seq }),
+        );
+        await turns();
+        f.session.receive(f.reply());
+        expect((await ack).type).toBe("applied-ack-result");
+      }
+      // The worker accepts the fourth ACK, but its result has no slot and waits.
+      let waited = false;
+      const waiting = a.service
+        .handle(command("applied-ack", ref, "ack-4", { appliedSeq: 4 }))
+        .then((reply) => ((waited = true), reply));
+      await turns();
+      f.session.receive(f.reply());
+      const recover = a.service.handle(
+        command("recover", ref, "recover", {
+          reason: "gap",
+          resume: { appliedSeq: 4, profile, encoding, geometry },
+        }),
+      );
+      await turns();
+      // The recover stays queued behind the waiting result: it was not even dispatched.
+      expect(waited).toBe(false);
+      expect(f.latest().type).toBe("applied-ack");
+      const results = () =>
+        a.writes
+          .map((item) => decode(item.data).metadata.type)
+          .filter((type) => type === "applied-ack-result" || type === "recover-result");
+      expect(results()).toEqual(Array(3).fill("applied-ack-result"));
+      // The transport finishes the earlier results; the waiting one is admitted, then recover runs.
+      a.settleWrites();
+      expect((await waiting).type).toBe("applied-ack-result");
+      await turns();
+      const sentRecover = f.latest();
+      expect(sentRecover.type).toBe("recover");
+      f.session.receive(f.reply(sentRecover, { recoveryMode: "replay", atSeq: 4 }));
+      expect((await recover).type).toBe("recover-result");
+      expect(results()).toEqual([...Array(4).fill("applied-ack-result"), "recover-result"]);
+      // The client's first ACK of the new attempt finds no unsettled ACK and is accepted.
+      const next = a.service.handle(command("applied-ack", ref, "after", { appliedSeq: 4 }));
+      await turns();
+      f.session.receive(f.reply());
+      expect((await next).type).toBe("applied-ack-result");
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it("refuses a second unsettled ACK of one subscription without retiring it", async () => {
     const f = fixture();
     const a = f.connect();
