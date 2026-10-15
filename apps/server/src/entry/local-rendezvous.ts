@@ -4,7 +4,7 @@ import { dirname, parse, join, isAbsolute, normalize } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
 
-export function launchIdentity() {
+export function launchIdentity(): { serverId: string; relayInstanceId: string; secret: string } {
   return {
     serverId: randomUUID(),
     relayInstanceId: randomUUID(),
