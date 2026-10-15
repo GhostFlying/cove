@@ -92,16 +92,39 @@ async function existingPending(
   return readPending(home, operationId);
 }
 
+// Makes a published pending record's directory entries durable: every directory from the record's
+// directory up to the filesystem root is fsynced. A file fsync does not make its directory entry
+// durable, and a host crash after the server accepted the operation must not lose the only local
+// copy of its ID and request.
+//
+// The whole chain is synced on every call, never only "what this call created": a command that
+// created the data directory (and possibly ancestors above it) can die before syncing them, and a
+// later command finds them already present. The call is idempotent, so `publishPending` (whether
+// it published or found the record) and `resend` both run it before transmitting. Every directory
+// the CLI may have created is its own and readable; an ancestor that cannot be opened for reading
+// existed before (the CLI could not have created it) and is skipped.
+export async function syncPendingPublication(home: string): Promise<void> {
+  const directory = pendingDirectory(home);
+  const homeParent = dirname(home);
+  for (let current = directory; ; current = dirname(current)) {
+    try {
+      await syncDirectory(current);
+    } catch (error) {
+      const above = current.length < homeParent.length;
+      if (!above || (error as NodeJS.ErrnoException).code !== "EACCES") throw error;
+    }
+    if (dirname(current) === current) break;
+  }
+}
+
 // Publishes the pending record of a write before it is first sent and returns the record that is
 // saved under its operation ID: this one, or the one an earlier command (or a concurrent one that
 // won the race) already saved. Write-once: an existing record is never replaced, so `resend` keeps
 // sending the request the ID was first used for.
 //
 // The content is complete and synced before link(2) publishes it (link refuses an existing path,
-// so of two concurrent commands exactly one publishes). The directory entry is then synced, and
-// with it every directory this call created and the directory holding the topmost one: a file
-// fsync does not make its directory entry durable, and a host crash after the server accepted the
-// operation must not lose the only local copy of its ID and request.
+// so of two concurrent commands exactly one publishes); syncPendingPublication then makes the
+// entry durable.
 export async function publishPending(
   home: string,
   pending: PendingOperation,
@@ -109,19 +132,8 @@ export async function publishPending(
   const operationId = pending.params.operationId;
   const path = pendingPath(home, operationId);
   const directory = pendingDirectory(home);
-  const created = await mkdir(directory, { recursive: true, mode: 0o700 });
-  // Directories up to and including the data directory are synced on every publication, not only
-  // when this call created them: a command that crashed before its sync may have created them.
-  const createdHome = created !== undefined && created.length <= home.length;
-  const top = createdHome ? created : home;
-  const syncPublication = async () => {
-    for (let current = directory; ; current = dirname(current)) {
-      await syncDirectory(current);
-      if (current === top || dirname(current) === current) break;
-    }
-    // A data directory this call created is itself a new entry in its parent.
-    if (createdHome) await syncDirectory(dirname(top));
-  };
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const syncPublication = () => syncPendingPublication(home);
   const saved = await existingPending(home, operationId);
   if (saved) {
     // An earlier command may have crashed between link(2) and its directory sync.
