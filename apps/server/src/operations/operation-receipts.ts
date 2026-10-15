@@ -41,8 +41,12 @@ export interface DurableReceiptBackend {
 
 // Proves the outcome of an operation an earlier instance left unfinished. It receives the record
 // already moved to `recovering` and returns its proven successor (next revision), or null when the
-// outcome cannot be proven, which leaves the operation requires_attention.
-export type ReceiptVerifier = (record: OperationRecord) => OperationRecord | null;
+// outcome cannot be proven, which leaves the operation requires_attention. It may inspect external
+// state (Git, processes) asynchronously; startup waits for it before serving.
+export type ReceiptVerifier = (
+  record: OperationRecord,
+) => OperationRecord | null | Promise<OperationRecord | null>;
+export type ReceiptVerifiers = Partial<Record<WriteRpcMethod, ReceiptVerifier>>;
 
 type Entry = {
   key: OperationReceiptKey;
@@ -270,32 +274,39 @@ export class OperationReceipts {
   // outcome its method's verifier proves; without a verifier or proof it becomes
   // requires_attention. Nothing is executed again: continuing or abandoning is an explicit command
   // with its own operation ID. Returns the receipts that were verified.
-  recoverInterrupted(
-    verifiers: Partial<Record<WriteRpcMethod, ReceiptVerifier>> = {},
-  ): OperationRecord[] {
+  //
+  // `verifiers` come from operations/recovery-verifiers.ts; a method without one keeps the generic
+  // outcome. The move to `recovering` is committed before the verifier runs, so a crash during
+  // verification leaves the receipt `recovering` and the next start verifies it again; the
+  // verifier's outcome is committed in a second transaction. Startup is the only caller and runs
+  // before any request is served, so nothing else changes these receipts in between.
+  async recoverInterrupted(verifiers: ReceiptVerifiers = {}): Promise<OperationRecord[]> {
     const durable = this.durable;
     if (!durable || this.disposed) return [];
     const verified: OperationRecord[] = [];
     for (const receipt of durable.unfinished()) {
+      const key = receipt.key;
+      const record = durable.atomic(() => {
+        const current = this.committed(key)?.record;
+        if (!current || TERMINAL_STATES.has(current.state)) return null;
+        if (current.state === "recovering") return current;
+        const recovering: OperationRecord = {
+          ...current,
+          revision: current.revision + 1,
+          state: "recovering",
+        };
+        if (!this.update(key, recovering)) throw new Error("Receipt verification refused");
+        return recovering;
+      });
+      if (!record) continue;
+      let proven: OperationRecord | null = null;
+      try {
+        proven = (await verifiers[record.method]?.(structuredClone(record))) ?? null;
+      } catch {
+        proven = null;
+      }
+      if (this.disposed) break;
       const outcome = durable.atomic(() => {
-        const key = receipt.key;
-        let record = this.committed(key)?.record;
-        if (!record || TERMINAL_STATES.has(record.state)) return null;
-        if (record.state !== "recovering") {
-          const recovering: OperationRecord = {
-            ...record,
-            revision: record.revision + 1,
-            state: "recovering",
-          };
-          if (!this.update(key, recovering)) throw new Error("Receipt verification refused");
-          record = recovering;
-        }
-        let proven: OperationRecord | null = null;
-        try {
-          proven = verifiers[record.method]?.(structuredClone(record)) ?? null;
-        } catch {
-          proven = null;
-        }
         if (proven && this.update(key, proven)) return proven;
         const attention: OperationRecord = {
           ...record,
@@ -306,7 +317,7 @@ export class OperationReceipts {
         if (!this.update(key, attention)) throw new Error("Receipt verification refused");
         return attention;
       });
-      if (outcome) verified.push(outcome);
+      verified.push(outcome);
     }
     return verified;
   }

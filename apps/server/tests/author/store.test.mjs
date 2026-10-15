@@ -289,7 +289,7 @@ describe("durable operation receipts", () => {
     close(store);
     store = await open(layout);
     receipts = durableReceipts(store, "server", "restarted");
-    const verified = receipts.recoverInterrupted();
+    const verified = await receipts.recoverInterrupted();
     expect(verified.map((item) => [item.operationId, item.state, item.revision]).sort()).toEqual([
       ["accepted", "requires_attention", 2],
       ["running", "requires_attention", 3],
@@ -319,7 +319,7 @@ describe("durable operation receipts", () => {
         state: "cancelled",
       }),
     ).toBe(true);
-    expect(receipts.recoverInterrupted()).toEqual([]);
+    expect(await receipts.recoverInterrupted()).toEqual([]);
     receipts.dispose();
   });
 
@@ -332,10 +332,52 @@ describe("durable operation receipts", () => {
     ).toBe(true);
     receipts.dispose();
     receipts = durableReceipts(store, "server", "second");
-    const [outcome] = receipts.recoverInterrupted({
-      "mount.retry": (current) => ({ ...current, revision: current.revision + 1, state: "failed" }),
+    const [outcome] = await receipts.recoverInterrupted({
+      // Verifiers may inspect external state asynchronously.
+      "mount.retry": async (current) => ({
+        ...current,
+        revision: current.revision + 1,
+        state: "failed",
+      }),
     });
     expect(outcome).toMatchObject({ state: "failed", revision: 2 });
+    receipts.dispose();
+  });
+
+  it("commits recovering before an asynchronous verifier and keeps the generic outcome when it throws", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    let receipts = durableReceipts(store);
+    for (const id of ["proven", "throws"])
+      expect(
+        receipts.prepare(key(id), `intent-${id}`).commit(record(id, { method: "mount.retry" })),
+      ).toBe(true);
+    receipts.dispose();
+    receipts = durableReceipts(store, "server", "second");
+    const seen = [];
+    const outcomes = await receipts.recoverInterrupted({
+      "mount.retry": async (current) => {
+        // The move to recovering is durable before the verifier inspects anything, so a crash
+        // during verification is retried by the next start.
+        seen.push([
+          current.operationId,
+          store.db
+            .prepare("SELECT state FROM operations WHERE operation_id = ?")
+            .get(current.operationId).state,
+        ]);
+        await new Promise((done) => setTimeout(done, 1));
+        if (current.operationId === "throws") throw new Error("inspection failed");
+        return { ...current, revision: current.revision + 1, state: "succeeded" };
+      },
+    });
+    expect(seen.sort()).toEqual([
+      ["proven", "recovering"],
+      ["throws", "recovering"],
+    ]);
+    expect(Object.fromEntries(outcomes.map((item) => [item.operationId, item.state]))).toEqual({
+      proven: "succeeded",
+      throws: "requires_attention",
+    });
     receipts.dispose();
   });
 });
