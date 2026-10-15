@@ -54,13 +54,18 @@ const PROBE_ENTRY = join(
   "dist/entry/d6-probe-main.js",
 );
 const TERMINALS = 8;
-// Output terminals with a subscribed client. The M0 worker pipe admits at most
+// Output terminals with a subscribed client (--subscribed-outputs). D6 prescribes all eight. The
+// default is three because of the M0 defect #96: the worker pipe admits at most
 // PIPE_ROUTE_CONTROL_COMMANDS (4) progress commands at once across all subscriptions of a worker,
-// and the client fails a subscription whose ACK is refused with BUSY; with one worker per server,
-// more than four continuously streaming subscriptions (here 8 outputs plus the echo terminal) make
-// subscriptions fail within seconds. Three subscribed outputs plus the echo terminal stay within
-// the bound; the other five terminals still print through the worker without WebSocket delivery.
-const SUBSCRIBED_OUTPUTS = 3;
+// and the client fails a subscription whose ACK is refused with BUSY, so more than four
+// continuously streaming subscriptions (8 outputs plus the echo terminal) fail within seconds. The
+// other terminals still print through the worker without WebSocket delivery. A run with fewer than
+// eight validated streams is a workload deviation: its verdict is PROVISIONAL, never final.
+const DEFAULT_SUBSCRIBED_OUTPUTS = 3;
+// Event-loop delay is sampled every 100 ms; a phase needs this share of its samples and no larger
+// gap between consecutive samples.
+const SAMPLE_COVERAGE = 0.9;
+const MAX_SAMPLE_GAP_MS = 500;
 const OUTPUT_BYTES_PER_SECOND = 64 * 1024;
 const KEY_INTERVAL_MS = 50;
 const WRITES_PER_SECOND = 20;
@@ -80,17 +85,30 @@ const now = () => performance.timeOrigin + performance.now();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function options(argv) {
-  const values = { phaseSeconds: 30, rounds: 3, out: undefined, reanalyze: undefined };
+  const values = {
+    phaseSeconds: 30,
+    rounds: 3,
+    subscribedOutputs: DEFAULT_SUBSCRIBED_OUTPUTS,
+    out: undefined,
+    reanalyze: undefined,
+  };
   for (let i = 0; i < argv.length; i += 2) {
     const [name, value] = [argv[i], argv[i + 1]];
     if (name === "--phase-seconds") values.phaseSeconds = Number(value);
     else if (name === "--rounds") values.rounds = Number(value);
+    else if (name === "--subscribed-outputs") values.subscribedOutputs = Number(value);
     else if (name === "--out") values.out = resolve(value);
     else if (name === "--reanalyze") values.reanalyze = resolve(value);
     else throw new Error(`unknown option ${name}`);
   }
   if (!(values.phaseSeconds > 0) || !Number.isInteger(values.rounds) || values.rounds < 1)
     throw new Error("--phase-seconds and --rounds must be positive");
+  if (
+    !Number.isInteger(values.subscribedOutputs) ||
+    values.subscribedOutputs < 1 ||
+    values.subscribedOutputs > TERMINALS
+  )
+    throw new Error(`--subscribed-outputs must be 1-${TERMINALS}`);
   return values;
 }
 
@@ -268,7 +286,13 @@ async function main() {
     const saved = JSON.parse(await readFile(config.reanalyze, "utf8"));
     const raw = saved.raw;
     const report = analyze({
-      config: raw.config ?? { phaseSeconds: 30, rounds: 3 },
+      // Raw data from before --subscribed-outputs subscribed the default three.
+      config: {
+        phaseSeconds: 30,
+        rounds: 3,
+        subscribedOutputs: DEFAULT_SUBSCRIBED_OUTPUTS,
+        ...raw.config,
+      },
       phases: raw.phases,
       echo: {
         keys: raw.keys,
@@ -322,15 +346,18 @@ async function main() {
     const typist = await connect();
     const writer = await connect();
 
-    const output = { bytes: 0 };
+    // Delivered bytes per subscribed terminal, so each stream is validated on its own.
+    const outputs = [];
     const watched = [];
     for (let i = 0; i < TERMINALS; i++) {
       const run = await create([process.execPath, script]);
-      if (i >= SUBSCRIBED_OUTPUTS) continue;
+      if (i >= config.subscribedOutputs) continue;
+      const counter = { bytes: 0 };
+      outputs.push(counter);
       const opened = watcher.openTerminal({
         run,
         viewId: `output-${i}`,
-        view: discardView(output),
+        view: discardView(counter),
         initialAppearance: DEFAULT_APPEARANCE,
       });
       if (!opened.ok) throw new Error("open output terminal failed");
@@ -407,7 +434,7 @@ async function main() {
         process.kill(server.pid, kind === "control" ? "SIGUSR2" : "SIGUSR1");
         await sleep(500);
         const label = `${round}-${kind}`;
-        const bytesBefore = output.bytes;
+        const bytesBefore = outputs.map((counter) => counter.bytes);
         const start = now();
         const end = start + config.phaseSeconds * 1000;
         phase = label;
@@ -420,7 +447,8 @@ async function main() {
           kind,
           start,
           end: now(),
-          outputBytes: output.bytes - bytesBefore,
+          outputBytesPerTerminal: outputs.map((counter, i) => counter.bytes - bytesBefore[i]),
+          outputBytes: outputs.reduce((sum, counter, i) => sum + counter.bytes - bytesBefore[i], 0),
         });
       }
     }
@@ -447,7 +475,11 @@ async function main() {
         {
           report,
           raw: {
-            config: { phaseSeconds: config.phaseSeconds, rounds: config.rounds },
+            config: {
+              phaseSeconds: config.phaseSeconds,
+              rounds: config.rounds,
+              subscribedOutputs: config.subscribedOutputs,
+            },
             mismatched: echo.mismatched,
             unmatched: echo.unmatched,
             unavailable,
@@ -624,7 +656,7 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
         // Delivered to the subscribing client, per subscribed terminal (PTY output includes the
         // CR that the line discipline adds before each LF).
         deliveredKiBPerSecondPerTerminal:
-          phase.outputBytes / 1024 / ((phase.end - phase.start) / 1000) / SUBSCRIBED_OUTPUTS,
+          phase.outputBytes / 1024 / ((phase.end - phase.start) / 1000) / config.subscribedOutputs,
       };
     };
     rounds.push({
@@ -736,16 +768,46 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
   // one SQLite transaction each, while in control phases they succeeded without any SQLite
   // transaction (and, where recorded, with in-memory write units instead). Failing writes that
   // return quickly, a missed mode switch or a stalled output stream make the phase incomplete.
+  //
+  // The instrumentation must cover the phase too: event-loop delay samples at the sampling rate
+  // with no long gap (a missing or stalled sampler gives no main-thread evidence).
   const switches = serverDump.switches ?? null;
   const intendedMode = { none: "sqlite", write: "sqlite", control: "memory" };
+  const minimumRate = (OUTPUT_BYTES_PER_SECOND / 1024) * 0.9;
+  // Streams: per subscribed terminal where the raw data has it (older raw data has the total only).
+  const streamRates = (phase) => {
+    const seconds = (phase.end - phase.start) / 1000;
+    return phase.outputBytesPerTerminal
+      ? phase.outputBytesPerTerminal.map((bytes) => bytes / 1024 / seconds)
+      : Array(config.subscribedOutputs).fill(
+          phase.outputBytes / 1024 / seconds / config.subscribedOutputs,
+        );
+  };
   const workloadGaps = phases
     .map((phase) => {
       const gaps = [];
       const info = { phase: phase.label, gaps };
-      const seconds = (phase.end - phase.start) / 1000;
-      const delivered = phase.outputBytes / 1024 / seconds / SUBSCRIBED_OUTPUTS;
-      if (delivered < (OUTPUT_BYTES_PER_SECOND / 1024) * 0.9)
-        gaps.push(`delivered ${delivered.toFixed(1)} KiB/s per subscribed terminal`);
+      streamRates(phase).forEach((rate, index) => {
+        if (rate < minimumRate) gaps.push(`stream ${index} delivered ${rate.toFixed(1)} KiB/s`);
+      });
+      const sampled = samples.filter(
+        (sample) => sample.at >= phase.start && sample.at <= phase.end,
+      );
+      const expectedSamples = (phase.end - phase.start) / 100;
+      let gap = 0;
+      let previous = phase.start;
+      for (const sample of [...sampled, { at: phase.end }]) {
+        gap = Math.max(gap, sample.at - previous);
+        previous = sample.at;
+      }
+      if (
+        sampled.length < expectedSamples * SAMPLE_COVERAGE ||
+        gap > MAX_SAMPLE_GAP_MS ||
+        sampled.some((sample) => !Number.isFinite(sample.max) || !Number.isFinite(sample.p99))
+      )
+        gaps.push(
+          `${sampled.length} event-loop samples of ${Math.floor(expectedSamples)} (largest gap ${Math.round(gap)} ms)`,
+        );
       if (!switches) gaps.push("no mode switches recorded");
       else {
         const before = switches.filter(([at]) => at <= phase.start).at(-1);
@@ -781,15 +843,36 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     echo.unmatched > 0 ||
     unavailable > 0 ||
     disturbedPhases.length > 0;
-  const verdict = incomplete
+  const measured = incomplete
     ? "UNRESOLVED"
     : concentrated || persistentlyHigher
       ? "B"
       : writesMatchNone
         ? "A"
         : "UNRESOLVED";
+  // Streams that ran as prescribed: subscribed, at the target rate in every phase.
+  const validatedStreams = Array.from(
+    { length: config.subscribedOutputs },
+    (_, index) => index,
+  ).filter((index) => phases.every((phase) => streamRates(phase)[index] >= minimumRate)).length;
+  // D6 prescribes eight subscribed streams. With fewer, an A or B describes a reduced workload: it
+  // is reported as PROVISIONAL with the measured attribution beside it, never as a final verdict.
+  const workloadDeviation =
+    validatedStreams < TERMINALS
+      ? {
+          prescribedStreams: TERMINALS,
+          subscribedStreams: config.subscribedOutputs,
+          validatedStreams,
+          reason:
+            "fewer than eight subscribed, validated output streams (M0 ACK BUSY defect #96); " +
+            "rerun with --subscribed-outputs 8 once it is fixed",
+        }
+      : null;
+  const verdict = workloadDeviation && measured !== "UNRESOLVED" ? "PROVISIONAL" : measured;
   return {
     verdict,
+    measuredVerdict: measured,
+    workloadDeviation,
     reasons: {
       delayedEchoesConcentrateInTransactions: concentrated,
       writePhasesHigherThanControlInEveryRound: persistentlyHigher,
@@ -804,7 +887,8 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     },
     workload: {
       terminals: TERMINALS,
-      subscribedOutputTerminals: SUBSCRIBED_OUTPUTS,
+      subscribedOutputTerminals: config.subscribedOutputs,
+      validatedOutputStreams: validatedStreams,
       outputBytesPerSecondPerTerminal: OUTPUT_BYTES_PER_SECOND,
       keyIntervalMs: KEY_INTERVAL_MS,
       writesPerSecond: WRITES_PER_SECOND,
