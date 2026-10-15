@@ -29,7 +29,9 @@ import { RunLog } from "../store/runs.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
-import { D6Probe } from "./d6-probe.js";
+// Type only: the instrumentation is constructed by the separate probe entry (d6-probe-main.ts), so
+// this executable cannot enable it, whatever its environment.
+import type { D6Probe } from "./d6-probe.js";
 import {
   localAuthority,
   parseLocalOptions,
@@ -268,7 +270,7 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
 export async function startLocalEntry(
   input: M0LocalOptions,
   shutdown?: { signal?: AbortSignal },
-  // Only the D6 latency probe passes this (COVE_D6_PROBE_DIR); see d6-probe.ts.
+  // Only the D6 probe entry passes this (d6-probe-main.ts); see d6-probe.ts.
   probe?: D6Probe,
 ) {
   const { local, store } = await openLocalApplication(input, probe);
@@ -424,8 +426,9 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const argv = process.argv.slice(2);
+// The server process: `--mode init` or the local server. `probe` is passed only by the D6 probe
+// entry.
+export function runServerProcess(argv: readonly string[], probe?: D6Probe): void {
   const fail = (error: unknown, fallback: string): void => {
     process.exitCode = 1;
     process.stderr.write(
@@ -472,7 +475,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
         server = await startLocalEntry(
           { ...options, home: options.home ?? resolveHome(undefined) },
           { signal: controller.signal },
-          D6Probe.fromEnvironment(),
+          probe,
         );
         if (controller.signal.aborted) await close();
       } catch (error) {
@@ -487,3 +490,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       }
     })().catch((error: unknown) => fail(error, "m0-local startup unavailable\n"));
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)
+  runServerProcess(process.argv.slice(2));
