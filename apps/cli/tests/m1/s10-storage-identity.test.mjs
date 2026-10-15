@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createSessionClient } from "../../dist/session.js";
 import { waitFor } from "../recording-view.mjs";
-import { alive, createM1Fixture } from "./fixtures.mjs";
+import { createM1Fixture } from "./fixtures.mjs";
 
 // S10 (docs/milestones/m1.md): storage, identity and operation deduplication across a restart,
 // driven through the compiled CLI and server against temporary data directories.
@@ -52,7 +52,7 @@ test("a second server on the same data directory is refused and the first keeps 
   expect(second.stderr).toContain("in use by another server");
 
   // The first server's rendezvous, identity and state are untouched and it still answers.
-  expect(alive(first.pid)).toBe(true);
+  expect(await fixture.serverRuns(first)).toBe(true);
   const status = await fixture.coveJson(["status"], { home });
   expect(status).toMatchObject({
     serverId: first.record.serverId,
@@ -81,7 +81,7 @@ test("a live record of another server at the data directory's rendezvous path is
   expect(refused.code).not.toBe(0);
   expect(refused.stderr).toContain("Another server's rendezvous is published");
   expect(await readFile(path)).toEqual(before);
-  expect(alive(foreign.pid)).toBe(true);
+  expect(await fixture.serverRuns(foreign)).toBe(true);
   expect(await fixture.coveJson(["--rendezvous", path, "status"], { home })).toMatchObject({
     serverId: foreign.record.serverId,
   });
@@ -215,7 +215,7 @@ test("saved requests resent after kill -9 return their records and never execute
   expect(workers).toHaveLength(1);
   const [worker] = workers;
   await fixture.trackPid(worker);
-  process.kill(worker, "SIGSTOP");
+  await fixture.signalTracked(worker, "SIGSTOP");
   const pending = fixture.spawnCove(
     ["terminal", "create", "--cwd", fixture.root, "--operation-id", "s10-suspended", ...command],
     { home },
