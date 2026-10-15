@@ -39,7 +39,7 @@ const validParams = {
     geometry: { cols: 80, rows: 24 },
   },
   "terminal.stop": { operationId: "o1", expectedRelayInstanceId: "i1", run },
-  "operation.get": { operationId: "o1", expectedRelayInstanceId: "i1" },
+  "operation.get": { operationId: "o1" },
   "operation.continue": { operationId: "o2", targetOperationId: "o1" },
   "operation.abandon": { operationId: "o2", targetOperationId: "o1" },
   "config.get": {},
@@ -113,6 +113,18 @@ test("the method table classifies every M1 method and names its server module", 
   expect(RPC_METHODS["mount.add"].domain).toBe("task");
   expect(isWriteRpcMethod("operation.get")).toBe(false);
   expect(isWriteRpcMethod("not.a.method")).toBe(false);
+});
+
+test("operation.get is keyed by operation ID alone", () => {
+  expect(validateRpcMethodParams("operation.get", { operationId: "o1" })).toEqual({
+    method: "operation.get",
+    params: { operationId: "o1" },
+  });
+  // A stale instance field from an older client is not part of the query.
+  expect(
+    validateRpcMethodParams("operation.get", { operationId: "o1", expectedRelayInstanceId: "old" })
+      ?.params,
+  ).toEqual({ operationId: "o1" });
 });
 
 test("managed worktree deletion requires confirmed true in the request itself", () => {
@@ -254,14 +266,11 @@ test("domain operation records carry references and per-mount outcomes within bu
       { operation: record },
     ),
   ).toBe(false);
-  const query = validParams["operation.get"];
-  expect(validateRpcResultForCall("operation.get", query, { operation: record })).toBe(true);
   expect(
-    validateRpcResultForCall(
-      "operation.get",
-      { ...query, operationId: "o9" },
-      { operation: record },
-    ),
+    validateRpcResultForCall("operation.get", { operationId: "o1" }, { operation: record }),
+  ).toBe(true);
+  expect(
+    validateRpcResultForCall("operation.get", { operationId: "o9" }, { operation: record }),
   ).toBe(false);
 });
 
@@ -401,4 +410,33 @@ test("tab launches validate appearance exactly like terminal.create", () => {
       validateRpcMethodParams(method, { ...validParams[method], appearance: valid })?.method,
     ).toBe(method);
   }
+});
+
+test("a historical terminal record matches the instance its own request named", () => {
+  const oldRun = { serverId: "s1", relayInstanceId: "old", runId: "r1" };
+  const create = { ...validParams["terminal.create"], expectedRelayInstanceId: "old" };
+  const record = {
+    operationId: "o1",
+    method: "terminal.create",
+    revision: 2,
+    state: "succeeded",
+    run: oldRun,
+    result: { run: oldRun },
+  };
+  expect(validateRpcResultForCall("terminal.create", create, { operation: record })).toBe(true);
+  expect(
+    validateRpcResultForCall("terminal.create", validParams["terminal.create"], {
+      operation: record,
+    }),
+  ).toBe(false);
+  expect(
+    validateRpcResultForCall("operation.get", { operationId: "o1" }, { operation: record }),
+  ).toBe(true);
+  const stop = { operationId: "o1", expectedRelayInstanceId: "old", run: oldRun };
+  const { result: _result, ...running } = record;
+  expect(
+    validateRpcResultForCall("terminal.stop", stop, {
+      operation: { ...running, method: "terminal.stop", state: "running" },
+    }),
+  ).toBe(true);
 });

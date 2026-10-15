@@ -440,7 +440,7 @@ test("unframable create cannot acquire a canonical write intent", () => {
 });
 
 test("receipt replay precedes capacity while conflicting intent and new work fail safely", () => {
-  const key = { serverId: "s1", relayInstanceId: "i1", principalId: "local", operationId: "o1" };
+  const key = { serverId: "s1", principalId: "local", operationId: "o1" };
   const intent = canonicalOperationIntent("terminal.create", create, encoder);
   const record = {
     operationId: "o1",
@@ -470,7 +470,7 @@ test("receipt replay precedes capacity while conflicting intent and new work fai
   expect(
     classifyReceiptAdmission({
       ...common,
-      existing: { key: { ...key, relayInstanceId: "i2" }, canonicalIntent: intent, record },
+      existing: { key: { ...key, principalId: "other" }, canonicalIntent: intent, record },
     }),
   ).toBe("invalid");
 });

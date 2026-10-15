@@ -120,6 +120,142 @@ function fixture(changes = {}) {
   };
 }
 
+// A receipt committed by an earlier instance of the same server. T0 keeps receipts in memory,
+// so the historical record is installed through the store API exactly as T1 will load it.
+function seedHistorical(f, method, params, oldRun) {
+  const key = { serverId: "server", principalId: "principal", operationId: params.operationId };
+  const intent = canonicalOperationIntent(method, params, codec.encode);
+  const preparation = f.receipts.prepare(key, intent);
+  const record = {
+    operationId: params.operationId,
+    method,
+    revision: 0,
+    state: "accepted",
+    run: oldRun,
+  };
+  expect(preparation.commit(record)).toBe(true);
+  expect(
+    f.receipts.update(key, { ...record, revision: 1, state: "succeeded", result: { run: oldRun } }),
+  ).toBe(true);
+  return f.receipts.get(key);
+}
+const oldRun = { serverId: "server", relayInstanceId: "old", runId: "run-old" };
+const oldCreate = (operationId = "create") => ({
+  ...create(operationId),
+  expectedRelayInstanceId: "old",
+});
+
+describe("durable operation receipts", () => {
+  it("returns the original old-instance record for a same-intent resend without executing", async () => {
+    const f = fixture();
+    const stored = seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    const before = f.bytes.snapshot();
+    const resent = await f.operations.create("principal", oldCreate());
+    expect(resent).toEqual({ operation: stored });
+    expect(resent.operation.run).toEqual(oldRun);
+    expect(f.commands).toHaveLength(0);
+    expect(f.registry.count).toBe(0);
+    expect(f.receipts.count).toBe(1);
+    expect(f.bytes.snapshot()).toEqual(before);
+    expect(f.operations.get("principal", "create")).toEqual({ operation: stored });
+    f.close();
+  });
+
+  it("conflicts on a changed intent before the stale-instance check", async () => {
+    const f = fixture();
+    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    // Same old-instance precondition, different command.
+    const changed = await f.operations.create("principal", { ...oldCreate(), argv: ["other"] });
+    expect(changed.error.kind).toBe("OPERATION_ID_CONFLICT");
+    // Rebuilt for the current instance: a new intent under the old operation ID.
+    const rebuilt = await f.operations.create("principal", create());
+    expect(rebuilt.error.kind).toBe("OPERATION_ID_CONFLICT");
+    expect(f.commands).toHaveLength(0);
+    expect(f.registry.count).toBe(0);
+    expect(f.receipts.count).toBe(1);
+    f.close();
+  });
+
+  it("rejects a new old-instance request that has no receipt", async () => {
+    const f = fixture();
+    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    const before = f.bytes.snapshot();
+    const stale = await f.operations.create("principal", oldCreate("fresh"));
+    expect(stale.error.kind).toBe("INSTANCE_MISMATCH");
+    const staleStop = await f.operations.stop("principal", {
+      operationId: "fresh-stop",
+      expectedRelayInstanceId: "old",
+      run: oldRun,
+    });
+    expect(staleStop.error.kind).toBe("INSTANCE_MISMATCH");
+    expect(f.commands).toHaveLength(0);
+    expect(f.receipts.count).toBe(1);
+    expect(f.bytes.snapshot()).toEqual(before);
+    f.close();
+  });
+
+  it("returns an old-instance stop record and conflicts on a changed target", async () => {
+    const f = fixture();
+    const stop = { operationId: "stop", expectedRelayInstanceId: "old", run: oldRun };
+    const stored = seedHistorical(f, "terminal.stop", stop, oldRun);
+    expect(await f.operations.stop("principal", stop)).toEqual({ operation: stored });
+    const other = { ...oldRun, runId: "run-other" };
+    expect((await f.operations.stop("principal", { ...stop, run: other })).error.kind).toBe(
+      "OPERATION_ID_CONFLICT",
+    );
+    expect(f.commands).toHaveLength(0);
+    f.close();
+  });
+
+  it("keys receipts by server, principal and operation ID without the instance", async () => {
+    const f = fixture();
+    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    // Another principal's operation with the same ID is unrelated new work.
+    const other = f.operations.create("other-principal", oldCreate());
+    expect((await other).error.kind).toBe("INSTANCE_MISMATCH");
+    expect(f.operations.get("other-principal", "create").error.kind).toBe("OPERATION_NOT_FOUND");
+    const foreign = { serverId: "foreign", principalId: "principal", operationId: "create" };
+    expect(f.receipts.get(foreign)).toBeNull();
+    expect(f.receipts.lookup(foreign, "intent").kind).toBe("invalid");
+    // A record may reference an earlier instance but never another server.
+    const key = { serverId: "server", principalId: "principal", operationId: "foreign-run" };
+    const preparation = f.receipts.prepare(key, "intent");
+    expect(
+      preparation.commit({
+        operationId: "foreign-run",
+        method: "terminal.create",
+        revision: 0,
+        state: "accepted",
+        run: { ...oldRun, serverId: "foreign" },
+      }),
+    ).toBe(false);
+    preparation.cancel();
+    f.close();
+  });
+});
+
+describe("terminal operation states", () => {
+  it("rejects every update after a terminal state, cancelled included", () => {
+    const f = fixture();
+    for (const state of ["succeeded", "failed", "cancelled", "requires_attention"]) {
+      const key = { serverId: "server", principalId: "principal", operationId: `op-${state}` };
+      const record = {
+        operationId: key.operationId,
+        method: "terminal.create",
+        revision: 0,
+        state: "accepted",
+        run: oldRun,
+      };
+      expect(f.receipts.prepare(key, `intent-${state}`).commit(record)).toBe(true);
+      expect(f.receipts.update(key, { ...record, revision: 1, state })).toBe(true);
+      for (const next of ["running", "succeeded", "failed", "cancelled"])
+        expect(f.receipts.update(key, { ...record, revision: 2, state: next })).toBe(false);
+      expect(f.receipts.get(key)).toMatchObject({ revision: 1, state });
+    }
+    f.close();
+  });
+});
+
 describe("instance-bound operation receipts", () => {
   it("rejects a receipts store on an equal-limit separate ledger before operations can run", () => {
     const f = fixture();
@@ -368,7 +504,7 @@ describe("instance-bound operation receipts", () => {
       },
     });
     await checked;
-    expect(f.operations.get("principal", "stop", "instance").operation.state).toBe("succeeded");
+    expect(f.operations.get("principal", "stop").operation.state).toBe("succeeded");
     expect(f.runtime.pool.snapshot().runs).toBe(1);
     f.close();
   });
@@ -379,12 +515,7 @@ describe("instance-bound operation receipts", () => {
     f.reply();
     const result = await held;
     result.operation.run.runId = "mutated";
-    const key = {
-      serverId: "server",
-      relayInstanceId: "instance",
-      principalId: "principal",
-      operationId: "create",
-    };
+    const key = { serverId: "server", principalId: "principal", operationId: "create" };
     const stored = f.receipts.get(key);
     expect(stored.run.runId).toBe("run-1");
     expect(

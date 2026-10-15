@@ -233,7 +233,7 @@ export const requiredSuites = [
   {
     project: "protocol",
     file: "packages/protocol/tests/workspace-contract.test.mjs",
-    minimumTests: 9,
+    minimumTests: 11,
   },
   {
     project: "server",
@@ -258,7 +258,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/operation-receipts.test.mjs",
-    minimumTests: 15,
+    minimumTests: 21,
   },
   {
     project: "server",

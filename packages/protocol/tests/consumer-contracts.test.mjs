@@ -653,7 +653,6 @@ test("receipt fixture replays same intent and rejects conflict or exhausted new 
   expect(intent).not.toBeNull();
   const key = {
     serverId: journey.server.serverId,
-    relayInstanceId: journey.server.relayInstanceId,
     principalId: "fixture-principal",
     operationId: create.params.operationId,
   };

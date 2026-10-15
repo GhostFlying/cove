@@ -220,7 +220,9 @@ export function validateRpcResultForCall(
     if ((response as { operation: OperationRecord }).operation.operationId !== input.operationId)
       return false;
   }
-  if (method === "terminal.create" || method === "terminal.stop" || method === "operation.get") {
+  if (method === "terminal.create" || method === "terminal.stop") {
+    // The execution precondition belongs to the original operation: a historical record keeps
+    // the run of the instance its request named, even when that instance has since ended.
     const input = call.params as { expectedRelayInstanceId: string; run?: RunRef };
     const operation = (response as { operation: OperationRecord }).operation;
     if (operation.run && operation.run.relayInstanceId !== input.expectedRelayInstanceId)
@@ -285,9 +287,11 @@ export function canonicalWriteIntent(
   return encodeUtf8(text).byteLength <= M0_LIMITS.canonicalIntentBytes ? text : null;
 }
 
+// Durable operation identity (relay-protocol §11.3). The relay instance is not part of it: it is
+// a transport binding checked per request and, for terminal writes, an execution precondition
+// inside the params that is checked only when no record exists.
 export const OperationReceiptKeySchema = z.object({
   serverId: OpaqueIdSchema,
-  relayInstanceId: OpaqueIdSchema,
   principalId: OpaqueIdSchema,
   operationId: OpaqueIdSchema,
 });

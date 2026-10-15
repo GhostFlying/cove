@@ -63,7 +63,7 @@ function paramsMatchInstance<M extends RpcMethod>(
 ): boolean {
   const value = params as Record<string, unknown>;
   if (
-    (method === "terminal.create" || method === "terminal.stop" || method === "operation.get") &&
+    (method === "terminal.create" || method === "terminal.stop") &&
     value.expectedRelayInstanceId !== binding.relayInstanceId
   )
     return false;

@@ -8,6 +8,13 @@ import {
 import type { ByteReservation } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 
+const TERMINAL_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
+  "succeeded",
+  "failed",
+  "cancelled",
+  "requires_attention",
+]);
+
 type Entry = {
   key: OperationReceiptKey;
   canonicalIntent: string;
@@ -22,6 +29,10 @@ export interface ReceiptPreparation {
   cancel(): void;
 }
 
+// In-memory operation receipts keyed by the durable identity (serverId, principalId,
+// operationId). The relay instance is not part of the key: a record may reference a run of an
+// earlier instance of the same server, and a same-intent resend must still find it. M1 T1 moves
+// these records into the store; until then they live as long as this process.
 export class OperationReceipts {
   private readonly entries = new Map<string, Entry>();
   private readonly scratch: ByteReservation;
@@ -45,15 +56,14 @@ export class OperationReceipts {
   }
 
   private id(key: OperationReceiptKey): string {
-    return JSON.stringify([key.serverId, key.relayInstanceId, key.principalId, key.operationId]);
+    return JSON.stringify([key.serverId, key.principalId, key.operationId]);
   }
 
   private valid(key: OperationReceiptKey): boolean {
     return (
       !this.disposed &&
       OperationReceiptKeySchema.safeParse(key).success &&
-      key.serverId === this.composition.serverId &&
-      key.relayInstanceId === this.composition.relayInstanceId
+      key.serverId === this.composition.serverId
     );
   }
 
@@ -93,7 +103,12 @@ export class OperationReceipts {
         1024,
     );
     if (!lease) return null;
-    const entry: Entry = { key: { ...key }, canonicalIntent, record: null, lease };
+    const entry: Entry = {
+      key: { serverId: key.serverId, principalId: key.principalId, operationId: key.operationId },
+      canonicalIntent,
+      record: null,
+      lease,
+    };
     const id = this.id(key);
     this.entries.set(id, entry);
     return {
@@ -112,14 +127,15 @@ export class OperationReceipts {
     };
   }
 
+  // Whether a new run may be bound to the current instance is the caller's execution
+  // precondition; the store only requires that a referenced run belongs to this server.
   private validate(entry: Entry, record: OperationRecord): OperationRecord | null {
     const checked = validateOperationRecord(record, this.encodeUtf8);
     if (
       !checked ||
       this.encodeUtf8(JSON.stringify(checked)).byteLength > this.budgets.operationRecordBytes ||
       checked.operationId !== entry.key.operationId ||
-      checked.run?.serverId !== this.composition.serverId ||
-      checked.run.relayInstanceId !== this.composition.relayInstanceId
+      (checked.run !== undefined && checked.run.serverId !== this.composition.serverId)
     )
       return null;
     return checked;
@@ -138,12 +154,10 @@ export class OperationReceipts {
       next.run?.runId !== entry.record.run?.runId
     )
       return false;
-    if (
-      entry.record.state === "succeeded" ||
-      entry.record.state === "failed" ||
-      entry.record.state === "requires_attention"
-    )
-      return false;
+    // Terminal states never change through an ordinary update: a late executor or recovery
+    // result must not replace them. Continuing a requires_attention operation is an explicit
+    // recovery command, not an update of this record.
+    if (TERMINAL_STATES.has(entry.record.state)) return false;
     const checked = this.validate(entry, next);
     if (!checked) return false;
     entry.record = structuredClone(checked);
