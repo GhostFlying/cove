@@ -18,6 +18,7 @@ import {
 import { createSessionClient, readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 // Regression: the server retained retired subscription state until the connection, the
 // run or the worker went away. The worker pipe refused every subscribe with BUSY after
@@ -35,10 +36,10 @@ let fixture;
 
 beforeEach(async () => {
   // Realpath the temp root: macOS /var is a symlink and the server refuses a rendezvous
-  // reached through a symlinked ancestor. HOME keeps the CLI start lock out of ~/.cove.
+  // reached through a symlinked ancestor. isolatedEnv keeps the data directory out of ~/.cove.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-reattach-")));
   const rendezvous = join(directory, "state", "run", "rendezvous.json");
-  const env = { ...process.env, HOME: directory, COVE_RENDEZVOUS: rendezvous };
+  const env = isolatedEnv(directory, { COVE_RENDEZVOUS: rendezvous });
   const server = spawn(process.execPath, [cli, "--rendezvous", rendezvous, "server", "start"], {
     stdio: ["ignore", "pipe", "pipe"],
     env,

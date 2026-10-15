@@ -7,6 +7,7 @@ import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { createSessionClient, readRendezvous } from "../dist/session.js";
 import { createRecordingView, waitFor } from "./recording-view.mjs";
 import { stopServer } from "./server-process.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 // A focus whose grid differs from the PTY makes the worker emit a resize that requires a new
 // baseline, so the client recovers right after the grant. The server keeps this subscription as
@@ -21,7 +22,7 @@ beforeEach(async () => {
   // reached through a symlinked ancestor.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-cli-")));
   const rendezvous = join(directory, "state", "run", "rendezvous.json");
-  const env = { ...process.env, HOME: directory, COVE_RENDEZVOUS: rendezvous };
+  const env = isolatedEnv(directory, { COVE_RENDEZVOUS: rendezvous });
   const server = spawn(process.execPath, [cli, "--rendezvous", rendezvous, "server", "start"], {
     stdio: ["ignore", "pipe", "pipe"],
     env,

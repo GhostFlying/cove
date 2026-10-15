@@ -17,6 +17,7 @@ import { createScreenView, parsePreview } from "./screen-view.mjs";
 import { stopServer } from "./server-process.mjs";
 import { QUERY_REPLIES_THEN, writeQueryProbe } from "./query-probe.mjs";
 import { createTappedClient } from "./wire-tap.mjs";
+import { isolatedEnv } from "./test-env.mjs";
 
 // Every scenario drives the compiled `cove` executable, which spawns the compiled server.
 const cli = resolve(import.meta.dirname, "../dist/main.js");
@@ -29,9 +30,9 @@ beforeEach(async () => {
   // reached through a symlinked ancestor.
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cove-cli-")));
   const rendezvous = join(directory, "state", "run", "rendezvous.json");
-  // The CLI keeps its start lock under ~/.cove; point HOME at the temp directory so a
-  // test never touches the user's real home.
-  const env = { ...process.env, HOME: directory, COVE_RENDEZVOUS: rendezvous };
+  // The CLI keeps its data directory and start lock under COVE_HOME; point it and HOME at the
+  // temp directory so a test never touches the real home or data directory.
+  const env = isolatedEnv(directory, { COVE_RENDEZVOUS: rendezvous });
   const server = spawn(process.execPath, [cli, "--rendezvous", rendezvous, "server", "start"], {
     stdio: ["ignore", "pipe", "pipe"],
     env,
