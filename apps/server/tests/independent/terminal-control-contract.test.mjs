@@ -1010,6 +1010,22 @@ describe("P2-B2 independent F1 held-result close unsubscribe", () => {
   );
 });
 
+// The transport finishes writing the held route-control frames, as a worker that replies to them
+// has read them. A route-control frame keeps one of the pipe's transport slots until its write
+// callback (issue #96), so these window tests release them; other held writes stay held.
+const finishRouteControlWrites = (r) => {
+  for (const write of r.pipeWrites)
+    if (
+      !write.released &&
+      write.frames.every((x) =>
+        ["applied-ack", "baseline-progress", "unsubscribe"].includes(x.metadata.type),
+      )
+    ) {
+      write.released = true;
+      write.settled();
+    }
+};
+
 describe("P2-B2 independent shared worker progress capacity", () => {
   test("R2-F1 freed peer ACK slot dispatches owned teardown before held focus settles", async () => {
     const r = controlFixture({ pipeHold: true });
@@ -1056,6 +1072,7 @@ describe("P2-B2 independent shared worker progress capacity", () => {
       expect(refused.error.acceptance).toBe("not-accepted");
       expect(r.count("input")).toBe(0);
       record("closed-under-shared-saturation");
+      finishRouteControlWrites(r);
       r.accept(acknowledgements[0]);
       expect((await peerReplies[0]).type).toBe("applied-ack-result");
       await turns();
@@ -1073,11 +1090,13 @@ describe("P2-B2 independent shared worker progress capacity", () => {
       const release = r.last("set-control");
       releaseOracle({ ...release, owner: holder(ar) }, { holder: holder(ar), epoch: 6, geometry });
       r.accept(release, { atSeq: 12 });
+      finishRouteControlWrites(r);
       for (const acknowledgement of acknowledgements.slice(1)) r.accept(acknowledgement);
       const replies = await Promise.all(peerReplies);
       expect(replies.map((x) => x.type)).toEqual(Array(4).fill("applied-ack-result"));
       await turns();
       const actualTeardowns = r.commands.filter((x) => x.type === "unsubscribe");
+      finishRouteControlWrites(r);
       for (const command of actualTeardowns) {
         expect(command.subscription).toEqual(ar);
         r.accept(command);
@@ -1146,11 +1165,13 @@ describe("P2-B2 independent shared worker progress capacity", () => {
       expect(settled.has(3)).toBe(false);
       expect(b.service.snapshot(peerRefs[3].subscriptionId).route.phase).toBe("active");
       record("background-plus-three-ACKs-held-fourth-waiting");
+      finishRouteControlWrites(r);
       r.accept(background);
       await turns();
       // The freed slot goes to the waiting ACK.
       expect(acknowledgements()).toHaveLength(4);
       expect(acknowledgements()[3].subscription).toEqual(peerRefs[3]);
+      finishRouteControlWrites(r);
       for (const acknowledgement of acknowledgements()) r.accept(acknowledgement);
       expect((await Promise.all(replies)).map((x) => x.type)).toEqual(
         Array(4).fill("applied-ack-result"),

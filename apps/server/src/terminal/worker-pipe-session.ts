@@ -34,9 +34,17 @@ export const SESSION_CONTROL_RESERVE = 6 * (6 * MAX_METADATA_BYTES + 2048) + 64 
 // off would break the client's rule that a handed-off ACK covers the commands sent after it.
 // Its storage is therefore paid for in advance. Each subscription's pipe route reserves one
 // waiting record for an ACK or progress report (its route queue sends them one at a time) and one
-// for its unsubscribe; the session arena holds the identity and frame bytes of the
-// PIPE_ROUTE_CONTROL_COMMANDS admitted ones. None of it draws on the shared control reserve,
-// which stays for status, stop and replies.
+// for its unsubscribe; the session arena holds the identities of the PIPE_ROUTE_CONTROL_COMMANDS
+// admitted ones and PIPE_ROUTE_CONTROL_COMMANDS transport slots for their frames. None of it
+// draws on the shared control reserve, which stays for status, stop and replies.
+//
+// The window and the transport slots are separate because they end at different moments. A
+// window slot ends when the worker's reply arrives, but the frame's bytes stay owned by the
+// transport until its write callback, which may come later. A frame holds its transport slot
+// from queueing until that callback, so a command waits until both a window slot and a
+// transport slot are free. Prepaid frames stay outside pipeQueuedBytes and
+// reservedControlBytes: ordinary traffic cannot consume their space, and the bytes queued or
+// in transport stay within pipeQueuedBytes plus the transport slots.
 const ROUTE_CONTROL_IDENTITY_BYTES = 6 * MAX_METADATA_BYTES + 2048;
 const ROUTE_CONTROL_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
 const ROUTE_CONTROL_WAIT_BYTES = ROUTE_CONTROL_FRAME_BYTES + MAX_METADATA_BYTES + 1024;
@@ -70,6 +78,8 @@ type Outgoing = {
   owned: boolean;
   // A prepaid route-control command waiting for a window slot holds its route's record.
   slot?: { route: Route; unsubscribe: boolean } | undefined;
+  // A queued or handed prepaid frame holds one of the arena's transport slots.
+  prepaid?: boolean;
 };
 // `unsubscribed` records that an unsubscribe for the ref settled, so the route can be
 // reclaimed by whichever of that unsubscribe and the last pending opener settles last.
@@ -123,6 +133,10 @@ export class WorkerPipeSession {
   private released = false;
   private promoting = false;
   private prepaidIdentities = 0;
+  // Prepaid route-control frames queued or awaiting their write callback, and their bytes.
+  // They are not part of queuedBytes or physicalBytes (see ROUTE_CONTROL_FRAME_BYTES).
+  private prepaidFrames = 0;
+  private prepaidBytes = 0;
 
   constructor(
     private readonly options: {
@@ -291,21 +305,36 @@ export class WorkerPipeSession {
       .length;
   }
 
+  // Whether a prepaid route-control command can be admitted now: it needs a window slot and a
+  // transport slot (see ROUTE_CONTROL_FRAME_BYTES).
+  private progressSlotFree(): boolean {
+    return (
+      this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS &&
+      this.prepaidFrames < PIPE_ROUTE_CONTROL_COMMANDS
+    );
+  }
+
+  // Queues a prepaid frame in a free transport slot. It needs no budget check: the arena pays
+  // for the slot, and ordinary traffic cannot use it.
+  private queuePrepaid(item: Outgoing): void {
+    item.prepaid = true;
+    this.prepaidFrames++;
+    this.prepaidBytes += item.bytes.buffer.byteLength;
+    this.queue.push(item);
+  }
+
   // A waiting command has not reached the worker, so the time it spent waiting is no evidence
   // of lost contact: the admitted commands ahead of it carry the liveness deadline (tick()
-  // ignores waiting ones). Its own deadline therefore starts when it takes a slot, read from
-  // the clock at that moment. The clock supplier may reenter (and promote, or close the session)
-  // or fail; a reentrant call returns at once and leaves the work to this loop, which rechecks
-  // its condition after the read, and an invalid clock fails the session closed as tick() does.
+  // ignores waiting ones), and a transport slot is held only by a frame already handed to the
+  // transport. Its own deadline therefore starts when it takes a slot, read from the clock at
+  // that moment. The clock supplier may reenter (and promote, or close the session) or fail; a
+  // reentrant call returns at once and leaves the work to this loop, which rechecks its
+  // condition after the read, and an invalid clock fails the session closed as tick() does.
   private promoteProgress(): void {
     if (this.closed || this.promoting) return;
     this.promoting = true;
     try {
-      while (
-        !this.closed &&
-        this.waitingProgress.length &&
-        this.progressCount() < PIPE_ROUTE_CONTROL_COMMANDS
-      ) {
+      while (!this.closed && this.waitingProgress.length && this.progressSlotFree()) {
         let now: number;
         try {
           now = this.now();
@@ -313,30 +342,16 @@ export class WorkerPipeSession {
           this.loseContact();
           return;
         }
-        if (
-          this.closed ||
-          !this.waitingProgress.length ||
-          this.progressCount() >= PIPE_ROUTE_CONTROL_COMMANDS
-        )
-          break;
+        if (this.closed || !this.waitingProgress.length || !this.progressSlotFree()) break;
         const item = this.waitingProgress.shift()!;
         if (item.slot) {
           if (item.slot.unsubscribe) item.slot.route.waitingUnsubscribe = false;
           else item.slot.route.waitingProgress = false;
           item.slot = undefined;
         }
-        // An admitted route-control frame is paid for by the session arena, and at most
-        // PIPE_ROUTE_CONTROL_COMMANDS of them plus status and stop are queued at once, well
-        // within reservedControlBytes. Failing that bound is a defect, so fail closed.
-        if (!this.queueBudget(item.bytes, "progress")) {
-          item.owned = false;
-          this.loseContact();
-          return;
-        }
-        this.queuedBytes += item.bytes.buffer.byteLength;
         item.request!.admitted = true;
         item.request!.deadline = now + this.options.timeoutMs;
-        this.queue.push(item);
+        this.queuePrepaid(item);
       }
     } finally {
       this.promoting = false;
@@ -426,7 +441,11 @@ export class WorkerPipeSession {
     if (prepaid && bytes.buffer.byteLength > ROUTE_CONTROL_FRAME_BYTES)
       return Promise.resolve(this.error(command, "CAPABILITY_UNAVAILABLE"));
     // A command also waits behind an earlier waiting one, so it can never overtake it.
-    const waiting = !!prepaid && (currentCount >= cap || this.waitingProgress.length > 0);
+    const waiting =
+      !!prepaid &&
+      (currentCount >= cap ||
+        this.prepaidFrames >= PIPE_ROUTE_CONTROL_COMMANDS ||
+        this.waitingProgress.length > 0);
     const unsubscribe = snapshot.type === "unsubscribe";
     if (
       (!waiting && currentCount >= cap) ||
@@ -495,15 +514,7 @@ export class WorkerPipeSession {
           owned: true,
           slot: { route: prepaid, unsubscribe },
         });
-      } else if (!this.queueBudget(bytes, role)) {
-        // The arena pays for the admitted window and reservedControlBytes covers its frames;
-        // missing that bound is a defect, so fail closed rather than refuse the command.
-        this.loseContact();
-        return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
-      } else {
-        this.queuedBytes += bytes.buffer.byteLength;
-        this.queue.push({ bytes, lease: PREPAID, role, request: pending, owned: true });
-      }
+      } else this.queuePrepaid({ bytes, lease: PREPAID, role, request: pending, owned: true });
     } else if (!this.enqueue(bytes, role, pending)) {
       if (newRoute && route) {
         this.routes.splice(this.routes.indexOf(route), 1);
@@ -563,10 +574,15 @@ export class WorkerPipeSession {
     if (!item.owned) return;
     item.owned = false;
     this.handed.delete(item);
-    this.physicalBytes -= item.bytes.buffer.byteLength;
+    if (item.prepaid) {
+      this.prepaidFrames--;
+      this.prepaidBytes -= item.bytes.buffer.byteLength;
+    } else this.physicalBytes -= item.bytes.buffer.byteLength;
     if (item.role === "ordinary") this.ordinaryBytes -= item.bytes.buffer.byteLength;
     item.lease.release();
     this.releaseClosedRecords();
+    // A freed transport slot may admit a waiting route-control command.
+    if (item.prepaid && !this.receiving) this.promoteProgress();
   }
 
   private flush(): void {
@@ -576,8 +592,10 @@ export class WorkerPipeSession {
       while (this.queue.length && !this.blocked && !this.closed) {
         // Preserve FIFO: progress gets admission reserve, not permission to pass a prior write.
         const item = this.queue.shift()!;
-        this.queuedBytes -= item.bytes.buffer.byteLength;
-        this.physicalBytes += item.bytes.buffer.byteLength;
+        if (!item.prepaid) {
+          this.queuedBytes -= item.bytes.buffer.byteLength;
+          this.physicalBytes += item.bytes.buffer.byteLength;
+        }
         this.handed.add(item);
         if (item.request) item.request.sent = true;
         try {
@@ -772,7 +790,10 @@ export class WorkerPipeSession {
     this.state = "closed";
     this.decoder.finish();
     for (const item of this.queue.splice(0)) {
-      this.queuedBytes -= item.bytes.buffer.byteLength;
+      if (item.prepaid) {
+        this.prepaidFrames--;
+        this.prepaidBytes -= item.bytes.buffer.byteLength;
+      } else this.queuedBytes -= item.bytes.buffer.byteLength;
       if (item.role === "ordinary") this.ordinaryBytes -= item.bytes.buffer.byteLength;
       item.owned = false;
       item.lease.release();
@@ -840,6 +861,8 @@ export class WorkerPipeSession {
     routes: number;
     queuedBytes: number;
     physicalBytes: number;
+    prepaidFrames: number;
+    prepaidBytes: number;
   } {
     return {
       pending: this.pending.size,
@@ -847,6 +870,8 @@ export class WorkerPipeSession {
       routes: this.routes.length,
       queuedBytes: this.queuedBytes,
       physicalBytes: this.physicalBytes,
+      prepaidFrames: this.prepaidFrames,
+      prepaidBytes: this.prepaidBytes,
     };
   }
 }
