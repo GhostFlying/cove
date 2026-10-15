@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +9,7 @@ import { M0_LIMITS } from "@cove/protocol/budgets";
 import { canonicalWriteIntent } from "@cove/protocol/rpc";
 import { Store, StoreError } from "../../dist/store/database.js";
 import { MIGRATIONS } from "../../dist/store/migrations.js";
+import { committedSchemaVersion } from "../../dist/store/schema-version.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/identity.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
@@ -18,6 +20,7 @@ import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
 
+const require = createRequire(import.meta.url);
 const encode = (text) => new TextEncoder().encode(text);
 const directories = [];
 const stores = [];
@@ -150,6 +153,99 @@ describe("store opening, migrations and the data directory lock", () => {
     await expect(open(layout)).rejects.toMatchObject({ category: "newer-schema" });
     expect(await sha256(layout.databasePath)).toBe(before);
     expect((await readdir(layout.serverDirectory)).sort()).toEqual(files);
+  });
+
+  // A process that writes through better-sqlite3 the way the server does, then dies by SIGKILL
+  // without closing, leaving its WAL behind (no checkpoint).
+  function crashAfter(databasePath, statements) {
+    const script = `
+      const Database = require(${JSON.stringify(require.resolve("better-sqlite3"))});
+      const db = new Database(${JSON.stringify(databasePath)}, { timeout: 0 });
+      db.pragma("locking_mode = EXCLUSIVE");
+      db.pragma("journal_mode = WAL");
+      db.pragma("wal_autocheckpoint = 0");
+      for (const sql of ${JSON.stringify(statements)}) db.exec(sql);
+      process.kill(process.pid, "SIGKILL");
+    `;
+    return new Promise((done) =>
+      execFile(process.execPath, ["-e", script], { timeout: 20_000 }, (error) =>
+        done(error?.signal),
+      ),
+    );
+  }
+
+  async function digests(directory) {
+    const names = (await readdir(directory)).sort();
+    return Object.fromEntries(
+      await Promise.all(names.map(async (name) => [name, await sha256(join(directory, name))])),
+    );
+  }
+
+  it("refuses a newer schema committed only to a crash-left WAL without touching any file", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    loadOrCreateIdentity(store);
+    close(store);
+    const newer = MIGRATIONS.length + 1;
+    expect(
+      await crashAfter(layout.databasePath, [
+        `PRAGMA user_version = ${newer}`,
+        "CREATE TABLE from_newer_build (x)",
+      ]),
+    ).toBe("SIGKILL");
+    const before = await digests(layout.serverDirectory);
+    expect(Object.keys(before)).toContain("cove.db-wal");
+    // The database file alone still has this build's version; only the WAL holds the newer one.
+    const header = await readFile(layout.databasePath);
+    expect(header.readInt32BE(60)).toBe(MIGRATIONS.length);
+    expect(await committedSchemaVersion(layout.databasePath)).toBe(newer);
+
+    await expect(open(layout)).rejects.toMatchObject({ category: "newer-schema" });
+    expect(await digests(layout.serverDirectory)).toEqual(before);
+  });
+
+  it("reads the committed schema version from the WAL exactly as SQLite recovers it", async () => {
+    const cases = {
+      committedInWal: ["CREATE TABLE t (x)", "PRAGMA user_version = 7"],
+      uncommittedSpill: [
+        "CREATE TABLE t (x)",
+        "PRAGMA user_version = 4",
+        "PRAGMA cache_size = 2",
+        "BEGIN",
+        "PRAGMA user_version = 9",
+        `WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+          INSERT INTO t SELECT randomblob(1000) FROM n`,
+      ],
+      staleFramesAfterRestart: [
+        "CREATE TABLE t (x)",
+        "PRAGMA user_version = 5",
+        `WITH RECURSIVE n (i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200)
+          INSERT INTO t SELECT randomblob(1000) FROM n`,
+        "PRAGMA wal_checkpoint(RESTART)",
+        "PRAGMA user_version = 6",
+      ],
+    };
+    const expected = { committedInWal: 7, uncommittedSpill: 4, staleFramesAfterRestart: 6 };
+    for (const [name, statements] of Object.entries(cases)) {
+      const directory = await mkdtemp(join(tmpdir(), "cove-wal-"));
+      directories.push(directory);
+      const databasePath = join(directory, "cove.db");
+      expect(await crashAfter(databasePath, statements)).toBe("SIGKILL");
+      const before = await digests(directory);
+      const version = await committedSchemaVersion(databasePath);
+      expect(await digests(directory)).toEqual(before);
+      // SQLite's own recovery, on a copy.
+      const copy = await mkdtemp(join(tmpdir(), "cove-wal-copy-"));
+      directories.push(copy);
+      for (const file of Object.keys(before))
+        if (file !== "cove.db-shm") await cp(join(directory, file), join(copy, file));
+      const Database = require("better-sqlite3");
+      const db = new Database(join(copy, "cove.db"));
+      const recovered = db.pragma("user_version", { simple: true });
+      db.close();
+      expect({ name, version }).toEqual({ name, version: recovered });
+      expect({ name, version }).toEqual({ name, version: expected[name] });
+    }
   });
 
   it("backs up an older schema with VACUUM INTO, then migrates in one transaction", async () => {
