@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { MIGRATIONS, SCHEMA_VERSION, type Migration } from "./migrations.js";
 import { committedSchemaVersion } from "./schema-version.js";
@@ -25,6 +25,8 @@ export type TransactionObserver = (startMs: number, endMs: number) => void;
 
 export type StoreOptions = {
   databasePath: string;
+  // The instance lock file; defaults to `cove.lock` beside the database.
+  lockPath?: string;
   backupDirectory: string;
   now?: () => number;
   migrations?: readonly Migration[];
@@ -41,6 +43,18 @@ function busy(error: unknown): boolean {
 // fails immediately (busy_timeout 0), and the operating system releases the lock when a crashed
 // server's process ends.
 //
+// The instance lock (`cove.lock`, held before the database is touched): the newer-schema refusal
+// must leave a newer build's files byte-for-byte unchanged, so the committed version is read from
+// the files before SQLite opens them (schema-version.ts; opening could checkpoint a newer build's
+// WAL on close). Without a lock, a newer server could commit into the WAL between that read and
+// the open, and the refusal's close would checkpoint it. The database's own lock cannot be taken
+// without SQLite reading (and later possibly checkpointing) the WAL, so every server first takes
+// an exclusive lock on a separate SQLite file: an open BEGIN EXCLUSIVE transaction, held until
+// close and never committed, so the lock file is never written after creation. Holding it, no
+// other server of this data directory is running or can start, and the files cannot change
+// between the version check and the open. The operating system releases it when a crashed server
+// exits.
+//
 // Never open a second connection to this file from the same process: POSIX advisory locks belong
 // to the process, and closing any other connection to the file would drop this one's lock.
 //
@@ -51,6 +65,7 @@ export class Store {
   private depth = 0;
   private closed = false;
   private constructor(
+    private readonly lock: Database.Database,
     readonly db: Database.Database,
     readonly path: string,
     readonly schemaVersion: number,
@@ -61,24 +76,31 @@ export class Store {
     const migrations = options.migrations ?? MIGRATIONS;
     const target = migrations.length;
     const now = options.now ?? Date.now;
+    const lock = Store.lockInstance(
+      options.lockPath ?? join(dirname(options.databasePath), "cove.lock"),
+    );
     // A newer build's database is refused before SQLite opens it: opening could checkpoint a WAL
-    // that build left behind (see schema-version.ts). The check after opening stays for a version
-    // written in between.
+    // that build left behind (see schema-version.ts). The instance lock is held, so the files
+    // cannot change until the open below; the check after opening is a second line of defence.
     let committed: number;
     try {
       committed = await committedSchemaVersion(options.databasePath);
     } catch {
+      lock.close();
       throw new StoreError("unavailable", "The Cove database cannot be opened");
     }
-    if (committed > target)
+    if (committed > target) {
+      lock.close();
       throw new StoreError(
         "newer-schema",
         `The Cove database schema ${committed} is newer than this build (${target})`,
       );
+    }
     let db: Database.Database;
     try {
       db = new Database(options.databasePath, { timeout: 0 });
     } catch (error) {
+      lock.close();
       throw busy(error)
         ? new StoreError("in-use", "The Cove data directory is in use by another server")
         : new StoreError("unavailable", "The Cove database cannot be opened");
@@ -135,11 +157,29 @@ export class Store {
           throw new StoreError("migration", "The Cove database migration failed; nothing changed");
         }
       }
-      return new Store(db, options.databasePath, target, backupPath);
+      return new Store(lock, db, options.databasePath, target, backupPath);
     } catch (error) {
       db.close();
+      lock.close();
       if (error instanceof StoreError) throw error;
       throw new StoreError("unavailable", "The Cove database cannot be opened");
+    }
+  }
+
+  // Takes the instance lock or fails with in-use (see the class comment).
+  private static lockInstance(path: string): Database.Database {
+    let lock: Database.Database | undefined;
+    try {
+      lock = new Database(path, { timeout: 0 });
+      // No rollback journal file: an exclusive transaction otherwise creates `cove.lock-journal`.
+      lock.pragma("journal_mode = MEMORY");
+      lock.exec("BEGIN EXCLUSIVE");
+      return lock;
+    } catch (error) {
+      lock?.close();
+      throw busy(error)
+        ? new StoreError("in-use", "The Cove data directory is in use by another server")
+        : new StoreError("unavailable", "The Cove data directory lock cannot be taken");
     }
   }
 
@@ -177,6 +217,8 @@ export class Store {
     if (this.closed) return;
     this.closed = true;
     this.db.close();
+    // Released last: the database is closed (and checkpointed) before another server can start.
+    this.lock.close();
   }
 }
 
