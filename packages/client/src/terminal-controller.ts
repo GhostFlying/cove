@@ -208,6 +208,32 @@ function detachLeavesStateUnproven(outcome: CommandOutcome): boolean {
   );
 }
 
+// Retry policy for an applied-ack or baseline-progress the server refused for capacity. Both are
+// cumulative and monotonic, and the client keeps one of each in flight per subscription, folding
+// newer ones into the latest pending value, so resending the latest after a refusal covers the
+// refused one. This is not terminal input: the rule that uncertain input is never replayed does
+// not apply. Only a definite refusal (BUSY, not accepted, nothing uncertain) is retried, since it
+// proves the server did not apply the command; any other failure still ends the subscription.
+// The server holds route control that finds the worker window full instead of refusing it
+// (issue #96), so this is a fallback for its hard capacity bounds. The backoff is bounded:
+// 50 ms doubling to 1 s, six retries (2.55 s in total), then the refusal ends the subscription
+// as before.
+const PROGRESS_BUSY_RETRIES = 6;
+
+function progressRetryDelayMs(retry: number): number {
+  return Math.min(1000, 50 * 2 ** (retry - 1));
+}
+
+function definiteBusy(outcome: CommandOutcome): boolean {
+  return (
+    !outcome.ok &&
+    !outcome.uncertain &&
+    "kind" in outcome.error &&
+    outcome.error.kind === "BUSY" &&
+    outcome.error.acceptance === "not-accepted"
+  );
+}
+
 function safeDispose(disposable: Disposable | undefined): void {
   try {
     disposable?.dispose();
@@ -2628,7 +2654,7 @@ export class RoutedTerminalController implements TerminalController {
     });
   }
 
-  private sendAck(seq: number, onHandoff?: () => void): void {
+  private sendAck(seq: number, onHandoff?: () => void, retry = 0): void {
     const ref = this.ref;
     if (!ref) return;
     if (this.ackInFlight) {
@@ -2650,11 +2676,28 @@ export class RoutedTerminalController implements TerminalController {
     }
     this.ackInFlight = true;
     let handled = false;
+    // handedAckSeq before this ACK's handoff, restored if the server refuses it (see below).
+    let handedBefore: number | undefined;
     const handle = (outcome: CommandOutcome): void => {
       if (handled) return;
       handled = true;
       // A superseded ACK's result never clears its successor's state.
       if (token !== this.token) return;
+      if (retry < PROGRESS_BUSY_RETRIES && definiteBusy(outcome)) {
+        // The refused ACK was never applied, so granted commands must not count on it: restore
+        // the previous handed boundary (ACKs are serialized, so nothing else raised it since).
+        // A handoff callback that has not run yet is carried to the retry.
+        const handedOff = handedBefore !== undefined;
+        if (handedOff && this.handedAckSeq === seq) this.handedAckSeq = handedBefore!;
+        this.retryProgress(token, retry + 1, () => {
+          // ackInFlight stayed set through the backoff, so newer ACKs folded into pendingAck.
+          const next = Math.max(seq, this.pendingAck ?? seq);
+          this.pendingAck = undefined;
+          this.ackInFlight = false;
+          this.sendAck(next, handedOff ? undefined : onHandoff, retry + 1);
+        });
+        return;
+      }
       this.ackInFlight = false;
       if (!outcome.ok) {
         this.host.lane.afterward(() => this.fail(outcome.error, token));
@@ -2673,6 +2716,7 @@ export class RoutedTerminalController implements TerminalController {
         5_000,
         () => {
           if (token !== this.token) return;
+          handedBefore = this.handedAckSeq;
           if (seq > this.handedAckSeq) this.handedAckSeq = seq;
           onHandoff?.();
           this.wake();
@@ -2682,7 +2726,23 @@ export class RoutedTerminalController implements TerminalController {
       .then(handle);
   }
 
-  private sendProgress(ordinal: number): void {
+  // Resends a refused ACK or progress report after a bounded backoff (PROGRESS_BUSY_RETRIES).
+  // The in-flight flag stays set meanwhile, so no second one is sent and newer values coalesce.
+  // The timer is never disposed: disposal is foreign code that could reenter here, and a
+  // callback for a subscription or attempt that has since ended (the token moved on) does
+  // nothing. Registering a timer is pure by the Scheduler contract; if it throws anyway the
+  // subscription ends as it would have without the retry.
+  private retryProgress(token: number, retry: number, resend: () => void): void {
+    try {
+      this.host.scheduler.setTimer(progressRetryDelayMs(retry), () => {
+        if (token === this.token) resend();
+      });
+    } catch {
+      this.host.lane.afterward(() => this.fail(localError("invalid-state"), token));
+    }
+  }
+
+  private sendProgress(ordinal: number, retry = 0): void {
     const ref = this.ref;
     const descriptor = this.baseline;
     const operation = this.operation;
@@ -2715,6 +2775,15 @@ export class RoutedTerminalController implements TerminalController {
       if (handled) return;
       handled = true;
       if (token !== this.token) return;
+      if (retry < PROGRESS_BUSY_RETRIES && definiteBusy(outcome)) {
+        this.retryProgress(token, retry + 1, () => {
+          const next = Math.max(ordinal, this.pendingProgress ?? ordinal);
+          this.pendingProgress = undefined;
+          this.progressInFlight = false;
+          if (descriptor === this.baseline) this.sendProgress(next, retry + 1);
+        });
+        return;
+      }
       this.progressInFlight = false;
       if (!outcome.ok) {
         this.host.lane.afterward(() => this.fail(outcome.error, token));
