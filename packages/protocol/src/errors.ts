@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { RunRefSchema } from "./provisional/identity.js";
 
 export const DOMAIN_ERROR_KINDS = [
   "UNAUTHENTICATED",
@@ -22,6 +23,25 @@ export const DOMAIN_ERROR_KINDS = [
   "RESULT_UNKNOWN",
   "WORKER_UNAVAILABLE",
   "COUNTER_EXHAUSTED",
+  // M1 domain kinds. They are appended so that every earlier kind keeps its code.
+  "INVALID_ARGUMENT",
+  "REVISION_CONFLICT",
+  "REPO_NOT_FOUND",
+  "TASK_NOT_FOUND",
+  "MOUNT_NOT_FOUND",
+  "TAB_NOT_FOUND",
+  "NOT_A_GIT_REPOSITORY",
+  "BARE_REPOSITORY",
+  "REPO_ALREADY_REGISTERED",
+  "MANAGED_WORKTREE_NOT_MOUNTABLE",
+  "MOUNT_NAME_CONFLICT",
+  "TASK_ARCHIVED",
+  "BRANCH_EXISTS",
+  "FETCH_FAILED",
+  "MAIN_BRANCH_UNRESOLVED",
+  "LIVE_RUNS_PRESENT",
+  "OPERATION_NOT_RESUMABLE",
+  "OPERATION_EFFECTS_ACTIVE",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -41,14 +61,28 @@ export const NextActionSchema = z.enum([
   "new-subscription",
   "query-operation",
   "inspect-run",
+  "refresh-resource",
+  "fix-request",
 ]);
+// Live runs that block a binding change or a worktree deletion (D10). Only references are
+// carried: paths, commands and terminal content never enter error data.
+export const DomainErrorDetailsSchema = z.object({
+  runs: z.array(RunRefSchema).min(1).max(128),
+});
+export type DomainErrorDetails = z.infer<typeof DomainErrorDetailsSchema>;
+const kindsWithDetails: ReadonlySet<string> = new Set(["LIVE_RUNS_PRESENT"]);
 const DomainErrorFieldsSchema = z.object({
   kind: z.enum(DOMAIN_ERROR_KINDS),
-  code: z.number().int().min(1000).max(1020),
+  code: z
+    .number()
+    .int()
+    .min(1000)
+    .max(1000 + DOMAIN_ERROR_KINDS.length - 1),
   message: z.string().max(256),
   acceptance: AcceptanceSchema,
   nextAction: NextActionSchema,
   subject: z.literal("input").optional(),
+  details: DomainErrorDetailsSchema.optional(),
 });
 
 const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
@@ -73,6 +107,26 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   RESULT_UNKNOWN: "query-operation",
   WORKER_UNAVAILABLE: "inspect-run",
   COUNTER_EXHAUSTED: "new-subscription",
+  INVALID_ARGUMENT: "fix-request",
+  REVISION_CONFLICT: "refresh-resource",
+  REPO_NOT_FOUND: "refresh-resource",
+  TASK_NOT_FOUND: "refresh-resource",
+  MOUNT_NOT_FOUND: "refresh-resource",
+  TAB_NOT_FOUND: "refresh-resource",
+  NOT_A_GIT_REPOSITORY: "fix-request",
+  BARE_REPOSITORY: "fix-request",
+  REPO_ALREADY_REGISTERED: "refresh-resource",
+  MANAGED_WORKTREE_NOT_MOUNTABLE: "fix-request",
+  MOUNT_NAME_CONFLICT: "fix-request",
+  TASK_ARCHIVED: "refresh-resource",
+  BRANCH_EXISTS: "fix-request",
+  // The fix is usually an explicit --no-fetch, which the CLI states; Cove never drops the
+  // fetch on its own (D1).
+  FETCH_FAILED: "fix-request",
+  MAIN_BRANCH_UNRESOLVED: "fix-request",
+  LIVE_RUNS_PRESENT: "inspect-run",
+  OPERATION_NOT_RESUMABLE: "query-operation",
+  OPERATION_EFFECTS_ACTIVE: "query-operation",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
@@ -81,7 +135,8 @@ export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
     value.message === value.kind.replaceAll("_", " ") &&
     (value.subject === undefined ||
       (value.kind === "RESULT_UNKNOWN" && value.acceptance === "unknown")) &&
-    value.nextAction === (value.subject === "input" ? "inspect-run" : actions[value.kind]),
+    value.nextAction === (value.subject === "input" ? "inspect-run" : actions[value.kind]) &&
+    (value.details === undefined || kindsWithDetails.has(value.kind)),
 );
 export type DomainError = z.infer<typeof DomainErrorSchema>;
 
@@ -90,9 +145,14 @@ export function domainError(
   kind: DomainErrorKind,
   acceptance: z.infer<typeof AcceptanceSchema> = "not-accepted",
   subject?: "input",
+  details?: DomainErrorDetails,
 ): DomainError {
   if (subject && (kind !== "RESULT_UNKNOWN" || acceptance !== "unknown"))
     throw new Error("Input subject requires unknown result");
+  // Parsing also detaches the details from the caller's objects.
+  const parsed = details === undefined ? undefined : DomainErrorDetailsSchema.safeParse(details);
+  if (parsed && (!kindsWithDetails.has(kind) || !parsed.success))
+    throw new Error("Error details are not allowed for this kind");
   return {
     kind,
     code: ERROR_CODES[kind],
@@ -100,6 +160,7 @@ export function domainError(
     acceptance,
     nextAction: subject === "input" ? "inspect-run" : actions[kind],
     ...(subject ? { subject } : {}),
+    ...(parsed?.success ? { details: parsed.data } : {}),
   };
 }
 

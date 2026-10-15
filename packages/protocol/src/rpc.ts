@@ -7,9 +7,11 @@ import { boundedJsonStructure } from "./terminal.js";
 import {
   OperationRecordSchema,
   RPC_METHODS,
+  isWriteRpcMethod,
   validateRpcMethodParams,
   type OperationRecord,
   type RpcMethod,
+  type WriteRpcMethod,
 } from "./rpc-methods.js";
 
 export const JSON_RPC_VERSION = "2.0" as const;
@@ -191,8 +193,9 @@ export function composeRpcMethodResult(method: RpcMethod, input: unknown): unkno
     !validateEffectiveBudgets((parsed.data as { effectiveBudgets: unknown }).effectiveBudgets)
   )
     return null;
+  // A write returns the record of its own operation, whichever method it is.
   if (
-    (method === "terminal.create" || method === "terminal.stop") &&
+    isWriteRpcMethod(method) &&
     (parsed.data as { operation: OperationRecord }).operation.method !== method
   )
     return null;
@@ -212,17 +215,15 @@ export function validateRpcResultForCall(
       (call.params as { run: RunRef }).run,
       (response as { record: { run: RunRef } }).record.run,
     );
+  if (isWriteRpcMethod(method) || method === "operation.get") {
+    const input = call.params as { operationId: string };
+    if ((response as { operation: OperationRecord }).operation.operationId !== input.operationId)
+      return false;
+  }
   if (method === "terminal.create" || method === "terminal.stop" || method === "operation.get") {
-    const input = call.params as {
-      operationId: string;
-      expectedRelayInstanceId: string;
-      run?: RunRef;
-    };
+    const input = call.params as { expectedRelayInstanceId: string; run?: RunRef };
     const operation = (response as { operation: OperationRecord }).operation;
-    if (
-      operation.operationId !== input.operationId ||
-      (operation.run && operation.run.relayInstanceId !== input.expectedRelayInstanceId)
-    )
+    if (operation.run && operation.run.relayInstanceId !== input.expectedRelayInstanceId)
       return false;
     if (method === "terminal.stop" && (!operation.run || !sameRunRef(input.run!, operation.run)))
       return false;
@@ -257,6 +258,26 @@ export function canonicalOperationIntent(
   const parsed = validateRpcMethodParams(method, input);
   if (!parsed || parsed.method !== method) return null;
   if (method === "terminal.create" && !composeSpawnPayload(parsed.params, encodeUtf8)) return null;
+  const { operationId: _operationId, ...params } = parsed.params;
+  const canonical = sorted({ method, params });
+  if (!canonical) return null;
+  const text = JSON.stringify(canonical);
+  return encodeUtf8(text).byteLength <= M0_LIMITS.canonicalIntentBytes ? text : null;
+}
+
+// Fingerprint of any write. Terminal writes use canonicalOperationIntent unchanged, so their
+// fingerprint keeps the execution preconditions (expectedRelayInstanceId, run). Domain writes use
+// the same canonical form: method plus accepted params without the operation ID.
+export function canonicalWriteIntent(
+  method: WriteRpcMethod,
+  input: unknown,
+  encodeUtf8: (text: string) => Uint8Array,
+): string | null {
+  if (method === "terminal.create" || method === "terminal.stop")
+    return canonicalOperationIntent(method, input, encodeUtf8);
+  if (!isWriteRpcMethod(method)) return null;
+  const parsed = validateRpcMethodParams(method, input);
+  if (!parsed || parsed.method !== method) return null;
   const { operationId: _operationId, ...params } = parsed.params;
   const canonical = sorted({ method, params });
   if (!canonical) return null;
@@ -324,8 +345,17 @@ export function validateOperationRecord(
 
 export {
   RPC_METHODS,
+  RPC_DOMAINS,
+  WRITE_RPC_METHODS,
   OperationRecordSchema,
   RunRecordSchema,
+  isWriteRpcMethod,
   validateRpcMethodParams,
 } from "./rpc-methods.js";
-export type { OperationRecord, RunRecord, RpcMethod } from "./rpc-methods.js";
+export type {
+  OperationRecord,
+  RunRecord,
+  RpcDomain,
+  RpcMethod,
+  WriteRpcMethod,
+} from "./rpc-methods.js";

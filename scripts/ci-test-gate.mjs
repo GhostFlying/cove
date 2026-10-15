@@ -231,6 +231,11 @@ export const requiredSuites = [
     minimumTests: 12,
   },
   {
+    project: "protocol",
+    file: "packages/protocol/tests/workspace-contract.test.mjs",
+    minimumTests: 9,
+  },
+  {
     project: "server",
     file: "apps/server/tests/author/runtime-admission.test.mjs",
     minimumTests: 21,

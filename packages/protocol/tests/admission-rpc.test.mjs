@@ -275,8 +275,9 @@ test("rendezvous carries numeric loopback endpoint and bounded harness secret", 
   expect(BootstrapRequestSchema.safeParse(request).success).toBe(true);
 });
 
-test("six closed RPC methods publish params, results, permissions and CLI routes", () => {
-  expect(Object.keys(RPC_METHODS)).toEqual([
+test("closed RPC methods publish params, results, permissions and CLI routes", () => {
+  // M0 methods keep their order; M1 domain methods follow (docs/milestones/m1.md T0).
+  expect(Object.keys(RPC_METHODS).slice(0, 6)).toEqual([
     "server.status",
     "terminal.list",
     "terminal.get",
