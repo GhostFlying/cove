@@ -28,9 +28,12 @@
 // confirmation of A.
 //
 // Concentration is tested against the control: a delayed round trip is long and overlaps one of
-// the 20 writes per second almost regardless of its cause, so delayed echoes concentrate around
-// SQLite transactions only when they do so in the write phases and not around the control phases'
-// in-memory writes, which run at the same moments of the same requests.
+// the 20 writes per second almost regardless of its cause. Delayed echoes concentrate around SQLite
+// transactions when (1) in the write phases they are delayed more often when they overlap a
+// transaction than when they do not, and (2) round trips overlapping a transaction are delayed more
+// often than round trips in the control phases overlapping an in-memory write, which runs at the
+// same moment of the same request without SQLite. Raw data without control write intervals is
+// judged by (1) alone and says so.
 
 import { spawnSync } from "node:child_process";
 import { cpus, release, totalmem } from "node:os";
@@ -637,13 +640,22 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     );
   // A delayed round trip is long, and a long round trip overlaps one of 20 writes per second
   // almost regardless of cause; write handling outside SQLite also runs then. The control phase
-  // has the same writes at the same rate with the same timing, so the concentration counts against
-  // the database only when it appears around SQLite transactions and not around the control
-  // phase's in-memory writes.
+  // has the same writes at the same rate and timing, so the concentration counts against the
+  // database only when overlapping round trips are delayed more often around SQLite transactions
+  // than around the control phase's in-memory writes (one-sided Fisher on the overlapping round
+  // trips of both phase kinds).
   const writeConcentration = concentrationTest(sum(writeTables));
   const controlConcentration = memoryWrites ? concentrationTest(sum(controlTables)) : null;
+  const versusControlP = controlConcentration
+    ? fisherGreater(
+        writeConcentration.delayedOverlap,
+        writeConcentration.onTimeOverlap,
+        controlConcentration.delayedOverlap,
+        controlConcentration.onTimeOverlap,
+      )
+    : null;
   const concentrated =
-    writeConcentration.significant && !(controlConcentration?.significant ?? false);
+    writeConcentration.significant && (versusControlP === null || versusControlP < ALPHA);
 
   // Observations only (not verdict inputs). Most write-phase round trips overlap some transaction
   // (20 per second against round trips of up to tens of milliseconds), so the overlap base rate is
@@ -750,6 +762,9 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     concentration: {
       aroundTransactions: writeConcentration,
       aroundControlWrites: controlConcentration ?? "not recorded",
+      // p that round trips overlapping a transaction are delayed more often than those
+      // overlapping a control write.
+      transactionsVersusControlP: versusControlP,
     },
     observations: {
       writeEchoOverlapRate: writeEchoes.length
