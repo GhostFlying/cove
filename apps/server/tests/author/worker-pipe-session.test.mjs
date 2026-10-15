@@ -777,13 +777,34 @@ describe("bounded worker pipe session", () => {
       const answered = [f.session.request(status), f.session.request(stop)];
       const burst = Buffer.concat(outbox.splice(0));
       expect(burst.length).toBeGreaterThan(budgets.pipeQueuedBytes);
-      if (delivery === "coalesced") toWorker.write(burst);
-      else {
-        // The decoder holds the partial ordinary frame when the ACKs arrive. Each read owns
-        // its own exactly sized buffer (Buffer.from may copy into Node's shared pool).
-        toWorker.write(new Uint8Array(burst.subarray(0, 65_535)));
+      // Frame boundaries of the burst, in wire order, to place split points exactly.
+      const frames = [];
+      for (let at = 0; at < burst.length;) {
+        const metadataEnd = at + HEADER_BYTES + burst.readUInt32BE(at + 8);
+        const end = metadataEnd + burst.readUInt32BE(at + 12);
+        const type = JSON.parse(codec.decode(burst.subarray(at + HEADER_BYTES, metadataEnd))).type;
+        frames.push({ end, route: type === "applied-ack" });
+        at = end;
+      }
+      expect(frames.filter((entry) => entry.route)).toHaveLength(acks.length);
+      // The ordinary frame right after the last prepaid ACK: split one byte before its end, the
+      // ACKs park while the decoder holds that frame's complete header and partial body.
+      const lastAck = frames.findLastIndex((entry) => entry.route);
+      const ordinaryNextToAck = frames[lastAck + 1];
+      expect(ordinaryNextToAck?.route).toBe(false);
+      const split = {
+        coalesced: burst.length,
+        // The decoder holds the partial ordinary frame when the ACKs arrive.
+        fragmented: 65_535,
+        // The last prepaid control frame misses exactly one byte.
+        "last-byte": frames.findLast((entry) => entry.route).end - 1,
+        "ordinary-tail": ordinaryNextToAck.end - 1,
+      }[delivery];
+      // Each read owns its own exactly sized buffer (Buffer.from may copy into Node's pool).
+      toWorker.write(new Uint8Array(burst.subarray(0, split)));
+      if (split < burst.length) {
         await turn();
-        toWorker.write(new Uint8Array(burst.subarray(65_535)));
+        toWorker.write(new Uint8Array(burst.subarray(split)));
       }
       for (let step = 0; step < 16 && executed.length < 4 + 3 + acks.length; step++)
         await exchange();
@@ -806,6 +827,14 @@ describe("bounded worker pipe session", () => {
 
   it("lets the real worker take prepaid route control beyond pipeQueuedBytes in fragments", async () => {
     await expect(prepaidBeyondQueue("fragmented")).resolves.toBeUndefined();
+  });
+
+  it("lets the real worker take prepaid route control whose last frame misses one byte", async () => {
+    await expect(prepaidBeyondQueue("last-byte")).resolves.toBeUndefined();
+  });
+
+  it("lets the real worker take prepaid route control split at an adjacent ordinary frame's tail", async () => {
+    await expect(prepaidBeyondQueue("ordinary-tail")).resolves.toBeUndefined();
   });
 
   it("never lets prepaid route control exhaust the identities other commands need", async () => {

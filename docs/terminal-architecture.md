@@ -176,8 +176,10 @@ runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CON
 - pipe：每个订阅路由在打开时预留一条等待中的 ACK/进度和一条等待中的 unsubscribe；会话 arena 预留在途窗口的身份及 `PIPE_ROUTE_CONTROL_COMMANDS` 个传输槽位。
   帧从入队起占用传输槽位直到写回调（失联后亦然），命令要同时有窗口位与传输槽位才发出。这些帧不计入 `pipeQueuedBytes` 与 `reservedControlBytes`，
   普通流量占不到它们的空间，因此最小合法预算下也不会因排队预算失败关闭；排队与在途字节以 `pipeQueuedBytes` 加上传输槽位为界。
-  传输槽位的字节由共享常量 `PIPE_PREPAID_ROUTE_CONTROL_BYTES` 给出，worker 的入口上限（活动块、解码器与暂存副本）相应为
-  `pipeQueuedBytes` 加两倍该常量，超出仍失败关闭。
+  传输槽位的字节由共享常量 `PIPE_PREPAID_ROUTE_CONTROL_BYTES` 给出。worker 的准入检查与快照用同一口径计量入口存储：
+  仍被持有的活动块 backing（解码器读完整块即释放，早于处理其产出的帧）、解码器实际持有的部分帧字节
+  （校验通过的帧头不预分配其声明长度）与暂存的路由控制副本。上限为 `pipeQueuedBytes` 加两倍该常量
+  （预付帧可能同时位于未读完的活动块与其暂存副本中），超出仍失败关闭。
 
 预付存储都不占共享的控制预留，等待量以订阅数为界。保证之外仍会失败的情形包括：
 
