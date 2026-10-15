@@ -209,3 +209,30 @@ test("finish rejects partial EOF and closes both lane decoders", () => {
   expect(pipe.finish().ok).toBe(true);
   expect(pipe.finish().error.code).toBe("DECODER_CLOSED");
 });
+
+test("a validated header does not allocate its declared frame; storage tracks bytes held", () => {
+  const payload = new Uint8Array(65_536).map((_, index) => index % 251);
+  const frame = bytes("output", payload);
+  const decoder = createTerminalDecoder();
+  expect(decoder.storageBytes).toBe(0);
+  decoder.read(frame.subarray(0, 7));
+  // The fixed header buffer is owned once a frame starts.
+  expect(decoder.storageBytes).toBe(HEADER_BYTES);
+  decoder.read(frame.subarray(7, HEADER_BYTES));
+  expect(decoder.storageBytes).toBe(HEADER_BYTES);
+  decoder.read(frame.subarray(HEADER_BYTES, 1_000));
+  expect(decoder.storageBytes).toBe(1_000);
+  const done = decoder.read(frame.subarray(1_000));
+  expect(Array.from(done.frames[0].payload)).toEqual(Array.from(payload));
+  expect(decoder.storageBytes).toBe(0);
+});
+
+test("a frame fed one byte at a time decodes intact across body compaction", () => {
+  const payload = new Uint8Array(300).map((_, index) => index % 251);
+  const decoder = createTerminalDecoder();
+  const frames = feed(decoder, bytes("output", payload), 1);
+  expect(frames).toHaveLength(1);
+  expect(Array.from(frames[0].metadata)).toEqual([123, 125]);
+  expect(Array.from(frames[0].payload)).toEqual(Array.from(payload));
+  expect(decoder.storageBytes).toBe(0);
+});
