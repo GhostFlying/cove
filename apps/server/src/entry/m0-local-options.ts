@@ -6,6 +6,9 @@ export type M0LocalOptions = {
   port: number;
   rendezvousPath: string;
   allowedOrigins: readonly string[];
+  // Cove data directory (M1 D5). Without it the application runs without a store (unit tests);
+  // the executable always resolves one (`--home`, COVE_HOME or ~/.cove).
+  home?: string;
 };
 
 export function validateLocalOptions(input: M0LocalOptions): M0LocalOptions {
@@ -19,6 +22,10 @@ export function validateLocalOptions(input: M0LocalOptions): M0LocalOptions {
     normalize(input.rendezvousPath) !== input.rendezvousPath ||
     !basename(input.rendezvousPath) ||
     input.rendezvousPath.endsWith("/") ||
+    (input.home !== undefined &&
+      (!isAbsolute(input.home) ||
+        normalize(input.home) !== input.home ||
+        (input.home.length > 1 && input.home.endsWith("/")))) ||
     input.allowedOrigins.length > 16 ||
     input.allowedOrigins.some((origin) => {
       try {
@@ -42,7 +49,7 @@ export function parseLocalOptions(argv: readonly string[]): M0LocalOptions {
     if (
       !key ||
       !value ||
-      !["--mode", "--host", "--port", "--rendezvous", "--origin"].includes(key) ||
+      !["--mode", "--host", "--port", "--rendezvous", "--origin", "--home"].includes(key) ||
       (key !== "--origin" && values.has(key))
     )
       throw new Error("Invalid local entry arguments");
@@ -57,6 +64,7 @@ export function parseLocalOptions(argv: readonly string[]): M0LocalOptions {
     port: Number(port),
     rendezvousPath: values.get("--rendezvous") ?? "",
     allowedOrigins: origins,
+    ...(values.has("--home") ? { home: values.get("--home")! } : {}),
   });
 }
 

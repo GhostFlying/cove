@@ -1,7 +1,10 @@
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import type { RpcDomain, RpcMethod } from "@cove/protocol/rpc";
 import { RPC_METHODS } from "@cove/protocol/rpc";
+import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { TerminalOperations } from "../operations/terminal-operations.js";
+import type { ConfigService } from "../store/config.js";
+import type { Store } from "../store/database.js";
 import type { LocalRuntime } from "../terminal/local-runtime.js";
 
 // Server-side services an RPC handler may use. The server composition (entry/) builds it; domain
@@ -10,9 +13,16 @@ export type LocalCore = {
   runtime: LocalRuntime;
   operations: TerminalOperations;
   buildVersion: string;
-  // Durable local owner (relay-protocol §11.3). Until the store provides a persistent principal
-  // (M1 T1), the M0 constant is used.
+  // Durable local owner (relay-protocol §11.3), read from the store. A composition without a
+  // store (unit tests) uses the M0 constant.
   principalId?: string;
+  // The server database (M1 T1). Domain modules run their queries and writes through it, one
+  // complete business operation per Store.transaction (D6). Absent in store-less unit tests, where
+  // every domain write reports CAPABILITY_UNAVAILABLE.
+  store?: Store;
+  // Operation receipts shared by every write of this server (durable when `store` is present).
+  receipts?: OperationReceipts;
+  config?: ConfigService;
 };
 
 export const M0_LOCAL_PRINCIPAL_ID = "m0-local";

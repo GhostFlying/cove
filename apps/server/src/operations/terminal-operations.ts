@@ -14,6 +14,15 @@ import { OperationReceipts } from "./operation-receipts.js";
 
 export type OperationOutcome = { operation: OperationRecord } | { error: DomainError };
 
+// Durable run records (store/runs.ts). Only the hook D9 needs: a run is recorded when accepted,
+// marked running once spawned and dropped when the worker definitely refused it; exit facts are
+// recorded by the server composition from runtime events.
+export interface RunRecorder {
+  started(run: RunRef, cwd: string, operationId: string): void;
+  spawned(run: RunRef): void;
+  notStarted(run: RunRef): void;
+}
+
 export class TerminalOperations {
   private runCounter = 0;
   private requestCounter = 0;
@@ -24,6 +33,7 @@ export class TerminalOperations {
       runtime: LocalRuntime;
       receipts: OperationReceipts;
       encodeUtf8: (text: string) => Uint8Array;
+      runs?: RunRecorder;
     },
   ) {
     if (
@@ -85,9 +95,18 @@ export class TerminalOperations {
       state: "accepted",
       run,
     };
+    const runs = this.options.runs;
+    try {
+      runs?.started(run, params.cwd, params.operationId);
+    } catch {
+      preparation.cancel();
+      this.options.runtime.cancelRunReservation(run, worker);
+      return this.failure("BUSY");
+    }
     if (!preparation.commit(record)) {
       preparation.cancel();
       this.options.runtime.cancelRunReservation(run, worker);
+      this.recordRun(() => runs?.notStarted(run));
       return this.failure("BUSY");
     }
     this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
@@ -112,7 +131,26 @@ export class TerminalOperations {
         error: domainError("RESULT_UNKNOWN", "unknown"),
       };
     }
+    const uncertain =
+      (result.type === "error" && result.error.acceptance === "unknown") ||
+      (result.type === "result" && result.outcome === "unknown");
+    // An uncertain spawn keeps its `starting` record: the next start marks it interrupted.
+    if (!uncertain)
+      this.recordRun(() =>
+        result.type === "error" || result.outcome === "rejected"
+          ? runs?.notStarted(run)
+          : runs?.spawned(run),
+      );
     return this.complete(key, result);
+  }
+
+  // Run records follow the terminal path; a failed record write never changes its outcome.
+  private recordRun(write: () => void): void {
+    try {
+      write();
+    } catch {
+      /* The run keeps its previous record; a restart marks it interrupted. */
+    }
   }
 
   async stop(principalId: string, input: unknown): Promise<OperationOutcome> {
