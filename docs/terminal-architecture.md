@@ -201,11 +201,17 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
   `PIPE_HEARTBEAT_INTERVAL_MS`（1 s）发出一个 `heartbeat` 帧，与命令执行无关；同一时刻至多一个未结算的心跳，
   按控制帧计量，控制预留不足时跳过这一拍（此时已有控制帧在发往 runtime，它们同样证明存活）。
   runtime 把收到的任何合法帧（应答、事件、心跳）都视为接触。
-- **判定失联**的条件只有：进程退出或 pipe 关闭/出错、协议违规（照旧失败关闭）、握手超时，以及连续
-  `recoveryDeadlineMs`（15 s）收不到任何帧，即 worker 挂起。静默只在 runtime 自己的时钟节拍中累计，每拍至多计
-  一个心跳间隔，因此 runtime 自身事件循环停顿（例如同步工作占用十几秒）不会被记在 worker 头上。
-  N 取 15 s：等于 15 个心跳间隔，远大于 worker 单次同步工作（5,000 行历史的 serialize p95 约 252 ms、解码按读预算分片），
-  与旧规则检测真正挂起 worker 的时间相同，也与客户端恢复期限一致，所以客户端看到失联不会更晚。
+- **判定失联**的条件只有：进程退出或 pipe 关闭/出错、协议违规（照旧失败关闭）、握手超时，以及 runtime 观察到连续
+  `PIPE_LIVENESS_WINDOW_MS`（120 s）收不到任何帧，即 worker 挂起。握手同样以这个窗口为期限。
+  静默只在 runtime 自己的时钟节拍中累计，每拍至多计一个心跳间隔，因此 runtime 自身事件循环停顿（例如同步工作占用十几秒）
+  不会被记在 worker 头上。这个窗口约束的是 runtime 观察到的静默，不是墙钟时间：runtime 反复停顿时，从 worker 真正挂起到判定失联
+  的墙钟时间会相应拉长。
+  N 取 120 s（用户 2026-10-16 决定）：它是“worker 不再说话”的判据，与客户端单次恢复等待的 `recoveryDeadlineMs` 无关，二者分开配置；
+  `recoveryDeadlineMs` 可协商到 1 ms，若沿用它，心跳间隔之内就会把空闲的 worker 判为失联。窗口至少覆盖
+  `PIPE_LIVENESS_MIN_HEARTBEATS`（3）个心跳间隔，runtime 拒绝更小的窗口，避免一次迟到的定时器把存活的 worker 判失联。
+  120 个心跳间隔远大于 worker 单次同步工作（5,000 行历史的 serialize p95 约 252 ms、解码按读预算分片）和饱和下实测的心跳间隙
+  （见 PR #105 的 Linux 测量）；代价是真正挂起但未退出的 worker 要到 2 分钟后才被判定失联，期间它的命令各自以明确结果结束，
+  并由下文的过载状态先行报告。
 - **命令期限只结束这一条命令，不结束 worker。** 普通命令（含 subscribe/recover/preview-refresh/input/spawn）、status 与 stop
   的期限仍是自受理起 `recoveryDeadlineMs`。期限到达而 worker 仍存活时：
   - 命令还在 runtime 队列中未交给传输（pipe 被背压阻塞）：撤回该帧，调用方得到 BUSY（not-accepted）；worker 从未看到它。
@@ -228,7 +234,7 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
 
 客户端看到的结果：worker 慢时订阅保持，输出按 ACK 流控变慢；一半期限内未得到标记的 attach/recover 以 RECOVERY_EXPIRED
 （not-accepted）结束，只影响该视图，客户端按其下一步重新订阅；超时的输入是 RESULT_UNKNOWN，客户端不重放；窗口满时是 BUSY。只有 worker 退出、pipe 失败、
-协议违规或 15 s 无任何帧时，订阅才随 worker 失联结束（RESULT_UNKNOWN / WORKER_UNAVAILABLE）。
+协议违规或 runtime 观察到 120 s 无任何帧时，订阅才随 worker 失联结束（RESULT_UNKNOWN / WORKER_UNAVAILABLE）。
 已知限制：持续发心跳却永不应答某条命令的 worker（实现缺陷而非过载）不判失联；该命令的调用方得到明确结果，所在类别的窗口位
 一直被占用，路由控制则会停在那里。单个 worker 的吞吐上限（D6 的容量单位）由 D6 另行测量，不在本规则内。
 

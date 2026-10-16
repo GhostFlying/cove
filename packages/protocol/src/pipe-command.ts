@@ -29,9 +29,17 @@ export const PIPE_PREPAID_ROUTE_CONTROL_BYTES =
   PIPE_ROUTE_CONTROL_COMMANDS * PIPE_ROUTE_CONTROL_FRAME_BYTES;
 // A ready worker sends a heartbeat frame at this interval from a timer, independent of command
 // execution (issue #103). The runtime counts any frame as contact and declares the worker lost
-// only after recoveryDeadlineMs without one, so a worker that is merely slow to answer commands
-// (CPU-saturated by parsing, say) is never mistaken for a lost one.
+// only after PIPE_LIVENESS_WINDOW_MS of observed silence, so a worker that is merely slow to
+// answer commands (CPU-saturated by parsing, say) is never mistaken for a lost one.
 export const PIPE_HEARTBEAT_INTERVAL_MS = 1000;
+// The runtime's liveness window: silence it observed itself (see WorkerPipeSession.tick), not
+// wall-clock time. It is deliberately independent of recoveryDeadlineMs, which is how long a
+// client waits for one recovery and may be negotiated down to a millisecond; a worker is never
+// declared lost for answering slowly, only for saying nothing for this long (user decision on
+// #103: 120 s). A window must span several heartbeats, or one late timer turn would look like
+// loss; PIPE_LIVENESS_MIN_HEARTBEATS states that relation, and the runtime refuses a smaller window.
+export const PIPE_LIVENESS_WINDOW_MS = 120_000;
+export const PIPE_LIVENESS_MIN_HEARTBEATS = 3;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };

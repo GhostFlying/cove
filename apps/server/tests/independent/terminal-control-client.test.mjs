@@ -1,3 +1,4 @@
+import { PIPE_LIVENESS_WINDOW_MS } from "@cove/protocol/pipe";
 import { describe, expect, test } from "vitest";
 import {
   binary,
@@ -141,7 +142,7 @@ describe("P2-B2 independent actual compiled public consumer", () => {
       // stays. The worker then falls silent for the liveness window and is lost.
       r.accept(command, { inputSeq: command.inputSeq, writtenBytes: 9 });
       expect(r.session.closed).toBe(false);
-      for (let second = 0; second <= 30; second++) r.advance(1000);
+      for (let second = 0; second <= PIPE_LIVENESS_WINDOW_MS / 1000; second++) r.advance(1000);
       expect(r.session.closed).toBe(true);
       await turns();
       expect(notices).toHaveLength(1);
