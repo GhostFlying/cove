@@ -456,7 +456,7 @@ Go 业务主体配合同一终端池不会自动降低 xterm 解析成本。主�
 ## 11. 业务持久化选型（已选择 SQLite）
 
 已确认每个 host 的 server 使用本地 SQLite 保存业务元数据与配置，通过统一写入入口执行短事务。
-Node 驱动已选择 better-sqlite3；候选 WAL 模式，数据库执行线程、durability 设置、迁移与备份机制后续细化。
+Node 驱动已选择 better-sqlite3，在专用 worker thread 中执行（§11.1）；WAL、`synchronous=FULL`、迁移与备份见 [M1 D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)。
 客户端、CLI 和终端子进程通过 server 接口操作，不直接并发改写数据库。
 
 | 方案                    | 收益                                                                         | 对 Cove 的代价                                                                         |
@@ -475,21 +475,51 @@ SQLite 是 server 内部存储，不要求用户手工编辑配置文件；所�
 
 依据：[SQLite 适用场景](https://www.sqlite.org/whentouse.html)、[WAL](https://www.sqlite.org/wal.html)。
 
-### 11.1 Node 驱动与执行位置（已选择 better-sqlite3 与专用数据库 worker thread）
+### 11.1 Node 驱动与执行位置（已选择 better-sqlite3，在专用 worker thread 执行）
 
 | 方案                    | 收益                                                                   | 代价                                                                              |
 | ----------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | Node 内置 `node:sqlite` | 无额外 SQLite addon 打包步骤；基础 SQL、预编译语句与事务可满足业务需要 | 当前 Node v24.x 文档仍标为 Release candidate；SQLite 和绑定的更新跟随 Node 运行时 |
 | `better-sqlite3`        | 成熟的同步接口、事务封装及 worker thread 支持；驱动可独立于 Node 升级  | 增加一个原生 addon，需验证各发行平台的预编译包或自行构建                          |
 
-已确认使用 `better-sqlite3`；执行位置按 [M1 D6](milestones/m1.md#d6-数据库执行位置选-b由探针结果于-2026-10-16-决定) 选 B，
-在 runtime 进程内的专用数据库 worker thread 中运行，实现待 F-D6B 完成。
-选择依据是接口成熟度与依赖维护取舍，不代表已实测其比 `node:sqlite` 更快。
-两者核心数据库调用都是同步的；专用 worker 用于避免数据库查询、锁等待或磁盘提交阻塞控制进程主事件循环。
-worker 内独占连接，按完整业务操作执行短事务；不将 BEGIN、各条 SQL 和 COMMIT 拆成可交错的跨线程请求。
-队列有界，提交成功后才确认持久化操作；一期不需要按 TTY 分配数据库连接或创建读连接池。
+已确认使用 `better-sqlite3`。选择依据是接口成熟度与依赖维护取舍，不代表已实测其比 `node:sqlite` 更快。
+两者核心数据库调用都是同步的。M1 的 D6 探针表明主线程同步事务会推迟终端回显，用户于 2026-10-16 选定
+[D6](milestones/m1.md#d6-数据库执行位置选-b由探针结果于-2026-10-16-决定) = B：数据库在 server 进程内的一个专用 `worker_threads` worker 中执行；未选独立数据库进程（C）。
 数据库 worker 与承载 PTY 的终端子进程池是两个边界，不能据此把 node-pty 放入 worker threads。
-WAL、durability、备份、schema migration 与 ORM/查询构建器仍待后续细化。
+
+**线程与锁。** 单实例锁 `server/cove.lock`（一个 SQLite 连接持有不提交的 `BEGIN EXCLUSIVE`）由主线程在
+启动 worker 前取得，直到 worker 退出后才释放。worker 只持有业务库 `cove.db` 的唯一连接，并在其中执行
+schema 版本预检、打开、pragma（独占锁模式、`busy_timeout` 0、WAL、`synchronous=FULL`）、迁移前备份与迁移。
+锁不放进 worker 的原因：在 Node 26.10.0 上实测，worker 抛出、被 `terminate()` 或调用 `process.exit` 时，
+其连接都在线程拆除时关闭、未提交事务回滚，而进程继续运行。若锁连接也在 worker 内，worker 一死锁即释放，
+第二个实例便可能在本进程仍运行时打开同一数据库。锁留在主线程，并在观察到 worker `exit` 之后才关闭，
+因此“锁先于预检取得、在库关闭之后释放”的顺序在崩溃时同样成立。
+
+**调用协议。** 存储只暴露命名的完整业务操作（`apps/server/src/store/sql/registry.ts`）；每次调用在 worker 内
+作为一个 `IMMEDIATE` 事务执行，不把 BEGIN、各条 SQL 与 COMMIT 拆成可交错的跨线程请求。参数与结果都是
+structured-clone 安全的纯数据；结果不可克隆时 worker 回报 `unanswerable`，客户端按失败处理。
+调用按 FIFO 执行，两级有界：最多 16 个调用交给 worker（已发送，若 worker 失败则结果不确定），最多 1024 个
+在主线程排队（未发送）；两者都满时直接以 busy 拒绝，不发送。错误跨线程保留种类：`StoreError`
+（in-use、newer-schema、unavailable、migration）、`StoreOperationError`（已回滚，带 SQLite 错误码）与
+`StoreUnavailableError`（busy、closed、failed；结果 not-sent 或 unknown）。提交成功后才确认持久化操作；
+一期不按 TTY 分配连接，也不建读连接池。
+
+**操作身份。** 带操作 ID 的数据库写入先在主线程查回执与预留，再由一个 worker 操作在同一事务内复查回执、
+校验前置条件、执行登记在 `sql/writes.ts` 的写入、写入 accepted 并改为 succeeded。复查与写入在同一事务内，
+所以重复提交不会写两次；回执记录与业务写入同时提交或同时回滚。
+
+**失败即关闭。** worker 异常退出或回报不可回答的结果时，存储不重启 worker：已交给 worker 的调用结果为
+unknown（RPC 返回 `RESULT_UNKNOWN`，不自动重放），排队调用为 not-sent，之后的调用被拒绝；server 在 stderr
+写出 `{"event":"store-failed"}`、关闭并以退出码 1 结束。worker 线程拆除时回滚其未提交事务，因此重启后
+数据库处于最后一次提交的状态；调用方用同一操作 ID 查询或重发来确认结果。
+
+**有序关闭。** 停止接收新调用，等待全部已排队与已发送的调用应答，发送 `close` 由 worker 关闭数据库，
+等待 worker 退出，最后释放实例锁。worker 未确认关闭时，客户端终止它，并在释放锁后报告关闭失败。
+启动恢复、进程台账、run 记录与停止记录相对监听开始与关闭的顺序不变：它们都 await 存储调用，
+FIFO 执行保证同一调用方的先后。
+
+**时间关联。** D6 探针的事务起止时间改在 worker 内取 `performance.timeOrigin + performance.now()`；
+实测该值与主线程的同一表达式一致，因此仍可与主线程的回显往返区间比较。
 
 依据（2026-09-25）：[Node v24.x SQLite 文档](https://github.com/nodejs/node/blob/v24.x/doc/api/sqlite.md)
 （自 v24.15.0 标为 Release candidate）、[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)。
