@@ -312,3 +312,35 @@ test("repo remove deletes only the registration and leaves the clone directory u
   const again = await register(home, clone.path);
   expect(again.result.resource.id).not.toBe(repoId);
 });
+
+test("a request Git cannot answer is refused as GIT_UNAVAILABLE, not as a non-repository", async () => {
+  const home = fixture.home("home");
+  const clone = await fixture.gitRepo("clones/eta");
+  const plain = join(fixture.root, "plain");
+  await mkdir(plain);
+  // The server finds this `git` first on its PATH; its output exceeds the server's bound, so no
+  // Git query gets an answer. Only the server is started with it.
+  const fake = join(fixture.root, "fake-bin");
+  await mkdir(fake);
+  await writeFile(join(fake, "git"), "#!/bin/sh\nexec yes\n", { mode: 0o755 });
+  const path = fixture.env.PATH;
+  fixture.env.PATH = `${fake}:${path}`;
+  try {
+    await fixture.startServer(home);
+  } finally {
+    fixture.env.PATH = path;
+  }
+
+  const unanswered = await refused(["repo", "register", clone.path], home, "GIT_UNAVAILABLE");
+  expect(unanswered.stderr).toContain("not-accepted");
+  // A domain refusal ends the CLI with the same status whatever its kind.
+  const notRepo = await refused(
+    ["repo", "register", join(fixture.root, "missing")],
+    home,
+    "NOT_A_GIT_REPOSITORY",
+  );
+  expect(unanswered.code).toBe(notRepo.code);
+  // The plain directory exists, so only Git could tell; it is not misreported as a non-repository.
+  await refused(["repo", "register", plain], home, "GIT_UNAVAILABLE");
+  expect(await repos(home)).toEqual([]);
+});

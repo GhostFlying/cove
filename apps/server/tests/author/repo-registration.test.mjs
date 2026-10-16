@@ -258,12 +258,12 @@ describe("repo registration", () => {
       (await repos.register("principal", { operationId: "op", path: `${path}/` })).error.kind,
     ).toBe("OPERATION_ID_CONFLICT");
     // A new request is checked: the missing path is refused before Git runs, and an existing
-    // directory Git cannot answer for is refused as BUSY, not as "not a repository".
+    // directory Git cannot answer for is refused as GIT_UNAVAILABLE, not as "not a repository".
     expect((await repos.register("principal", { operationId: "new", path })).error.kind).toBe(
       "NOT_A_GIT_REPOSITORY",
     );
-    expect((await repos.register("principal", { operationId: "new", path: root })).error.kind).toBe(
-      "BUSY",
+    expect((await repos.register("principal", { operationId: "new", path: root })).error).toEqual(
+      expect.objectContaining({ kind: "GIT_UNAVAILABLE", acceptance: "not-accepted" }),
     );
     expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
   });
