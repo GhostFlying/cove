@@ -161,8 +161,10 @@ describe("bounded server preview cache", () => {
 
   it("author preview stagger visits all registered runs without subscriptions", async () => {
     const f = fixture();
-    f.runtime.reserveRun({ ...run, runId: "hidden" }, geometry);
-    f.runtime.reserveRun({ ...run, runId: "never" }, geometry);
+    for (const runId of ["hidden", "never"]) {
+      const spawned = { ...run, runId };
+      f.runtime.registry.markDispatched(spawned, f.runtime.reserveRun(spawned, geometry));
+    }
     f.runtime.tickPreviews();
     await pump();
     expect(f.commands()).toHaveLength(1);
@@ -185,6 +187,36 @@ describe("bounded server preview cache", () => {
     );
     expect(f.commands().filter((command) => command.type === "status")).toHaveLength(3);
     expect(f.commands().filter((command) => command.type === "preview-refresh")).toHaveLength(2);
+    await cleaned(f);
+  });
+
+  it("author preview ticks skip a reserved run until its spawn is dispatched", async () => {
+    // terminal.create awaits durable store records between reserving a run and spawning it, so
+    // ticks run in that window. A status query then would reach the worker before the spawn, be
+    // refused, and leave the new run `unverifiable` for a whole cadence.
+    const f = fixture();
+    const pending = { ...run, runId: "pending" };
+    const worker = f.runtime.reserveRun(pending, geometry);
+    expect(worker).toBeTruthy();
+    // "pending" sorts before "run": without the dispatch check the first tick would pick it.
+    f.runtime.tickPreviews();
+    await pump();
+    expect(f.commands().map((command) => [command.type, command.run.runId])).toEqual([
+      ["status", "run"],
+    ]);
+    f.session.receive(f.reply(f.latest(), { runStatus: f.status(0, f.latest().run) }));
+    await pump();
+    f.clock(50);
+    f.runtime.tickPreviews();
+    await pump();
+    expect(f.commands().filter((command) => command.run.runId === "pending")).toEqual([]);
+    expect(f.runtime.registry.isDispatched(pending)).toBe(false);
+    // Once the spawn is sent the run is due at once, without waiting for a cadence.
+    f.runtime.registry.markDispatched(pending, worker);
+    f.clock(100);
+    f.runtime.tickPreviews();
+    await pump();
+    expect(f.latest()).toMatchObject({ type: "status", run: pending });
     await cleaned(f);
   });
 

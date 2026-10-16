@@ -122,6 +122,13 @@ export class RunRegistry {
     }
   }
 
+  // Whether the run's spawn has been sent to its worker. Before that the worker does not know the
+  // run, so a status query would only be refused.
+  isDispatched(run: RunRef): boolean {
+    const entry = this.entries.get(run.runId);
+    return !!entry && sameRunRef(run, entry.run) && entry.dispatched;
+  }
+
   markDispatched(run: RunRef, worker: WorkerRef): boolean {
     const entry = this.entries.get(run.runId);
     if (!entry || !sameRunRef(run, entry.run) || !sameWorkerRef(worker, entry.worker)) return false;
