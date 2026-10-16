@@ -17,7 +17,12 @@ import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { runRecordedSetup } from "../../scripts/ci-environment-setup.mjs";
+import {
+  checkJobMinimumMs,
+  checkStageMs,
+  ciTimeBudget,
+  runRecordedSetup,
+} from "../../scripts/ci-environment-setup.mjs";
 import { prepareNodePty } from "../../scripts/node-pty-install.mjs";
 import { prepareBetterSqlite3 } from "../../scripts/better-sqlite3-prepare.mjs";
 
@@ -34,6 +39,33 @@ async function isolatedDirectory() {
   directories.push(path);
   return path;
 }
+
+test("CI time bounds nest inside each other using configured allowances", async () => {
+  // The check stage must outlast everything it runs at full allowance, so vitest's own bound
+  // fires first and the gate records failure evidence instead of being killed from outside.
+  // Restate the full sums independently so dropping any allowance from the exported totals fails.
+  const gate = ciTimeBudget.gateCommandMs;
+  const checkStageNeeds =
+    ciTimeBudget.checkPreludeReserveMs +
+    2 * gate +
+    ciTimeBudget.vitestMs +
+    gate +
+    ciTimeBudget.checkFinalizeReserveMs;
+  expect(checkStageMs).toBeGreaterThanOrEqual(checkStageNeeds);
+  const jobNeeds =
+    3 * ciTimeBudget.setupStageMs + gate + checkStageNeeds + ciTimeBudget.jobActionsReserveMs;
+  expect(checkJobMinimumMs).toBeGreaterThanOrEqual(jobNeeds);
+  const workflow = await readFile(
+    resolve(import.meta.dirname, "../../.github/workflows/check.yml"),
+    "utf8",
+  );
+  // The `check` job block ends at the next top-level job or at the end of the file.
+  const job = /\n {2}check:\n([\s\S]*?)(?=\n {2}[\w-]+:\n|$)/.exec(workflow)?.[1];
+  expect(job, "check.yml has no top-level `check` job").toBeDefined();
+  const timeout = /\n {4}timeout-minutes: (\d+)\n/.exec(`\n${job}\n`)?.[1];
+  expect(timeout, "the `check` job has no timeout-minutes").toBeDefined();
+  expect(Number(timeout) * 60_000).toBeGreaterThanOrEqual(jobNeeds);
+});
 
 test("records a failed setup command before rejecting it", async () => {
   const directory = await isolatedDirectory();

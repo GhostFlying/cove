@@ -10,6 +10,46 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const setupDir = join(root, ".cache/ci/setup");
 
+const minute = 60_000;
+
+// One budget for every CI time bound. Each bound must contain the configured allowances of
+// everything inside it, not just their observed durations. While work without its own bound
+// stays within its stated reserve, a hung command is then stopped by the innermost bound and the
+// gate writes its evidence before an outer timeout or a job cancel.
+// tests/tooling/ci-environment-setup.test.mjs checks the composition and the workflow value.
+export const ciTimeBudget = Object.freeze({
+  // Each of the install, native and browser setup steps (observed: at most 25 s on macOS).
+  setupStageMs: 10 * minute,
+  // Each auxiliary gate command: the toolchain probe, discovery and the source revision.
+  gateCommandMs: 2 * minute,
+  // The vitest run. Green macOS runs took 11.1-11.8 minutes when #111 raised it from 12.
+  vitestMs: 20 * minute,
+  // Native preparation, format, lint, build and the gate's file preparation inside
+  // `pnpm check`. They have no bound of their own; this reserve is well above the observed 30 s.
+  checkPreludeReserveMs: 5 * minute,
+  // Parsing reports and writing evidence after the last gate command.
+  checkFinalizeReserveMs: 1 * minute,
+  // Runner actions (checkout, setup-node, pnpm, upload-artifact) have no bound we configure;
+  // observed at most about 40 s together.
+  jobActionsReserveMs: 5 * minute,
+});
+
+// `pnpm check`: prelude, toolchain probe and discovery, vitest, source revision, finalization.
+export const checkStageMs =
+  ciTimeBudget.checkPreludeReserveMs +
+  2 * ciTimeBudget.gateCommandMs +
+  ciTimeBudget.vitestMs +
+  ciTimeBudget.gateCommandMs +
+  ciTimeBudget.checkFinalizeReserveMs;
+
+// The `check` job: three setup steps, the `--environment` toolchain probe, the check stage and
+// the runner actions. `.github/workflows/check.yml` must allow at least this long.
+export const checkJobMinimumMs =
+  3 * ciTimeBudget.setupStageMs +
+  ciTimeBudget.gateCommandMs +
+  checkStageMs +
+  ciTimeBudget.jobActionsReserveMs;
+
 function custodyError(phase, error, stream) {
   return { phase, stream, error };
 }
@@ -235,7 +275,7 @@ export async function runRecordedSetup(
   args,
   directory,
   cwd,
-  timeoutMs = 600_000,
+  timeoutMs = ciTimeBudget.setupStageMs,
   outputs = {},
 ) {
   if (stage === "check")
@@ -320,7 +360,7 @@ async function main() {
     selected[2],
     setupDir,
     root,
-    command === "--check" ? 1_200_000 : 600_000,
+    command === "--check" ? checkStageMs : ciTimeBudget.setupStageMs,
   );
 }
 

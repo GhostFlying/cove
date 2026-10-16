@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   captureOrdinaryCIOutput,
+  ciTimeBudget,
   ordinaryCIOutputMetadata,
   replayOrdinaryCIOutput,
   throwOrdinaryCIOutputFailure,
@@ -1457,7 +1458,7 @@ export async function recordedCommand(
   binary,
   args,
   outputFile,
-  timeoutMs = 120_000,
+  timeoutMs = ciTimeBudget.gateCommandMs,
   outputs = {},
 ) {
   if (outputs.fileCapture)
@@ -2069,10 +2070,10 @@ async function main() {
       process.execPath,
       runArgs,
       join(evidenceDir, "execution.json"),
-      // The whole suite took 440 s on macOS runners before the WebGL renderer tests, and real
-      // browser suites vary by tens of seconds between runs. Keep a bound well inside the 30-minute
-      // job timeout so a hung run still fails with recorded evidence, not a cancelled job.
-      12 * 60_000,
+      // ciTimeBudget sizes the `pnpm check` stage and job timeouts around this bound. While the
+      // unbounded work around it stays within its reserves, a hung run fails here with recorded
+      // evidence rather than being killed from outside.
+      ciTimeBudget.vitestMs,
       { fileCapture: true },
     );
     if (result.status !== 0) throw new Error(`Vitest exited ${result.status}`);
