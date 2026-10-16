@@ -219,7 +219,10 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
 - **命令期限只结束这一条命令，不结束 worker。** 普通命令（含 subscribe/recover/preview-refresh/input/spawn）、status 与 stop
   的期限仍是自受理起 `recoveryDeadlineMs`。期限到达而 worker 仍存活时：
   - 命令还在 runtime 队列中未交给传输（pipe 被背压阻塞）：撤回该帧，调用方得到 BUSY（not-accepted）；worker 从未看到它。
-  - 已交给传输：调用方得到 RESULT_UNKNOWN（unknown；input 带 `subject: input`，下一步是核实 run，绝不重放）。
+  - 传输取走了帧但没有交出（其 write 返回或结算而未调用 `handing`）：同样什么都没到达 worker，调用方得到 BUSY（not-accepted），
+    关联、请求身份与窗口位立即释放（不会有应答）；帧的字节仍归传输，直到它结算。之后若传输迟迟交出该帧，会话拒绝
+    （`handing` 抛出，传输不得写出）并失败关闭为失联，不让调用方已被告知未接受的命令再到达 worker。
+  - 已交出（传输调用了 `handing`）：调用方得到 RESULT_UNKNOWN（unknown；input 带 `subject: input`，下一步是核实 run，绝不重放）。
     关联、请求身份与窗口位保留到 worker 的迟到应答，应答照常校验（不合法仍失败关闭），然后丢弃：不交接、不激活订阅路由、
     不封存预览。迟到的 subscribe/recover 即使被接受，其路由仍不激活，事件继续被拦截；订阅层已因期限退役该路由并发出 unsubscribe。
     被放弃的命令继续占用所在类别的窗口，所以过载表现为后续命令的 BUSY，而不是无界增长。

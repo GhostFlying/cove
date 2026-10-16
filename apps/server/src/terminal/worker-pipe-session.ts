@@ -60,7 +60,9 @@ const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 export interface PipeByteTransport {
   // A transport must call `handing` immediately before its first lower write or delivery side
   // effect: from then on bytes may reach the worker (and a reply may arrive, even synchronously).
-  // A write that throws before calling it delivered nothing.
+  // A write that throws before calling it delivered nothing. `handing` throws when the session
+  // refuses the handover (its command was already answered as never sent); the transport must
+  // then not write, as for any throw before its lower write.
   write(bytes: Uint8Array, settled: (error?: unknown) => void, handing: () => void): boolean;
 }
 export interface PipeCodec {
@@ -83,6 +85,11 @@ type Pending = {
   onSent?: () => void;
   // The runtime clock when the transport handed the frame over (health's command age).
   sentAt?: number;
+  // The transport took the frame (flush() called its write) but has not handed it over.
+  offered?: boolean;
+  // Answered as never sent at its deadline while offered (see expire()); a later handover of
+  // its frame is refused.
+  withdrawn?: boolean;
   admitted: boolean;
   // Its deadline passed while the worker was live and the caller already has RESULT_UNKNOWN; the
   // correlation stays until the worker's late reply (see expire()).
@@ -642,6 +649,13 @@ export class WorkerPipeSession {
         const request = item.request;
         const handing = (): void => {
           if (!request || request.sent) return;
+          if (request.withdrawn) {
+            // The transport hands over late a frame whose command expiry already answered as
+            // never sent: delivering it now could apply a command the caller was told was not.
+            // Fail closed: contact is lost, and the throw stops the transport's lower write.
+            this.loseContact();
+            throw new Error("Late handover of a withdrawn frame");
+          }
           request.sent = true;
           request.sentAt = this.lastNow;
           request.onSent?.();
@@ -656,6 +670,9 @@ export class WorkerPipeSession {
             },
             handing,
           );
+          // A write that returns (or settles) without calling `handing` has not handed the frame
+          // over; expire() may then answer it as never sent.
+          if (request && !request.sent) request.offered = true;
           if (!writable && drainGeneration === this.drainGeneration) this.blocked = true;
         } catch {
           this.loseContact();
@@ -928,6 +945,11 @@ export class WorkerPipeSession {
   // Ends one command whose deadline passed while the worker is live, keeping the worker.
   // - Still queued in the runtime (the transport is backpressured): the frame is withdrawn, so
   //   the worker never sees it, and the caller gets BUSY (not-accepted).
+  // - Taken by the transport but never handed over (its write returned or settled without
+  //   calling `handing`): nothing reached the worker either, so the caller gets BUSY too, and
+  //   the correlation, identity and window slot are released, as no reply can come. The
+  //   transport still owns the frame's bytes until it settles them (see release()); a late
+  //   handover of the frame is refused and fails closed (see flush()).
   // - Already handed to the transport: the worker may have applied it, so the caller gets
   //   RESULT_UNKNOWN (input with subject "input"; never replayed). The correlation, identity and
   //   window slot stay until the worker's late reply, which is still validated (a protocol
@@ -946,6 +968,15 @@ export class WorkerPipeSession {
         this.settle(requestId);
         const command = entry.command;
         // A withdrawn opener leaves its route to the unsubscribe its owner sends on the refusal.
+        if (command.type === "subscribe" || command.type === "recover")
+          this.forgetRoute(command.subscription, false);
+        entry.resolve(this.error(command, "BUSY"));
+        return;
+      }
+      if (!item && entry.offered) {
+        entry.withdrawn = true;
+        this.settle(requestId);
+        const command = entry.command;
         if (command.type === "subscribe" || command.type === "recover")
           this.forgetRoute(command.subscription, false);
         entry.resolve(this.error(command, "BUSY"));

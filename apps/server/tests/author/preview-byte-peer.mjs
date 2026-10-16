@@ -90,6 +90,7 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
         // Withheld: the frame is never handed over or delivered; the write only returns
         // ("return") or also settles ("settle"). The session must not infer a handoff from that.
         if (withheld) {
+          withheldHandings.push(handing);
           if (withheld === "settle") settled();
           return true;
         }
@@ -106,6 +107,8 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
   let backpressured = false;
   let deliver;
   let withheld;
+  // The `handing` callbacks of withheld writes, for a transport that hands a frame over late.
+  const withheldHandings = [];
   runtime.addWorker(session);
   session.start();
   session.receive(
@@ -241,6 +244,7 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
     backpressure: (value) => (backpressured = value),
     onDeliver: (hook) => (deliver = hook),
     withholdHandoff: (mode) => (withheld = mode),
+    handWithheld: () => withheldHandings.shift()(),
     bytes,
     budgets,
     composition,

@@ -380,6 +380,63 @@ describe("bounded server preview cache", () => {
     await expect(withheldHandoff("settle")).resolves.toBeUndefined();
   });
 
+  // Issue #103 review: the same withheld frame reaching its command deadline while the worker is
+  // live. Nothing was handed over, so the spawn is answered not-accepted and its correlation and
+  // window slot are released: with one ordinary slot, the next spawn still reaches the worker.
+  async function withheldHandoffExpiry(mode) {
+    const f = fixture({ pendingWorkerCommands: 1 });
+    const target = { ...run, runId: "expired-" + mode };
+    const next = { ...run, runId: "next-" + mode };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    expect(f.runtime.reserveRun(next, geometry)).toBeTruthy();
+    const written = f.commands().length;
+    f.withholdHandoff(mode);
+    const spawn = f.runtime.spawn(spawnInput(f, target, "spawn-expired-" + mode));
+    await pump();
+    f.clock(1000);
+    f.session.tick();
+    expect(await spawn).toMatchObject({
+      type: "error",
+      error: { kind: "BUSY", acceptance: "not-accepted" },
+    });
+    expect(f.session.ready).toBe(true);
+    expect(f.commands()).toHaveLength(written);
+    expectReleased(f, target, { reserveAgain: false });
+    f.withholdHandoff(undefined);
+    const second = f.runtime.spawn(spawnInput(f, next, "spawn-next-" + mode));
+    await pump();
+    const sent = f.commands().filter((command) => command.type === "spawn");
+    expect(sent.map((command) => command.run.runId)).toEqual([next.runId]);
+    f.session.receive(f.reply(sent[0], { operationId: sent[0].operationId }));
+    expect((await second).outcome).toBe("accepted");
+    await cleaned(f);
+  }
+
+  it("author spawn whose transport returns without handing it over expires not accepted", async () => {
+    await expect(withheldHandoffExpiry("return")).resolves.toBeUndefined();
+  });
+
+  it("author spawn whose transport settles without handing it over expires not accepted", async () => {
+    await expect(withheldHandoffExpiry("settle")).resolves.toBeUndefined();
+  });
+
+  it("author spawn handed over after it expired as never sent fails closed", async () => {
+    const f = fixture();
+    const target = { ...run, runId: "late" };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    f.withholdHandoff("return");
+    const spawn = f.runtime.spawn(spawnInput(f, target, "spawn-late"));
+    await pump();
+    f.clock(1000);
+    f.session.tick();
+    expect((await spawn).error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    // The handover is refused (the transport must not write) and contact is lost.
+    expect(() => f.handWithheld()).toThrow("Late handover of a withdrawn frame");
+    expect(f.session.ready).toBe(false);
+    expect(f.runtime.registry.isDispatched(target)).toBe(false);
+    await cleaned(f);
+  });
+
   it("author preview list and get are bounded metadata reads", async () => {
     const f = fixture();
     await f.capture();
