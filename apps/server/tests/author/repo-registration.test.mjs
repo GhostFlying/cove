@@ -159,39 +159,44 @@ describe("Git runner", () => {
 
   // A git that forks without exec: the forked descendant inherits stdout and stderr. Each case
   // must settle promptly (not when the descendant would close the pipes) and end the descendant.
-  it.each([
-    {
-      name: "a timeout",
-      script: "sleep 30 &\necho $! > PIDFILE\nwait",
-      options: { timeoutMs: 1_000 },
-      expected: { kind: "failed", reason: "timeout" },
-    },
-    {
-      name: "an output overflow",
-      script: "yes &\necho $! > PIDFILE\nwait",
-      options: { maxOutputBytes: 4096 },
-      expected: { kind: "failed", reason: "overflow" },
-    },
-    {
-      name: "an exit that leaves a descendant holding the pipes",
-      script: "sleep 30 &\necho $! > PIDFILE\necho done",
-      options: {},
-      expected: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
-    },
-  ])(
-    "ends the process group and settles promptly after $name",
-    async ({ script, options, expected }) => {
-      const cwd = await temporary();
-      const pidFile = join(cwd, "descendant.pid");
-      process.env.PATH = `${await fakeGit(script.replace("PIDFILE", pidFile))}:${savedEnv.PATH}`;
-      const started = Date.now();
-      expect(await runGit(["status"], { cwd, ...options })).toEqual(expected);
-      expect(Date.now() - started).toBeLessThan(3_000);
-      const pid = Number(await readFile(pidFile, "utf8"));
-      expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
-      expect(await ended(pid)).toBe(true);
-    },
-  );
+  // (Separate tests rather than it.each: the CI gate counts each `it` once at discovery.)
+  // Returns the run's result, whether it settled within 3 s (the descendant holds the pipes for
+  // 30 s) and whether the descendant ended.
+  async function forkingRun(script, options) {
+    const cwd = await temporary();
+    const pidFile = join(cwd, "descendant.pid");
+    process.env.PATH = `${await fakeGit(script.replace("PIDFILE", pidFile))}:${savedEnv.PATH}`;
+    const started = Date.now();
+    const result = await runGit(["status"], { cwd, ...options });
+    const prompt = Date.now() - started < 3_000;
+    const pid = Number(await readFile(pidFile, "utf8"));
+    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("no descendant PID recorded");
+    return { result, prompt, descendantEnded: await ended(pid) };
+  }
+
+  it("ends the process group and settles promptly after a timeout", async () => {
+    expect(await forkingRun("sleep 30 &\necho $! > PIDFILE\nwait", { timeoutMs: 1_000 })).toEqual({
+      result: { kind: "failed", reason: "timeout" },
+      prompt: true,
+      descendantEnded: true,
+    });
+  });
+
+  it("ends the process group and settles promptly after an output overflow", async () => {
+    expect(await forkingRun("yes &\necho $! > PIDFILE\nwait", { maxOutputBytes: 4096 })).toEqual({
+      result: { kind: "failed", reason: "overflow" },
+      prompt: true,
+      descendantEnded: true,
+    });
+  });
+
+  it("ends a descendant left holding the pipes when git exits", async () => {
+    expect(await forkingRun("sleep 30 &\necho $! > PIDFILE\necho done", {})).toEqual({
+      result: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
+      prompt: true,
+      descendantEnded: true,
+    });
+  });
 });
 
 async function exists(path) {
@@ -451,57 +456,7 @@ describe("repo registration", () => {
   // Clones whose main working tree Git cannot name from a linked worktree: once the clone is
   // registered, its common directory still identifies it, so the linked worktree (also through a
   // symlink) is the duplicate it is rather than "not a repository".
-  it.each([
-    {
-      name: "a separate Git directory",
-      async make(root) {
-        const main = join(root, "main");
-        await mkdir(join(root, "git-dirs"));
-        await git(
-          root,
-          root,
-          "init",
-          "--quiet",
-          "-b",
-          "main",
-          "--separate-git-dir",
-          join(root, "git-dirs", "main"),
-          main,
-        );
-        await commitFile(main, root);
-        return main;
-      },
-    },
-    {
-      name: "a relocated, symlinked Git directory",
-      async make(root) {
-        const main = await clone(root, "main");
-        await mkdir(join(root, "store"));
-        await rename(join(main, ".git"), join(root, "store", "main.git"));
-        await symlink(join(root, "store", "main.git"), join(main, ".git"));
-        return main;
-      },
-    },
-    {
-      name: "a submodule",
-      async make(root) {
-        const source = await clone(root, "source");
-        const superproject = await clone(root, "super");
-        await git(
-          superproject,
-          root,
-          "-c",
-          "protocol.file.allow=always",
-          "submodule",
-          "add",
-          "--quiet",
-          source,
-          "sub",
-        );
-        return join(superproject, "sub");
-      },
-    },
-  ])("recognizes a registered clone with $name through its linked worktree", async ({ make }) => {
+  async function recognizedThroughLinkedWorktree(make) {
     const root = await temporary();
     const main = await make(root);
     const linked = join(root, "linked");
@@ -510,20 +465,69 @@ describe("repo registration", () => {
     await symlink(linked, linkedLink);
     const { repos } = await service();
     // Unregistered, the linked worktree cannot name the clone.
-    expect((await repos.register("principal", { operationId: "a", path: linked })).error.kind).toBe(
-      "NOT_A_GIT_REPOSITORY",
-    );
-    const registered = await repos.register("principal", { operationId: "b", path: main });
-    expect(registered.operation.state).toBe("succeeded");
-    expect(repos.list({ limit: 10 }).repos.map((repo) => repo.path)).toEqual([main]);
+    const unregistered = (await repos.register("principal", { operationId: "a", path: linked }))
+      .error?.kind;
+    const registered = (await repos.register("principal", { operationId: "b", path: main }))
+      .operation?.state;
+    const paths = repos.list({ limit: 10 }).repos.map((repo) => repo.path);
+    const duplicates = [];
     for (const [operationId, path] of [
       ["c", linked],
       ["d", `${linkedLink}/`],
     ])
-      expect((await repos.register("principal", { operationId, path })).error.kind).toBe(
-        "REPO_ALREADY_REGISTERED",
-      );
-    expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
+      duplicates.push((await repos.register("principal", { operationId, path })).error?.kind);
+    return {
+      unregistered,
+      registered,
+      pathIsMain: paths.length === 1 && paths[0] === (await realpath(main)),
+      duplicates,
+      count: repos.list({ limit: 10 }).repos.length,
+    };
+  }
+
+  const recognized = {
+    unregistered: "NOT_A_GIT_REPOSITORY",
+    registered: "succeeded",
+    pathIsMain: true,
+    duplicates: ["REPO_ALREADY_REGISTERED", "REPO_ALREADY_REGISTERED"],
+    count: 1,
+  };
+
+  it("recognizes a registered clone with a separate Git directory through its linked worktree", async () => {
+    expect(
+      await recognizedThroughLinkedWorktree(async (root) => {
+        const main = join(root, "main");
+        await mkdir(join(root, "git-dirs"));
+        const gitDir = join(root, "git-dirs", "main");
+        await git(root, root, "init", "--quiet", "-b", "main", "--separate-git-dir", gitDir, main);
+        await commitFile(main, root);
+        return main;
+      }),
+    ).toEqual(recognized);
+  });
+
+  it("recognizes a registered clone with a relocated, symlinked Git directory through its linked worktree", async () => {
+    expect(
+      await recognizedThroughLinkedWorktree(async (root) => {
+        const main = await clone(root, "main");
+        await mkdir(join(root, "store"));
+        await rename(join(main, ".git"), join(root, "store", "main.git"));
+        await symlink(join(root, "store", "main.git"), join(main, ".git"));
+        return main;
+      }),
+    ).toEqual(recognized);
+  });
+
+  it("recognizes a registered submodule through its linked worktree", async () => {
+    expect(
+      await recognizedThroughLinkedWorktree(async (root) => {
+        const source = await clone(root, "source");
+        const superproject = await clone(root, "super");
+        const add = ["submodule", "add", "--quiet", source, "sub"];
+        await git(superproject, root, "-c", "protocol.file.allow=always", ...add);
+        return join(superproject, "sub");
+      }),
+    ).toEqual(recognized);
   });
 });
 
