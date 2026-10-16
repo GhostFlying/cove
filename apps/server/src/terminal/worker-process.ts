@@ -67,10 +67,12 @@ export class WorkerProcess {
         decode: (bytes) => new TextDecoder("utf-8", { fatal: true }).decode(bytes),
       },
       transport: {
-        write: (bytes, settled) => {
+        write: (bytes, settled, handing) => {
           const child = this.child;
           if (!child || this.writerClosed || child.stdin.destroyed)
             throw new Error("Worker writer unavailable");
+          // Past the preflight: the bytes go to the lower writer now (see PipeByteTransport).
+          handing();
           let owned = true;
           return child.stdin.write(bytes, (error) => {
             if (!owned) return;

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { RPC_METHODS } from "@cove/protocol/rpc";
+import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
 import { fixture, run, geometry, coalesce, pump, decode } from "./preview-byte-peer.mjs";
 
 async function cleaned(f) {
@@ -218,6 +219,165 @@ describe("bounded server preview cache", () => {
     await pump();
     expect(f.latest()).toMatchObject({ type: "status", run: pending });
     await cleaned(f);
+  });
+
+  // A spawn refused at admission never reaches the worker: its run must not count as dispatched
+  // (preview ticks would poll a run the worker does not know) and must not keep its reservation.
+  const spawnInput = (f, target, requestId) => ({
+    worker: f.session.worker,
+    run: target,
+    requestId,
+    operationId: requestId + "-operation",
+    geometry,
+    appearance: DEFAULT_APPEARANCE,
+    effectiveBudgets: f.budgets,
+    profile: PROFILE,
+    executable: "/bin/sh",
+    argv: [],
+    cwd: "/",
+  });
+  const expectReleased = (f, target, { reserveAgain = true } = {}) => {
+    expect(f.runtime.registry.isDispatched(target)).toBe(false);
+    expect(f.runtime.registry.get(target)).toBeNull();
+    // The reservation, the session's run record and the pool slot are all free again.
+    expect(f.session.forgetUnstartedRun(target)).toBe(false);
+    if (reserveAgain) expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+  };
+
+  it("author spawn refused by a full ordinary window releases its run and is never polled", async () => {
+    const f = fixture({ pendingWorkerCommands: 1 });
+    const first = { ...run, runId: "first" };
+    const second = { ...run, runId: "second" };
+    expect(f.runtime.reserveRun(first, geometry)).toBeTruthy();
+    expect(f.runtime.reserveRun(second, geometry)).toBeTruthy();
+    // The first spawn takes the only ordinary slot and stays unanswered.
+    const pending = f.runtime.spawn(spawnInput(f, first, "spawn-first"));
+    expect(f.runtime.registry.isDispatched(first)).toBe(true);
+    const refused = await f.runtime.spawn(spawnInput(f, second, "spawn-second"));
+    expect(refused).toMatchObject({
+      type: "error",
+      error: { kind: "BUSY", acceptance: "not-accepted" },
+    });
+    expectReleased(f, second);
+    f.runtime.tickPreviews();
+    await pump();
+    expect(f.commands().filter((command) => command.run.runId === "second")).toEqual([]);
+    const spawn = f.commands().find((command) => command.type === "spawn");
+    f.session.receive(f.reply(spawn, { operationId: spawn.operationId }));
+    expect((await pending).outcome).toBe("accepted");
+    await cleaned(f);
+  });
+
+  it("author spawn refused by a session that is not ready releases its run", async () => {
+    const f = fixture();
+    const target = { ...run, runId: "early" };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    // Contact is lost between the reservation and the spawn (terminal.create awaits the store
+    // in between); the session is no longer ready and admits nothing.
+    f.session.loseContact();
+    expect(f.session.ready).toBe(false);
+    const refused = await f.runtime.spawn(spawnInput(f, target, "spawn-early"));
+    expect(refused).toMatchObject({
+      type: "error",
+      error: { kind: "WORKER_UNAVAILABLE", acceptance: "not-accepted" },
+    });
+    // No worker is ready, so a new reservation is refused; the old one is gone.
+    expectReleased(f, target, { reserveAgain: false });
+    expect(f.commands().filter((command) => command.type === "spawn")).toEqual([]);
+    await cleaned(f);
+  });
+
+  it("author spawn queued behind a blocked transport and withdrawn on lost contact releases its run", async () => {
+    const f = fixture();
+    const target = { ...run, runId: "queued" };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    // A status query is written and the transport reports backpressure: later frames wait.
+    f.backpressure(true);
+    const refresh = f.runtime.previews.refresh(run);
+    await pump();
+    expect(f.latest()).toMatchObject({ type: "status", run });
+    // The spawn is admitted into the queue but never handed to the transport.
+    const spawn = f.runtime.spawn(spawnInput(f, target, "spawn-queued"));
+    await pump();
+    expect(f.runtime.registry.isDispatched(target)).toBe(false);
+    // Contact is lost before a drain: the queued spawn is withdrawn unsent.
+    f.session.loseContact();
+    expect(await spawn).toMatchObject({
+      type: "error",
+      error: { kind: "WORKER_UNAVAILABLE", acceptance: "not-accepted" },
+    });
+    expect(f.commands().filter((command) => command.type === "spawn")).toEqual([]);
+    expectReleased(f, target, { reserveAgain: false });
+    expect((await refresh).ok).toBe(false);
+    await cleaned(f);
+  });
+
+  it("author spawn answered synchronously during its delivery is dispatched first and accepted", async () => {
+    const f = fixture();
+    const target = { ...run, runId: "synchronous" };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    // The transport hands the frame over, then the worker stand-in answers inside the write.
+    let dispatchedWhenDelivered;
+    f.onDeliver((data) => {
+      const command = decode(data).metadata;
+      if (command.type !== "spawn") return;
+      dispatchedWhenDelivered = f.runtime.registry.isDispatched(target);
+      f.session.receive(f.reply(command, { operationId: command.operationId }));
+    });
+    const result = await f.runtime.spawn(spawnInput(f, target, "spawn-synchronous"));
+    expect(dispatchedWhenDelivered).toBe(true);
+    expect(result.outcome).toBe("accepted");
+    expect(f.runtime.registry.isDispatched(target)).toBe(true);
+    await cleaned(f);
+  });
+
+  it("author spawn whose transport throws after delivering keeps its reservation as unknown", async () => {
+    const f = fixture();
+    const target = { ...run, runId: "delivered" };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    f.onDeliver((data) => {
+      if (decode(data).metadata.type === "spawn")
+        throw new Error("lower writer failed after delivery");
+    });
+    const result = await f.runtime.spawn(spawnInput(f, target, "spawn-delivered"));
+    // The worker may have the spawn: unknown, never released for reuse.
+    expect(result).toMatchObject({
+      type: "error",
+      error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" },
+    });
+    expect(f.commands().filter((command) => command.type === "spawn")).toHaveLength(1);
+    expect(f.runtime.registry.isDispatched(target)).toBe(true);
+    expect(f.runtime.registry.get(target)).not.toBeNull();
+    await cleaned(f);
+  });
+
+  // A transport that never calls `handing` delivered nothing, whatever its write then does: the
+  // session must not infer a handoff from the write returning or settling (round-4 contract).
+  async function withheldHandoff(mode) {
+    const f = fixture();
+    const target = { ...run, runId: "withheld-" + mode };
+    expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+    const written = f.commands().length;
+    f.withholdHandoff(mode);
+    const spawn = f.runtime.spawn(spawnInput(f, target, "spawn-withheld-" + mode));
+    await pump();
+    expect(f.runtime.registry.isDispatched(target)).toBe(false);
+    f.session.loseContact();
+    expect(await spawn).toMatchObject({
+      type: "error",
+      error: { kind: "WORKER_UNAVAILABLE", acceptance: "not-accepted" },
+    });
+    expect(f.commands()).toHaveLength(written);
+    expectReleased(f, target, { reserveAgain: false });
+    await cleaned(f);
+  }
+
+  it("author spawn whose transport returns without handing it over stays never sent", async () => {
+    await expect(withheldHandoff("return")).resolves.toBeUndefined();
+  });
+
+  it("author spawn whose transport settles without handing it over stays never sent", async () => {
+    await expect(withheldHandoff("settle")).resolves.toBeUndefined();
   });
 
   it("author preview list and get are bounded metadata reads", async () => {

@@ -30,7 +30,7 @@ import { TerminalWebSocket } from "../../dist/transport/terminal-websocket.js";
 import { rpcBody, boundRpcResponseBody } from "../../dist/transport/http-rpc.js";
 import { createPipeDecoder, encodePipeFrame } from "@cove/protocol/pipe";
 import { encodeTerminalFrame, MAX_FRAME_BYTES } from "@cove/protocol/terminal";
-import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
+import { PROFILE, BASELINE_ENCODING, DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { REQUIRED_CAPABILITIES, BootstrapFailureSchema } from "@cove/protocol/bootstrap";
 import { composeRpcResponse } from "@cove/protocol/rpc";
 import { M0_LIMITS } from "@cove/protocol/budgets";
@@ -2808,6 +2808,81 @@ describe("D passive production local entry", () => {
       expect(process.snapshot().directlyOwnedLeaderExited).toBe(false);
       expect((await process.close()).status).toBe("exited");
       expect(process.snapshot().directlyOwnedLeaderExited).toBe(true);
+    });
+  });
+  it("D-A14d a spawn refused by the writer preflight before its close observer runs is released as never sent", async () => {
+    await withApp(async ({ core }) => {
+      const child = new EventEmitter();
+      child.pid = 123;
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      const decoder = createPipeDecoder();
+      let hello;
+      const commands = [];
+      child.stdin.on("data", (bytes) => {
+        for (const frame of decoder.read(bytes).frames) {
+          const metadata = JSON.parse(Buffer.from(frame.metadata).toString());
+          if (metadata.type !== "hello") {
+            commands.push(metadata);
+            continue;
+          }
+          hello = metadata;
+          child.stdout.write(
+            encodePipeFrame(2, utf8({ ...hello, type: "ready" }), new Uint8Array()).value,
+          );
+        }
+      });
+      const worker = new WorkerProcess(
+        core.runtime,
+        {
+          serverId: identity.serverId,
+          relayInstanceId: identity.relayInstanceId,
+          workerId: "worker",
+          workerIncarnationId: "birth",
+        },
+        () => 0,
+        () => child,
+      );
+      worker.start();
+      await worker.ready;
+      const run = {
+        serverId: identity.serverId,
+        relayInstanceId: identity.relayInstanceId,
+        runId: "destroyed-writer",
+      };
+      const geometry = { cols: 80, rows: 24 };
+      const placed = core.runtime.reserveRun(run, geometry);
+      expect(placed).toBeTruthy();
+      // destroy() marks the writer destroyed at once; its close event, which closes the session,
+      // comes on a later tick. A spawn in between passes admission and reaches the transport,
+      // whose preflight refuses it before any byte is written.
+      child.stdin.destroy();
+      expect(worker.session.ready).toBe(true);
+      const result = await core.runtime.spawn({
+        worker: placed,
+        run,
+        requestId: "spawn-destroyed-writer",
+        operationId: "operation-destroyed-writer",
+        geometry,
+        appearance: DEFAULT_APPEARANCE,
+        effectiveBudgets: hello.effectiveBudgets,
+        profile: PROFILE,
+        executable: "/bin/sh",
+        argv: [],
+        cwd: "/",
+      });
+      expect(result).toMatchObject({
+        type: "error",
+        error: { kind: "WORKER_UNAVAILABLE", acceptance: "not-accepted" },
+      });
+      expect(commands).toEqual([]);
+      expect(core.runtime.registry.isDispatched(run)).toBe(false);
+      expect(core.runtime.registry.get(run)).toBeNull();
+      expect(worker.session.forgetUnstartedRun(run)).toBe(false);
+      child.emit("exit", 0, null);
+      child.emit("close", 0, null);
+      expect((await worker.close()).status).toBe("exited");
     });
   });
   it("D-A14b worker stdout beyond one decoder read budget is resubmitted in order without losing contact", async () => {

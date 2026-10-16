@@ -126,12 +126,28 @@ export class LocalRuntime implements RuntimeTerminalPort {
     if (this.disposed || !placement || !sameWorkerRef(command.worker, placement.worker))
       return this.unavailable(command);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
-    if (command.type === "spawn") this.registry.markDispatched(command.run, command.worker);
+    // A spawn is dispatched only once its frame is handed to the worker transport: the worker can
+    // spawn nothing it never received. A spawn refused at admission (full window, session not
+    // ready, ...) or queued and then withdrawn unsent (contact lost while the transport was
+    // blocked) never reaches the worker, so the run must not be treated as known to the worker
+    // (preview ticks would poll it) or keep holding run resources. A spawn that was handed over
+    // keeps its reservation even when its result is unknown: the worker may have spawned it.
+    let sent = false;
+    const markSent =
+      command.type === "spawn"
+        ? () => {
+            sent = true;
+            this.registry.markDispatched(command.run, command.worker);
+          }
+        : undefined;
     // An unsubscribe carries no result handoff; every route-control command, this one
     // included, waits for a free slot in the worker's route-control window.
     const result = await (unsubscribe && command.type === "unsubscribe"
       ? placement.session.requestUnsubscribe(command)
-      : placement.session.request(command, payload, this.resultHandoff));
+      : placement.session.request(command, payload, this.resultHandoff, markSent));
+    // Never written, so definitely not accepted: release the reservation, which also drops the
+    // session's record of the run.
+    if (command.type === "spawn" && !sent) this.cancelRunReservation(command.run, command.worker);
     if (result.type === "result" && result.runStatus)
       this.registry.observe(placement.worker, result.runStatus);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
@@ -152,9 +168,10 @@ export class LocalRuntime implements RuntimeTerminalPort {
       profile: input.profile,
       spawnPayloadBytes: composed?.bytes.byteLength ?? 1,
     };
-    return composed
-      ? this.request(command, composed.bytes)
-      : Promise.resolve(this.unavailable(command));
+    if (composed) return this.request(command, composed.bytes);
+    // Nothing was sent: release the reservation as for a spawn that was never written.
+    this.cancelRunReservation(command.run, command.worker);
+    return Promise.resolve(this.unavailable(command));
   }
   stop(input: Parameters<RuntimeTerminalPort["stop"]>[0]): Promise<RuntimeResult> {
     return this.request(input);

@@ -95,8 +95,9 @@ export function controlFixture({
     composition,
     buildVersion: "b2-independent",
     transport: {
-      write(encoded, settled) {
+      write(encoded, settled, handing) {
         const frames = decodeFrames(encoded, true);
+        handing();
         commands.push(...frames.map((x) => x.metadata));
         pipeWrites.push({ encoded, frames, settled, released: !pipeHold });
         if (!pipeHold) settled();

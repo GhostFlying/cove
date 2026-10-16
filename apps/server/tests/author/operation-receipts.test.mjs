@@ -44,9 +44,10 @@ function fixture(changes = {}) {
     codec,
     buildVersion: "author",
     transport: {
-      write: (data, done) => {
+      write: (data, done, handing) => {
         const length = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(8);
         const metadata = JSON.parse(codec.decode(data.subarray(16, 16 + length)));
+        handing();
         if (metadata.type !== "hello") commands.push(metadata);
         done();
         return true;

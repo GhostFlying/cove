@@ -51,7 +51,8 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32, forward = undef
     buildVersion: "author",
     codec,
     transport: {
-      write: (data, settled) => {
+      write: (data, settled, handing) => {
+        handing();
         writes.push({ data, settled });
         forward?.(data);
         return !blocked;

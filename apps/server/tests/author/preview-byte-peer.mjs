@@ -86,13 +86,26 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
     timeoutMs: 1000,
     identityLimit: 256,
     transport: {
-      write: (data, settled) => {
+      write: (data, settled, handing) => {
+        // Withheld: the frame is never handed over or delivered; the write only returns
+        // ("return") or also settles ("settle"). The session must not infer a handoff from that.
+        if (withheld) {
+          if (withheld === "settle") settled();
+          return true;
+        }
+        handing();
         pipeWrites.push({ data, settled });
+        // A worker stand-in that sees the frame during the write; it may reply or throw.
+        deliver?.(data);
         settled();
-        return true;
+        // While backpressured, the session keeps later frames queued until a drain.
+        return !backpressured;
       },
     },
   });
+  let backpressured = false;
+  let deliver;
+  let withheld;
   runtime.addWorker(session);
   session.start();
   session.receive(
@@ -225,6 +238,9 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
     runtime,
     session,
     registry,
+    backpressure: (value) => (backpressured = value),
+    onDeliver: (hook) => (deliver = hook),
+    withholdHandoff: (mode) => (withheld = mode),
     bytes,
     budgets,
     composition,
