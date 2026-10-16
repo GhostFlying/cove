@@ -54,14 +54,19 @@ import {
 // The rows, their record mapping, the writes and the in-transaction reader for other domains
 // (findRepo, RegisteredRepo) live with the SQL in store/sql/repos.ts.
 
-// Fixed refusals of a clone path. A path Cove cannot read (missing, permission) is refused like
-// any other path that does not lead to a clone; the fixed error messages carry no path either
-// way. When Git gave no answer at all (timeout, overflow, git missing or killed; also an
+// Fixed refusals of a clone path, shared with checkout admission (domain/workspaces.ts), which
+// asks Git the same questions about a checkout path. A path Cove cannot read (missing,
+// permission) is refused like any other path that does not lead to a clone; the fixed error
+// messages carry no path either way. When Git gave no answer at all (timeout, overflow, git missing or killed; also an
 // unexpected filesystem error while resolving the path) nothing is known about the path, so the
 // request is refused as GIT_UNAVAILABLE (not accepted, nothing done) instead of being misreported
-// as "not a repository" or as a capacity refusal.
-function refusalError(refusal: RepositoryRefusal): DomainError {
+// as "not a repository" or as a capacity refusal. A checkout check that the workspace service's
+// own capacity bounds let nothing start (domain/workspaces.ts) is that capacity refusal, BUSY:
+// not accepted, and the same request may be sent again later. Registration never gets it.
+export function refusalError(refusal: RepositoryRefusal): DomainError {
   switch (refusal.kind) {
+    case "busy":
+      return domainError("BUSY");
     case "bare":
       return domainError("BARE_REPOSITORY");
     case "unavailable":

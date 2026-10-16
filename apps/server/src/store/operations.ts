@@ -1,7 +1,7 @@
 import type { OperationReceiptKey, OperationRecord, StoredReceipt } from "@cove/protocol/rpc";
 import type { DurableReceiptBackend } from "../operations/operation-receipts.js";
 import type {
-  DatabaseWriteOutcome,
+  DatabaseWriteResult,
   DatabaseWriteRequest,
   ReceiptLimits,
 } from "../operations/receipt-records.js";
@@ -47,7 +47,7 @@ export class SqliteReceiptBackend implements DurableReceiptBackend {
     return this.store.call("receipts.unfinished", undefined);
   }
 
-  write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteOutcome> {
+  write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteResult> {
     return this.store.call("receipts.write", {
       ...request,
       relayInstanceId: this.relayInstanceId,

@@ -44,6 +44,31 @@ export function storeReadError(error: unknown): DomainError {
   );
 }
 
+// The answer for a write request that already has a receipt, or null when it has none and must
+// be checked and executed. A domain looks the receipt up before checks that need the filesystem
+// or Git, so a resend never depends on a precondition that may have changed since (the clone moved,
+// the path is mounted by now); executeDatabaseWrite looks it up again inside its transaction. A
+// domain also calls it before returning a refusal decided after an await: while that request
+// waited, an identical one may have committed, and its record (or OPERATION_ID_CONFLICT for a
+// changed intent) answers both, never a late "not accepted".
+export async function recordedWrite(
+  context: DatabaseWriteContext,
+  principalId: string,
+  method: WriteRpcMethod,
+  params: Record<string, unknown> & { operationId: string },
+): Promise<DatabaseWriteOutcome | null> {
+  const intent = canonicalWriteIntent(method, params, context.encodeUtf8);
+  if (!intent) return { error: domainError("INVALID_ARGUMENT") };
+  const found = await context.receipts.lookup(
+    { serverId: context.serverId, principalId, operationId: params.operationId },
+    intent,
+  );
+  if (found.kind === "existing") return { operation: found.record };
+  if (found.kind === "conflict") return { error: domainError("OPERATION_ID_CONFLICT") };
+  if (found.kind !== "reserve") return { error: domainError("BUSY") };
+  return null;
+}
+
 // A write whose whole effect is a database change (config, and the repo/task/tab record writes of
 // later tasks). relay-protocol §11.3: the receipt is looked up first, so a same-intent resend
 // returns the original record (even one an earlier instance wrote) and a changed intent is
@@ -64,23 +89,40 @@ export async function executeDatabaseWrite(
   params: Record<string, unknown> & { operationId: string },
   apply: DatabaseWriteApply,
 ): Promise<DatabaseWriteOutcome> {
+  return (await executeDatabaseWriteCommitted(context, principalId, method, params, apply)).outcome;
+}
+
+// executeDatabaseWrite that also tells whether this call committed the change (receipts.write
+// `committed`), as opposed to answering from a receipt found by either lookup. Only the
+// committing call may follow its write with work outside the database (domain/workspaces.ts).
+export async function executeDatabaseWriteCommitted(
+  context: DatabaseWriteContext,
+  principalId: string,
+  method: WriteRpcMethod,
+  params: Record<string, unknown> & { operationId: string },
+  apply: DatabaseWriteApply,
+): Promise<{ outcome: DatabaseWriteOutcome; committed: boolean }> {
+  const answer = (outcome: DatabaseWriteOutcome) => ({ outcome, committed: false });
   const intent = canonicalWriteIntent(method, params, context.encodeUtf8);
-  if (!intent) return { error: domainError("INVALID_ARGUMENT") };
+  if (!intent) return answer({ error: domainError("INVALID_ARGUMENT") });
   const key: OperationReceiptKey = {
     serverId: context.serverId,
     principalId,
     operationId: params.operationId,
   };
   const found = await context.receipts.lookup(key, intent);
-  if (found.kind === "existing") return { operation: found.record };
-  if (found.kind === "conflict") return { error: domainError("OPERATION_ID_CONFLICT") };
-  if (found.kind !== "reserve") return { error: domainError("BUSY") };
+  if (found.kind === "existing") return answer({ operation: found.record });
+  if (found.kind === "conflict") return answer({ error: domainError("OPERATION_ID_CONFLICT") });
+  if (found.kind !== "reserve") return answer({ error: domainError("BUSY") });
   const preparation = await context.receipts.prepare(key, intent);
-  if (!preparation) return { error: domainError("BUSY") };
+  if (!preparation) return answer({ error: domainError("BUSY") });
   try {
-    return await context.receipts.write({ key, canonicalIntent: intent, method, apply });
+    const result = await context.receipts.write({ key, canonicalIntent: intent, method, apply });
+    if ("error" in result) return answer(result);
+    // The flag stays inside the server: the client's record is the operation alone.
+    return { outcome: { operation: result.operation }, committed: result.committed === true };
   } catch (error) {
-    return { error: storeFailureError(error) };
+    return answer({ error: storeFailureError(error) });
   } finally {
     preparation.cancel();
   }

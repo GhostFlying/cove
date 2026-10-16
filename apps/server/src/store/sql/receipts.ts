@@ -7,7 +7,7 @@ import {
 } from "@cove/protocol/rpc";
 import {
   checkedReceiptRecord,
-  type DatabaseWriteOutcome,
+  type DatabaseWriteResult,
   type DatabaseWriteRequest,
   type OperationResultData,
   type ReceiptLimits,
@@ -150,7 +150,7 @@ export const receiptOperations = {
   "receipts.write": (
     db: Connection,
     args: DatabaseWriteRequest & { relayInstanceId: string; at: number; limits: ReceiptLimits },
-  ): DatabaseWriteOutcome => {
+  ): DatabaseWriteResult => {
     const { key, limits } = args;
     if (key.serverId !== limits.serverId) return { error: domainError("INVALID_ARGUMENT") };
     const existing = get(db, key);
@@ -189,6 +189,6 @@ export const receiptOperations = {
       encodeUtf8,
     );
     if (!succeeded || !replace(db, key, 0, succeeded, args.at)) throw busy;
-    return { operation: succeeded };
+    return { operation: succeeded, committed: true };
   },
 };
