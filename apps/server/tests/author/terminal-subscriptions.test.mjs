@@ -36,6 +36,52 @@ const command = (type, ref, requestId, rest = {}) => ({
   ...rest,
 });
 
+// Issue #103 review: an acceptance past the marker deadline must not admit a marker; the
+// attempt ends RECOVERY_EXPIRED (not-accepted) and stays fenced. `type` is the command whose
+// marker arrives late: "attach" or "recover".
+async function lateMarker(type) {
+  const f = fixture({ recoveryDeadlineMs: 20 });
+  const a = f.connect("a");
+  try {
+    let ref;
+    let pending;
+    if (type === "attach") {
+      pending = a.service.handle(a.attach("late", 0));
+    } else {
+      ref = (await f.attach(a, 0, "replay")).subscription;
+      f.clock(1);
+      pending = a.service.handle(
+        command("recover", ref, "late", {
+          reason: "expired",
+          resume: { appliedSeq: 0, profile, encoding, geometry },
+        }),
+      );
+    }
+    const sent = f.latest();
+    expect(sent.type).toBe(type === "attach" ? "subscribe" : "recover");
+    ref ??= sent.subscription;
+    f.clock(25);
+    f.session.receive(f.reply(sent, { recoveryMode: "replay", atSeq: 0 }));
+    expect(await pending).toMatchObject({
+      type: "error",
+      requestId: "late",
+      error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+    });
+    // Output the worker sends for the late acceptance never reaches the client.
+    f.session.receive(f.output(ref, 1));
+    await turns();
+    const published = a.writes.map((item) => decode(item.data).metadata.type);
+    expect(published).not.toContain(`${type}-result`);
+    expect(published).not.toContain("run-event");
+    expect(a.service.snapshot(ref.subscriptionId).route.phase).toBe("retired");
+    const pipe = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
+    expect(pipe).toContain("unsubscribe");
+    expect(f.session.closed).toBe(false);
+  } finally {
+    await f.dispose();
+  }
+}
+
 describe("private terminal subscription delivery", () => {
   it.each(["invalid", "throw"])(
     "releases unpublished attach ownership when the third identity is %s",
@@ -410,6 +456,51 @@ describe("private terminal subscription delivery", () => {
     } finally {
       await f.dispose();
     }
+  });
+
+  it("never sends a queued recover whose deadline passed before its ACK was answered and no tick ran", async () => {
+    // Issue #103 review: the deadline can pass between ticks. The ACK the recover waits behind
+    // is answered after the recover's half deadline but before the next tick.
+    const f = fixture({ recoveryDeadlineMs: 20 });
+    const a = f.connect("a");
+    try {
+      const ref = (await f.attach(a, 0, "replay")).subscription;
+      f.session.receive(f.output(ref, 1));
+      const ack = a.service.handle(command("applied-ack", ref, "ack", { appliedSeq: 1 }));
+      const held = f.latest();
+      expect(held.type).toBe("applied-ack");
+      const recover = a.service.handle(command("recover", ref, "rec", { reason: "expired" }));
+      f.clock(25);
+      f.session.receive(f.reply(held));
+      expect(await ack).toMatchObject({
+        type: "applied-ack-result",
+        requestId: "ack",
+        appliedSeq: 1,
+      });
+      expect(await recover).toMatchObject({
+        type: "error",
+        requestId: "rec",
+        error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+      });
+      await turns();
+      const sent = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
+      expect(sent).not.toContain("recover");
+      expect(sent).toContain("unsubscribe");
+      expect(a.service.snapshot(ref.subscriptionId).route.phase).toBe("retired");
+      expect(f.session.closed).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("never activates an attach whose marker arrives after its deadline but before the next tick", async () => {
+    expect.hasAssertions();
+    await lateMarker("attach");
+  });
+
+  it("never activates a recover whose marker arrives after its deadline but before the next tick", async () => {
+    expect.hasAssertions();
+    await lateMarker("recover");
   });
 
   it("tells each active subscription when its worker becomes overloaded and normal again", async () => {
