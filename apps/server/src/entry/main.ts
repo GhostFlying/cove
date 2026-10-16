@@ -370,7 +370,11 @@ export async function startLocalEntry(
     interrupted();
     // D9: the live runs an orderly stop would end, read from the store.
     const liveRuns = async () => (store?.isOpen ? ((await local.runs?.live(instance)) ?? []) : []);
-    return { endpoint, close, liveRuns };
+    // Fail closed (D6 B): a failed store is never restarted, so the server stops serving. Resolves
+    // when the store worker failed; the caller then runs `close`, which cannot record the orderly
+    // stop (the next start marks this instance's runs interrupted) and reports cleanup failure.
+    const storeFailed = new Promise<void>((done) => store?.onFailure(done));
+    return { endpoint, close, liveRuns, storeFailed };
   } catch (error) {
     let cleanup: "verified" | "unverifiable" = "verified";
     try {
@@ -492,6 +496,14 @@ export function runServerProcess(argv: readonly string[], probe?: D6Probe): void
           probe,
         );
         if (controller.signal.aborted) await close();
+        const started = server;
+        void started.storeFailed.then(() => {
+          if (controller.signal.aborted) return;
+          controller.abort();
+          process.exitCode = 1;
+          process.stderr.write(`${JSON.stringify({ event: "store-failed" })}\n`);
+          close().catch(() => process.stderr.write("m0-local cleanup unverifiable\n"));
+        });
       } catch (error) {
         detach();
         if (
