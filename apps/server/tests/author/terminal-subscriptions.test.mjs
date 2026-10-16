@@ -330,6 +330,50 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  // Issue #103: a slow worker's late marker must not become an unknown attach, which makes the
+  // client retire its whole connection.
+  it("answers an attach without a marker not-accepted at half the deadline and keeps every other route", async () => {
+    const f = fixture({ recoveryDeadlineMs: 20 });
+    const a = f.connect("a");
+    try {
+      const live = (await f.attach(a, 0, "live")).subscription;
+      const pending = a.service.handle(a.attach("slow", 0));
+      const sent = f.latest();
+      expect(sent.type).toBe("subscribe");
+      f.clock(9);
+      a.service.tick();
+      f.clock(10);
+      a.service.tick();
+      expect(await pending).toMatchObject({
+        type: "error",
+        requestId: "slow",
+        error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+      });
+      await turns();
+      const unsubscribe = f.latest();
+      expect(unsubscribe).toMatchObject({
+        type: "unsubscribe",
+        subscription: { subscriptionId: sent.subscription.subscriptionId },
+      });
+      // The worker accepts late: nothing is activated or published, and the worker stays.
+      f.session.receive(
+        coalesce(
+          f.reply(sent, { recoveryMode: "replay", atSeq: 0 }),
+          f.output(sent.subscription, 1),
+        ),
+      );
+      f.session.receive(f.reply(unsubscribe));
+      expect(f.session.closed).toBe(false);
+      f.session.receive(f.output(live, 1));
+      const published = a.writes.map((item) => decode(item.data).metadata);
+      expect(published.map((item) => item.type)).toEqual(["attach-result", "error", "run-event"]);
+      expect(published[2].subscription.subscriptionId).toBe(live.subscriptionId);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
   it("retires only an expired route and reports its first cause on the next correlated command", async () => {
     const f = fixture({ recoveryDeadlineMs: 20 });
     const a = f.connect("a");

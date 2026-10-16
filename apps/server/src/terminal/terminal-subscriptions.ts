@@ -73,6 +73,8 @@ type Route = {
   failure?: DomainError | undefined;
   credit?: TerminalDeliveryCredit | undefined;
   deadline: number;
+  // When an opening attempt with no marker yet is answered not-accepted (see markerDeadline()).
+  markerDeadline: number;
   lease: ByteReservation;
   unsubscribeId: string;
   token: { current: boolean };
@@ -401,6 +403,7 @@ export class TerminalSubscriptions {
         attempt: 1,
         phase: "opening",
         deadline: now + this.composition.budgets.recoveryDeadlineMs,
+        markerDeadline: now + this.markerDeadline(),
         lease,
         unsubscribeId,
         token: { current: true },
@@ -723,7 +726,9 @@ export class TerminalSubscriptions {
       route.attempt++;
       request.attempt = route.attempt;
       route.phase = "opening";
-      route.deadline = this.now() + this.composition.budgets.recoveryDeadlineMs;
+      const now = this.now();
+      route.deadline = now + this.composition.budgets.recoveryDeadlineMs;
+      route.markerDeadline = now + this.markerDeadline();
     }
     const common = {
       worker: route.worker,
@@ -1076,6 +1081,15 @@ export class TerminalSubscriptions {
     route.lease.release();
     for (const slot of route.resultSlots.splice(0)) slot.release();
   }
+  // Half of recoveryDeadlineMs: the client times the same attach with recoveryDeadlineMs from
+  // before it was sent, and an attach it times out itself is unknown, which makes it retire the
+  // whole connection with every other subscription on it. Half leaves the other half for the
+  // reply to cross a slow transport and a busy server, and for the baseline transfer after a
+  // marker that does arrive in time (route.deadline still bounds the whole recovery).
+  private markerDeadline(): number {
+    return Math.floor(this.composition.budgets.recoveryDeadlineMs / 2);
+  }
+
   tick(): void {
     this.options.arbiter?.tick();
     if (this.closed) return;
@@ -1085,7 +1099,20 @@ export class TerminalSubscriptions {
     }
     const now = this.now();
     for (const route of this.routes.values())
-      if (
+      if (route.phase === "opening" && now >= route.markerDeadline) {
+        // A slow worker has not produced this attempt's marker (issue #103). No marker was
+        // admitted to delivery (admission moves the route out of "opening" synchronously), so
+        // the client cannot know this subscription, and retiring it here keeps it that way: the
+        // fence drops its events, the pipe refuses to activate a late acceptance, and the worker
+        // route is unsubscribed. The outcome is therefore definite (not-accepted), so the client
+        // fails this view alone and need not fence its whole connection, as it must for an
+        // attach whose outcome is unknown. It must reach the client before the client's own
+        // deadline for the same attach, which started earlier; see markerDeadline().
+        this.retire(route, domainError("RECOVERY_EXPIRED"));
+        for (const request of route.queue)
+          if (!(request.command.type === "input" && request.domain?.dispatched))
+            this.finish(request, this.error(request.command, route.failure!));
+      } else if (
         route.phase !== "retired" &&
         (!route.credit?.snapshot().installed ||
           route.credit.snapshot().appliedSeq < route.credit.atSeq) &&
