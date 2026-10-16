@@ -3,6 +3,7 @@
 // `pnpm build`; it is not a Vitest suite and is not part of `pnpm test` or the CI gate:
 //
 //   node apps/cli/tests/m1/d6-latency-probe.mjs [--phase-seconds 30] [--rounds 3] [--out FILE]
+//       [--subscribed-outputs 8] [--output-kib-per-second 64]
 //   node apps/cli/tests/m1/d6-latency-probe.mjs --reanalyze FILE   (verdict from saved raw data)
 //
 // Keep the host awake and otherwise idle (e.g. under `caffeinate -i` on macOS): a phase in which
@@ -15,7 +16,8 @@
 // transaction, samples its event-loop delay and accepts the control-mode switch
 // (apps/server/src/entry/d6-probe.ts). Clients use the compiled CLI.
 //
-// Bounded workload: 8 terminals each print 64 KiB/s from a fixed script, all subscribed by one
+// Bounded workload: 8 terminals each print 64 KiB/s (--output-kib-per-second) from a fixed
+// script, all subscribed by one
 // client; another client sends one keystroke every 50 ms to a terminal whose line discipline echoes
 // it and measures the round trip; in write phases a third client sends 20 complete `config.set`
 // operations per second. Each round runs three 30 s phases: no writes; writes on SQLite; control
@@ -54,18 +56,21 @@ const PROBE_ENTRY = join(
   "dist/entry/d6-probe-main.js",
 );
 const TERMINALS = 8;
-// Output terminals with a subscribed client (--subscribed-outputs). D6 prescribes all eight. The
-// default is three because of the M0 defect #96: the worker pipe admits at most
-// PIPE_ROUTE_CONTROL_COMMANDS (4) progress commands at once across all subscriptions of a worker,
-// and the client fails a subscription whose ACK is refused with BUSY, so more than four
-// continuously streaming subscriptions (8 outputs plus the echo terminal) fail within seconds. The
-// other terminals still print through the worker without WebSocket delivery. A run with fewer than
-// eight validated streams is a workload deviation: its verdict is PROVISIONAL, never final.
-const DEFAULT_SUBSCRIBED_OUTPUTS = 3;
+// Output terminals with a subscribed client (--subscribed-outputs). D6 prescribes all eight, the
+// default since #96 (refused subscription ACKs) was fixed; unsubscribed terminals still print
+// through the worker without WebSocket delivery. A run with fewer than eight validated streams is a
+// workload deviation: its verdict is PROVISIONAL, never final. Raw data saved before this option
+// existed subscribed three.
+const DEFAULT_SUBSCRIBED_OUTPUTS = TERMINALS;
+const LEGACY_SUBSCRIBED_OUTPUTS = 3;
 // Event-loop delay is sampled every 100 ms; a phase needs this share of its samples and no larger
 // gap between consecutive samples.
 const SAMPLE_COVERAGE = 0.9;
 const MAX_SAMPLE_GAP_MS = 500;
+// D6 prescribes 64 KiB/s per output terminal. --output-kib-per-second runs all eight streams at a
+// lower rate on a host where one worker cannot sustain 8 x 64 KiB/s: there a busy worker is
+// declared lost (#103) and the run is UNRESOLVED without measuring the database at all. The
+// report records both rates, so a reduced-rate result is never mistaken for the prescribed load.
 const OUTPUT_BYTES_PER_SECOND = 64 * 1024;
 const KEY_INTERVAL_MS = 50;
 const WRITES_PER_SECOND = 20;
@@ -89,6 +94,7 @@ function options(argv) {
     phaseSeconds: 30,
     rounds: 3,
     subscribedOutputs: DEFAULT_SUBSCRIBED_OUTPUTS,
+    outputBytesPerSecond: OUTPUT_BYTES_PER_SECOND,
     out: undefined,
     reanalyze: undefined,
   };
@@ -97,6 +103,7 @@ function options(argv) {
     if (name === "--phase-seconds") values.phaseSeconds = Number(value);
     else if (name === "--rounds") values.rounds = Number(value);
     else if (name === "--subscribed-outputs") values.subscribedOutputs = Number(value);
+    else if (name === "--output-kib-per-second") values.outputBytesPerSecond = Number(value) * 1024;
     else if (name === "--out") values.out = resolve(value);
     else if (name === "--reanalyze") values.reanalyze = resolve(value);
     else throw new Error(`unknown option ${name}`);
@@ -109,6 +116,11 @@ function options(argv) {
     values.subscribedOutputs > TERMINALS
   )
     throw new Error(`--subscribed-outputs must be 1-${TERMINALS}`);
+  // Whole KiB/s up to the prescribed rate; even 1 KiB/s gives each of the script's 20 chunks per
+  // second a few lines.
+  const kib = values.outputBytesPerSecond / 1024;
+  if (!Number.isInteger(kib) || kib < 1 || values.outputBytesPerSecond > OUTPUT_BYTES_PER_SECOND)
+    throw new Error("--output-kib-per-second must be an integer from 1 to 64");
   return values;
 }
 
@@ -264,15 +276,15 @@ function echoView(echo) {
   return view;
 }
 
-const OUTPUT_SCRIPT = `
-const chunkBytes = Math.round(${OUTPUT_BYTES_PER_SECOND} / 20);
+const outputScript = (bytesPerSecond) => `
+const chunkBytes = Math.round(${bytesPerSecond} / 20);
 const line = "x".repeat(62) + "\\n";
 const chunk = line.repeat(Math.ceil(chunkBytes / line.length)).slice(0, chunkBytes - 1) + "\\n";
 const started = Date.now();
 let sent = 0;
 // Paced against the wall clock so that a late timer catches up instead of drifting.
 setInterval(() => {
-  const due = Math.floor(((Date.now() - started) / 1000) * ${OUTPUT_BYTES_PER_SECOND});
+  const due = Math.floor(((Date.now() - started) / 1000) * ${bytesPerSecond});
   while (sent + chunk.length <= due) {
     process.stdout.write(chunk);
     sent += chunk.length;
@@ -286,11 +298,13 @@ async function main() {
     const saved = JSON.parse(await readFile(config.reanalyze, "utf8"));
     const raw = saved.raw;
     const report = analyze({
-      // Raw data from before --subscribed-outputs subscribed the default three.
+      // Raw data from before --subscribed-outputs subscribed three, and from before
+      // --output-kib-per-second ran at the prescribed rate.
       config: {
         phaseSeconds: 30,
         rounds: 3,
-        subscribedOutputs: DEFAULT_SUBSCRIBED_OUTPUTS,
+        subscribedOutputs: LEGACY_SUBSCRIBED_OUTPUTS,
+        outputBytesPerSecond: OUTPUT_BYTES_PER_SECOND,
         ...raw.config,
       },
       phases: raw.phases,
@@ -315,7 +329,7 @@ async function main() {
     await mkdir(probeDirectory);
     fixture.env.COVE_D6_PROBE_DIR = probeDirectory;
     const script = join(fixture.root, "output.cjs");
-    await writeFile(script, OUTPUT_SCRIPT);
+    await writeFile(script, outputScript(config.outputBytesPerSecond));
     const home = fixture.home("home");
     server = await fixture.startServerEntry(PROBE_ENTRY, home);
     const create = async (command) =>
@@ -479,6 +493,7 @@ async function main() {
               phaseSeconds: config.phaseSeconds,
               rounds: config.rounds,
               subscribedOutputs: config.subscribedOutputs,
+              outputBytesPerSecond: config.outputBytesPerSecond,
             },
             mismatched: echo.mismatched,
             unmatched: echo.unmatched,
@@ -773,7 +788,7 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
   // with no long gap (a missing or stalled sampler gives no main-thread evidence).
   const switches = serverDump.switches ?? null;
   const intendedMode = { none: "sqlite", write: "sqlite", control: "memory" };
-  const minimumRate = (OUTPUT_BYTES_PER_SECOND / 1024) * 0.9;
+  const minimumRate = (config.outputBytesPerSecond / 1024) * 0.9;
   // Streams: per subscribed terminal where the raw data has it (older raw data has the total only).
   const streamRates = (phase) => {
     const seconds = (phase.end - phase.start) / 1000;
@@ -863,9 +878,11 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
           prescribedStreams: TERMINALS,
           subscribedStreams: config.subscribedOutputs,
           validatedStreams,
+          // A stream is validated only when subscribed and delivered at 90% of the target rate in
+          // every phase; a lost subscription (e.g. a busy worker declared lost, #103) fails it.
           reason:
-            "fewer than eight subscribed, validated output streams (M0 ACK BUSY defect #96); " +
-            "rerun with --subscribed-outputs 8 once it is fixed",
+            "fewer than eight subscribed output streams delivered at the target rate in every " +
+            "phase; rerun with all eight subscribed, or investigate the streams that stalled",
         }
       : null;
   const verdict = workloadDeviation && measured !== "UNRESOLVED" ? "PROVISIONAL" : measured;
@@ -889,7 +906,8 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
       terminals: TERMINALS,
       subscribedOutputTerminals: config.subscribedOutputs,
       validatedOutputStreams: validatedStreams,
-      outputBytesPerSecondPerTerminal: OUTPUT_BYTES_PER_SECOND,
+      outputBytesPerSecondPerTerminal: config.outputBytesPerSecond,
+      prescribedOutputBytesPerSecondPerTerminal: OUTPUT_BYTES_PER_SECOND,
       keyIntervalMs: KEY_INTERVAL_MS,
       writesPerSecond: WRITES_PER_SECOND,
       phaseSeconds: config.phaseSeconds,
