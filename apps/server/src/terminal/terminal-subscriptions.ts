@@ -802,6 +802,7 @@ export class TerminalSubscriptions {
       }
       result = await teardown;
     } else if (command.type === "applied-ack") {
+      if (this.expireIfOverdue(route)) return;
       if (!route.credit?.ack(command.appliedSeq)) {
         this.finish(request, this.error(command, "RESYNC_REQUIRED"));
         return;
@@ -818,6 +819,7 @@ export class TerminalSubscriptions {
         appliedSeq: command.appliedSeq,
       });
     } else if (command.type === "baseline-progress") {
+      if (this.expireIfOverdue(route)) return;
       if (!route.credit?.progress(command.baselineId, command.lastParsedOrdinal)) {
         this.finish(request, this.error(command, "RESYNC_REQUIRED"));
         return;
@@ -1185,6 +1187,18 @@ export class TerminalSubscriptions {
     );
   }
 
+  // The full-deadline check shared by tick() and route control. The deadline can pass between
+  // ticks, and the ACK or baseline progress that would complete the recovery must not install
+  // it late: the client may already have given up on it. So route control checks first and, if
+  // the recovery is overdue, fences and retires the route before advancing credit or sending
+  // anything; the unsent command itself is then answered RECOVERY_EXPIRED (not-accepted) by
+  // failQueued(), since it never took effect.
+  private expireIfOverdue(route: Route): boolean {
+    if (!this.recoveryOverdue(route, this.now())) return false;
+    this.expireFullRecovery(route);
+    return true;
+  }
+
   // Answers the requests of a route that just retired, each by what actually happened to it:
   // - A request that has not taken effect gets a definite RECOVERY_EXPIRED (not-accepted),
   //   even when the recovery's own outcome is unknown: the server never applied or sent it,
@@ -1243,7 +1257,7 @@ export class TerminalSubscriptions {
         // ticks, so execute() checks it before a queued recover is dispatched and handoff
         // checks it before a marker is admitted, with the same outcome.
         this.expireRecovery(route);
-      } else if (this.recoveryOverdue(route, now)) this.expireFullRecovery(route);
+      } else this.expireIfOverdue(route);
     this.publishHealth();
   }
   // Tells each active route's client the current health of the worker serving it (issue #103;
