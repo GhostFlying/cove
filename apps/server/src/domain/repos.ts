@@ -77,15 +77,16 @@ export function findRepo(store: Store, repoId: string): RegisteredRepo | null {
 
 // Fixed refusals of a clone path. A path Cove cannot read (missing, permission) is refused like
 // any other path that does not lead to a clone; the fixed error messages carry no path either
-// way. When Git gave no answer at all (timeout, overflow, git missing) nothing is known about the
-// path, so the request is refused as BUSY (not accepted, nothing done, may be retried) instead of
-// being misreported as "not a repository".
+// way. When Git gave no answer at all (timeout, overflow, git missing or killed; also an
+// unexpected filesystem error while resolving the path) nothing is known about the path, so the
+// request is refused as GIT_UNAVAILABLE (not accepted, nothing done) instead of being misreported
+// as "not a repository" or as a capacity refusal.
 function refusalError(refusal: RepositoryRefusal): DomainError {
   switch (refusal.kind) {
     case "bare":
       return domainError("BARE_REPOSITORY");
     case "unavailable":
-      return domainError("BUSY");
+      return domainError("GIT_UNAVAILABLE");
     case "missing":
     case "inaccessible":
     case "not-repository":
@@ -242,7 +243,7 @@ export class RepoService {
       // The contract's GitRefSchema excludes option-like and whitespace values; Git's own rules
       // also refuse names such as `a..b` or `x.lock`, which no remote branch can have.
       const valid = await isValidBranchName(params.mainBranch);
-      if (valid === null) return { error: domainError("BUSY") };
+      if (valid === null) return { error: domainError("GIT_UNAVAILABLE") };
       if (!valid) return { error: domainError("INVALID_ARGUMENT") };
     }
     return this.write(principalId, "repo.update", params, () => {
