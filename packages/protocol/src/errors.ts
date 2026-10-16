@@ -46,6 +46,15 @@ export const DOMAIN_ERROR_KINDS = [
   // killed). Nothing is known about the repository or path the request named: it is neither
   // "not a repository" nor a capacity refusal (BUSY). The request was not accepted.
   "GIT_UNAVAILABLE",
+  // A repo registration cannot be removed while a mount of any task, archived ones included,
+  // references it: an archived task keeps its mounts, and unarchiving it must not find a mount
+  // whose repo is gone. Nothing was removed; the operator removes those mounts first.
+  "REPO_IN_USE",
+  // A task cannot get its workspace entry: the workspace root cannot be created, or something
+  // already occupies the entry path (Cove never takes over a directory it did not publish). The
+  // request was not accepted and nothing was recorded. An entry that fails after the task was
+  // recorded is reported by the task record (entryState), never by this refusal.
+  "WORKSPACE_ENTRY_UNAVAILABLE",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -134,6 +143,10 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   // Not retried automatically: the cause (a missing git, a hung credential helper, a huge repo)
   // is on the host, and the operator decides whether to fix it and send the request again.
   GIT_UNAVAILABLE: "none",
+  // The operator removes the mounts that reference the repo (`cove mount remove`) and asks again.
+  REPO_IN_USE: "fix-request",
+  // The cause is on the host (permissions, a file in the way); the operator fixes it and retries.
+  WORKSPACE_ENTRY_UNAVAILABLE: "none",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
