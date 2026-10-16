@@ -2,6 +2,7 @@
 import Fastify, { LogController } from "fastify";
 import websocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { M0_LIMITS, validateEffectiveBudgets, type EffectiveBudgets } from "@cove/protocol/budgets";
@@ -504,5 +505,10 @@ export function runServerProcess(argv: readonly string[], probe?: D6Probe): void
     })().catch((error: unknown) => fail(error, "m0-local startup unavailable\n"));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href)
+// Compared by real path: an installed executable is usually a symlink to this file, and
+// import.meta.url names the real file.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(realpathSync(resolve(process.argv[1]))).href
+)
   runServerProcess(process.argv.slice(2));
