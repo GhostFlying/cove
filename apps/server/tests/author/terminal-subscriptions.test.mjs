@@ -67,6 +67,38 @@ async function ackOutcomeAfterExpiry(end, expected) {
   }
 }
 
+// Issue #103 review: the ACK that would complete a recovery arrives after its full deadline but
+// before the next tick. It must not install the recovery late or reach the worker: the route
+// retires RECOVERY_EXPIRED (unknown) and the unsent ACK is answered not-accepted. `prepare`
+// brings a fresh route to the point where only its final ACK is missing and returns that ACK's
+// appliedSeq.
+async function finalAckAfterDeadline(prepare) {
+  const f = fixture({ recoveryDeadlineMs: 20 });
+  const a = f.connect("a");
+  try {
+    const { ref, appliedSeq } = await prepare(f, a);
+    const sent = f.pipeWrites.length;
+    f.clock(20);
+    const ack = a.service.handle(command("applied-ack", ref, "final", { appliedSeq }));
+    await turns();
+    // Checked before awaiting the answer: an ACK that reached the worker would wait for its reply.
+    const pipe = f.pipeWrites.slice(sent).map((item) => decode(item.data, true).metadata.type);
+    expect(pipe).not.toContain("applied-ack");
+    expect(pipe).toContain("unsubscribe");
+    expect(await ack).toMatchObject({
+      type: "error",
+      requestId: "final",
+      error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+    });
+    const route = a.service.snapshot(ref.subscriptionId).route;
+    expect(route.phase).toBe("retired");
+    expect(route.failure).toMatchObject({ kind: "RECOVERY_EXPIRED", acceptance: "unknown" });
+    expect(f.session.closed).toBe(false);
+  } finally {
+    await f.dispose();
+  }
+}
+
 // Issue #103 review: an acceptance past the marker deadline must not admit a marker; the
 // attempt ends RECOVERY_EXPIRED (not-accepted) and stays fenced. `type` is the command whose
 // marker arrives late: "attach" or "recover".
@@ -564,6 +596,58 @@ describe("private terminal subscription delivery", () => {
   it("never activates a recover whose marker arrives after its deadline but before the next tick", async () => {
     expect.hasAssertions();
     await lateMarker("recover");
+  });
+
+  it("never installs a baseline recovery whose final ACK arrives after its deadline but before the next tick", async () => {
+    expect.hasAssertions();
+    await finalAckAfterDeadline(async (f, a) => {
+      const ref = (await f.attach(a, null, "baseline")).subscription;
+      f.session.receive(
+        f.event(ref, { type: "baseline-start", run, descriptor: baseline(ref, 0) }),
+      );
+      f.session.receive(
+        f.event(
+          ref,
+          { type: "baseline-chunk", run, subscription: ref, baselineId: "baseline", ordinal: 0 },
+          new Uint8Array([65]),
+        ),
+      );
+      const progress = a.service.handle(
+        command("baseline-progress", ref, "progress", {
+          baselineId: "baseline",
+          lastParsedOrdinal: 0,
+        }),
+      );
+      await turns();
+      f.session.receive(f.reply());
+      await progress;
+      f.session.receive(
+        f.event(ref, {
+          type: "baseline-end",
+          run,
+          subscription: ref,
+          baselineId: "baseline",
+          chunkCount: 1,
+          totalBytes: 1,
+          atSeq: 0,
+        }),
+      );
+      a.settleWrites();
+      return { ref, appliedSeq: 0 };
+    });
+  });
+
+  it("never installs a replay recovery whose final ACK arrives after its deadline but before the next tick", async () => {
+    expect.hasAssertions();
+    await finalAckAfterDeadline(async (f, a) => {
+      const pending = a.service.handle(a.attach("replay", 0));
+      f.session.receive(f.reply(f.latest(), { recoveryMode: "replay", atSeq: 2 }));
+      const ref = (await pending).subscription;
+      f.session.receive(f.output(ref, 1));
+      f.session.receive(f.output(ref, 2));
+      a.settleWrites();
+      return { ref, appliedSeq: 2 };
+    });
   });
 
   it("tells each active subscription when its worker becomes overloaded and normal again", async () => {
