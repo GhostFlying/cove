@@ -4,6 +4,7 @@
 // passes (ServerTestHooks): the store loads store-fault-operations.mjs, and signals drive faults.
 //
 // - SIGUSR1: crash the store worker inside a transaction.
+// - SIGHUP: start an orderly stop (SIGTERM to itself) while a store crash waits in the queue.
 // - SIGUSR2: saturate the store (one long call in the worker, the queue filled), then write
 //   {"event":"saturated"} to stderr once a further call was refused as busy.
 // - COVE_TEST_STORE_LIMITS: JSON store limits ({"inFlight":1,"queued":2}).
@@ -63,6 +64,13 @@ if (process.env.COVE_TEST_STORE_QUERY === "1") {
     store: { operationModules, ...(limits ? { limits } : {}) },
     onStoreOpen: (store) => {
       process.on("SIGUSR1", () => store.call("test.crash", {}).catch(ignore));
+      process.on("SIGHUP", () => {
+        // A long call, then a crash queued behind it; the orderly stop begins at once. The stop's
+        // store close drains the queue, so the worker dies after the stop began.
+        store.call("test.sleep", { ms: 1500 }).catch(ignore);
+        store.call("test.crash", {}).catch(ignore);
+        process.kill(process.pid, "SIGTERM");
+      });
       process.on("SIGUSR2", () => {
         store.call("test.sleep", { ms: 1500 }).catch(ignore);
         for (let i = 0; i < (limits?.queued ?? 0); i++)
