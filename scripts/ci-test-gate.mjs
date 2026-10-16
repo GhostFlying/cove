@@ -1013,7 +1013,13 @@ export const fileRegisteredDirectories = [
   {
     project: "cli",
     directory: "apps/cli/tests/m1",
-    required: ["d6-probe-entry", "pending-operations", "s10-storage-identity", "test-isolation"],
+    required: [
+      "d6-probe-entry",
+      "pending-operations",
+      "s1-repo-registration",
+      "s10-storage-identity",
+      "test-isolation",
+    ],
   },
 ];
 

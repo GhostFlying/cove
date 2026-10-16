@@ -1386,7 +1386,13 @@ test("M1 CLI suites are registered per file and join the required inventory", as
     {
       project: "cli",
       directory: "apps/cli/tests/m1",
-      required: ["d6-probe-entry", "pending-operations", "s10-storage-identity", "test-isolation"],
+      required: [
+        "d6-probe-entry",
+        "pending-operations",
+        "s1-repo-registration",
+        "s10-storage-identity",
+        "test-isolation",
+      ],
     },
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
