@@ -8,7 +8,8 @@
 //   raised it, otherwise null.
 // - StoreUnavailableError: the store could not answer. `outcome` is
 //   - "not-sent": the call never reached the database (queue full, store closing, closed or
-//     failed); it did not execute;
+//     failed, or arguments that cannot be sent to the worker: reason "unsendable"); it did not
+//     execute;
 //   - "unknown": the call was handed to the database and no answer came back (the store failed
 //     while it was in flight); it may have committed.
 // Callers must surface "unknown" as an unknown result and never repeat the call on their own.
@@ -35,7 +36,7 @@ export class StoreOperationError extends Error {
   }
 }
 
-export type StoreUnavailableReason = "busy" | "closed" | "failed";
+export type StoreUnavailableReason = "busy" | "closed" | "failed" | "unsendable";
 
 export class StoreUnavailableError extends Error {
   constructor(
@@ -47,7 +48,9 @@ export class StoreUnavailableError extends Error {
         ? "The Cove store failed before answering; the result is unknown"
         : reason === "busy"
           ? "The Cove store queue is full"
-          : "The Cove store is not available",
+          : reason === "unsendable"
+            ? "The store call arguments cannot be sent to the store"
+            : "The Cove store is not available",
     );
     this.name = "StoreUnavailableError";
   }

@@ -501,7 +501,8 @@ structured-clone 安全的纯数据；结果不可克隆时 worker 回报 `unans
 调用按 FIFO 执行，两级有界：最多 16 个调用交给 worker（已发送，若 worker 失败则结果不确定），最多 1024 个
 在主线程排队（未发送）；两者都满时直接以 busy 拒绝，不发送。错误跨线程保留种类：`StoreError`
 （in-use、newer-schema、unavailable、migration）、`StoreOperationError`（已回滚，带 SQLite 错误码）与
-`StoreUnavailableError`（busy、closed、failed；结果 not-sent 或 unknown）。提交成功后才确认持久化操作；
+`StoreUnavailableError`（busy、closed、failed、unsendable；结果 not-sent 或 unknown）。unsendable 指调用参数
+不能 structured-clone，`postMessage` 在发送前即失败：结果为 not-sent，调用未执行，store 保持打开。提交成功后才确认持久化操作；
 一期不按 TTY 分配连接，也不建读连接池。
 
 **操作身份。** 带操作 ID 的数据库写入先在主线程查回执与预留，再由一个 worker 操作在同一事务内复查回执、

@@ -7,7 +7,6 @@ import type { StoreArgs, StoreOperationName, StoreResult } from "./sql/registry.
 import {
   reviveStoreError,
   StoreError,
-  StoreOperationError,
   StoreUnavailableError,
   type StoreErrorCategory,
 } from "./store-errors.js";
@@ -234,8 +233,9 @@ export class Store {
       try {
         this.worker.postMessage(request);
       } catch {
-        // The arguments cannot be cloned: nothing was sent.
-        call.reject(new StoreOperationError(null, "The store call arguments cannot be sent"));
+        // The arguments cannot be structured-cloned: postMessage throws before anything is sent,
+        // so the call definitely did not execute.
+        call.reject(new StoreUnavailableError("unsendable", "not-sent"));
         continue;
       }
       this.inFlight.set(call.id, call);
