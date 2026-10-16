@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { mkdir, symlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
 
@@ -44,4 +46,23 @@ test("cove-server started through a symlinked bin serves and persists writes", a
   });
   await fixture.stopServer(server);
   expect(await server.exited).toBe(0);
+});
+
+test("importing the server module from a stdin program neither throws nor starts a server", async () => {
+  // node reads the program from stdin and argv[1] is "-", which resolves to no file: the module's
+  // entry check must treat it as "not this executable" rather than throw on import.
+  const main = pathToFileURL(join(serverPackage, "dist/entry/main.js")).href;
+  const result = await new Promise((done) => {
+    const child = execFile(
+      process.execPath,
+      ["--input-type=module", "-"],
+      { cwd: fixture.root, env: fixture.env, timeout: 20_000 },
+      (error, stdout, stderr) => done({ code: error ? (error.code ?? 1) : 0, stdout, stderr }),
+    );
+    child.stdin.end(
+      `const m = await import(${JSON.stringify(main)});\n` +
+        `process.stdout.write(typeof m.runServerProcess + "\\n");\n`,
+    );
+  });
+  expect(result).toEqual({ code: 0, stdout: "function\n", stderr: "" });
 });
