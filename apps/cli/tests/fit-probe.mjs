@@ -7,7 +7,7 @@ import { waitFor } from "./recording-view.mjs";
 // last column of its current tty width: an ASCII row ending in `Z`, then a mixed ASCII and CJK
 // row ending in the wide character 身. It then reports that width in `<out>.<n>` for the n-th
 // print, so a test knows the grid the PTY really had when the rows were drawn.
-const SCRIPT = String.raw`import { writeFileSync } from "node:fs";
+const SCRIPT = String.raw`import { renameSync, writeFileSync } from "node:fs";
 const [out] = process.argv.slice(2);
 process.stdin.setRawMode(true);
 let prints = 0;
@@ -29,7 +29,11 @@ process.stdin.on("data", (chunk) => {
     }
     mixed += "身";
     process.stdout.write("\x1b[2J\x1b[H" + ascii + mixed + "\r\n");
-    writeFileSync(out + "." + ++prints, JSON.stringify({ cols, ascii, mixed }));
+    // nextPrint() reads the report as soon as it exists; written in place, that read could see
+    // the file created but not yet written. A rename makes it appear complete.
+    const report = out + "." + ++prints;
+    writeFileSync(report + ".partial", JSON.stringify({ cols, ascii, mixed }));
+    renameSync(report + ".partial", report);
   }
 });
 process.stdout.write("fit-probe-ready\r\n");

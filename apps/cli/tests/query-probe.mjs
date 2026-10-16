@@ -6,7 +6,7 @@ import { waitFor } from "./recording-view.mjs";
 // A process that sends DA (ESC[c) and CPR (ESC[6n) to its terminal and records every byte it
 // reads back until the typed line `done`. In "wait" mode it asks after the typed line `go`;
 // in "now" mode it asks at once. `<out>.seen` appears once both replies have arrived.
-const SCRIPT = String.raw`import { writeFileSync } from "node:fs";
+const SCRIPT = String.raw`import { renameSync, writeFileSync } from "node:fs";
 const [mode, out] = process.argv.slice(2);
 process.stdin.setRawMode(true);
 let received = "";
@@ -30,7 +30,10 @@ process.stdin.on("data", (chunk) => {
   }
   const end = received.indexOf("done\r");
   if (end >= 0) {
-    writeFileSync(out, JSON.stringify(received.slice(0, end)));
+    // received() reads the report as soon as it exists; written in place, that read could see
+    // the file created but not yet written. A rename makes it appear complete.
+    writeFileSync(out + ".partial", JSON.stringify(received.slice(0, end)));
+    renameSync(out + ".partial", out);
     process.exit(0);
   }
 });
