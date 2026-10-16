@@ -659,6 +659,60 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  it("answers a full recovery expiry per request: applied progress keeps its result, a queued detach is not accepted", async () => {
+    // Issue #103 review: at the full recovery deadline every queued request used to get
+    // RECOVERY_EXPIRED/unknown. The baseline progress the busy worker had not answered lost its
+    // real result, and the never-sent detach became unknown, which makes a client retire its
+    // whole connection.
+    const f = fixture({ recoveryDeadlineMs: 20 });
+    const a = f.connect("a");
+    try {
+      const ref = (await f.attach(a, null, "baseline")).subscription;
+      f.session.receive(
+        f.event(ref, { type: "baseline-start", run, descriptor: baseline(ref, 0) }),
+      );
+      f.session.receive(
+        f.event(
+          ref,
+          { type: "baseline-chunk", run, subscription: ref, baselineId: "baseline", ordinal: 0 },
+          new Uint8Array([65]),
+        ),
+      );
+      const progress = a.service.handle(
+        command("baseline-progress", ref, "progress", {
+          baselineId: "baseline",
+          lastParsedOrdinal: 0,
+        }),
+      );
+      await turns();
+      const held = f.latest();
+      expect(held.type).toBe("baseline-progress");
+      const detach = a.service.handle(command("detach", ref, "detach"));
+      f.clock(20);
+      a.service.tick();
+      expect(await detach).toMatchObject({
+        type: "error",
+        requestId: "detach",
+        error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+      });
+      // The recovery itself may or may not have been applied by the client: unknown.
+      expect(a.service.snapshot(ref.subscriptionId).route.failure).toMatchObject({
+        kind: "RECOVERY_EXPIRED",
+        acceptance: "unknown",
+      });
+      f.session.receive(f.reply(held));
+      expect(await progress).toMatchObject({
+        type: "baseline-progress-result",
+        requestId: "progress",
+        baselineId: "baseline",
+        lastParsedOrdinal: 0,
+      });
+      expect(f.session.closed).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it("retires only an expired route and reports its first cause on the next correlated command", async () => {
     const f = fixture({ recoveryDeadlineMs: 20 });
     const a = f.connect("a");
