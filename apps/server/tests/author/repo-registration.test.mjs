@@ -7,7 +7,9 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,7 +17,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { RepoService } from "../../dist/domain/repos.js";
-import { inspectRepository, isValidBranchName, readHead } from "../../dist/git/repository.js";
+import {
+  discoverRepository,
+  inspectRepository,
+  isValidBranchName,
+  readHead,
+} from "../../dist/git/repository.js";
 import { runGit } from "../../dist/git/run.js";
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { Store } from "../../dist/store/database.js";
@@ -391,4 +398,143 @@ describe("repo registration", () => {
     );
     expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
   });
+
+  it("answers a late Git refusal with the receipt a request of the same ID committed meanwhile", async () => {
+    const root = await temporary();
+    const path = await clone(root, "repo");
+    // Each call of a Git query takes the next behaviour. The first two requests are held at their
+    // Git check until the third, identical to the first, has committed; they are then refused.
+    const held = deferred();
+    const queue = (behaviours) => {
+      let next = 0;
+      return (...args) => behaviours[next++](...args);
+    };
+    const { repos } = await service({
+      discoverRepository: queue([
+        () => held.promise.then(() => ({ kind: "not-repository" })),
+        () => held.promise.then(() => ({ kind: "unavailable" })),
+        discoverRepository,
+        discoverRepository,
+      ]),
+      isValidBranchName: queue([
+        () => held.promise.then(() => null),
+        () => held.promise.then(() => false),
+        isValidBranchName,
+      ]),
+    });
+    const params = { operationId: "register", path };
+    const lateRegister = repos.register("principal", params);
+    const changedRegister = repos.register("principal", { ...params, displayName: "Other" });
+    const update = { operationId: "update", repoId: "", mainBranch: "develop" };
+    const committedRegister = await repos.register("principal", params);
+    expect(committedRegister.operation.state).toBe("succeeded");
+    update.repoId = committedRegister.operation.result.resource.id;
+    const lateUpdate = repos.update("principal", update);
+    const changedUpdate = repos.update("principal", { ...update, mainBranch: "other" });
+    const committedUpdate = await repos.update("principal", update);
+    expect(committedUpdate.operation.state).toBe("succeeded");
+    held.resolve();
+
+    // The identical requests return the committed record instead of their own late refusal;
+    // the changed ones learn that the operation ID is taken.
+    expect(await lateRegister).toEqual(committedRegister);
+    expect((await changedRegister).error.kind).toBe("OPERATION_ID_CONFLICT");
+    expect(await lateUpdate).toEqual(committedUpdate);
+    expect((await changedUpdate).error.kind).toBe("OPERATION_ID_CONFLICT");
+    // Without a receipt the refusal stands, and nothing more was written.
+    expect(
+      (await repos.register("principal", { operationId: "other", path: `${path}/` })).error.kind,
+    ).toBe("REPO_ALREADY_REGISTERED");
+    expect(repos.get(update.repoId).repo).toMatchObject({ revision: 1, mainBranch: "develop" });
+  });
+
+  // Clones whose main working tree Git cannot name from a linked worktree: once the clone is
+  // registered, its common directory still identifies it, so the linked worktree (also through a
+  // symlink) is the duplicate it is rather than "not a repository".
+  it.each([
+    {
+      name: "a separate Git directory",
+      async make(root) {
+        const main = join(root, "main");
+        await mkdir(join(root, "git-dirs"));
+        await git(
+          root,
+          root,
+          "init",
+          "--quiet",
+          "-b",
+          "main",
+          "--separate-git-dir",
+          join(root, "git-dirs", "main"),
+          main,
+        );
+        await commitFile(main, root);
+        return main;
+      },
+    },
+    {
+      name: "a relocated, symlinked Git directory",
+      async make(root) {
+        const main = await clone(root, "main");
+        await mkdir(join(root, "store"));
+        await rename(join(main, ".git"), join(root, "store", "main.git"));
+        await symlink(join(root, "store", "main.git"), join(main, ".git"));
+        return main;
+      },
+    },
+    {
+      name: "a submodule",
+      async make(root) {
+        const source = await clone(root, "source");
+        const superproject = await clone(root, "super");
+        await git(
+          superproject,
+          root,
+          "-c",
+          "protocol.file.allow=always",
+          "submodule",
+          "add",
+          "--quiet",
+          source,
+          "sub",
+        );
+        return join(superproject, "sub");
+      },
+    },
+  ])("recognizes a registered clone with $name through its linked worktree", async ({ make }) => {
+    const root = await temporary();
+    const main = await make(root);
+    const linked = join(root, "linked");
+    await git(main, root, "worktree", "add", "--quiet", "-b", "topic", linked);
+    const linkedLink = join(root, "linked-link");
+    await symlink(linked, linkedLink);
+    const { repos } = await service();
+    // Unregistered, the linked worktree cannot name the clone.
+    expect((await repos.register("principal", { operationId: "a", path: linked })).error.kind).toBe(
+      "NOT_A_GIT_REPOSITORY",
+    );
+    const registered = await repos.register("principal", { operationId: "b", path: main });
+    expect(registered.operation.state).toBe("succeeded");
+    expect(repos.list({ limit: 10 }).repos.map((repo) => repo.path)).toEqual([main]);
+    for (const [operationId, path] of [
+      ["c", linked],
+      ["d", `${linkedLink}/`],
+    ])
+      expect((await repos.register("principal", { operationId, path })).error.kind).toBe(
+        "REPO_ALREADY_REGISTERED",
+      );
+    expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
+  });
 });
+
+async function commitFile(path, home) {
+  await writeFile(join(path, "README.md"), "test\n");
+  await git(path, home, "add", "README.md");
+  await git(path, home, "commit", "--quiet", "--no-gpg-sign", "-m", "test");
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => (resolve = done));
+  return { promise, resolve };
+}

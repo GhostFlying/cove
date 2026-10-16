@@ -106,26 +106,37 @@ async function mainWorkingTree(directory: string): Promise<{ path: string } | Re
   return { path: fields[0].slice("worktree ".length) };
 }
 
-// Identifies the clone at `path`: a directory anywhere inside one of its working trees, given
-// through any symlink and with or without a trailing slash. The caller passes an absolute path.
-//
-// - A path inside the main working tree resolves to its real top level.
-// - A path inside a linked worktree resolves to the clone's main working tree, which must still
-//   exist and report the same common directory; otherwise the clone cannot be named reliably
-//   (e.g. its main working tree was deleted) and the path is refused as not a repository.
-// - A bare repository, or a linked worktree of one, is refused as bare (S1): Cove registers a
-//   clone with a working tree that checkout mounts can use.
-export async function inspectRepository(
+// The working tree that contains `path` (a directory anywhere inside it, given through any symlink
+// and with or without a trailing slash; the caller passes an absolute path): its real top level,
+// Git directory and common directory. The common directory is the clone's identity, known before
+// (and independently of) finding the clone's main working tree, so a caller can recognize an
+// already registered clone even when that main working tree cannot be found from here.
+export type WorkTreeDiscovery = Extract<Discovery, { kind: "work-tree" }>;
+
+export async function discoverRepository(
   path: string,
-): Promise<RepositoryInspection | RepositoryRefusal> {
+): Promise<WorkTreeDiscovery | RepositoryRefusal> {
   if (!isAbsolute(path)) return { kind: "not-repository" };
   const directory = await realDirectory(path);
   if (!directory.ok) return directory.refusal;
-  const found = await discover(directory.path);
-  if (found.kind !== "work-tree") return found;
+  return discover(directory.path);
+}
+
+// The clone a discovered working tree belongs to.
+//
+// - The main working tree (its Git directory is the common directory) is the clone itself.
+// - A linked worktree resolves to the clone's main working tree, which must still exist and
+//   report the same common directory; otherwise the clone cannot be named reliably (its main
+//   working tree was deleted, or Git cannot derive it, as for a separate Git directory or a
+//   submodule) and the path is refused as not a repository.
+// - A bare repository, or a linked worktree of one, is refused as bare (S1): Cove registers a
+//   clone with a working tree that checkout mounts can use.
+export async function cloneOf(
+  found: WorkTreeDiscovery,
+): Promise<RepositoryInspection | RepositoryRefusal> {
   if (found.gitDir === found.commonDir)
     return { kind: "clone", topLevel: found.topLevel, commonDir: found.commonDir };
-  const main = await mainWorkingTree(directory.path);
+  const main = await mainWorkingTree(found.topLevel);
   if (!("path" in main)) return main;
   const mainDirectory = await realDirectory(main.path);
   if (!mainDirectory.ok)
@@ -142,6 +153,14 @@ export async function inspectRepository(
   )
     return { kind: "not-repository" };
   return { kind: "clone", topLevel: confirmed.topLevel, commonDir: confirmed.commonDir };
+}
+
+// discoverRepository followed by cloneOf.
+export async function inspectRepository(
+  path: string,
+): Promise<RepositoryInspection | RepositoryRefusal> {
+  const found = await discoverRepository(path);
+  return found.kind === "work-tree" ? cloneOf(found) : found;
 }
 
 // HEAD of a working tree: the checked-out branch (null when detached) and the commit HEAD names

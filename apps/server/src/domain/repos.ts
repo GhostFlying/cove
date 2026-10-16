@@ -16,7 +16,12 @@ import {
 } from "../operations/database-operations.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { Store } from "../store/database.js";
-import { inspectRepository, isValidBranchName, type RepositoryRefusal } from "../git/repository.js";
+import {
+  cloneOf,
+  discoverRepository,
+  isValidBranchName,
+  type RepositoryRefusal,
+} from "../git/repository.js";
 
 // Repo registration (docs/milestones/m1.md T2, S1). A registration names one local clone:
 //
@@ -39,7 +44,10 @@ import { inspectRepository, isValidBranchName, type RepositoryRefusal } from "..
 // preconditions against the current rows in the same transaction that inserts the row and the
 // receipt. Two concurrent registrations of one clone thus serialize on that transaction: one
 // succeeds, the other is refused (or, with the same operation ID, returns the first's record).
-// A refused request leaves no receipt and changes nothing.
+// A refusal decided after a Git check looks the receipt up once more before it is returned (see
+// RepoService.refuse), so a request never reports "not accepted" for an operation ID whose
+// identical request was accepted meanwhile. A refused request leaves no receipt and changes
+// nothing.
 
 type RepoRow = {
   repo_id: string;
@@ -117,10 +125,22 @@ export type RepoServiceOptions = {
   encodeUtf8: (text: string) => Uint8Array;
   now?: () => number;
   newId?: () => string;
+  // The Git queries; tests replace them to order concurrent requests deterministically.
+  git?: Partial<RepoGit>;
+};
+
+export type RepoGit = {
+  discoverRepository: typeof discoverRepository;
+  cloneOf: typeof cloneOf;
+  isValidBranchName: typeof isValidBranchName;
 };
 
 export class RepoService {
-  constructor(private readonly options: RepoServiceOptions) {}
+  private readonly git: RepoGit;
+
+  constructor(private readonly options: RepoServiceOptions) {
+    this.git = { discoverRepository, cloneOf, isValidBranchName, ...options.git };
+  }
 
   private get db() {
     return this.options.store.db;
@@ -190,19 +210,46 @@ export class RepoService {
       : { repos: page };
   }
 
+  // A refusal decided after an await. While this request waited for Git, another request with the
+  // same operation ID may have committed: its receipt then answers this one too (the same record,
+  // or OPERATION_ID_CONFLICT for a changed intent), never this request's late refusal, which would
+  // contradict an operation that was in fact accepted.
+  private refuse(
+    principalId: string,
+    method: WriteRpcMethod,
+    params: Record<string, unknown> & { operationId: string },
+    error: DomainError,
+  ): DatabaseWriteOutcome {
+    return this.recorded(principalId, method, params) ?? { error };
+  }
+
+  private registeredCommonDir(commonDir: string): boolean {
+    return this.db.prepare("SELECT 1 FROM repos WHERE common_dir = ?").get(commonDir) !== undefined;
+  }
+
   async register(principalId: string, params: RegisterParams): Promise<DatabaseWriteOutcome> {
     const recorded = this.recorded(principalId, "repo.register", params);
     if (recorded) return recorded;
     // The path is interpreted on this host; a relative path has no meaning to the server.
     if (!isAbsolute(params.path)) return { error: domainError("INVALID_ARGUMENT") };
-    const inspected = await inspectRepository(params.path);
-    if (inspected.kind !== "clone") return { error: refusalError(inspected) };
-    const clone = inspected;
+    const refuse = (error: DomainError) => this.refuse(principalId, "repo.register", params, error);
+    const found = await this.git.discoverRepository(params.path);
+    if (found.kind !== "work-tree") return refuse(refusalError(found));
+    // The common directory is the identity. A clone already registered is recognized by it before
+    // its main working tree is looked for: from a linked worktree of a clone with a separate Git
+    // directory, of a submodule or of a relocated Git directory, Git cannot name the main working
+    // tree, and the request must still be reported as the duplicate it is (the registration's
+    // stored path is that clone's main working tree). This early answer is advisory; the
+    // transaction below checks again.
+    if (this.registeredCommonDir(found.commonDir))
+      return refuse(domainError("REPO_ALREADY_REGISTERED"));
+    const clone = await this.git.cloneOf(found);
+    if (clone.kind !== "clone") return refuse(refusalError(clone));
     if (
       !HostPathSchema.safeParse(clone.topLevel).success ||
       !HostPathSchema.safeParse(clone.commonDir).success
     )
-      return { error: domainError("INVALID_ARGUMENT") };
+      return refuse(domainError("INVALID_ARGUMENT"));
     const displayName = params.displayName ?? defaultDisplayName(clone.topLevel);
     return this.write(principalId, "repo.register", params, () => {
       const existing = this.db
@@ -242,9 +289,14 @@ export class RepoService {
     if (typeof params.mainBranch === "string") {
       // The contract's GitRefSchema excludes option-like and whitespace values; Git's own rules
       // also refuse names such as `a..b` or `x.lock`, which no remote branch can have.
-      const valid = await isValidBranchName(params.mainBranch);
-      if (valid === null) return { error: domainError("GIT_UNAVAILABLE") };
-      if (!valid) return { error: domainError("INVALID_ARGUMENT") };
+      const valid = await this.git.isValidBranchName(params.mainBranch);
+      if (valid !== true)
+        return this.refuse(
+          principalId,
+          "repo.update",
+          params,
+          domainError(valid === null ? "GIT_UNAVAILABLE" : "INVALID_ARGUMENT"),
+        );
     }
     return this.write(principalId, "repo.update", params, () => {
       const current = this.current(params);
