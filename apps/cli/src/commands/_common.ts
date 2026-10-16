@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CallOutcome, Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import { openSession, type Session } from "../session.js";
@@ -51,12 +51,33 @@ export function parseArguments(argv: readonly string[]): Arguments {
   return { words, flags, command: undefined };
 }
 
-export function takeFlags(args: Arguments, allowed: readonly string[]): void {
+// `repeatable` names the allowed flags that may be given more than once (their values are kept in
+// order, see flagValues).
+export function takeFlags(
+  args: Arguments,
+  allowed: readonly string[],
+  repeatable: readonly string[] = [],
+): void {
   for (const name of args.flags.keys())
     if (!(GLOBAL_FLAGS as readonly string[]).includes(name) && !allowed.includes(name))
       throw new UsageError(`Unknown option ${name}`);
   for (const [name, values] of args.flags)
-    if (name !== "--origin" && values.length > 1) throw new UsageError(`${name} given twice`);
+    if (name !== "--origin" && !repeatable.includes(name) && values.length > 1)
+      throw new UsageError(`${name} given twice`);
+}
+
+export function flagValues(args: Arguments, name: string): string[] {
+  return args.flags.get(name) ?? [];
+}
+
+// The path the server should inspect. A relative path is made absolute against this command's
+// directory without normalizing it: `..` after a symlink means something else than lexical
+// normalization says, and the server resolves the real path (and drops a trailing slash) itself.
+// Rebuilding the command from the same directory produces the same intent.
+export function hostPath(path: string): string {
+  if (isAbsolute(path)) return path;
+  const cwd = process.cwd();
+  return cwd.endsWith(sep) ? `${cwd}${path}` : `${cwd}${sep}${path}`;
 }
 
 export function flag(args: Arguments, name: string): string | undefined {
