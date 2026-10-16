@@ -29,6 +29,11 @@ export type StoreLimits = {
 
 export const DEFAULT_STORE_LIMITS: StoreLimits = Object.freeze({ inFlight: 16, queued: 1024 });
 
+// A call that close() runs after the drain, such as the lifecycle records of an orderly stop.
+export type FinalStoreCall = {
+  [N in StoreOperationName]: { operation: N; args: StoreArgs<N> };
+}[StoreOperationName];
+
 export type StoreOptions = {
   databasePath: string;
   // The instance lock file; defaults to `cove.lock` beside the database.
@@ -91,8 +96,11 @@ const WORKER_ENTRY = new URL("./store-worker.js", import.meta.url);
 // close().
 //
 // Shutdown. close() stops accepting calls, waits until every queued and in-flight call was
-// answered, asks the worker to close the database (which checkpoints the WAL), waits for the
-// worker thread to exit, and only then releases the instance lock.
+// answered, runs its final calls (the records an orderly stop must write) one at a time, asks the
+// worker to close the database (which checkpoints the WAL), waits for the worker thread to exit,
+// and only then releases the instance lock. Final calls bypass the queue limits: admission has
+// already stopped and the queue is empty when they run, so a queue that was saturated when the
+// stop began cannot refuse them.
 export class Store {
   private observer: TransactionObserver | undefined;
   private state: "open" | "closing" | "closed" | "failed" = "open";
@@ -279,22 +287,42 @@ export class Store {
     for (const listener of this.failureListeners.splice(0)) listener();
   }
 
-  // Drains, closes the database in the worker, waits for the worker to exit, then releases the
-  // instance lock. Rejects when the database could not be closed cleanly (the store failed before
-  // or during the close); the lock is released in every case.
-  close(): Promise<void> {
-    return (this.closing ??= this.shutdown());
+  // Drains, runs `finalCalls` in order, closes the database in the worker, waits for the worker to
+  // exit, then releases the instance lock. Final calls stop at the first failure, like awaited
+  // calls would. Rejects when a final call failed (with its error) or when the database could not
+  // be closed cleanly (the store failed before or during the close); the lock is released in every
+  // case. Only the first close() call's final calls run.
+  close(finalCalls: readonly FinalStoreCall[] = []): Promise<void> {
+    return (this.closing ??= this.shutdown(finalCalls));
   }
 
-  private async shutdown(): Promise<void> {
+  // Hands a call to the worker without the admission checks of call(); only shutdown uses it.
+  private enqueue(operation: string, args: unknown): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ id: ++this.nextId, operation, args, resolve, reject });
+      this.pump();
+    });
+  }
+
+  private async shutdown(finalCalls: readonly FinalStoreCall[]): Promise<void> {
     let clean = false;
+    let finalError: Error | undefined;
     if (this.state === "open") {
       this.state = "closing";
       if (this.queue.length > 0 || this.inFlight.size > 0)
         await new Promise<void>((done) => {
           this.drained = done;
         });
-      if (this.state === "closing") {
+      for (const final of finalCalls) {
+        if (this.currentState() !== "closing") break;
+        try {
+          await this.enqueue(final.operation, final.args);
+        } catch (error) {
+          finalError = error instanceof Error ? error : new Error("A final store call failed");
+          break;
+        }
+      }
+      if (this.currentState() === "closing") {
         const answered = new Promise<boolean>((done) => {
           this.closeAnswer = done;
         });
@@ -310,8 +338,9 @@ export class Store {
     this.lock.close();
     if (!clean) {
       this.state = "failed";
-      throw new StoreUnavailableError("failed", "unknown");
+      throw finalError ?? new StoreUnavailableError("failed", "unknown");
     }
+    if (finalError) throw finalError;
   }
 }
 

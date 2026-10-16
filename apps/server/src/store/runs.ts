@@ -1,5 +1,5 @@
 import type { RunRef } from "@cove/protocol/identity";
-import type { Store } from "./database.js";
+import type { FinalStoreCall, Store } from "./database.js";
 import type { LiveRunRecord } from "./sql/runs.js";
 
 export type { LiveRunRecord };
@@ -47,11 +47,20 @@ export class RunLog {
   // Orderly stop of this instance: its runs end with the server. `verified` says whether the
   // worker reported its own exit, which ends every PTY it owned.
   stoppedWithServer(relayInstanceId: string, verified: boolean): Promise<number> {
-    return this.store.call("runs.stoppedWithServer", {
-      relayInstanceId,
-      verified,
-      at: this.now(),
-    });
+    const { operation, args } = this.stoppedWithServerCall(relayInstanceId, verified);
+    return this.store.call(operation, args);
+  }
+
+  // The same record as a final call of Store.close, so an orderly stop writes it even when the
+  // store's queue was saturated when the stop began.
+  stoppedWithServerCall(
+    relayInstanceId: string,
+    verified: boolean,
+  ): Extract<FinalStoreCall, { operation: "runs.stoppedWithServer" }> {
+    return {
+      operation: "runs.stoppedWithServer",
+      args: { relayInstanceId, verified, at: this.now() },
+    };
   }
 
   // Startup: runs of earlier instances that never recorded an end are interrupted and
