@@ -209,3 +209,54 @@ test("an idle worker stays live with a recovery deadline shorter than its heartb
     throw new Error(`the idle worker was lost: ${JSON.stringify(record)}; ${fixture.stderr()}`);
   expect(await coveJson("status")).toMatchObject({ workerCount: 1, health: "live" });
 }, 30_000);
+
+// Issue #103 review (B1): the server leaves route control pending while the worker is live, so
+// the client must not give up sooner. With a fixed 5 s client deadline, an ACK held by a busy
+// worker failed its view at 5 s, the detach sent after that failure timed out in turn, and the
+// client retired the whole connection, ending every other subscription on it. Here the worker
+// holds every ACK and progress report for 12 s while it keeps sending heartbeats.
+test("route control held past the old client deadline keeps every subscription", async () => {
+  await launch(DEADLINE_MS);
+  const client = createSessionClient(fixture.record);
+  fixture.clients.push(client);
+  expect((await client.connect()).ok).toBe(true);
+  const streams = [];
+  for (const name of ["a", "b"]) {
+    const run = await coveJson(
+      "terminal",
+      "create",
+      "--cwd",
+      fixture.directory,
+      "--",
+      "/bin/sh",
+      "-c",
+      'stty -echo; i=0; while :; do printf "a-%06d\\n" "$i"; i=$((i+1)); sleep 0.02; done',
+    );
+    const view = open(client, run, `route-${name}`);
+    expect(await view.controller.attach()).toMatchObject({ ok: true });
+    streams.push(view);
+  }
+  for (const view of streams)
+    await waitFor("output before the hold", () => counters(view.recording.text()).length >= 10);
+  const describe = () =>
+    `${JSON.stringify(streams.map((view) => view.controller.snapshot()))}; server stderr: ${fixture.stderr()}`;
+  const hold = `${fixture.flag}.route`;
+  await writeFile(hold, "hold\n");
+  await sleep(12_000);
+  for (const view of streams)
+    if (view.controller.snapshot().phase !== "ready")
+      throw new Error(`a subscription ended while route control was held: ${describe()}`);
+  await rm(hold);
+  const progress = streams.map((view) => counters(view.recording.text()).length);
+  for (const [index, view] of streams.entries())
+    await waitFor(
+      "output after the hold",
+      () => counters(view.recording.text()).length > progress[index] + 20,
+    );
+  for (const view of streams) {
+    if (view.controller.snapshot().phase !== "ready")
+      throw new Error(`a subscription ended after the hold: ${describe()}`);
+    const seen = counters(view.recording.text());
+    expect(seen.slice(1)).toEqual(seen.slice(0, -1).map((value) => value + 1));
+  }
+}, 60_000);

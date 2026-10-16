@@ -20,6 +20,7 @@ import {
 import {
   validateBaselineDescriptor,
   MAX_PAYLOAD_BYTES,
+  ROUTE_CONTROL_DEADLINE_MS,
   type BaselineDescriptor,
   type ExternalTerminalEvent,
   type RunEvent,
@@ -650,7 +651,7 @@ export class RoutedTerminalController implements TerminalController {
     if (!requestId) return { ok: false, error: domainError("COUNTER_EXHAUSTED") };
     const result = await this.host.lane.send(
       { type: "detach", requestId, run: this.run, subscription: ref },
-      5_000,
+      ROUTE_CONTROL_DEADLINE_MS,
     );
     if (detachLeavesStateUnproven(result) && this.currentConnection(ref))
       this.host.retireConnection();
@@ -2670,7 +2671,12 @@ export class RoutedTerminalController implements TerminalController {
     void this.host.lane
       .send(
         { type: "applied-ack", requestId, run: this.run, subscription: ref, appliedSeq: seq },
-        5_000,
+        // Route control waits as long as the server does (see ROUTE_CONTROL_DEADLINE_MS): an
+        // ACK behind a busy worker is not a failed subscription (issue #103). One ACK stays in
+        // flight per subscription and newer ones fold into pendingAck, so waiting is bounded;
+        // the server's credit already advanced when it received this ACK, so output keeps
+        // flowing up to the next window. Ownership and re-entry handling are unchanged (#84).
+        ROUTE_CONTROL_DEADLINE_MS,
         () => {
           if (token !== this.token) return;
           if (seq > this.handedAckSeq) this.handedAckSeq = seq;
@@ -2737,7 +2743,8 @@ export class RoutedTerminalController implements TerminalController {
           baselineId: descriptor.baselineId,
           lastParsedOrdinal: ordinal,
         },
-        5_000,
+        // As for applied-ack: no shorter deadline than the server's (issue #103).
+        ROUTE_CONTROL_DEADLINE_MS,
         undefined,
         handle,
       )
@@ -2777,7 +2784,10 @@ export class RoutedTerminalController implements TerminalController {
       return;
     }
     void this.host.lane
-      .send({ type: "detach", requestId, run: this.run, subscription: ref }, 5_000)
+      .send(
+        { type: "detach", requestId, run: this.run, subscription: ref },
+        ROUTE_CONTROL_DEADLINE_MS,
+      )
       .then((outcome) => {
         if (detachLeavesStateUnproven(outcome) && this.currentConnection(ref))
           this.host.retireConnection();

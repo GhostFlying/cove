@@ -224,6 +224,10 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
     被放弃的命令继续占用所在类别的窗口，所以过载表现为后续命令的 BUSY，而不是无界增长。
 - **路由控制（applied-ack、baseline-progress、unsubscribe）没有应答期限**，在 worker 存活期间一直等待（上文容量保证）。
   让 ACK 超时会退役订阅，正是 #103 要避免的；慢 ACK 只让该订阅的输出按流控变慢。
+  客户端与之一致：确认、基线进度与 detach 的结果等待 `ROUTE_CONTROL_DEADLINE_MS`（存活窗口加两个默认恢复期限，150 s），
+  只作为 server 永不应答时的兜底。过去客户端固定等 5 s：worker 存活但 ACK 排在慢命令之后时，视图在 5 s 失败，随后的 detach
+  同样超时，客户端再退役整个连接，其上全部订阅随之结束。超时语义不变（已交出的命令结果未知、不重放），
+  每个订阅同类至多一条在途、更新的确认合并进下一条，所以等待仍有界；server 收到确认时已推进信用，输出继续流到下一个窗口。
 - **类别隔离。** runtime 与 worker 对普通命令（`pendingWorkerCommands`）、status、stop 和路由控制各有窗口，worker 分别执行；
   基线生成另受 `concurrentGenerationsPerWorker` 限制。一个慢的 subscribe/快照不占用 ACK 或刷新的窗口，它们只与之共享 worker 的 CPU。
   按类别窗口，macOS 复现中与 subscribe 同时未决的 ACK 与刷新并不等待 subscribe 本身；它们是随 subscribe 期限引发的失联一起失败的。

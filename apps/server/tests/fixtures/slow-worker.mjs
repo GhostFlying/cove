@@ -9,12 +9,16 @@
 // - subscribe and recover replies are held until it is no longer slow, so an attach waits past
 //   its deadline. The real execution has already run them, so a concurrent unsubscribe is
 //   handled by the real route state, exactly as for a capture that is merely slow.
+// Separately, while the file named by the flag plus ".route" exists, applied-ack and
+// baseline-progress wait before they execute, as route control queued behind a busy worker
+// does; the event loop stays free, so heartbeats keep coming.
 import { existsSync } from "node:fs";
 import { createWorkerExecution } from "@cove/terminal-worker/execution";
 import { runWorkerPipe } from "@cove/terminal-worker/pipe";
 
 const flag = process.env.COVE_TEST_SLOW_WORKER_FLAG;
 const slow = () => !!flag && existsSync(flag);
+const holdRoute = () => !!flag && existsSync(`${flag}.route`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 setInterval(() => {
@@ -29,6 +33,8 @@ function slowed(execution) {
   return Object.freeze({
     ...execution,
     execute: async (command, payload) => {
+      if (command.type === "applied-ack" || command.type === "baseline-progress")
+        while (holdRoute()) await sleep(50);
       const reply = await execution.execute(command, payload);
       if (command.type === "subscribe" || command.type === "recover")
         while (slow()) await sleep(50);

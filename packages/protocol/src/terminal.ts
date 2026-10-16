@@ -29,10 +29,20 @@ import {
   validateExternalEventBinding,
 } from "./terminal-events.js";
 import { validateBaselineDescriptor } from "./terminal-recovery.js";
+import { PIPE_LIVENESS_WINDOW_MS } from "./pipe-command.js";
 
 export const TERMINAL_LANE = 3;
 export const TERMINAL_REVISION = 2;
 export const TERMINAL_FRAME_CLASSES = Object.freeze({ command: 1, result: 2, event: 3, error: 4 });
+// How long a client waits for the result of a route-control command (applied-ack,
+// baseline-progress, detach). The server sets no reply deadline of its own for these while the
+// worker is live (issue #103): it answers when the worker does, or with an explicit outcome once
+// the worker is lost (PIPE_LIVENESS_WINDOW_MS of runtime-observed silence) or the connection
+// closes. A client deadline shorter than that fails a healthy subscription whose ACK merely
+// waits behind a busy worker, and the detach that follows such a failure timed out in turn and
+// retired the whole connection. This is only a backstop against a server that never answers:
+// the liveness window plus two default recovery deadlines for runtime stalls and transport.
+export const ROUTE_CONTROL_DEADLINE_MS = PIPE_LIVENESS_WINDOW_MS + 2 * M0_LIMITS.recoveryDeadlineMs;
 export type TerminalFrameClass = 1 | 2 | 3 | 4;
 export type TerminalMetadata =
   | z.infer<typeof TerminalCommandSchema>
