@@ -42,6 +42,10 @@ export const DOMAIN_ERROR_KINDS = [
   "LIVE_RUNS_PRESENT",
   "OPERATION_NOT_RESUMABLE",
   "OPERATION_EFFECTS_ACTIVE",
+  // The execution host's Git gave no answer (timeout, output over its bound, git missing or
+  // killed). Nothing is known about the repository or path the request named: it is neither
+  // "not a repository" nor a capacity refusal (BUSY). The request was not accepted.
+  "GIT_UNAVAILABLE",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -127,6 +131,9 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   LIVE_RUNS_PRESENT: "inspect-run",
   OPERATION_NOT_RESUMABLE: "query-operation",
   OPERATION_EFFECTS_ACTIVE: "query-operation",
+  // Not retried automatically: the cause (a missing git, a hung credential helper, a huge repo)
+  // is on the host, and the operator decides whether to fix it and send the request again.
+  GIT_UNAVAILABLE: "none",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
