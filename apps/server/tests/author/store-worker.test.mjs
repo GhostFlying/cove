@@ -145,6 +145,24 @@ describe("store worker calls", () => {
       await store.call("test.get", { sql: "SELECT count(*) AS n FROM server_identity" }),
     ).toEqual({ n: 1 });
   });
+
+  it("refuses arguments that cannot be cloned as not sent, without failing the store", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    await loadOrCreateIdentity(store);
+    const unsendable = await settle(
+      store.call("test.run", { sql: "UPDATE config SET revision = 3", params: [() => 1] }),
+    );
+    // postMessage throws before anything reaches the worker: not "ran and rolled back".
+    expect(unsendable.error).toBeInstanceOf(StoreUnavailableError);
+    expect(unsendable.error).toMatchObject({ reason: "unsendable", outcome: "not-sent" });
+    expect(unsendable.error).not.toBeInstanceOf(StoreOperationError);
+    expect(uncertainStoreOutcome(unsendable.error)).toBe(false);
+    expect(store.isOpen).toBe(true);
+    expect(await store.call("test.get", { sql: "SELECT revision FROM config" })).toEqual({
+      revision: 0,
+    });
+  });
 });
 
 describe("store worker failure", () => {
