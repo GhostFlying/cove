@@ -23,7 +23,7 @@ import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/termi
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
 import { resolveHome } from "../store/home.js";
-import { StoreError, type Store } from "../store/database.js";
+import { StoreError, type Store, type StoreOptions } from "../store/database.js";
 import { instanceStopCall, recordInstanceStart } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
 import { RunLog } from "../store/runs.js";
@@ -39,6 +39,14 @@ import {
   validateLocalOptions,
   type M0LocalOptions,
 } from "./m0-local-options.js";
+
+// Test-only seams, passed by test entries that import runServerProcess (for example
+// apps/cli/tests/m1/store-fault-server.mjs); the executable at the end of this module passes none,
+// so production cannot load test store operations or reach the store from outside.
+export type ServerTestHooks = {
+  store?: Pick<StoreOptions, "operationModules" | "limits">;
+  onStoreOpen?: (store: Store) => void;
+};
 
 export function createLocalApplication(
   input: M0LocalOptions,
@@ -217,12 +225,16 @@ function receiptBackend(persistence: { store: Store; probe?: D6Probe }, relayIns
 // Opens the data directory first (M1 T1): the database lock decides whether this process may run
 // at all, before a worker, listener or rendezvous exists. Startup verification of the previous
 // instance's operations and runs completes before any request can be served.
-async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
+async function openLocalApplication(
+  input: M0LocalOptions,
+  probe?: D6Probe,
+  hooks?: ServerTestHooks,
+) {
   const options = validateLocalOptions(input);
   if (options.home === undefined) return { local: createLocalApplication(options), store: null };
   let persistence;
   try {
-    persistence = await openPersistence(options.home);
+    persistence = await openPersistence(options.home, Date.now, hooks?.store);
   } catch (error) {
     throw new LocalEntryStartupError(
       "store",
@@ -265,6 +277,7 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
       throw error;
     }
     probe?.start(store);
+    hooks?.onStoreOpen?.(store);
     return { local, store };
   } catch (error) {
     await store.close().catch(() => undefined);
@@ -279,11 +292,14 @@ export async function startLocalEntry(
   shutdown?: { signal?: AbortSignal },
   // Only the D6 probe entry passes this (d6-probe-main.ts); see d6-probe.ts.
   probe?: D6Probe,
+  hooks?: ServerTestHooks,
 ) {
-  const { local, store } = await openLocalApplication(input, probe);
+  const { local, store } = await openLocalApplication(input, probe, hooks);
   const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
   const worker = local.createWorker();
   const instance = local.identity.relayInstanceId;
+  // Set once runServerProcess is told of a store failure (storeFailed below), which it reports.
+  let storeFailureReported = false;
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> =>
     (closing ??= (async () => {
@@ -323,7 +339,9 @@ export async function startLocalEntry(
               instanceStopCall(instance, Date.now()),
             ]);
           } catch {
-            failed = true;
+            // A failed store was already reported (the store-failed event, exit status 1); its
+            // records are left to the next start, which marks this instance's runs interrupted.
+            if (!store.failed || !storeFailureReported) failed = true;
           }
         }
       }
@@ -373,7 +391,12 @@ export async function startLocalEntry(
     // Fail closed (D6 B): a failed store is never restarted, so the server stops serving. Resolves
     // when the store worker failed; the caller then runs `close`, which cannot record the orderly
     // stop (the next start marks this instance's runs interrupted) and reports cleanup failure.
-    const storeFailed = new Promise<void>((done) => store?.onFailure(done));
+    const storeFailed = new Promise<void>((done) =>
+      store?.onFailure(() => {
+        storeFailureReported = true;
+        done();
+      }),
+    );
     return { endpoint, close, liveRuns, storeFailed };
   } catch (error) {
     let cleanup: "verified" | "unverifiable" = "verified";
@@ -443,7 +466,11 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
 
 // The server process: `--mode init` or the local server. `probe` is passed only by the D6 probe
 // entry.
-export function runServerProcess(argv: readonly string[], probe?: D6Probe): void {
+export function runServerProcess(
+  argv: readonly string[],
+  probe?: D6Probe,
+  hooks?: ServerTestHooks,
+): void {
   const fail = (error: unknown, fallback: string): void => {
     process.exitCode = 1;
     process.stderr.write(
@@ -494,6 +521,7 @@ export function runServerProcess(argv: readonly string[], probe?: D6Probe): void
           { ...options, home: options.home ?? resolveHome(undefined) },
           { signal: controller.signal },
           probe,
+          hooks,
         );
         if (controller.signal.aborted) await close();
         const started = server;
