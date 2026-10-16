@@ -11,8 +11,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 //   otherwise silently redirect the query to another repository or configuration;
 // - repository configuration cannot make a read-only query run programs or contact a remote:
 //   lazy fetching of missing objects from a promisor remote is disabled (GIT_NO_LAZY_FETCH, Git
-//   2.45+; the queries in repository.ts also avoid reading objects, so older Git does not fetch
-//   either) and the file-system monitor hook is off (core.fsmonitor);
+//   2.45+; readHead, the only query that reads objects, refuses an older Git) and the file-system
+//   monitor hook is off (core.fsmonitor);
 // - messages are forced to the C locale, so the few stderr texts the caller classifies are stable;
 // - stdout and stderr are capped, and the whole run has a deadline (see runGit for how the
 //   process tree is ended and why completion is bounded).
@@ -21,7 +21,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 // GIT_CONFIG_{GLOBAL,SYSTEM,NOSYSTEM} switches) is still read: safe.directory and similar trust
 // settings must apply to the server's queries exactly as they do to the user's own git.
 //
-// Supported Git: 2.36 or later (`git worktree list -z`, repository.ts).
+// Supported Git: 2.36 or later (`git worktree list -z`, repository.ts); readHead needs 2.45.
 
 export const GIT_TIMEOUT_MS = 10_000;
 export const GIT_OUTPUT_BYTES = 1024 * 1024;
