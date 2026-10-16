@@ -18,19 +18,21 @@
 
 ## 2. 现在可用（AVAILABLE）
 
-| 能力                    | CLI                                                                                     | 引入                                       | 说明                                                                                                            |
-| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| 数据目录                | 全局 `--home DIR`，或 `$COVE_HOME`，默认 `~/.cove`                                      | `c02367b`                                  | 同一数据目录只允许一个 server                                                                                   |
-| 初始化                  | `cove server init [--workspace-root DIR]`                                               | `c02367b`                                  | 服务未运行时使用                                                                                                |
-| 启动 server             | `cove server start [--port N] [--origin URL]...`                                        | `8b06fe4`                                  | 前台运行；未初始化时按默认值初始化                                                                              |
-| 状态                    | `cove status`                                                                           | `8b06fe4`                                  |                                                                                                                 |
-| 设置                    | `cove config get`；`config set/reset workspaceRoot [--expected-revision N]`             | `c02367b`                                  | 只影响之后新建的 workspace                                                                                      |
-| 终端 run（不属于 tab）  | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                  | M0 路径；tab 尚未提供（见 §3）                                                                                  |
-| 查看与停止 run          | `cove terminal list`、`terminal get <runId>`、`terminal stop <runId>`                   | `8b06fe4`                                  |                                                                                                                 |
-| 操作身份                | 写命令接受 `--operation-id ID`；`cove operation get <id>`、`cove operation resend <id>` | `c02367b`（重发只发保存的请求：`2d89043`） | 首次发送前把请求保存为本机待定记录；`resend` 只向原 server 原样重发，已有记录时返回原记录、不重复执行           |
-| 重启后的 run 与操作记录 | server 启动时处理，无单独命令                                                           | `299514d`                                  | 旧实例未结束的 run 记为 interrupted/unverifiable，不探测旧 PID、不重跑；无法证明结果的操作为 requires_attention |
-| 输出                    | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                  | 尚无版本号与稳定性承诺（见 §6）                                                                                 |
-| 退出码                  | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                  | `server start` 可能以 server 自身的退出状态结束；错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出          |
+| 能力                    | CLI                                                                                     | 引入                                             | 说明                                                                                                                                                                                                                                |
+| ----------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 数据目录                | 全局 `--home DIR`，或 `$COVE_HOME`，默认 `~/.cove`                                      | `c02367b`                                        | 同一数据目录只允许一个 server                                                                                                                                                                                                       |
+| 初始化                  | `cove server init [--workspace-root DIR]`                                               | `c02367b`                                        | 服务未运行时使用                                                                                                                                                                                                                    |
+| 启动 server             | `cove server start [--port N] [--origin URL]...`                                        | `8b06fe4`（未初始化时按默认值初始化：`d99ef5d`） | 前台运行                                                                                                                                                                                                                            |
+| 状态                    | `cove status`                                                                           | `8b06fe4`                                        |                                                                                                                                                                                                                                     |
+| 读取设置                | `cove config get`                                                                       | `c02367b`                                        |                                                                                                                                                                                                                                     |
+| 修改设置                | `cove config set workspaceRoot <DIR> [--expected-revision N] [--operation-id ID]`       | `c02367b`                                        | 只影响之后新建的 workspace                                                                                                                                                                                                          |
+| 重置设置                | `cove config reset workspaceRoot [--expected-revision N] [--operation-id ID]`           | `c02367b`                                        | 同上                                                                                                                                                                                                                                |
+| 终端 run（不属于 tab）  | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                        | M0 路径；tab 尚未提供（见 §3）                                                                                                                                                                                                      |
+| 查看与停止 run          | `cove terminal list`、`terminal get <runId>`、`terminal stop <runId>`                   | `8b06fe4`                                        |                                                                                                                                                                                                                                     |
+| 操作身份                | 写命令接受 `--operation-id ID`；`cove operation get <id>`、`cove operation resend <id>` | `c02367b`（重发只发保存的请求：`2d89043`）       | 首次发送前把请求保存为本机待定记录；`resend` 只向原 server 原样重发，已有记录时返回原记录、不重复执行                                                                                                                               |
+| 重启后的 run 与操作记录 | server 停止与启动时处理，无单独命令                                                     | `d99ef5d`（存储原语：`299514d`）                 | 正常停止时当前实例存活的 run 记为 stopped-with-server；启动时，旧实例中仍为 starting/running（没有结束记录）的 run 记为 interrupted/unverifiable，已有的结束记录不变；不探测旧 PID、不重跑。无法证明结果的操作为 requires_attention |
+| 输出                    | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                        | 尚无版本号与稳定性承诺（见 §6）                                                                                                                                                                                                     |
+| 退出码与错误            | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                        | CLI 自身的错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出；`server init` 与 `server start` 另外原样转发子 server 进程的 stderr，并以其退出状态结束（信号为 128+N）                                                            |
 
 ## 3. 计划中（PLANNED）
 
@@ -62,7 +64,9 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
 ## 5. 重启与环境变量
 
-- Cove server 重启后，旧 run 显示为会话中断，绝不重跑（重启记录已 AVAILABLE，CLI 读取路径见 §3）。
+- Server 正常停止时，当前实例存活的 run 记为 stopped-with-server（随 server 停止而结束）；崩溃或被强杀后，
+  下次启动把旧实例中仍为 starting/running、没有结束记录的 run 记为会话中断（interrupted/unverifiable），
+  已有结束记录的 run 保持不变。任何情况都不重跑（记录已 AVAILABLE，CLI 读取路径见 §3）。
   是否继续由 tend 决定：用 agent 的 resume 命令新建 tab。`tab reopen` 只按原配方新建 run，不能临时改参数。
 - 配方环境变量（PLANNED）：条数与字节有上限（实现时公布），不得覆盖 `PATH`、`HOME` 等受保护变量及 `COVE_` 前缀；
   值随配方保存并在 `tab get` 中可见，因此不得放机密。
@@ -78,6 +82,7 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
 ## 7. 变更记录
 
-| 日期       | Cove 提交                 | 对 tend 的变化                                                                        |
-| ---------- | ------------------------- | ------------------------------------------------------------------------------------- |
-| 2026-10-16 | main `399c20b` 时建立本文 | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启） |
+| 日期       | Cove 提交                 | 对 tend 的变化                                                                                                  |
+| ---------- | ------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 2026-10-16 | main `399c20b` 时建立本文 | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                           |
+| 2026-10-16 | main `399c20b`            | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出 |
