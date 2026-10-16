@@ -926,6 +926,73 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  it("keeps a retired route counted against identityLimit until its health frame is written", async () => {
+    // Issue #103 review: a retired route was released while its health frame was still with the
+    // transport, so attach/detach churn could leave any number of outstanding health frames per
+    // connection, outside its route bound. Health callbacks are held here; everything else settles.
+    const f = fixture({}, { identityLimit: 2 });
+    const a = f.connect("a");
+    try {
+      const beat = frame({
+        type: "heartbeat",
+        worker,
+        load: {
+          windowMs: 1000,
+          eventLoopDelayP99Ms: 450,
+          eventLoopDelayMaxMs: 450,
+          cpuPercent: 100,
+          parseBacklogBytes: 0,
+          executingCommands: 0,
+        },
+      });
+      for (let now = 1000; now <= 6000; now += 1000) {
+        f.clock(now);
+        f.session.receive(beat);
+        f.session.tick();
+      }
+      const isHealth = (write) => decode(write.data).metadata.type === "worker-health";
+      const settleOthers = () => {
+        for (const write of a.writes)
+          if (!write.done && !isHealth(write)) {
+            write.done = true;
+            write.settled();
+          }
+      };
+      const churn = async (index) => {
+        const ref = (await f.attach(a, 0, `attach-${index}`)).subscription;
+        a.service.tick();
+        expect(a.writes.filter(isHealth)).toHaveLength(index + 1);
+        const detach = a.service.handle(command("detach", ref, `detach-${index}`));
+        f.session.receive(f.reply(f.latest()));
+        expect((await detach).type).toBe("detach-result");
+        await turns();
+        settleOthers();
+      };
+      await churn(0);
+      await churn(1);
+      // Both retired routes still have a health frame out, so both still count.
+      expect(a.service.snapshot()).toMatchObject({ routes: 2, active: 0 });
+      const count = f.pipeWrites.length;
+      expect(await a.service.handle(a.attach("refused", 0))).toMatchObject({
+        type: "error",
+        requestId: "refused",
+        error: { kind: "BUSY" },
+      });
+      expect(f.pipeWrites).toHaveLength(count);
+      // The first health callback returns its slot and releases that route.
+      const held = a.writes.find(isHealth);
+      held.done = true;
+      held.settled();
+      expect(a.service.snapshot()).toMatchObject({ routes: 1, active: 0 });
+      await churn(2);
+      a.settleWrites();
+      expect(a.service.snapshot()).toMatchObject({ routes: 0, active: 0 });
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
+
   it("reports a released route's first cause within the recent retired window", async () => {
     const f = fixture({ recoveryDeadlineMs: 20 }, { identityLimit: 2 });
     const a = f.connect();

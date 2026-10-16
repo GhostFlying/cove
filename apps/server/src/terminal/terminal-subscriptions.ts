@@ -99,7 +99,8 @@ type Route = {
   waitingResults: Request[];
   dropped: boolean;
   // The worker health this route's client was last given, and the route's prepaid health slot
-  // while it is free (undefined while delivery holds it; see publishHealth()).
+  // while it is free (undefined while delivery holds it, which keeps the route from being
+  // reaped, or after the route was dropped; see publishHealth() and reap()).
   deliveredHealth: WorkerHealth;
   healthSlot: ByteReservation | undefined;
 };
@@ -528,6 +529,12 @@ export class TerminalSubscriptions {
   // unsubscribe settled, so the worker no longer routes events to it and no teardown
   // still needs the record. The arbiter was already told at retirement. The route
   // lease, with its prepaid route-control records, is released with it.
+  //
+  // It also waits for its health slot: a health frame the transport already took cannot be
+  // recalled by the retirement fence, and until its write callback returns the slot, the frame
+  // still occupies the connection. Keeping the route (and so its count against identityLimit)
+  // until then bounds those frames by the connection's route admission; publishHealth()'s slot
+  // release retries the reap.
   private reap(route: Route): void {
     const id = route.ref.subscriptionId;
     if (
@@ -537,6 +544,7 @@ export class TerminalSubscriptions {
       route.queue.length ||
       route.waitingResults.length ||
       route.resultSlotsOut ||
+      !route.healthSlot ||
       !route.teardownSent ||
       route.teardown ||
       this.routes.get(id) !== route
@@ -1290,7 +1298,10 @@ export class TerminalSubscriptions {
           if (!owned) return;
           owned = false;
           if (route.dropped) lease.release();
-          else route.healthSlot = lease;
+          else {
+            route.healthSlot = lease;
+            this.reap(route);
+          }
         },
       };
       const admitted = this.delivery.admit(
