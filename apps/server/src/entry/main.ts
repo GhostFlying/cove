@@ -517,10 +517,17 @@ export function runServerProcess(argv: readonly string[], probe?: D6Probe): void
     })().catch((error: unknown) => fail(error, "m0-local startup unavailable\n"));
 }
 
-// Compared by real path: an installed executable is usually a symlink to this file, and
-// import.meta.url names the real file.
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(realpathSync(resolve(process.argv[1]))).href
-)
-  runServerProcess(process.argv.slice(2));
+// Whether this module is the program node was started with. Compared by real path: an installed
+// executable is usually a symlink to this file, and import.meta.url names the real file. An entry
+// that cannot be resolved (for example "-" when the program is read from stdin) is not this file;
+// this check runs on import, so it must never throw.
+function startedAsThisFile(entry: string | undefined): boolean {
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(resolve(entry))).href;
+  } catch {
+    return false;
+  }
+}
+
+if (startedAsThisFile(process.argv[1])) runServerProcess(process.argv.slice(2));
