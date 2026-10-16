@@ -241,6 +241,28 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
 - **订阅交接被拒不再是失联。** 被接受的 subscribe/recover 若其消费者已不再需要（订阅层已因期限或连接关闭退役该路由），
   runtime 不激活路由、把结果交给调用方，由订阅层退订；此前这一路径会让 runtime 放弃整个 worker。
 
+#### worker 过载状态（#103，已选）
+
+过载是只作提示的 worker 健康状态，不改变任何终端行为：不退役订阅、不拒绝命令、不判失联。
+判据（实现见 `apps/server/src/terminal/worker-health.ts`）：
+
+- worker 在每个心跳中自报上一窗口的负载（显式测量值，不是引擎私有状态）：事件循环延迟 p99 与最大值
+  （`monitorEventLoopDelay`，心跳定时器自身的迟到也计为一个样本，窗口内取样定时器一次都没触发时即以它为准，
+  否则循环越堵越报 0）、主线程 CPU 占一个核的百分比（`process.threadCpuUsage`）、尚未解析的 PTY 输出字节与执行中的命令数。
+- runtime 自己观察：距上一个心跳的时间（与存活静默同样按节拍累计、每拍封顶，runtime 自身停顿不算）
+  和已发给 worker 且未应答的最老命令的年龄（stop 除外，它等的是进程组退出，与负载无关）。
+- 条件：事件循环延迟 p99 超过 200 ms、心跳间隔超过 3 s、最老命令超过 5 s，任一条件连续成立 5 s 即进入 overloaded；
+  所有条件连续 10 s 都不成立才回到 normal（滞回，避免在阈值附近抖动）。原因（reasons）列出进入后持续成立过的条件。
+  CPU 与积压只作为佐证随状态报告，从不单独触发：worker 可以占满一个核仍及时应答，积压也会成批消化。
+- 阈值校准见 PR #105 的测量：空闲与正常负载下事件循环延迟 p99 在采样分辨率附近，饱和时达数百毫秒；
+  5,000 行历史的 serialize p95 约 252 ms，200 ms 的 p99 只在持续排队时超过；3 s 是三个心跳间隔，5 s 是客户端常见命令期限的三分之一。
+- 状态变化记一行日志（JSON：`event`、`workerId`、`state`、`reasons`，不含终端内容）。
+- 暴露：`server.status`（CLI `cove status`）的 `workers[]` 给出每个存活 worker 的 `health`、状态持续时间与上述信号；
+  订阅通道上的 `worker-health` 事件告诉客户端其 run 所在 worker 的状态。它不带 seq、不占信用、无需 ACK；
+  按路由电平触发：路由记下已告知的状态，与当前不同则在之后的节拍发送，交付暂时无空间就下次再试，从不因此退役路由。
+  路由与客户端都从 normal 开始，健康的 worker 不产生事件；恢复开始时双方都回到 normal，新尝试活跃后再告知。
+  客户端快照的 `workerHealth` 即最近一次告知的值。
+
 客户端看到的结果：worker 慢时订阅保持，输出按 ACK 流控变慢；一半期限内未得到标记的 attach/recover 以 RECOVERY_EXPIRED
 （not-accepted）结束，只影响该视图，客户端按其下一步重新订阅；超时的输入是 RESULT_UNKNOWN，客户端不重放；窗口满时是 BUSY。只有 worker 退出、pipe 失败、
 协议违规或 runtime 观察到 120 s 无任何帧时，订阅才随 worker 失联结束（RESULT_UNKNOWN / WORKER_UNAVAILABLE）。

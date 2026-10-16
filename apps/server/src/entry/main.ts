@@ -59,6 +59,8 @@ export function createLocalApplication(
     workerSpawn?: WorkerSpawn;
     // The opened data directory (M1 T1). identity.serverId must be its persistent serverId.
     persistence?: { store: Store; home: string; principalId: string; probe?: D6Probe };
+    // Where operational log lines go (one JSON object per line); stderr by default.
+    log?: (line: string) => void;
   },
 ) {
   const options = validateLocalOptions(input);
@@ -144,6 +146,25 @@ export function createLocalApplication(
       : {}),
   };
   const arbiter = new ControlArbiter(runtime);
+  // Worker health transitions are logged (issue #103): which worker, the new state and why.
+  // Only the worker identity and the reason names are written, never terminal contents.
+  const log = injected?.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const healthLog = injected?.core
+    ? undefined
+    : runtime.onWorkerHealth((worker, health) => {
+        try {
+          log(
+            JSON.stringify({
+              event: "worker-health",
+              workerId: worker.workerId,
+              state: health.state,
+              reasons: health.reasons,
+            }),
+          );
+        } catch {
+          // Logging is best effort; it never affects the worker or its terminals.
+        }
+      });
   const admission = new LocalAdmission(
     options,
     identity.secret,
@@ -194,6 +215,7 @@ export function createLocalApplication(
       return worker;
     },
     disposeCore: () => {
+      healthLog?.dispose();
       clock.stop();
       terminal?.close();
       arbiter.dispose();

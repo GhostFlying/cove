@@ -574,7 +574,20 @@ test("a ready worker sends heartbeats from a timer while a command is outstandin
   expect(h.calls).toHaveLength(1);
   const beats = heartbeats(h);
   expect(beats.length).toBeGreaterThanOrEqual(3);
-  for (const beat of beats) expect(beat).toEqual({ type: "heartbeat", worker });
+  for (const beat of beats) {
+    expect(beat).toMatchObject({ type: "heartbeat", worker });
+    // The worker's own load over the window: explicit measurements, bounded by the schema.
+    expect(Object.keys(beat.load).sort()).toEqual([
+      "cpuPercent",
+      "eventLoopDelayMaxMs",
+      "eventLoopDelayP99Ms",
+      "executingCommands",
+      "parseBacklogBytes",
+      "windowMs",
+    ]);
+  }
+  // The stuck command is still executing when later heartbeats are sampled.
+  expect(beats.at(-1).load.executingCommands).toBe(1);
   await h.pipe.shutdown("test");
   const after = heartbeats(h).length;
   await sleep(60);

@@ -16,5 +16,10 @@ export const handle: RpcHandler<"server"> = (core) => {
     runCount: runtime.registry.count,
     admission: pool.readyWorkers ? "ready" : "unavailable",
     health: pool.readyWorkers ? "live" : "unverifiable",
+    // Informational overload state per live worker (issue #103); see worker-health.ts.
+    workers: runtime.pool
+      .sessions()
+      .map((session) => session.workerStatus())
+      .filter((status) => status !== undefined),
   };
 };

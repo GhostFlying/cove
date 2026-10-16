@@ -1,3 +1,4 @@
+import { monitorEventLoopDelay, performance, type ELDHistogram } from "node:perf_hooks";
 import type { Readable, Writable } from "node:stream";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError } from "@cove/protocol/errors";
@@ -19,6 +20,7 @@ import {
   type PipeError,
   type PipeEvent,
   type PipeResult,
+  type WorkerLoad,
 } from "@cove/protocol/pipe";
 import {
   createWorkerExecution,
@@ -33,7 +35,16 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
 type Hello = Parameters<typeof validatePipeReadiness>[0];
 type Ready = Parameters<typeof validatePipeReadiness>[1];
-type Heartbeat = { readonly type: "heartbeat"; readonly worker: Hello["worker"] };
+type Heartbeat = {
+  readonly type: "heartbeat";
+  readonly worker: Hello["worker"];
+  readonly load: WorkerLoad;
+};
+// Event-loop delay sampling resolution for the heartbeat's load report (issue #103).
+const LOOP_DELAY_RESOLUTION_MS = 10;
+const LOAD_MS_CAP = 3_600_000;
+const loadMs = (value: number): number =>
+  Number.isFinite(value) ? Math.min(LOAD_MS_CAP, Math.max(0, Math.round(value))) : 0;
 
 export interface WorkerPipeOptions {
   readonly buildVersion: string;
@@ -122,6 +133,18 @@ function guardTerminalErrors(stream: Readable | Writable, pendingCallbacks = 0):
   };
 }
 
+// The main thread's CPU time in microseconds, where the platform measures it per thread.
+function threadCpuMicros(): number | undefined {
+  try {
+    const usage = (
+      process as { threadCpuUsage?: () => { user: number; system: number } }
+    ).threadCpuUsage?.();
+    return usage ? usage.user + usage.system : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 class WorkerPipeCore {
   readonly #readable: Readable;
   readonly #writable: Writable;
@@ -165,6 +188,10 @@ class WorkerPipeCore {
   #shutdownPromise: Promise<WorkerPipeClose> | undefined;
   #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   #heartbeatUnsettled = false;
+  // Load sampling between heartbeats (see #sampleLoad).
+  #loopDelay: ELDHistogram | undefined;
+  #loadSampledAt = 0;
+  #threadCpuMicros: number | undefined;
 
   constructor(readable: Readable, writable: Writable, options: WorkerPipeOptions) {
     if (!options.buildVersion || options.buildVersion.length > 128)
@@ -219,6 +246,8 @@ class WorkerPipeCore {
     this.#state = "closing";
     if (this.#heartbeatTimer !== undefined) clearInterval(this.#heartbeatTimer);
     this.#heartbeatTimer = undefined;
+    this.#loopDelay?.disable();
+    this.#loopDelay = undefined;
     const uncertainRequestIds = [...this.#pending.keys()];
     guardTerminalErrors(this.#readable);
     this.#writeGuardCallbackSettled = guardTerminalErrors(
@@ -716,6 +745,14 @@ class WorkerPipeCore {
   // next beat waits until the previous one's write callback has run.
   #startHeartbeat(): void {
     const interval = this.#options.heartbeatIntervalMs ?? PIPE_HEARTBEAT_INTERVAL_MS;
+    try {
+      this.#loopDelay = monitorEventLoopDelay({ resolution: LOOP_DELAY_RESOLUTION_MS });
+      this.#loopDelay.enable();
+    } catch {
+      this.#loopDelay = undefined;
+    }
+    this.#loadSampledAt = performance.now();
+    this.#threadCpuMicros = threadCpuMicros();
     this.#heartbeatTimer = setInterval(() => this.#beat(), interval);
     // The worker's lifetime follows stdin, never this timer.
     this.#heartbeatTimer.unref?.();
@@ -723,8 +760,59 @@ class WorkerPipeCore {
 
   #beat(): void {
     if (this.#state !== "ready" || this.#heartbeatUnsettled) return;
-    const heartbeat: Heartbeat = { type: "heartbeat", worker: this.#hello!.worker };
+    const heartbeat: Heartbeat = {
+      type: "heartbeat",
+      worker: this.#hello!.worker,
+      load: this.#sampleLoad(),
+    };
     if (this.#enqueue(heartbeat, 2, false, undefined, false, true)) this.#heartbeatUnsettled = true;
+  }
+
+  // The worker's own load since the previous sample: event-loop delay (the main signal of a
+  // saturated worker), its main thread's CPU share (supporting data only) and its backlog. A
+  // sample is taken only when a heartbeat is sent, so a skipped beat folds into the next window.
+  #sampleLoad(): WorkerLoad {
+    const now = performance.now();
+    const windowMs = loadMs(now - this.#loadSampledAt);
+    this.#loadSampledAt = now;
+    // The heartbeat timer's own lateness is one more delay sample. It matters most when the
+    // loop is blocked so much that the histogram's sampling timer did not fire at all in the
+    // window: an empty histogram then means the worst delay, not none. With few samples, p99 is
+    // in effect the maximum, so the lateness raises it; with many, one sample cannot.
+    const interval = this.#options.heartbeatIntervalMs ?? PIPE_HEARTBEAT_INTERVAL_MS;
+    const lateMs = loadMs(windowMs - interval);
+    const histogram = this.#loopDelay;
+    const count = histogram?.count ?? 0;
+    const histogramP99 = count > 0 ? loadMs(histogram!.percentile(99) / 1e6) : 0;
+    const histogramMax = count > 0 ? loadMs(histogram!.max / 1e6) : 0;
+    const eventLoopDelayP99Ms = count >= 100 ? histogramP99 : Math.max(histogramP99, lateMs);
+    const eventLoopDelayMaxMs = Math.max(histogramMax, lateMs);
+    histogram?.reset();
+    const cpu = threadCpuMicros();
+    const previous = this.#threadCpuMicros;
+    this.#threadCpuMicros = cpu;
+    const cpuPercent =
+      cpu === undefined || previous === undefined || windowMs === 0
+        ? null
+        : Math.min(100, Math.max(0, Math.round((cpu - previous) / 10 / windowMs)));
+    let parseBacklogBytes = 0;
+    try {
+      const bytes = this.#execution?.parseBacklogBytes?.() ?? 0;
+      if (Number.isSafeInteger(bytes) && bytes >= 0) parseBacklogBytes = bytes;
+    } catch {
+      // A failing measurement reports no backlog rather than stopping the heartbeat.
+    }
+    let executingCommands = 0;
+    for (const record of this.#pending.values())
+      if (record.phase === "executing") executingCommands++;
+    return {
+      windowMs,
+      eventLoopDelayP99Ms,
+      eventLoopDelayMaxMs,
+      cpuPercent,
+      parseBacklogBytes,
+      executingCommands: Math.min(65_536, executingCommands),
+    };
   }
 
   #startExecution(record: RequestRecord, payload?: Uint8Array): void {

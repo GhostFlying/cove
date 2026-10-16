@@ -260,3 +260,73 @@ test("route control held past the old client deadline keeps every subscription",
     expect(seen.slice(1)).toEqual(seen.slice(0, -1).map((value) => value + 1));
   }
 }, 60_000);
+
+// Issue #103 (A2): an overloaded worker is reported, informationally, through `cove status`,
+// the server log and the subscriptions it serves, and reported normal again after the hold
+// period; nothing about the terminal changes. The worker's event loop is busy in 450 ms bursts,
+// so its event-loop delay p99 exceeds the threshold while its heartbeats still arrive.
+test("an overloaded worker is reported through status, the log and its subscriptions", async () => {
+  await launch(DEADLINE_MS);
+  const client = createSessionClient(fixture.record);
+  fixture.clients.push(client);
+  expect((await client.connect()).ok).toBe(true);
+  const run = await coveJson(
+    "terminal",
+    "create",
+    "--cwd",
+    fixture.directory,
+    "--",
+    "/bin/sh",
+    "-c",
+    'stty -echo; i=0; while :; do printf "a-%06d\\n" "$i"; i=$((i+1)); sleep 0.02; done',
+  );
+  const a = open(client, run, "health-a");
+  expect(await a.controller.attach()).toMatchObject({ ok: true });
+  await waitFor("output before the overload", () => counters(a.recording.text()).length >= 10);
+  const workerHealth = async () => (await coveJson("status")).workers[0].health;
+  expect(await workerHealth()).toEqual({ state: "normal", reasons: [] });
+  expect(a.controller.snapshot().workerHealth).toEqual({ state: "normal", reasons: [] });
+
+  await writeFile(fixture.flag, "450\n");
+  const overloadedSince = Date.now();
+  let reported;
+  let last;
+  await waitFor(
+    "status to report the overload",
+    async () => {
+      last = await coveJson("status");
+      reported = last.workers[0].health;
+      return reported.state === "overloaded";
+    },
+    20_000,
+  ).catch((error) => {
+    throw new Error(`${error.message}: ${JSON.stringify(last?.workers)}; ${fixture.stderr()}`);
+  });
+  // Entered only after the condition held for the entry period.
+  expect(Date.now() - overloadedSince).toBeGreaterThanOrEqual(5000);
+  expect(reported.reasons).toContain("event-loop-delay");
+  await waitFor(
+    "the subscription to report the overload",
+    () => a.controller.snapshot().workerHealth.state === "overloaded",
+  );
+  expect(fixture.stderr()).toMatch(/"event":"worker-health".*"state":"overloaded"/);
+  const status = await coveJson("status");
+  expect(status.workers[0].signals.eventLoopDelayP99Ms).toBeGreaterThan(200);
+
+  await rm(fixture.flag);
+  await waitFor(
+    "status to report the worker normal again",
+    async () => (await workerHealth()).state === "normal",
+    30_000,
+  );
+  await waitFor(
+    "the subscription to report normal again",
+    () => a.controller.snapshot().workerHealth.state === "normal",
+  );
+  expect(fixture.stderr()).toMatch(/"event":"worker-health".*"state":"normal"/);
+  // Informational only: the terminal kept streaming, in order, throughout.
+  if (a.controller.snapshot().phase !== "ready")
+    throw new Error(`A was interrupted: ${JSON.stringify(a.controller.snapshot())}`);
+  const seen = counters(a.recording.text());
+  expect(seen.slice(1)).toEqual(seen.slice(0, -1).map((value) => value + 1));
+}, 90_000);

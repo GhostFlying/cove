@@ -4,15 +4,16 @@
 // shipped worker reads that variable; this entry exists only for tests that spawn it.
 //
 // While slow, the worker behaves like one saturated by parsing on a slow host:
-// - its event loop is busy 150 ms out of every 200 ms, so every reply and every output event is
-//   late (its heartbeat timer still fires between bursts, as it would on a busy worker);
+// - its event loop is busy in bursts of 150 ms every 200 ms (or as many milliseconds as the
+//   flag file holds), so every reply and every output event is late (its heartbeat timer still
+//   fires between bursts, as it would on a busy worker);
 // - subscribe and recover replies are held until it is no longer slow, so an attach waits past
 //   its deadline. The real execution has already run them, so a concurrent unsubscribe is
 //   handled by the real route state, exactly as for a capture that is merely slow.
 // Separately, while the file named by the flag plus ".route" exists, applied-ack and
 // baseline-progress wait before they execute, as route control queued behind a busy worker
 // does; the event loop stays free, so heartbeats keep coming.
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createWorkerExecution } from "@cove/terminal-worker/execution";
 import { runWorkerPipe } from "@cove/terminal-worker/pipe";
 
@@ -21,9 +22,18 @@ const slow = () => !!flag && existsSync(flag);
 const holdRoute = () => !!flag && existsSync(`${flag}.route`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function burstMs() {
+  try {
+    const value = Number(readFileSync(flag, "utf8").trim());
+    return Number.isSafeInteger(value) && value > 0 ? value : 150;
+  } catch {
+    return 150;
+  }
+}
+
 setInterval(() => {
   if (!slow()) return;
-  const end = Date.now() + 150;
+  const end = Date.now() + burstMs();
   while (Date.now() < end);
 }, 200).unref();
 

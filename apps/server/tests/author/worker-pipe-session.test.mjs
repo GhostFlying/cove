@@ -126,8 +126,22 @@ function fixture(
     clock: (value) => {
       now = value;
     },
+    now: () => now,
     // The worker's liveness frame (issue #103).
-    heartbeat: () => frame({ type: "heartbeat", worker }),
+    heartbeat: (load = {}) =>
+      frame({
+        type: "heartbeat",
+        worker,
+        load: {
+          windowMs: 1000,
+          eventLoopDelayP99Ms: 10,
+          eventLoopDelayMaxMs: 12,
+          cpuPercent: 20,
+          parseBacklogBytes: 0,
+          executingCommands: 0,
+          ...load,
+        },
+      }),
     lost: () => lost,
   };
 }
@@ -483,6 +497,85 @@ describe("bounded worker pipe session", () => {
     f.clock(PIPE_LIVENESS_WINDOW_MS);
     f.session.tick();
     expect(f.lost()).toBe(1);
+    f.session.transportReleased();
+  });
+
+  // Informational health (issue #103): judged from the heartbeat's load and what the runtime
+  // observes itself, published to listeners on transitions, never acting on the worker.
+  const seconds = (f, from, to, frames = () => []) => {
+    for (let now = from; now <= to; now += 1000) {
+      f.clock(now);
+      for (const bytes of frames(now)) f.session.receive(bytes);
+      f.session.tick();
+    }
+  };
+
+  it("reports an overloaded worker from its heartbeat load and recovers with hysteresis", async () => {
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 100, 120_000);
+    f.start();
+    const changes = [];
+    f.session.onHealth((health) => changes.push({ now: f.now(), ...health }));
+    const slow = () => [f.heartbeat({ eventLoopDelayP99Ms: 450, cpuPercent: 99 })];
+    seconds(f, 1000, 5000, slow);
+    expect(changes).toEqual([]);
+    seconds(f, 6000, 6000, slow);
+    expect(changes).toEqual([{ now: 6000, state: "overloaded", reasons: ["event-loop-delay"] }]);
+    expect(f.session.workerHealth).toEqual({ state: "overloaded", reasons: ["event-loop-delay"] });
+    expect(f.session.workerStatus()).toMatchObject({
+      workerId: worker.workerId,
+      health: { state: "overloaded", reasons: ["event-loop-delay"] },
+      signals: { eventLoopDelayP99Ms: 450, cpuPercent: 99, heartbeatGapMs: 0 },
+    });
+    // Prompt again from 7 s: normal only after ten clear seconds; the worker was never touched.
+    seconds(f, 7000, 16_000, () => [f.heartbeat()]);
+    expect(changes).toHaveLength(1);
+    seconds(f, 17_000, 17_000, () => [f.heartbeat()]);
+    expect(changes.at(-1)).toEqual({ now: 17_000, state: "normal", reasons: [] });
+    expect(f.lost()).toBe(0);
+    expect(f.session.ready).toBe(true);
+  });
+
+  it("judges heartbeat gaps by runtime-observed time and command age without stops", async () => {
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 100, 120_000);
+    f.start();
+    const changes = [];
+    f.session.onHealth((health) => changes.push({ now: f.now(), ...health }));
+    // A stop waits for its process group, not for a busy worker: it never counts.
+    const stop = f.command("stop", "slow-stop", { operationId: "slow-stop" });
+    const stopping = f.session.request(stop);
+    f.settleWrites();
+    seconds(f, 1000, 30_000, () => [f.heartbeat()]);
+    expect(changes).toEqual([]);
+    // The runtime's own loop stalls for 20 s: at most one interval of gap is charged per tick.
+    f.clock(50_000);
+    f.session.tick();
+    seconds(f, 51_000, 52_000, () => [f.heartbeat()]);
+    expect(changes).toEqual([]);
+    // A status sent at 53 s and not answered: older than 5 s from 59 s, held for 5 s at 64 s.
+    const status = f.command("status", "slow-status");
+    f.clock(53_000);
+    const held = f.session.request(status);
+    f.settleWrites();
+    seconds(f, 54_000, 63_000, () => [f.heartbeat()]);
+    expect(changes).toEqual([]);
+    seconds(f, 64_000, 64_000, () => [f.heartbeat()]);
+    expect(changes).toEqual([{ now: 64_000, state: "overloaded", reasons: ["command-age"] }]);
+    // Heartbeats stop after 64 s: the gap exceeds 3 s from 68 s and is held for 5 s at 73 s.
+    seconds(f, 65_000, 72_000);
+    expect(changes).toHaveLength(1);
+    seconds(f, 73_000, 73_000);
+    expect(changes.at(-1)).toEqual({
+      now: 73_000,
+      state: "overloaded",
+      reasons: ["heartbeat-gap", "command-age"],
+    });
+    expect(f.session.workerStatus().signals.heartbeatGapMs).toBe(9000);
+    // Health only reports: the worker is live and both commands ended alone at their deadlines.
+    expect(f.lost()).toBe(0);
+    expect((await held).error.kind).toBe("RESULT_UNKNOWN");
+    expect((await stopping).error.kind).toBe("RESULT_UNKNOWN");
+    f.session.loseContact();
+    expect(f.session.workerHealth).toBeUndefined();
     f.session.transportReleased();
   });
 

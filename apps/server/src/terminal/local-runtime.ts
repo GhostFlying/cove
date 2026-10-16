@@ -3,6 +3,7 @@ import { domainError } from "@cove/protocol/errors";
 import { sameWorkerRef, type RunRef, type WorkerRef } from "@cove/protocol/identity";
 import type { Geometry } from "@cove/protocol/profile";
 import type { RuntimeResult, RuntimeTerminalPort } from "@cove/protocol/runtime";
+import type { WorkerHealth } from "@cove/protocol/terminal";
 import { WorkerPool } from "./worker-pool.js";
 import { RunRegistry } from "./run-registry.js";
 import { WorkerPipeSession, type ResultHandoff } from "./worker-pipe-session.js";
@@ -16,6 +17,10 @@ export class LocalRuntime implements RuntimeTerminalPort {
     ByteReservation
   >();
   private readonly workerListeners: { dispose(): void }[] = [];
+  private readonly healthListeners = new Map<
+    (worker: WorkerRef, health: WorkerHealth) => void,
+    ByteReservation
+  >();
   private disposed = false;
   private previewOwner: PreviewRefresh | undefined;
   constructor(
@@ -54,12 +59,50 @@ export class LocalRuntime implements RuntimeTerminalPort {
     } catch {
       return false;
     }
-    if (!this.pool.add(session)) {
+    let health: { dispose(): void };
+    try {
+      health = session.onHealth((value) => {
+        if (this.disposed) return;
+        for (const sink of [...this.healthListeners.keys()]) {
+          if (this.disposed) break;
+          if (this.healthListeners.has(sink)) sink({ ...session.worker }, value);
+        }
+      });
+    } catch {
       listener.dispose();
       return false;
     }
-    this.workerListeners.push(listener);
+    if (!this.pool.add(session)) {
+      listener.dispose();
+      health.dispose();
+      return false;
+    }
+    this.workerListeners.push(listener, health);
     return true;
+  }
+
+  // Informational worker health changes (issue #103), for logging and for subscriptions to
+  // publish to clients. A listener may be foreign code; a throwing one is isolated by the session.
+  onWorkerHealth(listener: (worker: WorkerRef, health: WorkerHealth) => void): {
+    dispose(): void;
+  } {
+    if (this.disposed || this.healthListeners.size >= 1024 || this.healthListeners.has(listener))
+      throw new Error("Health listener capacity unavailable");
+    const lease = this.bytes.reserve(512);
+    if (!lease) throw new Error("Health listener byte capacity unavailable");
+    this.healthListeners.set(listener, lease);
+    return {
+      dispose: () => {
+        if (this.healthListeners.get(listener) !== lease) return;
+        this.healthListeners.delete(listener);
+        lease.release();
+      },
+    };
+  }
+
+  // The current health of the worker serving a run, or undefined when it has none.
+  workerHealth(run: RunRef): WorkerHealth | undefined {
+    return this.pool.get(run)?.session.workerHealth;
   }
 
   reserveRun(run: RunRef, geometry: Geometry): WorkerRef | null {
@@ -273,6 +316,8 @@ export class LocalRuntime implements RuntimeTerminalPort {
     for (const session of this.pool.sessions()) session.loseContact();
     for (const lease of this.listeners.values()) lease.release();
     this.listeners.clear();
+    for (const lease of this.healthListeners.values()) lease.release();
+    this.healthListeners.clear();
     this.pool.dispose();
     this.registry.dispose();
   }

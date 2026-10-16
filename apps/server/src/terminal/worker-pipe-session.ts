@@ -29,7 +29,10 @@ import {
 } from "@cove/protocol/identity";
 import type { RuntimeResult } from "@cove/protocol/runtime";
 import type { ByteReservation } from "./runtime-retained-bytes.js";
+import type { WorkerStatus } from "@cove/protocol/rpc";
+import type { WorkerHealth } from "@cove/protocol/terminal";
 import { RuntimeComposition } from "./runtime-composition.js";
+import { WorkerHealthMonitor } from "./worker-health.js";
 
 export const SESSION_CONTROL_RESERVE = 6 * (6 * MAX_METADATA_BYTES + 2048) + 64 * 1024;
 // Route control (applied-ack, baseline-progress, unsubscribe) of a subscription the pipe knows is
@@ -78,6 +81,8 @@ type Pending = {
   // Called when the transport hands the frame over (`sent` becomes true); see request() and
   // PipeByteTransport.
   onSent?: () => void;
+  // The runtime clock when the transport handed the frame over (health's command age).
+  sentAt?: number;
   admitted: boolean;
   // Its deadline passed while the worker was live and the caller already has RESULT_UNKNOWN; the
   // correlation stays until the worker's late reply (see expire()).
@@ -157,6 +162,12 @@ export class WorkerPipeSession {
   // charged to the worker. The window therefore bounds runtime-observed silence, not wall-clock
   // time: recurring runtime stalls stretch the wall-clock time to detection.
   private readonly livenessWindowMs: number;
+  // Informational health (worker-health.ts): a heartbeat since the last tick, and the
+  // runtime-observed time since the latest heartbeat, accrued like `silentMs`.
+  private health: WorkerHealthMonitor | undefined;
+  private heardHeartbeat = false;
+  private sinceHeartbeatMs = 0;
+  private readonly healthListeners = new Map<(health: WorkerHealth) => void, ByteReservation>();
   private heard = false;
   private silentMs = 0;
   private lastTick: number | undefined;
@@ -240,6 +251,7 @@ export class WorkerPipeSession {
       return false;
     }
     this.state = "hello";
+    this.health = new WorkerHealthMonitor(this.now());
     // A worker that never says ready is silent: the liveness window bounds the handshake too.
     this.handshakeDeadline = this.now() + this.livenessWindowMs;
     if (!this.enqueue(bytes, "status", undefined)) {
@@ -631,6 +643,7 @@ export class WorkerPipeSession {
         const handing = (): void => {
           if (!request || request.sent) return;
           request.sent = true;
+          request.sentAt = this.lastNow;
           request.onSent?.();
         };
         try {
@@ -699,7 +712,11 @@ export class WorkerPipeSession {
           this.loseContact();
           break;
         }
-        if (value.type === "heartbeat") continue;
+        if (value.type === "heartbeat") {
+          this.heardHeartbeat = true;
+          this.health?.heartbeat(value.load);
+          continue;
+        }
         if (value.type === "result" || value.type === "error") {
           const pending = this.pending.get(value.requestId);
           if (!pending || !pending.sent || !validatePipeResultForCommand(pending.command, value)) {
@@ -840,6 +857,12 @@ export class WorkerPipeSession {
       this.loseContact();
       return;
     }
+    if (this.heardHeartbeat) {
+      this.heardHeartbeat = false;
+      this.sinceHeartbeatMs = 0;
+    } else this.sinceHeartbeatMs += Math.min(elapsed, PIPE_HEARTBEAT_INTERVAL_MS);
+    this.evaluateHealth(now);
+    if (this.closed) return;
     for (const [requestId, entry] of [...this.pending]) {
       if (this.closed) return;
       if (
@@ -851,6 +874,55 @@ export class WorkerPipeSession {
       )
         this.expire(requestId, entry);
     }
+  }
+
+  private evaluateHealth(now: number): void {
+    if (!this.health) return;
+    let oldest: number | undefined;
+    for (const entry of this.pending.values())
+      if (entry.sent && entry.sentAt !== undefined && entry.command.type !== "stop")
+        oldest = Math.max(oldest ?? 0, now - entry.sentAt);
+    const changed = this.health.evaluate(now, {
+      heartbeatGapMs: this.sinceHeartbeatMs,
+      oldestCommandAgeMs: oldest,
+    });
+    if (!changed) return;
+    // Listeners are foreign code (logging, subscription publication) and may reenter.
+    for (const listener of [...this.healthListeners.keys()]) {
+      if (this.closed) return;
+      if (!this.healthListeners.has(listener)) continue;
+      try {
+        listener({ state: changed.state, reasons: [...changed.reasons] });
+      } catch {
+        // Health is informational; a failing observer never affects the worker.
+      }
+    }
+  }
+
+  // The worker's current health, "normal" until it is ready; undefined once it is lost.
+  get workerHealth(): WorkerHealth | undefined {
+    if (this.closed) return undefined;
+    return this.health?.health ?? { state: "normal", reasons: [] };
+  }
+
+  workerStatus(): WorkerStatus | undefined {
+    if (!this.ready || !this.health) return undefined;
+    return this.health.status(this.lastNow, this.worker.workerId);
+  }
+
+  onHealth(listener: (health: WorkerHealth) => void): { dispose(): void } {
+    if (this.closed || this.healthListeners.size >= 32 || this.healthListeners.has(listener))
+      throw new Error("Health listener capacity unavailable");
+    const lease = this.composition.bytes.reserve(512);
+    if (!lease) throw new Error("Health listener byte capacity unavailable");
+    this.healthListeners.set(listener, lease);
+    return {
+      dispose: () => {
+        if (this.healthListeners.get(listener) !== lease) return;
+        this.healthListeners.delete(listener);
+        lease.release();
+      },
+    };
   }
 
   // Ends one command whose deadline passed while the worker is live, keeping the worker.
@@ -935,6 +1007,8 @@ export class WorkerPipeSession {
 
     for (const lease of this.listeners.values()) lease.release();
     this.listeners.clear();
+    for (const lease of this.healthListeners.values()) lease.release();
+    this.healthListeners.clear();
     this.releaseClosedRecords();
     this.options.contactLost?.(this.worker);
   }
