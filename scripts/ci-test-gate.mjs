@@ -1031,6 +1031,7 @@ export const fileRegisteredDirectories = [
       "pending-operations",
       "s1-repo-registration",
       "s10-storage-identity",
+      "s2-task-checkout-mounts",
       "test-isolation",
     ],
   },
