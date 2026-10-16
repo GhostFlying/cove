@@ -5,6 +5,7 @@ import { sameWorkerRef } from "@cove/protocol/identity";
 import {
   HEADER_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_HEARTBEAT_INTERVAL_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_PREPAID_ROUTE_CONTROL_BYTES,
   PIPE_VERSION,
@@ -31,12 +32,15 @@ const textDecoder = new TextDecoder("utf-8", { fatal: true });
 
 type Hello = Parameters<typeof validatePipeReadiness>[0];
 type Ready = Parameters<typeof validatePipeReadiness>[1];
+type Heartbeat = { readonly type: "heartbeat"; readonly worker: Hello["worker"] };
 
 export interface WorkerPipeOptions {
   readonly buildVersion: string;
   readonly createExecution?: (options: WorkerExecutionOptions) => WorkerExecution;
   readonly onFault?: WorkerExecutionOptions["onFault"];
   readonly onFact?: WorkerExecutionOptions["onFact"];
+  // Tests only; production uses PIPE_HEARTBEAT_INTERVAL_MS.
+  readonly heartbeatIntervalMs?: number;
 }
 
 export interface WorkerPipeClose {
@@ -73,6 +77,7 @@ interface OutboundFrame {
   request?: RequestRecord;
   readonly control: boolean;
   readonly extra: boolean;
+  readonly heartbeat?: boolean;
   state: "queued" | "transport" | "settled";
 }
 
@@ -157,10 +162,17 @@ class WorkerPipeCore {
   #processing = false;
   #allowCommands = false;
   #shutdownPromise: Promise<WorkerPipeClose> | undefined;
+  #heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  #heartbeatUnsettled = false;
 
   constructor(readable: Readable, writable: Writable, options: WorkerPipeOptions) {
     if (!options.buildVersion || options.buildVersion.length > 128)
       throw new TypeError("Invalid worker build version");
+    if (
+      options.heartbeatIntervalMs !== undefined &&
+      (!Number.isSafeInteger(options.heartbeatIntervalMs) || options.heartbeatIntervalMs < 1)
+    )
+      throw new TypeError("Invalid worker heartbeat interval");
     this.#readable = readable;
     this.#writable = writable;
     this.#options = options;
@@ -204,6 +216,8 @@ class WorkerPipeCore {
     // Latch before stream teardown or execution disposal can reenter shutdown.
     this.#shutdownPromise = this.#closedPromise;
     this.#state = "closing";
+    if (this.#heartbeatTimer !== undefined) clearInterval(this.#heartbeatTimer);
+    this.#heartbeatTimer = undefined;
     const uncertainRequestIds = [...this.#pending.keys()];
     guardTerminalErrors(this.#readable);
     this.#writeGuardCallbackSettled = guardTerminalErrors(
@@ -537,6 +551,7 @@ class WorkerPipeCore {
         void this.shutdown("ready-send-failed");
         return false;
       }
+      this.#startHeartbeat();
       return true;
     }
     if (
@@ -673,6 +688,27 @@ class WorkerPipeCore {
     return true;
   }
 
+  // The runtime's liveness signal (issue #103). A timer, not command execution, drives it, so it
+  // keeps flowing while commands queue behind parsing on a saturated worker; only a worker whose
+  // event loop stops for the runtime's whole liveness window (or whose process or pipe ends) is
+  // declared lost. At most one heartbeat is unsettled at a time, and it is an ordinary control
+  // frame: it is sent only when a whole reply still fits the control reserve, so it can never
+  // displace a reply whose capacity was reserved at admission. When it does not fit, control
+  // frames are already queued for the runtime, and they prove liveness just as well.
+  #startHeartbeat(): void {
+    const interval = this.#options.heartbeatIntervalMs ?? PIPE_HEARTBEAT_INTERVAL_MS;
+    this.#heartbeatTimer = setInterval(() => this.#beat(), interval);
+    // The worker's lifetime follows stdin, never this timer.
+    this.#heartbeatTimer.unref?.();
+  }
+
+  #beat(): void {
+    if (this.#state !== "ready" || this.#heartbeatUnsettled || !this.#replyCapacity("status"))
+      return;
+    const heartbeat: Heartbeat = { type: "heartbeat", worker: this.#hello!.worker };
+    if (this.#enqueue(heartbeat, 2, true, undefined, false, true)) this.#heartbeatUnsettled = true;
+  }
+
   #startExecution(record: RequestRecord, payload?: Uint8Array): void {
     record.phase = "executing";
     this.#reservedReplyBytes += MAX_REPLY_BYTES;
@@ -749,11 +785,12 @@ class WorkerPipeCore {
   }
 
   #enqueue(
-    metadata: Ready | PipeResult | PipeError,
+    metadata: Ready | Heartbeat | PipeResult | PipeError,
     kind: 2 | 4,
     control: boolean,
     request?: RequestRecord,
     extra = false,
+    heartbeat = false,
   ): boolean {
     const metadataBytes = textEncoder.encode(JSON.stringify(metadata));
     if (!validatePipeFrame({ kind, metadata: metadataBytes, payload: emptyPayload }, metadata).ok)
@@ -778,6 +815,7 @@ class WorkerPipeCore {
       ...(request && { request }),
       control,
       extra,
+      ...(heartbeat && { heartbeat }),
       state: "queued",
     };
     this.#outbound.push(frame);
@@ -883,6 +921,7 @@ class WorkerPipeCore {
     this.#unsettledFrames.delete(frame);
     frame.request?.frames.delete(frame);
     if (frame.extra) this.#extraResponseItems--;
+    if (frame.heartbeat) this.#heartbeatUnsettled = false;
     const record = frame.request;
     delete frame.request;
     frame.bytes = emptyPayload;

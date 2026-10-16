@@ -137,8 +137,12 @@ describe("P2-B2 independent actual compiled public consumer", () => {
       await turns();
       expect(notices).toHaveLength(1);
       expect(notices[0].outcome).toEqual(result);
+      // The timed-out input ended alone (issue #103): its late reply is discarded and the worker
+      // stays. The worker then falls silent for the liveness window and is lost.
       r.accept(command, { inputSeq: command.inputSeq, writtenBytes: 9 });
-      r.advance(30_001);
+      expect(r.session.closed).toBe(false);
+      for (let second = 0; second <= 30; second++) r.advance(1000);
+      expect(r.session.closed).toBe(true);
       await turns();
       expect(notices).toHaveLength(1);
       expect(r.count("input")).toBe(1);

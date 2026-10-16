@@ -333,6 +333,12 @@ describe("private shared terminal control and binary input", () => {
           nextAction: "inspect-run",
         },
       });
+      // The timed-out input ends alone; the worker is still live (issue #103). It is lost only
+      // once it stays silent for the whole liveness window.
+      expect(f.session.closed).toBe(false);
+      f.clock(2000);
+      f.session.tick();
+      expect(f.session.closed).toBe(true);
       const recovery = a.service.handle(
         command("recover", ref, "recover", {
           reason: "expired",

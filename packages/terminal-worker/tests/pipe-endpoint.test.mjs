@@ -149,6 +149,7 @@ function createHarness(config = {}) {
   const pipe = (config.runPipe ?? runWorkerPipe)(input, output, {
     buildVersion: "child",
     createExecution: config.createExecution ?? (() => execution),
+    ...(config.heartbeatIntervalMs && { heartbeatIntervalMs: config.heartbeatIntervalMs }),
   });
   const frames = () => {
     const bytes = Buffer.concat(chunks);
@@ -556,6 +557,46 @@ async function ready(harness, greeting = hello) {
     buildVersion: "child",
   });
 }
+
+// Issue #103: the runtime's liveness signal comes from a timer, independent of commands.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const heartbeats = (h) => h.frames().filter((frame) => frame.type === "heartbeat");
+
+test("a ready worker sends heartbeats from a timer while a command is outstanding and stops on shutdown", async () => {
+  // The only command never completes, as on a worker whose replies queue behind parsing.
+  const h = createHarness({ heartbeatIntervalMs: 10, execute: () => new Promise(() => {}) });
+  await sleep(50);
+  // No heartbeat before the handshake.
+  expect(h.frames()).toEqual([]);
+  await ready(h);
+  h.input.write(encode({ type: "preview-refresh", worker, run, requestId: "stuck" }));
+  await sleep(120);
+  expect(h.calls).toHaveLength(1);
+  const beats = heartbeats(h);
+  expect(beats.length).toBeGreaterThanOrEqual(3);
+  for (const beat of beats) expect(beat).toEqual({ type: "heartbeat", worker });
+  await h.pipe.shutdown("test");
+  const after = heartbeats(h).length;
+  await sleep(60);
+  expect(heartbeats(h)).toHaveLength(after);
+});
+
+test("a worker keeps at most one heartbeat unsettled", async () => {
+  // A transport that never completes a write: every frame stays unsettled.
+  const held = [];
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      held.push(callback);
+    },
+  });
+  const h = createHarness({ heartbeatIntervalMs: 10, output });
+  h.input.write(encode(hello));
+  await tick();
+  await sleep(120);
+  // The ready frame and a single heartbeat, not one per interval.
+  expect(h.pipe.snapshot().responseItems).toBe(2);
+  await h.pipe.shutdown("test");
+});
 
 test("split hello and coalesced commands preserve correlated revision-2 frames", async () => {
   const h = createHarness();
