@@ -289,7 +289,9 @@ async function openLocalApplication(
 
 export async function startLocalEntry(
   input: M0LocalOptions,
-  shutdown?: { signal?: AbortSignal },
+  // `onStoreFailure` reports a store failure (runServerProcess: the store-failed event and exit
+  // status 1). It is called for every failure, also one during a stop that already began.
+  shutdown?: { signal?: AbortSignal; onStoreFailure?: () => void },
   // Only the D6 probe entry passes this (d6-probe-main.ts); see d6-probe.ts.
   probe?: D6Probe,
   hooks?: ServerTestHooks,
@@ -298,8 +300,22 @@ export async function startLocalEntry(
   const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
   const worker = local.createWorker();
   const instance = local.identity.relayInstanceId;
-  // Set once runServerProcess is told of a store failure (storeFailed below), which it reports.
+  // Fail closed (D6 B): a failed store is never restarted, so the server stops serving. The
+  // listener is registered as soon as the store exists, so a failure at any later point (startup,
+  // serving, or a stop that already began) is reported. `storeFailureReported` is set only after
+  // the reporter ran: cleanup may then treat the store's refusal to record the orderly stop as
+  // already accounted for (exit status 1; the next start marks this instance's runs interrupted).
+  // Without a reporter the failure is a cleanup failure like any other.
   let storeFailureReported = false;
+  let storeFailedNow: () => void = () => undefined;
+  const storeFailed = new Promise<void>((done) => (storeFailedNow = done));
+  store?.onFailure(() => {
+    if (shutdown?.onStoreFailure) {
+      shutdown.onStoreFailure();
+      storeFailureReported = true;
+    }
+    storeFailedNow();
+  });
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> =>
     (closing ??= (async () => {
@@ -388,15 +404,8 @@ export async function startLocalEntry(
     interrupted();
     // D9: the live runs an orderly stop would end, read from the store.
     const liveRuns = async () => (store?.isOpen ? ((await local.runs?.live(instance)) ?? []) : []);
-    // Fail closed (D6 B): a failed store is never restarted, so the server stops serving. Resolves
-    // when the store worker failed; the caller then runs `close`, which cannot record the orderly
-    // stop (the next start marks this instance's runs interrupted) and reports cleanup failure.
-    const storeFailed = new Promise<void>((done) =>
-      store?.onFailure(() => {
-        storeFailureReported = true;
-        done();
-      }),
-    );
+    // Resolves when the store worker failed; the caller then stops the server unless a stop already
+    // began. `close` cannot record the orderly stop of a failed store.
     return { endpoint, close, liveRuns, storeFailed };
   } catch (error) {
     let cleanup: "verified" | "unverifiable" = "verified";
@@ -484,6 +493,16 @@ export function runServerProcess(
   } else
     void (async () => {
       const controller = new AbortController();
+      // Every store failure ends the process with status 1 and one store-failed event, whether it
+      // happens while serving or during a stop that already began (the stop records may then be
+      // missing). Only the event is deduplicated; the status is latched each time.
+      let storeFailureEvent = false;
+      const reportStoreFailure = (): void => {
+        process.exitCode = 1;
+        if (storeFailureEvent) return;
+        storeFailureEvent = true;
+        process.stderr.write(`${JSON.stringify({ event: "store-failed" })}\n`);
+      };
       let server: Awaited<ReturnType<typeof startLocalEntry>> | undefined;
       let closing: Promise<void> | undefined;
       const detach = (): void => {
@@ -519,17 +538,17 @@ export function runServerProcess(
         const options = parseLocalOptions(argv);
         server = await startLocalEntry(
           { ...options, home: options.home ?? resolveHome(undefined) },
-          { signal: controller.signal },
+          { signal: controller.signal, onStoreFailure: reportStoreFailure },
           probe,
           hooks,
         );
         if (controller.signal.aborted) await close();
         const started = server;
+        // The failure itself was reported by reportStoreFailure; this only starts the stop. A stop
+        // that already began continues on its own.
         void started.storeFailed.then(() => {
           if (controller.signal.aborted) return;
           controller.abort();
-          process.exitCode = 1;
-          process.stderr.write(`${JSON.stringify({ event: "store-failed" })}\n`);
           close().catch(() => process.stderr.write("m0-local cleanup unverifiable\n"));
         });
       } catch (error) {

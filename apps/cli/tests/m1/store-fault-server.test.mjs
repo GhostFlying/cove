@@ -126,6 +126,25 @@ test("a store worker crash fails the compiled server closed and keeps the direct
   await fixture.stopServer(server);
 });
 
+test("a store crash during an orderly stop still exits 1 with one failure event and releases the lock", async () => {
+  const home = fixture.home("home");
+  const server = await fixture.startServerEntry(ENTRY, home);
+  await fixture.signalServer(server, "SIGHUP");
+  expect(await server.exited).toBe(1);
+  const events = server
+    .stderr()
+    .split("\n")
+    .filter((line) => line.includes("store-failed"));
+  expect(events).toEqual([JSON.stringify({ event: "store-failed" })]);
+  // The stop record could not be written; the lock is free once the process is gone.
+  const after = await queryStore(home);
+  expect(after.lock).toBe("opened");
+  expect(after.instances.at(-1)).toMatchObject({
+    id: server.record.relayInstanceId,
+    stopped: null,
+  });
+});
+
 test("an orderly stop with a saturated store still writes both stop records, exits 0 and releases the lock", async () => {
   const home = fixture.home("home");
   fixture.env.COVE_TEST_STORE_LIMITS = JSON.stringify({ inFlight: 1, queued: 2 });
