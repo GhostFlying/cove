@@ -3,7 +3,26 @@
 // tests can inspect rows and pragmas of the live database and inject failures without a second
 // connection, which would break the store's process-wide locks.
 
+// Armed by test.armAfterCommit: what afterCommit does to the next committed call of one operation.
+let armed = null;
+
+// The store worker calls this after an operation committed and before posting its result
+// (executor.ts, AfterCommitHook). Armed, it loses that result: "crash" ends the worker thread
+// (process.exit in a worker ends only that thread), "unanswerable" returns a value that cannot be
+// structured-cloned. Either way the write is durable and the caller never hears of it.
+export function afterCommit(operation, value) {
+  if (!armed || armed.operation !== operation) return value;
+  const { mode } = armed;
+  armed = null;
+  if (mode === "crash") process.exit(9);
+  return { fn: () => value };
+}
+
 export const operations = {
+  "test.armAfterCommit": (_db, { operation, mode }) => {
+    armed = { operation, mode };
+    return null;
+  },
   "test.all": (db, { sql, params = [] }) => db.prepare(sql).all(...params),
   "test.get": (db, { sql, params = [] }) => db.prepare(sql).get(...params) ?? null,
   "test.run": (db, { sql, params = [] }) => db.prepare(sql).run(...params).changes,

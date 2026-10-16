@@ -24,6 +24,23 @@ export async function loadOperations(modules: readonly string[] = []): Promise<O
   return table;
 }
 
+// A hook of a test module (exported as `afterCommit`): called after an operation answered without
+// error and before its result is posted, with the operation's name and value; it returns the value
+// to post. Tests use it to lose a committed call's reply (end the thread, or return a value that
+// cannot be cloned). Only `operationModules` supply hooks, and production passes none.
+export type AfterCommitHook = (operation: string, value: unknown) => unknown;
+
+export async function loadAfterCommitHooks(
+  modules: readonly string[] = [],
+): Promise<AfterCommitHook[]> {
+  const hooks: AfterCommitHook[] = [];
+  for (const url of modules) {
+    const { afterCommit } = (await import(url)) as { afterCommit?: unknown };
+    if (typeof afterCommit === "function") hooks.push(afterCommit as AfterCommitHook);
+  }
+  return hooks;
+}
+
 export type Execution =
   | { ok: true; value: unknown; timing: [number, number] }
   | { ok: false; error: SerializedStoreError; timing: [number, number] };
