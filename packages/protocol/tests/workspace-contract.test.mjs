@@ -18,8 +18,12 @@ import {
   GitRefSchema,
   M1_LIMITS,
   MountNameSchema,
+  MountOutcomeSchema,
+  MountStateSchema,
   ResourceIdSchema,
   OperationStateSchema,
+  TaskRecordSchema,
+  WorkspaceRecordSchema,
 } from "@cove/protocol/workspace";
 
 const encoder = (text) => new TextEncoder().encode(text);
@@ -172,6 +176,71 @@ test("git refs and mount names refuse option-like or path-escaping values", () =
       })),
     }),
   ).toBeNull();
+});
+
+test("a task record states its workspace entry and gives a checkout no entry path", () => {
+  const checkout = {
+    mountId: "mount-1",
+    name: "app",
+    source: "checkout",
+    repoId: "repo-1",
+    path: "/src/app",
+    entryPath: null,
+    state: "ready",
+    branch: null,
+    baseCommit: null,
+    sharedWithTaskIds: ["task-2"],
+  };
+  const task = {
+    taskId: "task-1",
+    revision: 0,
+    title: "Investigate",
+    slug: "investigate",
+    archived: false,
+    createdAtMs: 1,
+    workspace: {
+      workspaceId: "workspace-1",
+      revision: 0,
+      entryPath: "/w/investigate-1a2b3c4d",
+      entryState: "pending",
+      mounts: [checkout],
+    },
+  };
+  expect(TaskRecordSchema.safeParse(task).success).toBe(true);
+  const { entryState, ...withoutState } = task.workspace;
+  expect(entryState).toBe("pending");
+  expect(TaskRecordSchema.safeParse({ ...task, workspace: withoutState }).success).toBe(false);
+  expect(
+    TaskRecordSchema.safeParse({ ...task, workspace: { ...task.workspace, entryState: "gone" } })
+      .success,
+  ).toBe(false);
+});
+
+test("a read may report an entry or a mount as unavailable, which an operation result never records", () => {
+  const checkout = {
+    mountId: "mount-1",
+    name: "app",
+    source: "checkout",
+    repoId: "repo-1",
+    path: "/src/app",
+    entryPath: null,
+    state: "unavailable",
+    branch: null,
+    baseCommit: null,
+    sharedWithTaskIds: [],
+  };
+  const workspace = {
+    workspaceId: "workspace-1",
+    revision: 0,
+    entryPath: "/w/investigate-1a2b3c4d",
+    entryState: "unavailable",
+    mounts: [checkout],
+  };
+  expect(WorkspaceRecordSchema.safeParse(workspace).success).toBe(true);
+  expect(MountStateSchema.safeParse("unavailable").success).toBe(false);
+  expect(MountOutcomeSchema.safeParse({ mountId: "mount-1", state: "unavailable" }).success).toBe(
+    false,
+  );
 });
 
 test("domain write fingerprints ignore the operation ID and key order only", () => {

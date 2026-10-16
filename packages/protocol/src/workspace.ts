@@ -137,7 +137,22 @@ export const MountSpecSchema = z.discriminatedUnion("source", [
 ]);
 export type MountSpec = z.infer<typeof MountSpecSchema>;
 
+// The recorded state of a mount (and of a mount in an operation result).
 export const MountStateSchema = z.enum(["pending", "ready", "failed", "missing"]);
+// A mount as a read reports it: the recorded state, with a ready binding verified when the record
+// is read. A ready checkout whose directory is gone, is no longer the registered clone's working
+// tree (another repository, a symlink in its place, a Cove-managed worktree now, its Git metadata
+// gone) is `missing`; one that could not be verified (Git did not answer within the read's time
+// budget, permission denied, Git refused a directory whose metadata is still there, as for a
+// safe.directory refusal) is `unavailable`, which claims neither that it is there nor that it is
+// gone.
+export const MountRecordStateSchema = z.enum([
+  "pending",
+  "ready",
+  "failed",
+  "missing",
+  "unavailable",
+]);
 export const MountRecordSchema = z.object({
   mountId: ResourceIdSchema,
   name: MountNameSchema,
@@ -145,9 +160,11 @@ export const MountRecordSchema = z.object({
   repoId: ResourceIdSchema,
   // Real directory of the binding: the checkout itself or the managed worktree.
   path: HostPathSchema,
-  // Path through the workspace entry; null when the entry gives no link for it (D2 option C).
+  // Path inside the workspace entry. A managed worktree lives at `<entry>/<name>`; a checkout has
+  // no path in the entry and is null (D2 option C): it is reached through its real `path`, which
+  // the entry's mount manifest lists.
   entryPath: HostPathSchema.nullable(),
-  state: MountStateSchema,
+  state: MountRecordStateSchema,
   branch: GitRefSchema.nullable(),
   baseCommit: CommitIdSchema.nullable(),
   // Other tasks mounting the same checkout (D4: shown, never locked).
@@ -161,6 +178,22 @@ export const WorkspaceRecordSchema = z.object({
   // Increases on every binding change, including conversion to a worktree.
   revision: SequenceSchema,
   entryPath: HostPathSchema,
+  // The entry directory and its mount manifest, verified when the record is read, for the
+  // revision this record carries. The database record comes first and the filesystem follows it,
+  // so they can differ:
+  // - ready: the entry is Cove's directory and its manifest is exactly the current one (this
+  //   workspace and revision, the current mount list);
+  // - pending: the record is ahead of the filesystem (being written, a failed attempt such as an
+  //   unwritable workspace root, or an older manifest of this workspace), or a change committed
+  //   while the record was being read; the next attempt writes it;
+  // - missing: the entry was (or may have been) published once and is gone now. A read reports
+  //   this and never recreates it; the next binding change writes the entry again;
+  // - unavailable: something Cove does not own is at the entry path (a foreign directory, file
+  //   or symlink, or a manifest of another workspace or one that does not parse), or the path to
+  //   it changed (a symlink in place of an ancestor), or it cannot be read or was not checked
+  //   within the read's time budget. Cove never writes over what it does not own; the operator
+  //   resolves it.
+  entryState: z.enum(["ready", "pending", "missing", "unavailable"]),
   mounts: z.array(MountRecordSchema).max(M1_LIMITS.mountsPerWorkspace),
 });
 export type WorkspaceRecord = z.infer<typeof WorkspaceRecordSchema>;
