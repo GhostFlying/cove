@@ -475,14 +475,15 @@ SQLite 是 server 内部存储，不要求用户手工编辑配置文件；所�
 
 依据：[SQLite 适用场景](https://www.sqlite.org/whentouse.html)、[WAL](https://www.sqlite.org/wal.html)。
 
-### 11.1 Node 驱动与执行位置（已选择 better-sqlite3，执行位置待定）
+### 11.1 Node 驱动与执行位置（已选择 better-sqlite3 与专用数据库 worker thread）
 
 | 方案                    | 收益                                                                   | 代价                                                                              |
 | ----------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | Node 内置 `node:sqlite` | 无额外 SQLite addon 打包步骤；基础 SQL、预编译语句与事务可满足业务需要 | 当前 Node v24.x 文档仍标为 Release candidate；SQLite 和绑定的更新跟随 Node 运行时 |
 | `better-sqlite3`        | 成熟的同步接口、事务封装及 worker thread 支持；驱动可独立于 Node 升级  | 增加一个原生 addon，需验证各发行平台的预编译包或自行构建                          |
 
-已确认使用 `better-sqlite3`；建议配一个专用数据库 worker thread，执行位置尚未确认。
+已确认使用 `better-sqlite3`；执行位置按 [M1 D6](milestones/m1.md#d6-数据库执行位置选-b由探针结果于-2026-10-16-决定) 选 B，
+在 runtime 进程内的专用数据库 worker thread 中运行，实现待 F-D6B 完成。
 选择依据是接口成熟度与依赖维护取舍，不代表已实测其比 `node:sqlite` 更快。
 两者核心数据库调用都是同步的；专用 worker 用于避免数据库查询、锁等待或磁盘提交阻塞控制进程主事件循环。
 worker 内独占连接，按完整业务操作执行短事务；不将 BEGIN、各条 SQL 和 COMMIT 拆成可交错的跨线程请求。
