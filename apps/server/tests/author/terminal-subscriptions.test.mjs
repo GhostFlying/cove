@@ -374,6 +374,41 @@ describe("private terminal subscription delivery", () => {
     expect(f.bytes.snapshot().total).toBe(0);
   });
 
+  it("answers a recover queued behind an unanswered ACK not-accepted at half its deadline", async () => {
+    // Issue #103 review (B3): a recover's deadlines were set only when it started executing, so
+    // one queued behind an ACK the busy worker had not answered could outlive the client's own
+    // deadline (which started before the request) and turn into an unknown outcome there.
+    const f = fixture({ recoveryDeadlineMs: 20 });
+    const a = f.connect("a");
+    try {
+      const ref = (await f.attach(a, 0, "replay")).subscription;
+      f.session.receive(f.output(ref, 1));
+      const ack = a.service.handle(command("applied-ack", ref, "ack", { appliedSeq: 1 }));
+      const held = f.latest();
+      expect(held.type).toBe("applied-ack");
+      const recover = a.service.handle(command("recover", ref, "rec", { reason: "expired" }));
+      f.clock(9);
+      a.service.tick();
+      f.clock(10);
+      a.service.tick();
+      expect(await recover).toMatchObject({
+        type: "error",
+        requestId: "rec",
+        error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
+      });
+      // The worker answers the ACK late; the recover was never sent and the worker stays.
+      f.session.receive(f.reply(held));
+      await ack;
+      await turns();
+      const sent = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
+      expect(sent).not.toContain("recover");
+      expect(sent).toContain("unsubscribe");
+      expect(f.session.closed).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it("retires only an expired route and reports its first cause on the next correlated command", async () => {
     const f = fixture({ recoveryDeadlineMs: 20 });
     const a = f.connect("a");
