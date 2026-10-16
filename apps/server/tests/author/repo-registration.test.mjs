@@ -1,5 +1,15 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -104,12 +114,13 @@ describe("Git runner", () => {
       GIT_PAGER: "cat",
       PAGER: "cat",
       GIT_OPTIONAL_LOCKS: "0",
+      GIT_NO_LAZY_FETCH: "1",
       LC_ALL: "C",
     });
     const allowed = new Set([
       ...["PATH", "HOME", "XDG_CONFIG_HOME", "TMPDIR", "GIT_CONFIG_NOSYSTEM"],
       ...["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "LC_ALL", "LANG", "GIT_TERMINAL_PROMPT"],
-      ...["GIT_PAGER", "PAGER", "GIT_EDITOR", "GIT_OPTIONAL_LOCKS"],
+      ...["GIT_PAGER", "PAGER", "GIT_EDITOR", "GIT_OPTIONAL_LOCKS", "GIT_NO_LAZY_FETCH"],
       // Set by the shell running the fake git itself.
       ...["PWD", "SHLVL", "_", "OLDPWD"],
     ]);
@@ -138,7 +149,83 @@ describe("Git runner", () => {
     expect(await runGit(["status"], { cwd })).toEqual({ kind: "failed", reason: "spawn" });
     expect(await isValidBranchName("main")).toBeNull();
   });
+
+  // A git that forks without exec: the forked descendant inherits stdout and stderr. Each case
+  // must settle promptly (not when the descendant would close the pipes) and end the descendant.
+  it.each([
+    {
+      name: "a timeout",
+      script: "sleep 30 &\necho $! > PIDFILE\nwait",
+      options: { timeoutMs: 1_000 },
+      expected: { kind: "failed", reason: "timeout" },
+    },
+    {
+      name: "an output overflow",
+      script: "yes &\necho $! > PIDFILE\nwait",
+      options: { maxOutputBytes: 4096 },
+      expected: { kind: "failed", reason: "overflow" },
+    },
+    {
+      name: "an exit that leaves a descendant holding the pipes",
+      script: "sleep 30 &\necho $! > PIDFILE\necho done",
+      options: {},
+      expected: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
+    },
+  ])(
+    "ends the process group and settles promptly after $name",
+    async ({ script, options, expected }) => {
+      const cwd = await temporary();
+      const pidFile = join(cwd, "descendant.pid");
+      process.env.PATH = `${await fakeGit(script.replace("PIDFILE", pidFile))}:${savedEnv.PATH}`;
+      const started = Date.now();
+      expect(await runGit(["status"], { cwd, ...options })).toEqual(expected);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      const pid = Number(await readFile(pidFile, "utf8"));
+      expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+      expect(await ended(pid)).toBe(true);
+    },
+  );
 });
+
+async function exists(path) {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+// Every entry under `root` (including .git) with its type, size and modification time.
+async function snapshot(root) {
+  const entries = {};
+  async function walk(directory) {
+    for (const name of (await readdir(directory)).sort()) {
+      const path = join(directory, name);
+      const info = await lstat(path);
+      entries[path.slice(root.length)] = [info.mode, info.size, info.mtimeMs];
+      if (info.isDirectory()) await walk(path);
+    }
+  }
+  await walk(root);
+  return entries;
+}
+
+// Whether `pid` stops existing within a few seconds (an orphaned descendant is reaped by init).
+async function ended(pid) {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return true;
+      throw error;
+    }
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  return false;
+}
 
 describe("repository queries", () => {
   it("reads HEAD on a branch, detached and unborn", async () => {
@@ -188,6 +275,43 @@ describe("repository queries", () => {
     expect(await inspectRepository(linked)).toEqual({ kind: "not-repository" });
   });
 
+  it("runs no repository-configured program and fetches nothing from a promisor remote", async () => {
+    const root = await temporary();
+    const path = await clone(root, "partial");
+    // A partial clone whose HEAD names a commit that is not present: reading the object would
+    // lazily fetch it through the promisor remote, here an `ext::` transport that leaves a marker.
+    // core.fsmonitor is a program Git runs when it reads the index; it leaves another marker.
+    const missing = "1".repeat(40);
+    await writeFile(join(path, ".git", "refs", "heads", "main"), `${missing}\n`);
+    const fetched = join(root, "fetched");
+    const monitored = join(root, "monitored");
+    const monitor = join(root, "monitor.sh");
+    await writeFile(monitor, `#!/bin/sh\ntouch '${monitored}'\n`);
+    await chmod(monitor, 0o755);
+    for (const [key, value] of [
+      ["core.repositoryformatversion", "1"],
+      ["extensions.partialClone", "origin"],
+      ["remote.origin.promisor", "true"],
+      ["protocol.ext.allow", "always"],
+      ["remote.origin.url", `ext::sh -c touch% ${fetched}`],
+      ["core.fsmonitor", monitor],
+    ])
+      await git(path, root, "config", key, value);
+    const before = await snapshot(path);
+
+    expect(await readHead(path)).toEqual({ kind: "head", branch: "main", commit: missing });
+    expect(await inspectRepository(path)).toEqual({
+      kind: "clone",
+      topLevel: path,
+      commonDir: join(path, ".git"),
+    });
+    expect(await isValidBranchName("main")).toBe(true);
+
+    expect(await exists(fetched)).toBe(false);
+    expect(await exists(monitored)).toBe(false);
+    expect(await snapshot(path)).toEqual(before);
+  });
+
   it("checks branch names with Git's own rules", async () => {
     for (const name of ["main", "release/1.0", "feature-x"])
       expect(await isValidBranchName(name)).toBe(true);
@@ -196,7 +320,7 @@ describe("repository queries", () => {
   });
 });
 
-async function service() {
+async function service(git) {
   const layout = await prepareHome(join(await temporary(), "home"));
   const store = await Store.open({
     databasePath: layout.databasePath,
@@ -213,7 +337,7 @@ async function service() {
   );
   return {
     store,
-    repos: new RepoService({ store, serverId: "server", receipts, encodeUtf8: encode }),
+    repos: new RepoService({ store, serverId: "server", receipts, encodeUtf8: encode, git }),
   };
 }
 
