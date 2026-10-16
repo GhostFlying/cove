@@ -162,7 +162,7 @@ runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CON
 双方以同一时刻作为窗口位的释放点：runtime 读到应答即释放一个窗口位；worker 在应答帧交给可写流后即不再把该命令计入窗口，
 因为写回调可能晚于对端读到应答。该命令仍占路由执行位、应答仍计字节，直到写回调；路由控制因此仍逐条执行，这类命令同时至多一条（#96）。
 窗口已满时 runtime 不拒绝路由控制命令，而是让它在 pipe 中未发送地按到达顺序等待，有空位时再发出（#96）；
-等待中的命令尚未到达 worker，其应答期限从占得空位时读取的时钟起算。
+路由控制命令在 worker 存活期间没有应答期限，只随 worker 失联而结束（见下文“worker 存活与命令期限”）。
 
 容量保证（#96）。客户端把已交出的 ACK 视为覆盖其后发出的命令，交出后的拒绝无法补救，所以 server 保证：
 对连接与 worker 都在线、且 pipe 已打开其路由的订阅，遵守协议的客户端（每个订阅每类至多一条未结算）发出的 applied-ack、baseline-progress 与 detach，
@@ -190,6 +190,47 @@ runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CON
 - pipe 不认识的订阅（从未在此打开或已释放）：它没有 worker 路由需要保护，其路由控制只在窗口与排队预算都有空位时接纳。
 
 status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排队预算，预算不足时可能以 BUSY 拒绝。
+
+#### worker 存活与命令期限（#103，已选）
+
+忙碌的 worker 不是失联的 worker。单个 worker 的 CPU 跑满时（Linux x86_64 上 8 路 64 KiB/s 输出加一个回显终端），
+命令应答会排在解析之后变慢；过去 runtime 以“任一已发出命令超过 `recoveryDeadlineMs`（15 s）未应答”判定失联，
+把过载变成该 worker 上全部终端的丢失，违背“失联不能证明进程退出”。规则如下：
+
+- **存活只看 worker 是否仍在说话，不看某条命令是否已应答。** worker 在 `ready` 之后由定时器每
+  `PIPE_HEARTBEAT_INTERVAL_MS`（1 s）发出一个 `heartbeat` 帧，与命令执行无关；同一时刻至多一个未结算的心跳，
+  按控制帧计量，控制预留不足时跳过这一拍（此时已有控制帧在发往 runtime，它们同样证明存活）。
+  runtime 把收到的任何合法帧（应答、事件、心跳）都视为接触。
+- **判定失联**的条件只有：进程退出或 pipe 关闭/出错、协议违规（照旧失败关闭）、握手超时，以及连续
+  `recoveryDeadlineMs`（15 s）收不到任何帧，即 worker 挂起。静默只在 runtime 自己的时钟节拍中累计，每拍至多计
+  一个心跳间隔，因此 runtime 自身事件循环停顿（例如同步工作占用十几秒）不会被记在 worker 头上。
+  N 取 15 s：等于 15 个心跳间隔，远大于 worker 单次同步工作（5,000 行历史的 serialize p95 约 252 ms、解码按读预算分片），
+  与旧规则检测真正挂起 worker 的时间相同，也与客户端恢复期限一致，所以客户端看到失联不会更晚。
+- **命令期限只结束这一条命令，不结束 worker。** 普通命令（含 subscribe/recover/preview-refresh/input/spawn）、status 与 stop
+  的期限仍是自受理起 `recoveryDeadlineMs`。期限到达而 worker 仍存活时：
+  - 命令还在 runtime 队列中未交给传输（pipe 被背压阻塞）：撤回该帧，调用方得到 BUSY（not-accepted）；worker 从未看到它。
+  - 已交给传输：调用方得到 RESULT_UNKNOWN（unknown；input 带 `subject: input`，下一步是核实 run，绝不重放）。
+    关联、请求身份与窗口位保留到 worker 的迟到应答，应答照常校验（不合法仍失败关闭），然后丢弃：不交接、不激活订阅路由、
+    不封存预览。迟到的 subscribe/recover 即使被接受，其路由仍不激活，事件继续被拦截；订阅层已因期限退役该路由并发出 unsubscribe。
+    被放弃的命令继续占用所在类别的窗口，所以过载表现为后续命令的 BUSY，而不是无界增长。
+- **路由控制（applied-ack、baseline-progress、unsubscribe）没有应答期限**，在 worker 存活期间一直等待（上文容量保证）。
+  让 ACK 超时会退役订阅，正是 #103 要避免的；慢 ACK 只让该订阅的输出按流控变慢。
+- **类别隔离。** runtime 与 worker 对普通命令（`pendingWorkerCommands`）、status、stop 和路由控制各有窗口，worker 分别执行；
+  基线生成另受 `concurrentGenerationsPerWorker` 限制。一个慢的 subscribe/快照不占用 ACK 或刷新的窗口，它们只与之共享 worker 的 CPU。
+  按类别窗口，macOS 复现中与 subscribe 同时未决的 ACK 与刷新并不等待 subscribe 本身；它们是随 subscribe 期限引发的失联一起失败的。
+- **未得到标记的 attach/recover 在一半期限时明确失败。** 客户端以 `recoveryDeadlineMs` 为同一 attach 计时，且早于 server 开始；
+  客户端自己超时的 attach 结果未知，它必须退役整个连接及其上全部订阅。因此订阅层对超过 `recoveryDeadlineMs / 2` 仍无标记
+  （标记进入交付队列即离开 opening）的尝试回答 RECOVERY_EXPIRED（not-accepted）：客户端尚不可能知道这个订阅，server 退役路由、
+  丢弃其事件、拒绝激活迟到的接受并退订 worker 路由，所以结果是确定的，客户端只结束这个视图。另一半期限留给应答穿过慢传输与忙碌
+  server，以及按时得到标记后的基线传输（整个恢复仍以 `recoveryDeadlineMs` 为界）。
+- **订阅交接被拒不再是失联。** 被接受的 subscribe/recover 若其消费者已不再需要（订阅层已因期限或连接关闭退役该路由），
+  runtime 不激活路由、把结果交给调用方，由订阅层退订；此前这一路径会让 runtime 放弃整个 worker。
+
+客户端看到的结果：worker 慢时订阅保持，输出按 ACK 流控变慢；一半期限内未得到标记的 attach/recover 以 RECOVERY_EXPIRED
+（not-accepted）结束，只影响该视图，客户端按其下一步重新订阅；超时的输入是 RESULT_UNKNOWN，客户端不重放；窗口满时是 BUSY。只有 worker 退出、pipe 失败、
+协议违规或 15 s 无任何帧时，订阅才随 worker 失联结束（RESULT_UNKNOWN / WORKER_UNAVAILABLE）。
+已知限制：持续发心跳却永不应答某条命令的 worker（实现缺陷而非过载）不判失联；该命令的调用方得到明确结果，所在类别的窗口位
+一直被占用，路由控制则会停在那里。单个 worker 的吞吐上限（D6 的容量单位）由 D6 另行测量，不在本规则内。
 
 进程池可从 devbox 已测的 4 个子进程起步，作为配置与验证起点，不是固定容量承诺。
 node-pty 官方明确不保证 worker_threads 安全，PTY 并行采用子进程。
@@ -642,6 +683,7 @@ WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到�
 - 某个手机或后台 tab 太慢时，暂停其增量订阅并标记需重新同步；不因它卡住其他客户端或远端任务。
 - Host 自己解析/存储跟不上时，需要有限背压或明确过载策略。不能同时承诺有限资源、无限吞吐和绝不阻塞。
 - 控制面和其他终端仍需有调度机会；输出洪峰下 Ctrl-C 必须能及时到达目标 PTY。
+- Host 过载只降级为变慢与逐条命令的明确结果（BUSY、RESULT_UNKNOWN、RECOVERY_EXPIRED），不把仍在发心跳的 worker 判为失联（3.3 节，#103）。
 
 不无限积累待 `write` 数据，也不直接丢掉控制流后继续当作状态完整。
 过载导致的恢复和历史缺口必须可见。
