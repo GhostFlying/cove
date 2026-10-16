@@ -445,9 +445,15 @@ describe("private terminal subscription delivery", () => {
         requestId: "rec",
         error: { kind: "RECOVERY_EXPIRED", acceptance: "not-accepted" },
       });
-      // The worker answers the ACK late; the recover was never sent and the worker stays.
+      // The worker answers the ACK late; the recover was never sent and the worker stays. The
+      // ACK was applied (its credit advanced and the worker accepted it), so its real result
+      // reaches the client rather than the recover's expiry.
       f.session.receive(f.reply(held));
-      await ack;
+      expect(await ack).toMatchObject({
+        type: "applied-ack-result",
+        requestId: "ack",
+        appliedSeq: 1,
+      });
       await turns();
       const sent = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
       expect(sent).not.toContain("recover");

@@ -1142,14 +1142,31 @@ export class TerminalSubscriptions {
   }
 
   // Ends an attach or recover attempt whose marker deadline passed with no marker admitted:
-  // RECOVERY_EXPIRED (not-accepted) for the route and every request still queued on it (see
-  // tick() for why the outcome is definite). Retirement fences the route's events, so a late
-  // acceptance from the worker is never activated, and unsubscribes the worker route.
+  // RECOVERY_EXPIRED (not-accepted) for the route and the requests it still owes an answer
+  // (see tick() for why the outcome is definite). Retirement fences the route's events, so a
+  // late acceptance from the worker is never activated, and unsubscribes the worker route.
   private expireRecovery(route: Route): void {
     this.retire(route, domainError("RECOVERY_EXPIRED"));
-    for (const request of route.queue)
-      if (!(request.command.type === "input" && request.domain?.dispatched))
-        this.finish(request, this.error(request.command, route.failure!));
+    this.failQueued(route);
+  }
+
+  // Answers the requests of a route that just retired with its failure, except those whose
+  // effect already happened: a route-control command that started executing has advanced the
+  // route's credit and was sent to the worker (an ACK the busy worker answers late, say), and
+  // dispatched input reached the PTY. Those keep their real result, which still arrives:
+  // the worker answers in order, before the unsubscribe that retirement sent. Reporting them
+  // not-accepted would tell the client an applied ACK was not applied.
+  private failQueued(route: Route): void {
+    for (const request of route.queue) {
+      const type = request.command.type;
+      if (
+        request.started &&
+        (type === "applied-ack" || type === "baseline-progress" || type === "detach")
+      )
+        continue;
+      if (type === "input" && request.domain?.dispatched) continue;
+      this.finish(request, this.error(request.command, route.failure!));
+    }
   }
 
   tick(): void {
