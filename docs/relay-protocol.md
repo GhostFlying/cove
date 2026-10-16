@@ -556,17 +556,19 @@ RPC 错误使用标准整数 error.code、供人阅读的 error.message 和可�
 响应必须有 result 或 error 且二者互斥，不再使用自定义 ok 字段。
 不使用笼统 `retryable: true`，因为“重新发送同一操作”和“新建操作重做”不是一回事。
 
-| 错误/观察                                     | 后续行为                                                           |
-| --------------------------------------------- | ------------------------------------------------------------------ |
-| `INVALID_ARGUMENT`                            | 展示字段问题，修改后以新的写操作意图提交                           |
-| `UNAUTHENTICATED` / `FORBIDDEN`               | 修复授权；不执行重试风暴，不回放终端输入                           |
-| `CAPABILITY_UNAVAILABLE` / `METHOD_NOT_FOUND` | 同版本未支持的可选能力提示不可用；基础方法缺失视为契约问题         |
-| `REVISION_CONFLICT`                           | 获取当前资源，由客户端/用户重新决定，不默默覆盖                    |
-| `OPERATION_ID_CONFLICT`                       | 同 ID 被用于不同意图；保留原操作，修复调用方，不自动生成新 ID 绕过 |
-| `BUSY`                                        | 若已明确未接受，退避后以同 operationId 重试；响应不明仍先查询      |
-| `OPERATION_HISTORY_EXPIRED`                   | 去重证据尚在但完整结果已清理；核对资源，禁止同 ID 重新执行         |
-| `GIT_UNAVAILABLE`                             | Git 无回答（超时/超限/缺 git）；未接受，路径状态未知               |
-| 网络超时、连接断开、不可识别的 5xx            | 客户端本地状态为结果未知；按 operationId 查询，不能认定操作失败    |
+| 错误/观察                                     | 后续行为                                                             |
+| --------------------------------------------- | -------------------------------------------------------------------- |
+| `INVALID_ARGUMENT`                            | 展示字段问题，修改后以新的写操作意图提交                             |
+| `UNAUTHENTICATED` / `FORBIDDEN`               | 修复授权；不执行重试风暴，不回放终端输入                             |
+| `CAPABILITY_UNAVAILABLE` / `METHOD_NOT_FOUND` | 同版本未支持的可选能力提示不可用；基础方法缺失视为契约问题           |
+| `REVISION_CONFLICT`                           | 获取当前资源，由客户端/用户重新决定，不默默覆盖                      |
+| `OPERATION_ID_CONFLICT`                       | 同 ID 被用于不同意图；保留原操作，修复调用方，不自动生成新 ID 绕过   |
+| `BUSY`                                        | 若已明确未接受，退避后以同 operationId 重试；响应不明仍先查询        |
+| `OPERATION_HISTORY_EXPIRED`                   | 去重证据尚在但完整结果已清理；核对资源，禁止同 ID 重新执行           |
+| `GIT_UNAVAILABLE`                             | Git 无回答（超时/超限/缺 git）；未接受，路径状态未知                 |
+| `REPO_IN_USE`                                 | 仍有 task（含已归档）的挂载引用该 repo；未接受，先移除这些挂载       |
+| `WORKSPACE_ENTRY_UNAVAILABLE`                 | workspace 根目录无法创建，或入口路径已被占用；未接受，不记录任何内容 |
+| 网络超时、连接断开、不可识别的 5xx            | 客户端本地状态为结果未知；按 operationId 查询，不能认定操作失败      |
 
 错误示例（1001 仅为示意，领域错误整数码尚未冻结）：
 
