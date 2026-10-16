@@ -601,6 +601,34 @@ describe("bounded worker pipe session", () => {
     f.session.transportReleased();
   });
 
+  it("times the handshake by observed ticks: a runtime stall after hello loses no worker", async () => {
+    // Issue #103 review: the handshake used an absolute deadline, so the first tick after a
+    // runtime stall longer than the window, run before the buffered ready frame was read,
+    // declared a healthy worker lost. Production cadence and window (no overrides).
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 100, null);
+    f.session.start();
+    f.settleWrites();
+    f.clock(PIPE_LIVENESS_WINDOW_MS + 5000);
+    f.session.tick();
+    expect(f.lost()).toBe(0);
+    f.session.receive(f.ready());
+    expect(f.session.ready).toBe(true);
+    f.session.transportReleased();
+    // A worker that never says ready is still lost once the runtime observed the whole window.
+    const silent = fixture({ ...M0_LIMITS }, 32, undefined, 100, null);
+    silent.session.start();
+    silent.settleWrites();
+    for (let now = 1000; now < PIPE_LIVENESS_WINDOW_MS; now += 1000) {
+      silent.clock(now);
+      silent.session.tick();
+    }
+    expect(silent.lost()).toBe(0);
+    silent.clock(PIPE_LIVENESS_WINDOW_MS);
+    silent.session.tick();
+    expect(silent.lost()).toBe(1);
+    silent.session.transportReleased();
+  });
+
   it("ends a timed-out command alone with an unknown outcome and discards its late reply", async () => {
     const f = fixture();
     f.start();

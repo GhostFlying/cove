@@ -147,7 +147,6 @@ export class WorkerPipeSession {
   private physicalBytes = 0;
   private ordinaryBytes = 0;
   private lastNow = 0;
-  private handshakeDeadline = 0;
   private released = false;
   private promoting = false;
   private prepaidIdentities = 0;
@@ -252,8 +251,9 @@ export class WorkerPipeSession {
     }
     this.state = "hello";
     this.health = new WorkerHealthMonitor(this.now());
-    // A worker that never says ready is silent: the liveness window bounds the handshake too.
-    this.handshakeDeadline = this.now() + this.livenessWindowMs;
+    // A worker that never says ready is silent: the liveness window bounds the handshake too,
+    // measured like any other silence (see tick()), so it starts here.
+    this.lastTick = this.now();
     if (!this.enqueue(bytes, "status", undefined)) {
       this.loseContact();
       return false;
@@ -844,11 +844,10 @@ export class WorkerPipeSession {
     const now = this.now();
     const elapsed = this.lastTick === undefined ? 0 : now - this.lastTick;
     this.lastTick = now;
-    if (this.state === "hello" && now >= this.handshakeDeadline) {
-      this.loseContact();
-      return;
-    }
-    if (!this.ready) return;
+    if (this.state !== "hello" && !this.ready) return;
+    // The handshake is timed the same way as a ready worker's silence: an absolute deadline
+    // would charge a runtime stall right after hello to the worker, and the first late tick
+    // could then run before the buffered ready frame is read and lose a healthy worker.
     if (this.heard) {
       this.heard = false;
       this.silentMs = 0;
@@ -857,6 +856,7 @@ export class WorkerPipeSession {
       this.loseContact();
       return;
     }
+    if (!this.ready) return;
     if (this.heardHeartbeat) {
       this.heardHeartbeat = false;
       this.sinceHeartbeatMs = 0;
