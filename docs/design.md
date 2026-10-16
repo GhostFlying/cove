@@ -367,8 +367,8 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
   Cove 保持与 agent 无关，不实现 agent 状态 hook。[工程 §3.4](engineering-plan.md#34-不把未选择的功能变成首期前置条件)
   延后的“agent 最后业务状态 hook”意味着 Cove 自身不做这项能力，agent 业务状态由 Shepherd（tend）负责。
 - 无人值守的 TUI agent 必须以不阻塞的权限模式启动；这属于 tend 的启动配方，Cove 不检查也不改写。
-- Cove server 重启时 worker run 按 [M1 D9](milestones/m1.md#d9-重启后的-run-显示选-a) 标为会话中断，
-  不重跑。是否用 agent 自身的 resume 继续由 tend 决定，Cove 不推断业务进度；继续时 tend 用 agent 的
+- Cove server 正常停止时，存活的 worker run 记为随 server 停止而结束；崩溃后重启时，旧实例中没有结束记录的
+  run 按 [M1 D9](milestones/m1.md#d9-重启后的-run-显示选-a) 标为会话中断，已有结束记录不变。两种情况都不重跑。是否用 agent 自身的 resume 继续由 tend 决定，Cove 不推断业务进度；继续时 tend 用 agent 的
   resume 命令新建 tab。`tab reopen` 只按原配方新建 run，不提供一次性覆盖启动参数。
 - tend 判断任务完成不授权 Cove 停止 run 或删除 worktree；这些仍是带 operationId 的显式 CLI 操作。
 
