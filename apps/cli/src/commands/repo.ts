@@ -1,8 +1,8 @@
-import { isAbsolute, sep } from "node:path";
 import type { Client } from "@cove/client";
 import { M1_LIMITS, type RepoRecord } from "@cove/protocol/workspace";
 import {
   flag,
+  hostPath,
   one,
   optionalIntegerFlag,
   print,
@@ -43,16 +43,6 @@ async function listRepos(client: Client): Promise<RepoRecord[]> {
     afterRepoId = page.nextAfterRepoId;
   } while (afterRepoId);
   return repos;
-}
-
-// The path the server should inspect. A relative path is made absolute against this command's
-// directory without normalizing it: `..` after a symlink means something else than lexical
-// normalization says, and the server resolves the real path (and drops a trailing slash) itself.
-// Rebuilding the command from the same directory produces the same intent.
-function hostPath(path: string): string {
-  if (isAbsolute(path)) return path;
-  const cwd = process.cwd();
-  return cwd.endsWith(sep) ? `${cwd}${path}` : `${cwd}${sep}${path}`;
 }
 
 function expectedRevision(args: Arguments): { expectedRevision?: number } {
