@@ -1,6 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { openConnection } from "./connection.js";
-import { execute, loadOperations } from "./executor.js";
+import { execute, loadAfterCommitHooks, loadOperations } from "./executor.js";
 import { serializeStoreError } from "./store-errors.js";
 import type { StoreRequest, StoreResponse, StoreWorkerData } from "./store-protocol.js";
 
@@ -28,8 +28,10 @@ function post(message: StoreResponse): void {
 async function main(): Promise<void> {
   let opened;
   let operations;
+  let hooks;
   try {
     operations = await loadOperations(data.operationModules);
+    hooks = await loadAfterCommitHooks(data.operationModules);
     opened = await openConnection(data);
   } catch (error) {
     post({ type: "open-failed", error: serializeStoreError(error) });
@@ -50,6 +52,7 @@ async function main(): Promise<void> {
       return;
     }
     const result = execute(db, operations, request.operation, request.args);
+    if (result.ok) for (const hook of hooks) result.value = hook(request.operation, result.value);
     try {
       post({ type: "result", id: request.id, ...result });
     } catch {

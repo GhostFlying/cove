@@ -264,6 +264,81 @@ describe("store worker failure", () => {
     ).toEqual({ n: 0 });
   });
 
+  // The barrier sits after receipts.write committed (business change and receipt together)
+  // and before its result is posted: "crash" exits the worker, "unanswerable" makes the result
+  // uncloneable. Separate tests (not a loop) so test discovery lists each case.
+  async function lostReplyThenResend(mode) {
+    const layout = await home();
+    const configService = (store) => {
+      const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+      const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes);
+      const receipts = new OperationReceipts(
+        composition,
+        encode,
+        new SqliteReceiptBackend(store, "instance", () => 1),
+      );
+      const config = new ConfigService({
+        home: "/home/owner/.cove",
+        serverId: "server",
+        receipts,
+        state: sqliteConfigState(store),
+        encodeUtf8: encode,
+      });
+      return { receipts, config };
+    };
+    const store = await open(layout);
+    await loadOrCreateIdentity(store);
+    await recordInstanceStart(store, "instance", 1);
+    const first = configService(store);
+    await store.call("test.armAfterCommit", { operation: "receipts.write", mode });
+    const params = { operationId: "committed", patch: { workspaceRoot: "/srv/committed" } };
+    expect(await first.config.set("principal", params)).toEqual({
+      error: expect.objectContaining({
+        kind: "RESULT_UNKNOWN",
+        acceptance: "unknown",
+        nextAction: "query-operation",
+      }),
+    });
+    expect(store.isOpen).toBe(false);
+    first.receipts.dispose();
+    await expect(store.close()).rejects.toBeInstanceOf(StoreUnavailableError);
+    stores.splice(stores.indexOf(store), 1);
+    // After a restart the write is there exactly once: one business revision, one receipt.
+    const reopened = await open(layout);
+    const count = async () => ({
+      config: await reopened.call("test.get", {
+        sql: "SELECT revision, workspace_root AS root FROM config",
+      }),
+      receipts: await reopened.call("test.all", {
+        sql: "SELECT operation_id AS id, state FROM operations",
+      }),
+    });
+    const committed = {
+      config: { revision: 1, root: "/srv/committed" },
+      receipts: [{ id: "committed", state: "succeeded" }],
+    };
+    expect(await count()).toEqual(committed);
+    // A same-ID resend returns the original result and changes nothing.
+    const second = configService(reopened);
+    const resent = await second.config.set("principal", params);
+    expect(resent).toEqual({
+      operation: expect.objectContaining({ operationId: "committed", state: "succeeded" }),
+    });
+    expect(resent.operation.result).toEqual({
+      resource: { kind: "config", id: "server", revision: 1 },
+    });
+    expect(await count()).toEqual(committed);
+    second.receipts.dispose();
+  }
+
+  it("surfaces a committed receipt-checked write whose reply is lost in a crash as RESULT_UNKNOWN; a resend returns it", async () => {
+    await expect(lostReplyThenResend("crash")).resolves.toBeUndefined();
+  });
+
+  it("surfaces a committed receipt-checked write whose reply cannot be sent as RESULT_UNKNOWN; a resend returns it", async () => {
+    await expect(lostReplyThenResend("unanswerable")).resolves.toBeUndefined();
+  });
+
   it("fails closed when the worker exits while idle or cannot send a result", async () => {
     for (const operation of ["test.exitSoon", "test.unanswerable"]) {
       const layout = await home();
