@@ -1,10 +1,10 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `399c20b`（2026-10-16）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `47229e6`（2026-10-17；`deb33ea` 之后的提交未改变本文所列接口），另列出未合入的 PR #109（T3a）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
-标记：**AVAILABLE** 表示已在 main 上，并注明引入的提交；**PLANNED** 表示已决定或已排期但尚未合入。
+标记：**AVAILABLE** 表示已在 main 上，并注明引入的提交；**PENDING** 表示已在某个未合入的 PR 中实现，注明 PR，合入前仍可能变化，合入后改为 AVAILABLE 并注明合入提交；**PLANNED** 表示已决定或已排期但尚未实现。
 
 ## 1. 集成模型
 
@@ -23,23 +23,51 @@
 | 数据目录                 | 全局 `--home DIR`，或 `$COVE_HOME`，默认 `~/.cove`                                      | `c02367b`                                                                                                        | 同一数据目录只允许一个 server                                                                                                                                                                                                                 |
 | 初始化                   | `cove server init [--workspace-root DIR]`                                               | `c02367b`                                                                                                        | 服务未运行时使用                                                                                                                                                                                                                              |
 | 启动 server              | `cove server start [--port N] [--origin URL]...`                                        | `8b06fe4`（未初始化时按默认值初始化：`d99ef5d`）                                                                 | 前台运行                                                                                                                                                                                                                                      |
-| 状态                     | `cove status`                                                                           | `8b06fe4`；`workers[]`：PR #105（合入后填写提交）                                                                | 输出新增 `workers[]`：每个存活 terminal worker 的 `health`（`state` 为 `normal` 或 `overloaded`，`reasons` 为 `event-loop-delay`、`heartbeat-gap`、`command-age`）、`stateAgeMs` 与 `signals`。过载只作提示，不影响 run；旧 server 不带该字段 |
+| 状态                     | `cove status`                                                                           | `8b06fe4`；`workers[]`：`e11f175`                                                                                | 输出新增 `workers[]`：每个存活 terminal worker 的 `health`（`state` 为 `normal` 或 `overloaded`，`reasons` 为 `event-loop-delay`、`heartbeat-gap`、`command-age`）、`stateAgeMs` 与 `signals`。过载只作提示，不影响 run；旧 server 不带该字段 |
 | 读取设置                 | `cove config get`                                                                       | `c02367b`                                                                                                        |                                                                                                                                                                                                                                               |
 | 修改设置                 | `cove config set workspaceRoot <DIR> [--expected-revision N] [--operation-id ID]`       | `c02367b`                                                                                                        | 只影响之后新建的 workspace                                                                                                                                                                                                                    |
 | 重置设置                 | `cove config reset workspaceRoot [--expected-revision N] [--operation-id ID]`           | `c02367b`                                                                                                        | 同上                                                                                                                                                                                                                                          |
 | 终端 run（不属于 tab）   | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                                                                                        | M0 路径；tab 尚未提供（见 §3）                                                                                                                                                                                                                |
 | 查看与停止 run           | `cove terminal list`、`terminal get <runId>`、`terminal stop <runId>`                   | `8b06fe4`                                                                                                        |                                                                                                                                                                                                                                               |
 | 操作身份                 | 写命令接受 `--operation-id ID`；`cove operation get <id>`、`cove operation resend <id>` | `c02367b`（重发只发保存的请求：`2d89043`）                                                                       | 首次发送前把请求保存为本机待定记录；`resend` 只向原 server 原样重发，已有记录时返回原记录、不重复执行                                                                                                                                         |
+| Repo 注册                | `cove repo register/list/get/set/reset/remove`                                          | `200e24d`（T2）                                                                                                  | 注册不改动 clone；`remove` 只删除注册                                                                                                                                                                                                         |
 | 重启后的 run 与操作记录  | server 停止与启动时处理，无单独命令                                                     | `d99ef5d`（存储原语：`299514d`）                                                                                 | 正常停止时当前实例存活的 run 记为 stopped-with-server；启动时，旧实例中仍为 starting/running（没有结束记录）的 run 记为 interrupted/unverifiable，已有的结束记录不变；不探测旧 PID、不重跑。无法证明结果的操作为 requires_attention           |
 | 输出                     | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                                                                                        | 尚无版本号与稳定性承诺（见 §6）                                                                                                                                                                                                               |
 | 退出码与错误             | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                                                                                        | CLI 自身的错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出                                                                                                                                                                               |
 | 子 server 进程的退出状态 | `cove server start`、`cove server init`                                                 | `0a76f8c`（start 保留退出状态，信号为 128+N）、`2d3628a`（就绪前退出时同样保留）、`c02367b`（init 使用同一映射） | 原样转发子 server 进程的 stderr，并以其退出状态结束；`8b06fe4` 时信号结束的 server 仍返回 1                                                                                                                                                   |
 
-## 3. 计划中（PLANNED）
+## 3. 进行中（PENDING）与计划中（PLANNED）
+
+PENDING：PR #109（T3a：task、workspace 与 checkout 挂载），未合入：
+
+- `cove repo remove` 在仍有任一 task（含已归档）的挂载引用该 repo 时返回 `REPO_IN_USE`，先 `cove mount remove`。
+- `cove task create <标题> [--checkout SPEC]... [--worktree SPEC]...`、`task list [--archived exclude/include/only]`、
+  `task get`、`task rename`、`task archive`、`task unarchive`。每个 task 一个入口目录
+  `<workspaceRoot>/<slug>-<短 ID>`（0700），内有挂载清单 `cove-workspace.json`（0600；每个挂载的名称、真实路径、
+  来源、`readOnly`、状态）；checkout 不建链接，经清单中的真实路径访问。归档只改可见性。入口路径已被占用或
+  workspace 根目录无法创建时 `task create` 返回 `WORKSPACE_ENTRY_UNAVAILABLE`，不记录任何内容。
+- `cove mount add <taskId> (--checkout SPEC | --worktree SPEC)`、`cove mount remove <taskId> <mountId>`，
+  `--expected-revision` 为 workspace revision。checkout SPEC：`REPO_ID[,name=N][,path=P]`（`path=` 在最后）；
+  Cove 托管的 worktree 不能作为 checkout（`MANAGED_WORKTREE_NOT_MOUNTABLE`）。移除挂载从不删除目录，
+  已归档 task 也允许。`--worktree` 在 T3b 之前以 `CAPABILITY_UNAVAILABLE` 拒绝且不记录任何内容
+  （`task create` 中的其他挂载也不创建）。会使 task 记录无法放进一次读取响应的 `task create` 或 `mount add`
+  （例如很多真实路径极长的挂载）以 `INVALID_ARGUMENT` 拒绝且不记录。server 的文件系统工作已满（被放弃且
+  尚未结束的检查占满上限）时，`task create` 与 `mount add` 以 `BUSY` 拒绝（未接受、不记录，稍后以同一请求
+  重试）。`task list` 由 CLI 取完所有页后输出。
+- JSON 输出（`task get`、`task list`、`task create`、`mount add`、`mount remove`）：task 记录含
+  `workspace.entryState`（ready、pending、missing，或入口路径上有 Cove 不拥有的东西、路径已改变时为
+  unavailable；属于记录中返回的 workspace revision）与每个挂载的 `state`：checkout 在每次读取时核对，目录
+  不在或已不是被准入的 checkout（其他 clone、普通目录、符号链接、托管 worktree、`.git` 已不在）时为 missing，
+  无法核对（Git 未应答或超时、无权限、`.git` 在但 Git 拒绝读取，如 safe.directory）时为 unavailable，从不丢弃。
+  读取在约 3 秒内返回，届时未完成的核对为 unavailable。`sharedWithTaskIds` 含已归档 task，直到其挂载移除。CLI 为每个挂载加
+  `readOnlyUse`，有 checkout 时加 `notice`。`task create`、`mount add/remove` 输出 `{ operation, task }`，
+  操作未成功时仍输出并以 1 退出。
+
+PLANNED：
 
 M1（已批准，实施中，见 [M1](../milestones/m1.md)）：
 
-- `repo` 注册；`task`/`workspace` 与 checkout、托管 worktree 挂载；逐仓准备结果。
+- 托管 worktree 挂载（创建前 fetch、主分支解析、`--no-fetch`、`--base`）、逐仓准备结果与 `mount retry`。
 - `tab create/stop/reopen/close` 与 run 历史；`tab create` 保存启动配方（可执行文件与参数），默认 cwd 为 workspace 入口目录。
   注入 `COVE_TASK_ID` 等少量 Cove 标识，不保存其他环境变量。
 - 重启后 run 显示为会话中断的 CLI 读取路径；`operation continue/abandon`。
@@ -83,9 +111,11 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
 ## 7. 变更记录
 
-| 日期       | Cove 提交                 | 对 tend 的变化                                                                                                  |
-| ---------- | ------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 2026-10-16 | main `399c20b` 时建立本文 | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                           |
-| 2026-10-16 | main `399c20b`            | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出 |
-| 2026-10-16 | main `399c20b`            | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                      |
-| 2026-10-16 | PR #105（未合入）         | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示）；合入后补提交号                                 |
+| 日期       | Cove 提交                           | 对 tend 的变化                                                                                                                                                                                                                                                    |
+| ---------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-16 | main `399c20b` 时建立本文           | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                                                                                                                                                                             |
+| 2026-10-16 | main `399c20b`                      | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出                                                                                                                                                   |
+| 2026-10-16 | main `399c20b`                      | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                                                                                                                                                                        |
+| 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                             |
+| 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE` |
+| 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                  |
