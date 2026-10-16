@@ -144,8 +144,14 @@ export async function inspectRepository(
   return { kind: "clone", topLevel: confirmed.topLevel, commonDir: confirmed.commonDir };
 }
 
-// HEAD of a working tree: the checked-out branch (null when detached) and its commit (null on an
-// unborn branch, such as a fresh `git init`). Consumers: checkout mounts and binding conversion.
+// HEAD of a working tree: the checked-out branch (null when detached) and the commit HEAD names
+// (null on an unborn branch, such as a fresh `git init`). Consumers: checkout mounts and binding
+// conversion.
+//
+// Only refs are read, never objects: `rev-parse --verify HEAD` resolves the ref to an object ID
+// without opening the object, so a commit missing from a partial clone is reported as named, not
+// fetched. Peeling (`HEAD^{commit}`) would open the object and, in a partial clone, fetch it from
+// the promisor remote before Git 2.45's GIT_NO_LAZY_FETCH (set by run.ts) could prevent it.
 export type HeadState =
   | { kind: "head"; branch: string | null; commit: string | null }
   | { kind: "not-repository" }
@@ -161,7 +167,7 @@ function exitedWith(
 export async function readHead(workTree: string): Promise<HeadState> {
   const [symbolic, commit] = await Promise.all([
     runGit(["symbolic-ref", "--quiet", "HEAD"], { cwd: workTree }),
-    runGit(["rev-parse", "--quiet", "--verify", "HEAD^{commit}"], { cwd: workTree }),
+    runGit(["rev-parse", "--quiet", "--verify", "HEAD"], { cwd: workTree }),
   ]);
   if (symbolic.kind === "failed" || commit.kind === "failed") return { kind: "unavailable" };
   // symbolic-ref exits 1 for a detached HEAD and 128 outside a repository; rev-parse --verify
