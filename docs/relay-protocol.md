@@ -219,6 +219,11 @@ Reset 不删除 task、workspace、仓库目录或 rollout。旧 session 保留�
   覆盖其后发出的命令。确认仍可能因失联、连接关闭或取值被拒而失败。同一订阅同类的第二条未结算命令以 BUSY
   （not-accepted）拒绝，不结束该订阅；遵守协议的客户端不会收到。客户端在确认的任何失败后结束该订阅；
   取值被拒（如 RESYNC_REQUIRED）时 server 不一定退役路由（#96，细节见 [终端架构](terminal-architecture.md) 3.3 节）。
+- worker 忙不是失联（#103）。server 只在 worker 退出、pipe 失败、协议违规或连续 15 s 收不到 worker 的任何帧（含心跳）时
+  判定失联并结束其上全部订阅；worker 慢时订阅保持，输出按确认流控变慢。单条命令超过期限只结束这一条：一半期限内未得到标记的 attach/recover
+  得到 RECOVERY_EXPIRED（not-accepted，早于客户端自己的期限，因此不必退役整个连接），已发出的输入等命令得到 RESULT_UNKNOWN
+  （不重放），尚未发出的得到 BUSY。确认与 detach 在 worker 存活期间
+  没有期限。细节见 [终端架构](terminal-architecture.md) 3.3 节“worker 存活与命令期限”。
 - 预览（preview）事件不带请求 ID，只靠 previewId 与请求关联：`preview-result` 在 `status` 为 `transfer` 时必须携带它完成的
   `previewId`，为 `unchanged` 时不得携带。客户端只在结果与实际收到的传输 ID 精确匹配时完成预览；同一请求出现第二个或不匹配的
   传输、或结果 ID 不符时按无效应答结束该预览，不能把迟到的旧传输归到同一 run 的新请求上。
