@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { OperationReceiptKey } from "@cove/protocol/rpc";
 import type { Store } from "./database.js";
+import type { ProcessRow } from "./sql/processes.js";
 
 // Durable attribution of subprocesses an operation started (migration 001, operation_processes).
 // T3b runs each Git command in a process group of its own and records it here before waiting for
@@ -151,20 +152,7 @@ function exists(pid: number): boolean | null {
   }
 }
 
-type Row = {
-  process_id: string;
-  operation_server_id: string;
-  operation_principal_id: string;
-  operation_id: string;
-  pid: number;
-  pgid: number;
-  start_identity: string;
-  started_by_instance_id: string;
-  started_at_ms: number;
-  ended_at_ms: number | null;
-};
-
-function toRecord(row: Row): ProcessRecord {
+function toRecord(row: ProcessRow): ProcessRecord {
   return {
     processId: row.process_id,
     operation: {
@@ -181,59 +169,38 @@ function toRecord(row: Row): ProcessRecord {
   };
 }
 
+// The SQL is in store/sql/processes.ts.
 export class ProcessLedger {
-  private readonly statements;
   constructor(
     private readonly store: Store,
     private readonly relayInstanceId: string,
     private readonly now: () => number = Date.now,
-  ) {
-    const db = store.db;
-    this.statements = {
-      insert: db.prepare(
-        `INSERT INTO operation_processes (process_id, operation_server_id, operation_principal_id,
-           operation_id, pid, pgid, start_identity, started_by_instance_id, started_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ),
-      open: db.prepare(
-        `SELECT * FROM operation_processes
-         WHERE operation_server_id = ? AND operation_principal_id = ? AND operation_id = ?
-           AND ended_at_ms IS NULL
-         ORDER BY started_at_ms, process_id`,
-      ),
-      ended: db.prepare(
-        `UPDATE operation_processes SET ended_at_ms = ? WHERE process_id = ? AND ended_at_ms IS NULL`,
-      ),
-    };
-  }
+  ) {}
 
   // Records a started process before the caller waits for it. The caller reads startIdentity
   // (processStartIdentity) right after spawning, while it holds the child, so the PID cannot have
   // been reused yet; a process whose identity cannot be read must not be started for an operation
-  // that a restart has to reason about.
-  record(
+  // that a restart has to reason about. The record is durable when the returned promise resolves;
+  // the caller must not wait for the process before that.
+  async record(
     operation: OperationReceiptKey,
     process: { pid: number; pgid: number; startIdentity: string },
-  ): ProcessRecord {
+  ): Promise<ProcessRecord> {
     // A record must be comparable after a restart; an identity this build cannot parse would leave
     // the operation unverifiable until both the PID and the group are gone.
     if (parseStartIdentity(process.startIdentity) === null)
       throw new Error("The process start identity is not in the current format");
     const processId = randomUUID();
     const at = this.now();
-    this.store.transaction(() =>
-      this.statements.insert.run(
-        processId,
-        operation.serverId,
-        operation.principalId,
-        operation.operationId,
-        process.pid,
-        process.pgid,
-        process.startIdentity,
-        this.relayInstanceId,
-        at,
-      ),
-    );
+    await this.store.call("processes.record", {
+      processId,
+      operation: { ...operation },
+      pid: process.pid,
+      pgid: process.pgid,
+      startIdentity: process.startIdentity,
+      relayInstanceId: this.relayInstanceId,
+      at,
+    });
     return {
       processId,
       operation: { ...operation },
@@ -245,18 +212,12 @@ export class ProcessLedger {
   }
 
   // Processes of the operation not yet observed to have ended.
-  open(operation: OperationReceiptKey): ProcessRecord[] {
-    return (
-      this.statements.open.all(
-        operation.serverId,
-        operation.principalId,
-        operation.operationId,
-      ) as Row[]
-    ).map(toRecord);
+  async open(operation: OperationReceiptKey): Promise<ProcessRecord[]> {
+    return (await this.store.call("processes.open", { operation: { ...operation } })).map(toRecord);
   }
 
-  markEnded(processId: string): void {
-    this.store.transaction(() => this.statements.ended.run(this.now(), processId));
+  markEnded(processId: string): Promise<void> {
+    return this.store.call("processes.markEnded", { processId, at: this.now() });
   }
 
   // Whether a recorded process may still run. Its process group is checked as well: a Git wrapper
@@ -298,9 +259,9 @@ export class ProcessLedger {
   // alive or unverifiable when any process may still run.
   async check(operation: OperationReceiptKey): Promise<ProcessLiveness> {
     let overall: ProcessLiveness = "ended";
-    for (const record of this.open(operation)) {
+    for (const record of await this.open(operation)) {
       const state = await ProcessLedger.liveness(record);
-      if (state === "ended") this.markEnded(record.processId);
+      if (state === "ended") await this.markEnded(record.processId);
       else if (state === "alive" || overall === "ended") overall = state;
     }
     return overall;

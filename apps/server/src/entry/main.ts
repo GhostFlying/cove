@@ -232,7 +232,7 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
   const store = persistence.store;
   try {
     const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
-    recordInstanceStart(store, identity.relayInstanceId, Date.now());
+    await recordInstanceStart(store, identity.relayInstanceId, Date.now());
     const local = createLocalApplication(options, {
       identity,
       persistence: {
@@ -253,7 +253,7 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
           now: Date.now,
         }),
       );
-      local.runs?.interruptEarlier(identity.relayInstanceId);
+      await local.runs?.interruptEarlier(identity.relayInstanceId);
       await replaceStaleRendezvous(persistence.layout, options.rendezvousPath, {
         store,
         serverId: identity.serverId,
@@ -266,7 +266,7 @@ async function openLocalApplication(input: M0LocalOptions, probe?: D6Probe) {
     probe?.start(store);
     return { local, store };
   } catch (error) {
-    store.close();
+    await store.close().catch(() => undefined);
     if (error instanceof RendezvousConflictError)
       throw new LocalEntryStartupError("rendezvous", "verified", error.message);
     throw new LocalEntryStartupError("store", "verified", "The Cove data directory is unusable");
@@ -314,12 +314,16 @@ export async function startLocalEntry(
         // lock after the rendezvous is gone.
         if (store) {
           try {
-            local.runs?.stoppedWithServer(instance, receipt?.status === "exited");
-            recordInstanceStop(store, instance, Date.now());
+            await local.runs?.stoppedWithServer(instance, receipt?.status === "exited");
+            await recordInstanceStop(store, instance, Date.now());
           } catch {
             failed = true;
           }
-          store.close();
+          try {
+            await store.close();
+          } catch {
+            failed = true;
+          }
         }
       }
       if (failed || receipt?.status !== "exited")
@@ -364,7 +368,7 @@ export async function startLocalEntry(
     await rendezvous.publish({ bootstrapVersion: 1, ...local.identity, endpoint });
     interrupted();
     // D9: the live runs an orderly stop would end, read from the store.
-    const liveRuns = () => (store?.isOpen ? (local.runs?.live(instance) ?? []) : []);
+    const liveRuns = async () => (store?.isOpen ? ((await local.runs?.live(instance)) ?? []) : []);
     return { endpoint, close, liveRuns };
   } catch (error) {
     let cleanup: "verified" | "unverifiable" = "verified";
@@ -416,8 +420,8 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
         "The Cove data directory is already initialized; change workspaceRoot with `cove config set`",
       );
     if (workspaceRoot !== undefined)
-      initializeWorkspaceRoot(persistence.store, workspaceRoot, Date.now());
-    const config = sqliteConfigState(persistence.store).read();
+      await initializeWorkspaceRoot(persistence.store, workspaceRoot, Date.now());
+    const config = await sqliteConfigState(persistence.store).read();
     process.stdout.write(
       `${JSON.stringify({
         home: persistence.layout.home,
@@ -428,7 +432,7 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
       })}\n`,
     );
   } finally {
-    persistence.store.close();
+    await persistence.store.close();
   }
 }
 
@@ -460,14 +464,17 @@ export function runServerProcess(argv: readonly string[], probe?: D6Probe): void
         controller.abort();
         if (!server) return;
         // D9: name the live runs this stop ends before ending them.
-        try {
-          process.stderr.write(
-            `${JSON.stringify({ event: "stopping", liveRuns: server.liveRuns() })}\n`,
-          );
-        } catch {
-          process.stderr.write("cove-server: the live run list is unavailable\n");
-        }
-        void close().catch(() => {
+        const running = server;
+        void (async () => {
+          try {
+            process.stderr.write(
+              `${JSON.stringify({ event: "stopping", liveRuns: await running.liveRuns() })}\n`,
+            );
+          } catch {
+            process.stderr.write("cove-server: the live run list is unavailable\n");
+          }
+          await close();
+        })().catch(() => {
           process.exitCode = 1;
           process.stderr.write("m0-local cleanup unverifiable\n");
         });

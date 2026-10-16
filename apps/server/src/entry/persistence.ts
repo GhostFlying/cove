@@ -19,7 +19,8 @@ export type ServerPersistence = {
 
 // Opens the data directory for one server process (D5, D7). The database lock is taken before
 // anything else is touched, so a refused second server leaves the running one, its rendezvous and
-// its files alone. The caller owns `store` and must close it last.
+// its files alone. The caller owns `store` and must close it last (Store.close releases the lock
+// after the database is closed).
 export async function openPersistence(
   home: string,
   now: () => number = Date.now,
@@ -31,7 +32,7 @@ export async function openPersistence(
     now,
   });
   try {
-    const identity = loadOrCreateIdentity(store, now);
+    const identity = await loadOrCreateIdentity(store, now);
     return {
       layout,
       store,
@@ -39,7 +40,7 @@ export async function openPersistence(
       created: identity.created,
     };
   } catch {
-    store.close();
+    await store.close().catch(() => undefined);
     throw new StoreError("unavailable", "The Cove server identity cannot be read");
   }
 }
@@ -95,7 +96,7 @@ export async function replaceStaleRendezvous(
     !record?.success ||
     record.data.serverId !== owner.serverId ||
     record.data.relayInstanceId === owner.relayInstanceId ||
-    !isRecordedInstance(owner.store, record.data.relayInstanceId)
+    !(await isRecordedInstance(owner.store, record.data.relayInstanceId))
   )
     throw new RendezvousConflictError();
   // Remove exactly the file that was read: a publisher only links a new file to a free path, so

@@ -17,8 +17,9 @@ export type LocalCore = {
   // store (unit tests) uses the M0 constant.
   principalId?: string;
   // The server database (M1 T1). Domain modules run their queries and writes through it, one
-  // complete business operation per Store.transaction (D6). Absent in store-less unit tests, where
-  // every domain write reports CAPABILITY_UNAVAILABLE.
+  // complete business operation per Store.call (D6; registered in store/sql/registry.ts and, for
+  // receipt-checked writes, store/sql/writes.ts). Absent in store-less unit tests, where every
+  // domain write reports CAPABILITY_UNAVAILABLE.
   store?: Store;
   // Operation receipts shared by every write of this server (durable when `store` is present).
   receipts?: OperationReceipts;

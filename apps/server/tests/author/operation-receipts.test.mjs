@@ -29,6 +29,10 @@ const create = (operationId = "create") => ({
   cwd: "/synthetic-owned",
   geometry: { cols: 80, rows: 24 },
 });
+// Lets every pending promise continuation run: operations now await the receipts (asynchronous
+// like the store) before they send a command to the worker.
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+
 function fixture(changes = {}) {
   const budgets = { ...M0_LIMITS, ...changes };
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
@@ -122,10 +126,10 @@ function fixture(changes = {}) {
 
 // A receipt committed by an earlier instance of the same server. T0 keeps receipts in memory,
 // so the historical record is installed through the store API exactly as T1 will load it.
-function seedHistorical(f, method, params, oldRun) {
+async function seedHistorical(f, method, params, oldRun) {
   const key = { serverId: "server", principalId: "principal", operationId: params.operationId };
   const intent = canonicalOperationIntent(method, params, codec.encode);
-  const preparation = f.receipts.prepare(key, intent);
+  const preparation = await f.receipts.prepare(key, intent);
   const record = {
     operationId: params.operationId,
     method,
@@ -133,9 +137,14 @@ function seedHistorical(f, method, params, oldRun) {
     state: "accepted",
     run: oldRun,
   };
-  expect(preparation.commit(record)).toBe(true);
+  expect(await preparation.commit(record)).toBe(true);
   expect(
-    f.receipts.update(key, { ...record, revision: 1, state: "succeeded", result: { run: oldRun } }),
+    await f.receipts.update(key, {
+      ...record,
+      revision: 1,
+      state: "succeeded",
+      result: { run: oldRun },
+    }),
   ).toBe(true);
   return f.receipts.get(key);
 }
@@ -148,7 +157,7 @@ const oldCreate = (operationId = "create") => ({
 describe("durable operation receipts", () => {
   it("returns the original old-instance record for a same-intent resend without executing", async () => {
     const f = fixture();
-    const stored = seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    const stored = await seedHistorical(f, "terminal.create", oldCreate(), oldRun);
     const before = f.bytes.snapshot();
     const resent = await f.operations.create("principal", oldCreate());
     expect(resent).toEqual({ operation: stored });
@@ -157,13 +166,13 @@ describe("durable operation receipts", () => {
     expect(f.registry.count).toBe(0);
     expect(f.receipts.count).toBe(1);
     expect(f.bytes.snapshot()).toEqual(before);
-    expect(f.operations.get("principal", "create")).toEqual({ operation: stored });
+    expect(await f.operations.get("principal", "create")).toEqual({ operation: stored });
     f.close();
   });
 
   it("conflicts on a changed intent before the stale-instance check", async () => {
     const f = fixture();
-    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    await seedHistorical(f, "terminal.create", oldCreate(), oldRun);
     // Same old-instance precondition, different command.
     const changed = await f.operations.create("principal", { ...oldCreate(), argv: ["other"] });
     expect(changed.error.kind).toBe("OPERATION_ID_CONFLICT");
@@ -178,7 +187,7 @@ describe("durable operation receipts", () => {
 
   it("rejects a new old-instance request that has no receipt", async () => {
     const f = fixture();
-    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    await seedHistorical(f, "terminal.create", oldCreate(), oldRun);
     const before = f.bytes.snapshot();
     const stale = await f.operations.create("principal", oldCreate("fresh"));
     expect(stale.error.kind).toBe("INSTANCE_MISMATCH");
@@ -197,7 +206,7 @@ describe("durable operation receipts", () => {
   it("returns an old-instance stop record and conflicts on a changed target", async () => {
     const f = fixture();
     const stop = { operationId: "stop", expectedRelayInstanceId: "old", run: oldRun };
-    const stored = seedHistorical(f, "terminal.stop", stop, oldRun);
+    const stored = await seedHistorical(f, "terminal.stop", stop, oldRun);
     expect(await f.operations.stop("principal", stop)).toEqual({ operation: stored });
     const other = { ...oldRun, runId: "run-other" };
     expect((await f.operations.stop("principal", { ...stop, run: other })).error.kind).toBe(
@@ -209,19 +218,21 @@ describe("durable operation receipts", () => {
 
   it("keys receipts by server, principal and operation ID without the instance", async () => {
     const f = fixture();
-    seedHistorical(f, "terminal.create", oldCreate(), oldRun);
+    await seedHistorical(f, "terminal.create", oldCreate(), oldRun);
     // Another principal's operation with the same ID is unrelated new work.
     const other = f.operations.create("other-principal", oldCreate());
     expect((await other).error.kind).toBe("INSTANCE_MISMATCH");
-    expect(f.operations.get("other-principal", "create").error.kind).toBe("OPERATION_NOT_FOUND");
+    expect((await f.operations.get("other-principal", "create")).error.kind).toBe(
+      "OPERATION_NOT_FOUND",
+    );
     const foreign = { serverId: "foreign", principalId: "principal", operationId: "create" };
-    expect(f.receipts.get(foreign)).toBeNull();
-    expect(f.receipts.lookup(foreign, "intent").kind).toBe("invalid");
+    expect(await f.receipts.get(foreign)).toBeNull();
+    expect((await f.receipts.lookup(foreign, "intent")).kind).toBe("invalid");
     // A record may reference an earlier instance but never another server.
     const key = { serverId: "server", principalId: "principal", operationId: "foreign-run" };
-    const preparation = f.receipts.prepare(key, "intent");
+    const preparation = await f.receipts.prepare(key, "intent");
     expect(
-      preparation.commit({
+      await preparation.commit({
         operationId: "foreign-run",
         method: "terminal.create",
         revision: 0,
@@ -235,7 +246,7 @@ describe("durable operation receipts", () => {
 });
 
 describe("terminal operation states", () => {
-  it("rejects every update after a terminal state, cancelled included", () => {
+  it("rejects every update after a terminal state, cancelled included", async () => {
     const f = fixture();
     for (const state of ["succeeded", "failed", "cancelled", "requires_attention"]) {
       const key = { serverId: "server", principalId: "principal", operationId: `op-${state}` };
@@ -246,18 +257,18 @@ describe("terminal operation states", () => {
         state: "accepted",
         run: oldRun,
       };
-      expect(f.receipts.prepare(key, `intent-${state}`).commit(record)).toBe(true);
-      expect(f.receipts.update(key, { ...record, revision: 1, state })).toBe(true);
+      expect(await (await f.receipts.prepare(key, `intent-${state}`)).commit(record)).toBe(true);
+      expect(await f.receipts.update(key, { ...record, revision: 1, state })).toBe(true);
       for (const next of ["running", "succeeded", "failed", "cancelled"])
-        expect(f.receipts.update(key, { ...record, revision: 2, state: next })).toBe(false);
-      expect(f.receipts.get(key)).toMatchObject({ revision: 1, state });
+        expect(await f.receipts.update(key, { ...record, revision: 2, state: next })).toBe(false);
+      expect(await f.receipts.get(key)).toMatchObject({ revision: 1, state });
     }
     f.close();
   });
 });
 
 describe("explicit recovery of requires_attention", () => {
-  function attention(f, operationId) {
+  async function attention(f, operationId) {
     const key = { serverId: "server", principalId: "principal", operationId };
     const record = {
       operationId,
@@ -266,61 +277,83 @@ describe("explicit recovery of requires_attention", () => {
       state: "accepted",
       run: oldRun,
     };
-    expect(f.receipts.prepare(key, `intent-${operationId}`).commit(record)).toBe(true);
-    expect(f.receipts.update(key, { ...record, revision: 1, state: "requires_attention" })).toBe(
+    expect(await (await f.receipts.prepare(key, `intent-${operationId}`)).commit(record)).toBe(
       true,
     );
-    return { key, record: f.receipts.get(key) };
+    expect(
+      await f.receipts.update(key, { ...record, revision: 1, state: "requires_attention" }),
+    ).toBe(true);
+    return { key, record: await f.receipts.get(key) };
   }
 
-  it("continues to running or recovering and then finishes through ordinary updates", () => {
+  it("continues to running or recovering and then finishes through ordinary updates", async () => {
     const f = fixture();
     for (const resumed of ["running", "recovering"]) {
-      const { key, record } = attention(f, `continue-${resumed}`);
+      const { key, record } = await attention(f, `continue-${resumed}`);
       // A late executor result is still refused; only the explicit transition resumes.
-      expect(f.receipts.update(key, { ...record, revision: 2, state: "succeeded" })).toBe(false);
-      expect(f.receipts.recover(key, 1, { ...record, revision: 2, state: resumed })).toBe(true);
-      expect(f.receipts.update(key, { ...record, revision: 3, state: "succeeded" })).toBe(true);
-      expect(f.receipts.update(key, { ...record, revision: 4, state: "running" })).toBe(false);
-      expect(f.receipts.get(key)).toMatchObject({ revision: 3, state: "succeeded" });
+      expect(await f.receipts.update(key, { ...record, revision: 2, state: "succeeded" })).toBe(
+        false,
+      );
+      expect(await f.receipts.recover(key, 1, { ...record, revision: 2, state: resumed })).toBe(
+        true,
+      );
+      expect(await f.receipts.update(key, { ...record, revision: 3, state: "succeeded" })).toBe(
+        true,
+      );
+      expect(await f.receipts.update(key, { ...record, revision: 4, state: "running" })).toBe(
+        false,
+      );
+      expect(await f.receipts.get(key)).toMatchObject({ revision: 3, state: "succeeded" });
     }
     f.close();
   });
 
-  it("abandons to cancelled, which never changes again", () => {
+  it("abandons to cancelled, which never changes again", async () => {
     const f = fixture();
-    const { key, record } = attention(f, "abandon");
-    expect(f.receipts.recover(key, 1, { ...record, revision: 2, state: "cancelled" })).toBe(true);
-    expect(f.receipts.update(key, { ...record, revision: 3, state: "running" })).toBe(false);
-    expect(f.receipts.recover(key, 2, { ...record, revision: 3, state: "running" })).toBe(false);
-    expect(f.receipts.get(key)).toMatchObject({ revision: 2, state: "cancelled" });
+    const { key, record } = await attention(f, "abandon");
+    expect(await f.receipts.recover(key, 1, { ...record, revision: 2, state: "cancelled" })).toBe(
+      true,
+    );
+    expect(await f.receipts.update(key, { ...record, revision: 3, state: "running" })).toBe(false);
+    expect(await f.receipts.recover(key, 2, { ...record, revision: 3, state: "running" })).toBe(
+      false,
+    );
+    expect(await f.receipts.get(key)).toMatchObject({ revision: 2, state: "cancelled" });
     f.close();
   });
 
-  it("refuses stale, out-of-order or non-recovery transitions", () => {
+  it("refuses stale, out-of-order or non-recovery transitions", async () => {
     const f = fixture();
-    const { key, record } = attention(f, "guarded");
+    const { key, record } = await attention(f, "guarded");
     // Stale inspected revision, skipped revision, and a state recovery cannot jump to.
-    expect(f.receipts.recover(key, 0, { ...record, revision: 2, state: "running" })).toBe(false);
-    expect(f.receipts.recover(key, 1, { ...record, revision: 3, state: "running" })).toBe(false);
+    expect(await f.receipts.recover(key, 0, { ...record, revision: 2, state: "running" })).toBe(
+      false,
+    );
+    expect(await f.receipts.recover(key, 1, { ...record, revision: 3, state: "running" })).toBe(
+      false,
+    );
     for (const state of ["succeeded", "failed", "accepted", "requires_attention"])
-      expect(f.receipts.recover(key, 1, { ...record, revision: 2, state })).toBe(false);
+      expect(await f.receipts.recover(key, 1, { ...record, revision: 2, state })).toBe(false);
     expect(
-      f.receipts.recover(key, 1, {
+      await f.receipts.recover(key, 1, {
         ...record,
         revision: 2,
         state: "running",
         method: "terminal.stop",
       }),
     ).toBe(false);
-    expect(f.receipts.get(key)).toMatchObject({ revision: 1, state: "requires_attention" });
+    expect(await f.receipts.get(key)).toMatchObject({ revision: 1, state: "requires_attention" });
     // Records that are not waiting for attention cannot be recovered.
     for (const state of ["running", "succeeded", "failed", "cancelled"]) {
       const other = { serverId: "server", principalId: "principal", operationId: `not-${state}` };
       const base = { ...record, operationId: other.operationId, revision: 0, state: "accepted" };
-      expect(f.receipts.prepare(other, `intent-not-${state}`).commit(base)).toBe(true);
-      expect(f.receipts.update(other, { ...base, revision: 1, state })).toBe(true);
-      expect(f.receipts.recover(other, 1, { ...base, revision: 2, state: "running" })).toBe(false);
+      expect(await (await f.receipts.prepare(other, `intent-not-${state}`)).commit(base)).toBe(
+        true,
+      );
+      expect(await f.receipts.update(other, { ...base, revision: 1, state })).toBe(true);
+      expect(await f.receipts.recover(other, 1, { ...base, revision: 2, state: "running" })).toBe(
+        false,
+      );
     }
     f.close();
   });
@@ -416,6 +449,7 @@ describe("instance-bound operation receipts", () => {
   it("reserves before spawn and concurrent same intent starts only one run", async () => {
     const f = fixture();
     const first = f.operations.create("principal", create());
+    await settled();
     expect(f.commands).toHaveLength(1);
     const duplicate = await f.operations.create("principal", create());
     expect(duplicate.operation).toMatchObject({
@@ -437,6 +471,7 @@ describe("instance-bound operation receipts", () => {
   it("preserves unknown after response loss and never respawns a duplicate", async () => {
     const f = fixture();
     const first = f.operations.create("principal", create());
+    await settled();
     f.session.loseContact();
     const result = await first;
     expect(result.operation).toMatchObject({
@@ -452,6 +487,7 @@ describe("instance-bound operation receipts", () => {
   it("conflicts on changed canonical intent without another side effect", async () => {
     const f = fixture();
     const held = f.operations.create("principal", create());
+    await settled();
     const conflict = await f.operations.create("principal", { ...create(), argv: ["different"] });
     expect(conflict.error.kind).toBe("OPERATION_ID_CONFLICT");
     expect(f.commands).toHaveLength(1);
@@ -478,9 +514,11 @@ describe("instance-bound operation receipts", () => {
   it("binds deduplication to principal as well as operation ID", async () => {
     const f = fixture();
     const first = f.operations.create("first", create());
+    await settled();
     f.reply(0);
     await first;
     const second = f.operations.create("second", create());
+    await settled();
     expect(f.commands).toHaveLength(2);
     expect(f.commands[0].run).not.toEqual(f.commands[1].run);
     f.reply(1);
@@ -492,6 +530,7 @@ describe("instance-bound operation receipts", () => {
   it("refuses receipt cap plus one and keeps completed deduplication proof", async () => {
     const f = fixture({ operationReceipts: 1 });
     const first = f.operations.create("principal", create());
+    await settled();
     f.reply();
     await first;
     const before = f.bytes.snapshot();
@@ -506,6 +545,7 @@ describe("instance-bound operation receipts", () => {
   it("cancels a prepared receipt when run capacity is unavailable", async () => {
     const f = fixture({ maxRuns: 1, listPage: 1 });
     const first = f.operations.create("principal", create());
+    await settled();
     f.reply();
     await first;
     const before = f.bytes.snapshot();
@@ -520,6 +560,7 @@ describe("instance-bound operation receipts", () => {
   it("does not turn accepted stop into exit or release pool capacity", async () => {
     const f = fixture();
     const started = f.operations.create("principal", create());
+    await settled();
     f.reply();
     const run = (await started).operation.run;
     const stopped = f.operations.stop("principal", {
@@ -527,6 +568,7 @@ describe("instance-bound operation receipts", () => {
       expectedRelayInstanceId: "instance",
       run,
     });
+    await settled();
     f.reply(1);
     const result = await stopped;
     expect(result.operation.state).toBe("running");
@@ -548,6 +590,7 @@ describe("instance-bound operation receipts", () => {
   it("finishes stop only after correlated exited run evidence without native capacity release", async () => {
     const f = fixture();
     const started = f.operations.create("principal", create());
+    await settled();
     f.reply();
     const run = (await started).operation.run;
     const stopped = f.operations.stop("principal", {
@@ -555,10 +598,12 @@ describe("instance-bound operation receipts", () => {
       expectedRelayInstanceId: "instance",
       run,
     });
+    await settled();
     f.reply(1);
     await stopped;
     const request = { type: "status", worker, run, requestId: "status-proof" };
     const checked = f.runtime.getStatus(request);
+    await settled();
     f.reply(2, {
       runStatus: {
         run,
@@ -574,7 +619,7 @@ describe("instance-bound operation receipts", () => {
       },
     });
     await checked;
-    expect(f.operations.get("principal", "stop").operation.state).toBe("succeeded");
+    expect((await f.operations.get("principal", "stop")).operation.state).toBe("succeeded");
     expect(f.runtime.pool.snapshot().runs).toBe(1);
     f.close();
   });
@@ -582,14 +627,15 @@ describe("instance-bound operation receipts", () => {
   it("returns detached records and prevents terminal revision rewrites", async () => {
     const f = fixture();
     const held = f.operations.create("principal", create());
+    await settled();
     f.reply();
     const result = await held;
     result.operation.run.runId = "mutated";
     const key = { serverId: "server", principalId: "principal", operationId: "create" };
-    const stored = f.receipts.get(key);
+    const stored = await f.receipts.get(key);
     expect(stored.run.runId).toBe("run-1");
     expect(
-      f.receipts.update(key, { ...stored, revision: stored.revision + 1, state: "running" }),
+      await f.receipts.update(key, { ...stored, revision: stored.revision + 1, state: "running" }),
     ).toBe(false);
     f.close();
   });

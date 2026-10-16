@@ -1,6 +1,5 @@
 import {
   classifyReceiptAdmission,
-  validateOperationRecord,
   OperationReceiptKeySchema,
   type OperationReceiptKey,
   type OperationRecord,
@@ -10,6 +9,12 @@ import {
 import { domainError } from "@cove/protocol/errors";
 import type { ByteReservation } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
+import {
+  checkedReceiptRecord,
+  type DatabaseWriteOutcome,
+  type DatabaseWriteRequest,
+  type ReceiptLimits,
+} from "./receipt-records.js";
 
 const TERMINAL_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
   "succeeded",
@@ -24,19 +29,26 @@ const RECOVERY_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
   "cancelled",
 ]);
 
-// Durable storage of committed receipts (M1 T1: apps/server/src/store/operations.ts). Every
-// method is synchronous and each write is atomic. `replace` is a compare-and-set on the stored
-// revision, so two writers can never both advance the same record.
+// Durable storage of committed receipts (apps/server/src/store/operations.ts). Every method is
+// asynchronous (the database runs in the store worker) and each write is atomic. `replace` is a
+// compare-and-set on the stored revision, so two writers can never both advance the same record,
+// whatever else runs between a read and the write. A rejected promise is a store failure
+// (store/store-errors.ts), never an answer: an unreadable receipt must not look absent.
 export interface DurableReceiptBackend {
-  get(key: OperationReceiptKey): StoredReceipt | null;
-  // Inserts a new receipt; false when the key already exists or the write failed.
-  insert(receipt: StoredReceipt): boolean;
+  get(key: OperationReceiptKey): Promise<StoredReceipt | null>;
+  // Inserts a new receipt; false when the key already exists.
+  insert(receipt: StoredReceipt): Promise<boolean>;
   // Replaces the record when the stored revision still equals expectedRevision.
-  replace(key: OperationReceiptKey, expectedRevision: number, record: OperationRecord): boolean;
+  replace(
+    key: OperationReceiptKey,
+    expectedRevision: number,
+    record: OperationRecord,
+  ): Promise<boolean>;
   // Receipts left accepted, running or recovering, oldest first.
-  unfinished(): StoredReceipt[];
-  // Runs fn atomically with the backend's writes (a database transaction).
-  atomic<T>(fn: () => T): T;
+  unfinished(): Promise<StoredReceipt[]>;
+  // One receipt-checked database write: receipt recheck, the named change and the receipt in a
+  // single transaction (store/sql/receipts.ts, receipts.write).
+  write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteOutcome>;
 }
 
 // Proves the outcome of an operation an earlier instance left unfinished. It receives the record
@@ -58,7 +70,11 @@ export type ReceiptLookup =
   | { kind: "existing"; record: OperationRecord }
   | { kind: "reserve" | "busy" | "conflict" | "invalid" };
 export interface ReceiptPreparation {
-  commit(record: OperationRecord): boolean;
+  // Commits the accepted record. False: refused (invalid, or the key exists), nothing written.
+  // Rejects with the store's error when the store failed; an uncertain failure
+  // (uncertainStoreOutcome) means the receipt may have been committed.
+  commit(record: OperationRecord): Promise<boolean>;
+  // Releases the reservation (also after a commit, where it does nothing).
   cancel(): void;
 }
 
@@ -70,6 +86,15 @@ export interface ReceiptPreparation {
 // in-memory composition). With a DurableReceiptBackend, committed receipts live in the database
 // and survive restarts; memory then holds only reservations that are not committed yet, and the
 // receipt limit bounds those in-flight reservations rather than the durable history.
+//
+// Every method is asynchronous. Between a read and a later write of the same method other calls
+// may run, so each write is guarded on its own: a reservation is re-checked synchronously right
+// before it is made (one in-flight reservation per key), and every replacement is a
+// compare-and-set on the revision that was read.
+//
+// Store failures: lookup reports an unreadable receipt as `invalid` (nothing is executed, the
+// caller refuses the request); get, update, recover and commit reject with the store's error, so a
+// caller can tell an uncertain outcome from a refusal.
 export class OperationReceipts {
   private readonly entries = new Map<string, Entry>();
   private readonly scratch: ByteReservation;
@@ -105,9 +130,9 @@ export class OperationReceipts {
     );
   }
 
-  // The committed receipt of a key, wherever it is kept. A backend failure throws: an unreadable
+  // The committed receipt of a key, wherever it is kept. A backend failure rejects: an unreadable
   // receipt must never look absent, or a resend would execute the operation again.
-  private committed(key: OperationReceiptKey): StoredReceipt | null {
+  private async committed(key: OperationReceiptKey): Promise<StoredReceipt | null> {
     if (this.durable) return this.durable.get(key);
     const entry = this.entries.get(this.id(key));
     return entry?.record
@@ -115,21 +140,23 @@ export class OperationReceipts {
       : null;
   }
 
-  lookup(key: OperationReceiptKey, canonicalIntent: string): ReceiptLookup {
+  async lookup(key: OperationReceiptKey, canonicalIntent: string): Promise<ReceiptLookup> {
     if (
       !this.valid(key) ||
       this.encodeUtf8(canonicalIntent).byteLength > this.budgets.canonicalIntentBytes
     )
       return { kind: "invalid" };
-    const entry = this.entries.get(this.id(key));
-    if (entry && !entry.record)
-      return { kind: entry.canonicalIntent === canonicalIntent ? "busy" : "conflict" };
+    const pending = this.pending(key, canonicalIntent);
+    if (pending) return { kind: pending };
     let existing: StoredReceipt | null;
     try {
-      existing = this.committed(key);
+      existing = await this.committed(key);
     } catch {
       return { kind: "invalid" };
     }
+    // A reservation for the key may have been made while the store answered.
+    const reserved = this.pending(key, canonicalIntent);
+    if (reserved && !existing) return { kind: reserved };
     const kind = classifyReceiptAdmission({
       key,
       canonicalIntent,
@@ -141,8 +168,26 @@ export class OperationReceipts {
     return kind === "existing" ? { kind, record: structuredClone(existing!.record) } : { kind };
   }
 
-  prepare(key: OperationReceiptKey, canonicalIntent: string): ReceiptPreparation | null {
-    if (this.lookup(key, canonicalIntent).kind !== "reserve") return null;
+  // An in-flight reservation of the key: busy for the same intent, conflict for another.
+  private pending(key: OperationReceiptKey, canonicalIntent: string): "busy" | "conflict" | null {
+    const entry = this.entries.get(this.id(key));
+    if (!entry || entry.record) return null;
+    return entry.canonicalIntent === canonicalIntent ? "busy" : "conflict";
+  }
+
+  async prepare(
+    key: OperationReceiptKey,
+    canonicalIntent: string,
+  ): Promise<ReceiptPreparation | null> {
+    if ((await this.lookup(key, canonicalIntent)).kind !== "reserve") return null;
+    // Re-checked after the lookup's await: another call may have reserved the key or the last
+    // free slot meanwhile.
+    if (
+      this.disposed ||
+      this.entries.has(this.id(key)) ||
+      this.entries.size >= this.budgets.operationReceipts
+    )
+      return null;
     const lease = this.bytes.reserve(
       6 * this.encodeUtf8(canonicalIntent).byteLength +
         6 * this.budgets.operationRecordBytes +
@@ -158,7 +203,7 @@ export class OperationReceipts {
     const id = this.id(key);
     this.entries.set(id, entry);
     return {
-      commit: (record) => {
+      commit: async (record) => {
         if (this.disposed || this.entries.get(id) !== entry || entry.record !== null) return false;
         const valid = this.validate(entry.key, record);
         if (!valid || valid.revision !== 0 || valid.state !== "accepted") return false;
@@ -166,17 +211,13 @@ export class OperationReceipts {
           entry.record = structuredClone(valid);
           return true;
         }
-        let inserted = false;
-        try {
-          inserted = this.durable.insert({
-            key: entry.key,
-            canonicalIntent: entry.canonicalIntent,
-            record: valid,
-          });
-        } catch {
-          inserted = false;
-        }
-        if (!inserted) return false;
+        // A store failure rejects; the reservation stays until the caller cancels it.
+        const inserted = await this.durable.insert({
+          key: entry.key,
+          canonicalIntent: entry.canonicalIntent,
+          record: valid,
+        });
+        if (!inserted || this.entries.get(id) !== entry) return false;
         // The database owns the receipt now; the reservation is no longer in flight.
         this.entries.delete(id);
         lease.release();
@@ -193,26 +234,23 @@ export class OperationReceipts {
   // Whether a new run may be bound to the current instance is the caller's execution
   // precondition; the store only requires that a referenced run belongs to this server.
   private validate(key: OperationReceiptKey, record: OperationRecord): OperationRecord | null {
-    const checked = validateOperationRecord(record, this.encodeUtf8);
-    if (
-      !checked ||
-      this.encodeUtf8(JSON.stringify(checked)).byteLength > this.budgets.operationRecordBytes ||
-      checked.operationId !== key.operationId ||
-      (checked.run !== undefined && checked.run.serverId !== this.composition.serverId)
-    )
-      return null;
-    return checked;
+    return checkedReceiptRecord(key, record, this.limits, this.encodeUtf8);
+  }
+
+  private get limits(): ReceiptLimits {
+    return {
+      serverId: this.composition.serverId,
+      operationRecordBytes: this.budgets.operationRecordBytes,
+    };
   }
 
   // The committed receipt when `next` is its successor: next revision, same method and run.
-  private successor(key: OperationReceiptKey, next: OperationRecord): StoredReceipt | null {
+  private async successor(
+    key: OperationReceiptKey,
+    next: OperationRecord,
+  ): Promise<StoredReceipt | null> {
     if (!this.valid(key)) return null;
-    let current: StoredReceipt | null;
-    try {
-      current = this.committed(key);
-    } catch {
-      return null;
-    }
+    const current = await this.committed(key);
     const record = current?.record;
     if (
       !record ||
@@ -227,26 +265,24 @@ export class OperationReceipts {
     return current;
   }
 
-  private replace(current: StoredReceipt, next: OperationRecord): boolean {
+  // A compare-and-set on the revision `current` was read at.
+  private async replace(current: StoredReceipt, next: OperationRecord): Promise<boolean> {
     const checked = this.validate(current.key, next);
-    if (!checked) return false;
+    if (!checked || this.disposed) return false;
     if (!this.durable) {
       const entry = this.entries.get(this.id(current.key));
-      if (!entry?.record) return false;
+      if (!entry?.record || entry.record.revision !== current.record.revision) return false;
       entry.record = structuredClone(checked);
       return true;
     }
-    try {
-      return this.durable.replace(current.key, current.record.revision, checked);
-    } catch {
-      return false;
-    }
+    return this.durable.replace(current.key, current.record.revision, checked);
   }
 
   // Ordinary progress of a live operation. Terminal states never change here, so a late executor
   // or verification result cannot replace succeeded, failed, cancelled or requires_attention.
-  update(key: OperationReceiptKey, next: OperationRecord): boolean {
-    const current = this.successor(key, next);
+  // False when refused; rejects on a store failure.
+  async update(key: OperationReceiptKey, next: OperationRecord): Promise<boolean> {
+    const current = await this.successor(key, next);
     if (!current || TERMINAL_STATES.has(current.record.state)) return false;
     return this.replace(current, next);
   }
@@ -256,8 +292,12 @@ export class OperationReceipts {
   // its normal terminal state; operation.abandon ends it as cancelled. The caller names the
   // revision it inspected, so a recovery decided on a stale view is refused. succeeded, failed
   // and cancelled never change.
-  recover(key: OperationReceiptKey, expectedRevision: number, next: OperationRecord): boolean {
-    const current = this.successor(key, next);
+  async recover(
+    key: OperationReceiptKey,
+    expectedRevision: number,
+    next: OperationRecord,
+  ): Promise<boolean> {
+    const current = await this.successor(key, next);
     if (
       !current ||
       current.record.state !== "requires_attention" ||
@@ -278,27 +318,22 @@ export class OperationReceipts {
   // `verifiers` come from operations/recovery-verifiers.ts; a method without one keeps the generic
   // outcome. The move to `recovering` is committed before the verifier runs, so a crash during
   // verification leaves the receipt `recovering` and the next start verifies it again; the
-  // verifier's outcome is committed in a second transaction. Startup is the only caller and runs
-  // before any request is served, so nothing else changes these receipts in between.
+  // verifier's outcome is committed afterwards. Every step is a compare-and-set on the revision
+  // just read. Startup is the only caller and runs before any request is served, so nothing else
+  // changes these receipts in between; a refused step is therefore corruption and fails startup.
   async recoverInterrupted(verifiers: ReceiptVerifiers = {}): Promise<OperationRecord[]> {
     const durable = this.durable;
     if (!durable || this.disposed) return [];
     const verified: OperationRecord[] = [];
-    for (const receipt of durable.unfinished()) {
+    for (const receipt of await durable.unfinished()) {
       const key = receipt.key;
-      const record = durable.atomic(() => {
-        const current = this.committed(key)?.record;
-        if (!current || TERMINAL_STATES.has(current.state)) return null;
-        if (current.state === "recovering") return current;
-        const recovering: OperationRecord = {
-          ...current,
-          revision: current.revision + 1,
-          state: "recovering",
-        };
-        if (!this.update(key, recovering)) throw new Error("Receipt verification refused");
-        return recovering;
-      });
-      if (!record) continue;
+      const current = (await this.committed(key))?.record;
+      if (!current || TERMINAL_STATES.has(current.state)) continue;
+      let record = current;
+      if (current.state !== "recovering") {
+        record = { ...current, revision: current.revision + 1, state: "recovering" };
+        if (!(await this.update(key, record))) throw new Error("Receipt verification refused");
+      }
       let proven: OperationRecord | null = null;
       try {
         proven = (await verifiers[record.method]?.(structuredClone(record))) ?? null;
@@ -306,30 +341,34 @@ export class OperationReceipts {
         proven = null;
       }
       if (this.disposed) break;
-      const outcome = durable.atomic(() => {
-        if (proven && this.update(key, proven)) return proven;
-        const attention: OperationRecord = {
+      let outcome: OperationRecord;
+      if (proven && (await this.update(key, proven))) outcome = proven;
+      else {
+        outcome = {
           ...record,
           revision: record.revision + 1,
           state: "requires_attention",
           error: domainError("RESULT_UNKNOWN", "unknown"),
         };
-        if (!this.update(key, attention)) throw new Error("Receipt verification refused");
-        return attention;
-      });
+        if (!(await this.update(key, outcome))) throw new Error("Receipt verification refused");
+      }
       verified.push(outcome);
     }
     return verified;
   }
 
-  get(key: OperationReceiptKey): OperationRecord | null {
+  // One receipt-checked database write (operations/database-operations.ts). Without a durable
+  // backend there is no database to write to. Rejects on a store failure.
+  async write(request: DatabaseWriteRequest): Promise<DatabaseWriteOutcome> {
+    if (!this.durable || !this.valid(request.key))
+      return { error: domainError("CAPABILITY_UNAVAILABLE") };
+    return this.durable.write(request, this.limits);
+  }
+
+  // Rejects on a store failure: an unreadable receipt is not an absent one.
+  async get(key: OperationReceiptKey): Promise<OperationRecord | null> {
     if (!this.valid(key)) return null;
-    let record: OperationRecord | undefined;
-    try {
-      record = this.committed(key)?.record;
-    } catch {
-      return null;
-    }
+    const record = (await this.committed(key))?.record;
     return record ? structuredClone(record) : null;
   }
   // Receipts held in memory: every receipt without a backend, in-flight reservations with one.
