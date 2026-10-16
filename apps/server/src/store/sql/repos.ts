@@ -146,10 +146,17 @@ export const repoWrites = {
     };
   },
 
-  // Deletes the registration row only; the result names the revision that was removed.
+  // Deletes the registration row only; the result names the revision that was removed. Refused
+  // while any mount references the repo, whether its task is active or archived (REPO_IN_USE):
+  // an archived task keeps its mounts, and unarchiving it must never find a mount whose
+  // registration is gone. Checked here, in the transaction that deletes the row, so a concurrent
+  // mount.add of the same repo either commits first (and this is refused) or finds the
+  // registration gone (REPO_NOT_FOUND).
   "repo.remove": (db: Connection, args: RepoRemoveArgs): Applied => {
     const found = current(db, args, false);
     if ("error" in found) return found;
+    if (statement(db, "SELECT 1 FROM mounts WHERE repo_id = ? LIMIT 1").get(found.row.repo_id))
+      return { error: domainError("REPO_IN_USE") };
     statement(db, "DELETE FROM repos WHERE repo_id = ?").run(found.row.repo_id);
     return {
       result: {
