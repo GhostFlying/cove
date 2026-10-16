@@ -2,10 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 // One bounded Git subprocess. Every Git command of the server goes through here so that none of
 // them can hang a request or grow without limit:
-// - git is spawned with an argument array, never a shell string, so a path or ref is never parsed
-//   by a shell;
-// - stdin is closed and prompting, pagers and the user's editor are disabled, so a credential
-//   helper, pager or editor configured by the user cannot wait for a terminal that does not exist;
+// - git is run with an argument array, never a command string: the arguments reach git as "$@"
+//   of a fixed supervisor script (see runGit), so a path or ref is never parsed by a shell;
+// - git's stdin is /dev/null and prompting, pagers and the user's editor are disabled, so a
+//   credential helper, pager or editor configured by the user cannot wait for a terminal that
+//   does not exist;
 // - the environment is rebuilt from a short allowlist: a GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
 //   GIT_CEILING_DIRECTORIES or GIT_CONFIG_* inherited from whoever started the server would
 //   otherwise silently redirect the query to another repository or configuration;
@@ -14,8 +15,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 //   2.45+; readHead, the only query that reads objects, refuses an older Git) and the file-system
 //   monitor hook is off (core.fsmonitor);
 // - messages are forced to the C locale, so the few stderr texts the caller classifies are stable;
-// - stdout and stderr are capped, and the whole run has a deadline (see runGit for how the
-//   process tree is ended and why completion is bounded).
+// - stdout and stderr are capped, and the whole run has a deadline (see runGit for which
+//   processes are ended and why completion is bounded).
 //
 // The user's global and system Git configuration (located through HOME, XDG_CONFIG_HOME and the
 // GIT_CONFIG_{GLOBAL,SYSTEM,NOSYSTEM} switches) is still read: safe.directory and similar trust
@@ -74,46 +75,69 @@ export type GitRunResult =
   | { kind: "exited"; code: number; stdout: string; stderr: string }
   | { kind: "failed"; reason: "spawn" | "timeout" | "overflow" | "signal" };
 
-// Sends SIGKILL to the process group the run created. ESRCH (the group is already empty) is the
-// expected outcome after an orderly exit.
-function killGroup(pgid: number): void {
-  try {
-    process.kill(-pgid, "SIGKILL");
-  } catch {
-    // ESRCH: nothing left to end. EPERM cannot happen for a group this process created.
-  }
-}
+// The supervisor script run by /bin/sh as the leader of the run's process group (see runGit).
+// fd 3 becomes the watcher's pipe; git gets /dev/null as stdin and does not inherit fd 3. The
+// watcher's output goes to /dev/null so that it never holds git's stdout or stderr open.
+//
+// The watcher waits with cat, which exits 0 only at end of file, rather than the shell's `read`,
+// which returns the same status for end of file and for a read error. On macOS a read of the
+// freshly inherited pipe occasionally fails once with EBADF (observed about once per thousand runs
+// with Node's own stdin closed; bash 3.2's `read` and cat both see it, and a retry succeeds), and
+// treating that as end of file would kill git mid-query. A read error is therefore retried for
+// about 5 s; if it persists, the group is killed anyway, so the run fails (as `signal`) rather
+// than leaving the group running. cat and sleep are named by path so that PATH cannot change them.
+const SUPERVISOR = [
+  "exec 3<&0 0</dev/null",
+  "(n=0; until /bin/cat <&3 >/dev/null; do n=$((n + 1)); " +
+    '[ "$n" -ge 50 ] && break; /bin/sleep 0.1; done; kill -s KILL 0) </dev/null >/dev/null 2>&1 &',
+  'exec git "$@" 3<&-',
+].join("\n");
 
-// Runs git once. Process tree and completion bounds:
+// Runs git once. Process group and completion bounds:
 //
-// git starts as the leader of a new process group and session (`detached`), so every process it
-// starts (helpers, wrappers, a shell script standing in for git) is in that group unless it
-// deliberately leaves it, and none of them can open the server's controlling terminal.
+// git runs in a new process group and session (`detached`), so every process it starts (helpers,
+// wrappers, a shell script standing in for git) is in that group unless it deliberately leaves
+// it, and none of them can open the server's controlling terminal.
 //
-// The group is signalled only while its ID is certainly still ours. A process group ID is the
-// leader's PID, and the kernel does not hand out a PID that is still in use as a process or
-// group ID. While the leader has not exited, its PID (alive or as an unreaped zombie) pins the
-// ID. Once Node has reaped the leader, the ID stays pinned only while another member remains, so
-// the group is signalled exactly once more, synchronously in the leader's `exit` handler, and
-// never later. Reusing the ID in between would need every member to be gone and the PID space to
-// wrap within that one tick.
+// Who signals the group. A process group ID is a PID, and the kernel does not hand it out again
+// while any process is still a member of that group. Node learns that a child ended only after
+// libuv has reaped it (libuv reaps before it runs exit callbacks), so when Node could act on an
+// exit the group may already be empty and its ID free for an unrelated group; checking that the
+// ID exists and then signalling it keeps the same race. This process therefore never signals
+// the group, or git, by number. Instead /bin/sh, the group leader (its PID is the group ID),
+// starts a watcher in the background and then `exec`s git, which keeps the PID, so Node still
+// receives git's own exit status. The watcher stays in the group and blocks reading a pipe
+// whose only writer is this process. When this process closes it (git exited, timeout,
+// overflow) or dies, the watcher runs `kill -s KILL 0`: a signal to its own group sent by a
+// live member of it, so the group ID is pinned by the sender itself and cannot have been reused.
 //
-// - Timeout or overflow before the leader exits: kill the group, destroy the pipes and settle at
-//   once. Nothing waits for a descendant to close its copy of stdout or stderr.
-// - Leader exits: kill the group (a read-only query has no legitimate background process; this
-//   ends any descendant still holding the pipes) and settle on `close`, which then follows
-//   promptly. The deadline still applies: if the pipes are not closed by then (a descendant that
-//   left the group), the pipes are destroyed and the run is a timeout.
+// Guarantee, and its limit. Completion is always bounded by the deadline. Descendants that remain
+// in the created group are killed once git exits or the run is abandoned. A descendant that
+// leaves the group (setsid, setpgid) is not contained: it keeps running, and if it holds stdout
+// or stderr open the run ends at the deadline as a timeout. Containing such processes needs OS
+// facilities beyond M1; git and its configuration are trusted local inputs, and the concern is
+// helpers left running, not an adversary. If the watcher is killed from outside, descendants are
+// likewise left running; completion stays bounded.
+//
+// - Timeout or overflow: close the watcher's pipe, destroy stdout and stderr, and settle at once.
+//   Nothing waits for a descendant to close its copy of the pipes.
+// - git exits: close the watcher's pipe (a read-only query has no legitimate background process)
+//   and settle on `close`, which then follows promptly unless an escaped descendant holds the
+//   pipes; the deadline then settles the run as a timeout.
+//
+// If `exec` fails (no git on PATH, not executable), the shell exits 127 or 126. The Git commands
+// Cove runs never exit with those statuses themselves (Git uses 0, 1, 128 and 129), so both are
+// reported as `spawn`.
 export function runGit(args: readonly string[], options: GitRunOptions): Promise<GitRunResult> {
   const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
   const maxBytes = options.maxOutputBytes ?? GIT_OUTPUT_BYTES;
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn("git", [...GLOBAL_OPTIONS, ...args], {
+      child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", ...GLOBAL_OPTIONS, ...args], {
         cwd: options.cwd,
         env: gitEnvironment(),
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         detached: true,
       });
@@ -125,24 +149,21 @@ export function runGit(args: readonly string[], options: GitRunOptions): Promise
     const stderr: Buffer[] = [];
     const bytes = { stdout: 0, stderr: 0 };
     let settled = false;
-    let leaderExited = false;
     let spawnFailed = false;
     let exit: { code: number | null; signal: NodeJS.Signals | null } | null = null;
 
+    // Closing the only writer of the watcher's pipe makes the watcher kill the group.
+    const releaseGroup = () => child.stdin?.destroy();
     const settle = (result: GitRunResult) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      releaseGroup();
       child.stdout?.destroy();
       child.stderr?.destroy();
       resolve(result);
     };
-    // Cove ends the run: the group is killed only while the leader has not exited (see above).
-    const abandon = (reason: "timeout" | "overflow") => {
-      if (settled) return;
-      if (!leaderExited && child.pid !== undefined) killGroup(child.pid);
-      settle({ kind: "failed", reason });
-    };
+    const abandon = (reason: "timeout" | "overflow") => settle({ kind: "failed", reason });
     const timer = setTimeout(() => abandon("timeout"), timeoutMs);
 
     const collect = (stream: "stdout" | "stderr", into: Buffer[]) => (chunk: Buffer) => {
@@ -154,23 +175,24 @@ export function runGit(args: readonly string[], options: GitRunOptions): Promise
     child.stdout!.on("data", collect("stdout", stdout));
     child.stderr!.on("data", collect("stderr", stderr));
     // A destroyed pipe may report an error; the run's outcome is already decided by then.
+    child.stdin!.on("error", () => {});
     child.stdout!.on("error", () => {});
     child.stderr!.on("error", () => {});
     child.once("error", () => {
-      // ENOENT (no git on PATH), EACCES or a bad cwd. No process was started; `close` follows.
+      // /bin/sh could not be started or the cwd is bad. No process was started; `close` follows.
       spawnFailed = true;
       if (child.pid === undefined) settle({ kind: "failed", reason: "spawn" });
     });
     child.once("exit", (code, signal) => {
-      leaderExited = true;
       exit = { code, signal };
-      // The only signal after the leader was reaped: same tick, before its ID can be reused.
-      if (child.pid !== undefined) killGroup(child.pid);
+      releaseGroup();
     });
     child.once("close", () => {
       if (spawnFailed) return settle({ kind: "failed", reason: "spawn" });
       if (!exit || exit.code === null)
         return settle({ kind: "failed", reason: exit?.signal ? "signal" : "spawn" });
+      if (exit.code === 126 || exit.code === 127)
+        return settle({ kind: "failed", reason: "spawn" });
       settle({
         kind: "exited",
         code: exit.code,

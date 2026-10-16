@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { ChildProcess, execFile } from "node:child_process";
 import {
   chmod,
   lstat,
@@ -14,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { RepoService } from "../../dist/domain/repos.js";
 import {
@@ -160,25 +160,46 @@ describe("Git runner", () => {
   // A git that forks without exec: the forked descendant inherits stdout and stderr. Each case
   // must settle promptly (not when the descendant would close the pipes) and end the descendant.
   // (Separate tests rather than it.each: the CI gate counts each `it` once at discovery.)
-  // Returns the run's result, whether it settled within 3 s (the descendant holds the pipes for
-  // 30 s) and whether the descendant ended.
+  // Returns the run's result, whether it settled within 3 s (the descendant lives for 30 s),
+  // whether the descendant ended, and how many signals this process sent by number while the
+  // run was in progress (none may be: a group or PID may be reused once Node has reaped git).
+  // A descendant that outlives the check (an escaped one) is killed here; the test started it.
   async function forkingRun(script, options) {
     const cwd = await temporary();
     const pidFile = join(cwd, "descendant.pid");
-    process.env.PATH = `${await fakeGit(script.replace("PIDFILE", pidFile))}:${savedEnv.PATH}`;
+    process.env.PATH = `${await fakeGit(script.replaceAll("PIDFILE", pidFile))}:${savedEnv.PATH}`;
+    const kills = vi.spyOn(process, "kill");
+    const childKills = vi.spyOn(ChildProcess.prototype, "kill");
     const started = Date.now();
-    const result = await runGit(["status"], { cwd, ...options });
+    let result;
+    let numericSignals;
+    try {
+      result = await runGit(["status"], { cwd, ...options });
+    } finally {
+      // Read before restoring: mockRestore also clears the recorded calls.
+      numericSignals = kills.mock.calls.length + childKills.mock.calls.length;
+      kills.mockRestore();
+      childKills.mockRestore();
+    }
     const prompt = Date.now() - started < 3_000;
     const pid = Number(await readFile(pidFile, "utf8"));
     if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("no descendant PID recorded");
-    return { result, prompt, descendantEnded: await ended(pid) };
+    const descendantEnded = await ended(pid);
+    if (!descendantEnded) process.kill(pid, "SIGKILL");
+    return { result, prompt, descendantEnded, numericSignals };
   }
+
+  // Starts `command` in a new session, so it leaves the run's process group, then waits until it
+  // has left: the process records its PID only after setsid (perl's exec keeps that PID).
+  const escaped = (command, redirect = "") =>
+    `perl -MPOSIX -e 'POSIX::setsid() >= 0 or die; open(my $f, ">", shift) or die; print $f $$; close $f; exec @ARGV' PIDFILE ${command} ${redirect} &\nwhile [ ! -s PIDFILE ]; do sleep 0.05; done\necho done`;
 
   it("ends the process group and settles promptly after a timeout", async () => {
     expect(await forkingRun("sleep 30 &\necho $! > PIDFILE\nwait", { timeoutMs: 1_000 })).toEqual({
       result: { kind: "failed", reason: "timeout" },
       prompt: true,
       descendantEnded: true,
+      numericSignals: 0,
     });
   });
 
@@ -187,6 +208,7 @@ describe("Git runner", () => {
       result: { kind: "failed", reason: "overflow" },
       prompt: true,
       descendantEnded: true,
+      numericSignals: 0,
     });
   });
 
@@ -195,6 +217,39 @@ describe("Git runner", () => {
       result: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
       prompt: true,
       descendantEnded: true,
+      numericSignals: 0,
+    });
+  });
+
+  it("ends a descendant left in the group with its output closed when git exits", async () => {
+    const script = "sleep 30 </dev/null >/dev/null 2>&1 &\necho $! > PIDFILE\necho done";
+    expect(await forkingRun(script, {})).toEqual({
+      result: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
+      prompt: true,
+      descendantEnded: true,
+      numericSignals: 0,
+    });
+  });
+
+  // Documented limit: a descendant that leaves the group is not contained. Completion stays
+  // bounded; one holding the pipes turns the run into a timeout at the deadline.
+  it("bounds a run whose escaped descendant holds the pipes, without containing it", async () => {
+    const script = escaped("sleep 30");
+    expect(await forkingRun(script, { timeoutMs: 1_000 })).toEqual({
+      result: { kind: "failed", reason: "timeout" },
+      prompt: true,
+      descendantEnded: false,
+      numericSignals: 0,
+    });
+  });
+
+  it("completes a run whose escaped descendant closed its output, without containing it", async () => {
+    const script = escaped("sleep 30", "</dev/null >/dev/null 2>&1");
+    expect(await forkingRun(script, { timeoutMs: 1_000 })).toEqual({
+      result: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
+      prompt: true,
+      descendantEnded: false,
+      numericSignals: 0,
     });
   });
 });
