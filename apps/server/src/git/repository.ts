@@ -186,10 +186,13 @@ export type HeadState =
 
 const NO_LAZY_FETCH_GIT = [2, 45] as const;
 
-// Whether the installed Git honours GIT_NO_LAZY_FETCH; null when Git gave no usable answer.
-// Not cached: the git on PATH can change while the server runs.
-async function gitHonoursNoLazyFetch(): Promise<boolean | null> {
-  const result = await runGit(["version"], { cwd: "/" });
+// Whether the git that runs in `cwd` honours GIT_NO_LAZY_FETCH; null when Git gave no usable
+// answer. It must be asked in the same directory (and, through runGit, with the same environment)
+// as the command it guards: a relative PATH entry or a directory-sensitive wrapper can select a
+// different git in another directory. Not cached: the git on PATH can change while the server
+// runs.
+async function gitHonoursNoLazyFetch(cwd: string): Promise<boolean | null> {
+  const result = await runGit(["version"], { cwd });
   if (result.kind === "failed" || result.code !== 0) return null;
   const match = /^git version (\d+)\.(\d+)/.exec(result.stdout);
   if (!match) return null;
@@ -212,7 +215,7 @@ const OBJECT_ID = /^[0-9a-f]{40,64}$/;
 export async function readHead(workTree: string): Promise<HeadState> {
   // The version check and the two ref reads open no object, so they are safe on any Git.
   const [supported, symbolic, named] = await Promise.all([
-    gitHonoursNoLazyFetch(),
+    gitHonoursNoLazyFetch(workTree),
     runGit(["symbolic-ref", "--quiet", "HEAD"], { cwd: workTree }),
     runGit(["rev-parse", "--quiet", "--verify", "HEAD"], { cwd: workTree }),
   ]);

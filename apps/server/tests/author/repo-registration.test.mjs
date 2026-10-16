@@ -357,6 +357,35 @@ describe("repository queries", () => {
     ]);
   });
 
+  it("checks the Git version where the peel would run", async () => {
+    const root = await temporary();
+    const path = await clone(root, "repo");
+    const real = await new Promise((done, fail) =>
+      execFile("sh", ["-c", "command -v git"], { env: { PATH: savedEnv.PATH } }, (error, out) =>
+        error ? fail(error) : done(out.trim()),
+      ),
+    );
+    // A relative PATH entry: from `/` it names nothing, so the real (supported) git answers there;
+    // inside the clone it names a Git 2.44 that would ignore GIT_NO_LAZY_FETCH. The fake logs
+    // every call and otherwise runs the real git.
+    const bin = "cove-test-old-git-bin";
+    const calls = join(root, "calls.log");
+    await mkdir(join(path, bin));
+    await writeFile(
+      join(path, bin, "git"),
+      `#!/bin/sh\necho "$*" >> '${calls}'\nfor last; do :; done\nif [ "$last" = version ]; then echo 'git version 2.44.2'; exit 0; fi\nexec '${real}' "$@"\n`,
+    );
+    await chmod(join(path, bin, "git"), 0o755);
+    process.env.PATH = `${bin}:${savedEnv.PATH}`;
+    const result = await readHead(path);
+    const log = await readFile(calls, "utf8");
+    expect({
+      result,
+      versionAskedInClone: log.split("\n").some((line) => line.endsWith(" version")),
+      peeled: log.includes("^{commit}"),
+    }).toEqual({ result: { kind: "unavailable" }, versionAskedInClone: true, peeled: false });
+  });
+
   it("ignores an inherited GIT_DIR and resolves a linked worktree to its clone", async () => {
     const root = await temporary();
     const main = await clone(root, "main");
