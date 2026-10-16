@@ -198,8 +198,11 @@ status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排�
 把过载变成该 worker 上全部终端的丢失，违背“失联不能证明进程退出”。规则如下：
 
 - **存活只看 worker 是否仍在说话，不看某条命令是否已应答。** worker 在 `ready` 之后由定时器每
-  `PIPE_HEARTBEAT_INTERVAL_MS`（1 s）发出一个 `heartbeat` 帧，与命令执行无关；同一时刻至多一个未结算的心跳，
-  按控制帧计量，控制预留不足时跳过这一拍（此时已有控制帧在发往 runtime，它们同样证明存活）。
+  `PIPE_HEARTBEAT_INTERVAL_MS`（1 s）发出一个 `heartbeat` 帧，与命令执行无关；同一时刻至多一个未结算的心跳。
+  心跳占用自己预付的单帧槽位（`PIPE_HEARTBEAT_FRAME_BYTES`），不计入 `reservedControlBytes` 与 `pipeQueuedBytes`，
+  因此任何慢命令都不能压住它，它也不会挤占受理时已预留的应答；runtime 对未读 worker 输出的上界相应加上这一帧。
+  若心跳计入控制预留，在合法的最小预留下一条执行中的 status/stop/路由控制命令就占满预留，空闲而存活的 worker 会被判失联。
+  只有阻塞的传输会推迟心跳：上一拍的写回调完成前不发下一拍。
   runtime 把收到的任何合法帧（应答、事件、心跳）都视为接触。
 - **判定失联**的条件只有：进程退出或 pipe 关闭/出错、协议违规（照旧失败关闭）、握手超时，以及 runtime 观察到连续
   `PIPE_LIVENESS_WINDOW_MS`（120 s）收不到任何帧，即 worker 挂起。握手同样以这个窗口为期限。

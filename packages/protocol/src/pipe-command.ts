@@ -40,6 +40,12 @@ export const PIPE_HEARTBEAT_INTERVAL_MS = 1000;
 // loss; PIPE_LIVENESS_MIN_HEARTBEATS states that relation, and the runtime refuses a smaller window.
 export const PIPE_LIVENESS_WINDOW_MS = 120_000;
 export const PIPE_LIVENESS_MIN_HEARTBEATS = 3;
+// The largest heartbeat frame. A worker has at most one heartbeat queued or in transport, and
+// that frame is prepaid outside reservedControlBytes and pipeQueuedBytes (issue #103 review B2):
+// charged to the control reserve, one slow control command at the smallest legal reserve held
+// the whole reserve and every heartbeat was skipped, so an idle live worker looked lost. The
+// runtime's bound on unread worker output includes this one frame; both sides read this constant.
+export const PIPE_HEARTBEAT_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };

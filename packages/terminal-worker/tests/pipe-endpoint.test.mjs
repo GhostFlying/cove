@@ -598,6 +598,26 @@ test("a worker keeps at most one heartbeat unsettled", async () => {
   await h.pipe.shutdown("test");
 });
 
+test("a slow control command at the smallest control reserve cannot suppress heartbeats", async () => {
+  // Issue #103 review (B2): one executing control command reserves a whole reply, which is the
+  // entire reserve at its legal minimum. A heartbeat charged to that reserve was skipped for as
+  // long as the command ran, and an idle live worker looked lost. The heartbeat has its own
+  // prepaid slot (PIPE_HEARTBEAT_FRAME_BYTES).
+  const minimum = { ...M0_LIMITS, reservedControlBytes: HEADER_BYTES + MAX_METADATA_BYTES };
+  const h = createHarness({ heartbeatIntervalMs: 10, execute: () => new Promise(() => {}) });
+  await ready(h, { ...hello, effectiveBudgets: minimum });
+  h.input.write(encode({ type: "status", worker, run, requestId: "stuck-status" }));
+  await tick();
+  expect(h.calls.map(({ command }) => command.type)).toEqual(["status"]);
+  const before = heartbeats(h).length;
+  await sleep(120);
+  // Nothing but heartbeats leaves the worker: no reply, no output.
+  expect(h.frames().filter((frame) => frame.type !== "heartbeat")).toHaveLength(1);
+  expect(heartbeats(h).length - before).toBeGreaterThanOrEqual(3);
+  expect(h.pipe.snapshot().outstandingRequests).toBe(1);
+  await h.pipe.shutdown("test");
+});
+
 test("split hello and coalesced commands preserve correlated revision-2 frames", async () => {
   const h = createHarness();
   const bytes = encode(hello);
