@@ -742,6 +742,14 @@ export class TerminalSubscriptions {
       return;
     }
     if (command.type === "recover") {
+      // A recover that waited in the route queue (behind an ACK the worker answered late) may
+      // reach this point after its marker deadline, before any tick expired it. Sending it now
+      // could still activate a recovery the client has already given up on, so it ends here
+      // as the tick would have ended it: never sent, so definitely not accepted.
+      if (this.now() >= request.recoverDeadlines!.markerDeadline) {
+        this.expireRecovery(route);
+        return;
+      }
       if (route.attempt === Number.MAX_SAFE_INTEGER) {
         this.retire(route, domainError("COUNTER_EXHAUSTED"));
         this.finish(request, this.error(command, route.failure!));
@@ -901,6 +909,15 @@ export class TerminalSubscriptions {
       atSeq: result.atSeq,
     };
     if (!validateTerminalResultForCommand(command, marker)) return false;
+    // The worker's acceptance can arrive after the marker deadline but before the tick that
+    // would expire the attempt. Admitting the marker then would activate a subscription the
+    // client is about to time out (it started timing earlier); refusing the handoff instead
+    // leaves the worker route inactive and fenced, and the attempt ends as the tick would end
+    // it. The pending attach/recover is settled here, so execute() returns without a reply.
+    if (this.now() >= route.markerDeadline) {
+      this.expireRecovery(route);
+      return false;
+    }
     const credit = new TerminalDeliveryCredit(
       this.composition,
       route.attempt,
@@ -1124,6 +1141,17 @@ export class TerminalSubscriptions {
     return Math.floor(this.composition.budgets.recoveryDeadlineMs / 2);
   }
 
+  // Ends an attach or recover attempt whose marker deadline passed with no marker admitted:
+  // RECOVERY_EXPIRED (not-accepted) for the route and every request still queued on it (see
+  // tick() for why the outcome is definite). Retirement fences the route's events, so a late
+  // acceptance from the worker is never activated, and unsubscribes the worker route.
+  private expireRecovery(route: Route): void {
+    this.retire(route, domainError("RECOVERY_EXPIRED"));
+    for (const request of route.queue)
+      if (!(request.command.type === "input" && request.domain?.dispatched))
+        this.finish(request, this.error(request.command, route.failure!));
+  }
+
   tick(): void {
     this.options.arbiter?.tick();
     if (this.closed) return;
@@ -1157,10 +1185,11 @@ export class TerminalSubscriptions {
         // busy worker has not answered, say) at its half deadline, counted from its acceptance.
         // It was never sent to the worker, so its outcome is just as definite, and the route
         // ends the same way: the client asked to recover it, so it cannot simply continue.
-        this.retire(route, domainError("RECOVERY_EXPIRED"));
-        for (const request of route.queue)
-          if (!(request.command.type === "input" && request.domain?.dispatched))
-            this.finish(request, this.error(request.command, route.failure!));
+        //
+        // The tick is only one of the places this is decided: the deadline can pass between
+        // ticks, so execute() checks it before a queued recover is dispatched and handoff
+        // checks it before a marker is admitted, with the same outcome.
+        this.expireRecovery(route);
       } else if (
         route.phase !== "retired" &&
         (!route.credit?.snapshot().installed ||
