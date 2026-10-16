@@ -1391,6 +1391,7 @@ test("M1 CLI suites are registered per file and join the required inventory", as
         "pending-operations",
         "s1-repo-registration",
         "s10-storage-identity",
+        "s2-task-checkout-mounts",
         "test-isolation",
       ],
     },
