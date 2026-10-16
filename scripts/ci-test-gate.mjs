@@ -1453,6 +1453,11 @@ async function fileRecordedVitest(stage, binary, args, outputFile, timeoutMs, ou
   return Object.assign(result, { outputCapture: capture });
 }
 
+// What a recorded command may print. `vitest list --json` prints every test of the repository
+// (about 350 bytes each, some 1,500 tests at the time of writing, past 512 KiB), and spawnSync fails
+// the whole gate with ENOBUFS once the output exceeds this; 8 MiB leaves room for many times that.
+const COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024;
+
 export async function recordedCommand(
   stage,
   binary,
@@ -1479,7 +1484,7 @@ export async function recordedCommand(
       cwd: root,
       encoding: "utf8",
       timeout: timeoutMs,
-      maxBuffer: 512 * 1024,
+      maxBuffer: COMMAND_OUTPUT_BYTES,
     });
     attempt.exitCode = result.status;
     attempt.signal = result.signal;
