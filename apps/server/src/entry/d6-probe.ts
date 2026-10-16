@@ -175,6 +175,11 @@ export class D6Probe {
     const select = (mode: Mode) => () => {
       this.mode = mode;
       this.switches.push([D6Probe.now(), mode]);
+      // Load the control configuration now, in the gap before the control phase: the read is a
+      // store transaction, and one inside the phase would count as SQLite work there. It queues
+      // behind any write still in the store, so it sees what the write phase left. A failure is
+      // reported to the first control write, which awaits the same promise.
+      if (mode === "memory") this.loadControlConfig().catch(() => {});
     };
     process.on("SIGUSR1", select("sqlite"));
     process.on("SIGUSR2", select("memory"));
