@@ -281,8 +281,9 @@ export class RepoService {
   // Deletes the registration row only; the clone directory is never touched. The result names
   // the revision that was removed.
   //
-  // Mounts are not consulted: no mount can exist before T3a, and whether a mounted repo may be
-  // unregistered is still open (reported with T2). A mount keeps its own repoId and real path.
+  // A registration that any mount references, of an active or an archived task, is not removed
+  // (REPO_IN_USE, checked in the write's transaction, store/sql/repos.ts): the operator removes
+  // those mounts first (`cove mount remove`, allowed on archived tasks too).
   remove(principalId: string, params: RemoveParams): Promise<DatabaseWriteOutcome> {
     return this.write(principalId, "repo.remove", params, {
       name: "repo.remove",

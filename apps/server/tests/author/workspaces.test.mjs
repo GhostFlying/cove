@@ -487,6 +487,32 @@ describe("tasks and checkout mounts", () => {
     expect(kind(await env.tasks.get("no-such-task"))).toBe("TASK_NOT_FOUND");
   });
 
+  it("refuses to remove a repo registration while a mount of an active or archived task references it", async () => {
+    const env = await setup();
+    const alpha = await env.register("alpha");
+    const beta = await env.register("beta");
+    const { taskId } = await created(env.tasks, "c", "T", [
+      { source: "checkout", repoId: alpha.repoId },
+    ]);
+    const removeRepo = (operationId, repoId) => env.repos.remove("p", { operationId, repoId });
+    expect((await removeRepo("r1", alpha.repoId)).error).toMatchObject({
+      kind: "REPO_IN_USE",
+      acceptance: "not-accepted",
+      nextAction: "fix-request",
+    });
+    await env.tasks.setArchived("p", { operationId: "ar", taskId }, true);
+    expect(kind(await removeRepo("r2", alpha.repoId))).toBe("REPO_IN_USE");
+    // An unmounted registration is removed as before.
+    expect((await removeRepo("r3", beta.repoId)).operation.state).toBe("succeeded");
+    const [mount] = (await env.tasks.get(taskId)).task.workspace.mounts;
+    await env.tasks.removeMount("p", { operationId: "rm", taskId, mountId: mount.mountId });
+    expect((await removeRepo("r4", alpha.repoId)).operation.state).toBe("succeeded");
+    // The clone itself is untouched, and the archived task unarchives with no dangling mount.
+    expect(await readFile(join(alpha.path, "README.md"), "utf8")).toBe("test\n");
+    await env.tasks.setArchived("p", { operationId: "un", taskId }, false);
+    expect((await env.tasks.get(taskId)).task.workspace.mounts).toEqual([]);
+  });
+
   it("lists active tasks by default and pages in task order", async () => {
     const env = await setup();
     const ids = [];

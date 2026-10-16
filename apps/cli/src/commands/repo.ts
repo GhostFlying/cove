@@ -24,7 +24,9 @@ export const usage = `  repo register <PATH> [--name NAME] [--operation-id ID]
 
 A registration names one clone by its real top level; its existing worktrees are not imported.
 mainBranch is only stored here; unset, worktree creation resolves it from the remote.
-repo remove deletes the registration only and never touches the clone directory.`;
+repo remove deletes the registration only and never touches the clone directory. It is refused
+(REPO_IN_USE) while a mount of any task, archived ones included, uses the repo; remove those
+mounts first with \`cove mount remove\`.`;
 
 async function listRepos(client: Client): Promise<RepoRecord[]> {
   const repos: RepoRecord[] = [];
