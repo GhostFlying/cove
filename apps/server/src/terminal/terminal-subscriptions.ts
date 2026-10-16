@@ -845,7 +845,14 @@ export class TerminalSubscriptions {
     }
     if (result.type === "error") {
       this.retire(route, result.error);
-      this.finish(request, this.error(command, route.failure ?? result.error));
+      // Route control that took effect was deliberately left running when the route retired
+      // (see failQueued()), so it reports its own outcome: contact loss (RESULT_UNKNOWN) or the
+      // worker's refusal, with that error's acceptance. The route's first failure, kept by
+      // retire(), still answers later requests; an attach or recover reports it.
+      this.finish(
+        request,
+        this.error(command, request.dispatched ? result.error : (route.failure ?? result.error)),
+      );
       return;
     }
     if (result.outcome !== "accepted") {
