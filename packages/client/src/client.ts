@@ -30,6 +30,7 @@ import {
   type RpcMethod,
   type WriteRpcMethod,
 } from "@cove/protocol/rpc";
+import type { WorkerHealth } from "@cove/protocol/terminal";
 import type { TerminalView } from "@cove/protocol/view";
 import {
   agreeBootstraps,
@@ -311,6 +312,10 @@ export interface TerminalSnapshot {
   // recoveries. Coalesced snapshots can skip intermediate phases, so a consumer acts on a
   // recovery once it sees ready with a sequence it has not handled yet.
   readonly recoverySequence: number;
+  // The informational health of the worker serving this terminal, as the server last reported it
+  // on this subscription (issue #103). "overloaded" means replies and output are slow; it never
+  // changes what the terminal does. "normal" until the server reports otherwise.
+  readonly workerHealth: WorkerHealth;
 }
 
 export interface TerminalController {

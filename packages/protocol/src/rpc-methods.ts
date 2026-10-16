@@ -7,6 +7,7 @@ import { DomainErrorSchema } from "./errors.js";
 import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./identity.js";
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { RunStatusSchema, SpawnArgumentsSchema } from "./pipe.js";
+import { WorkerHealthSchema } from "./terminal-events.js";
 import * as W from "./workspace.js";
 import {
   TERMINAL_RESULT_KEYS,
@@ -91,6 +92,27 @@ export const RunRecordSchema = z.object({
 export type RunRecord = z.infer<typeof RunRecordSchema>;
 
 export const ServerStatusParamsSchema = z.object({});
+const signalMs = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+// One terminal worker's informational health (issue #103) and the signals it was judged from.
+// The worker's own measurements are those of its latest heartbeat (null before the first);
+// heartbeatGapMs is the silence since that heartbeat as the server observed it, and
+// oldestCommandAgeMs the age of the oldest command sent to the worker and not yet answered.
+export const WorkerStatusSchema = z.object({
+  workerId: OpaqueIdSchema,
+  health: WorkerHealthSchema,
+  // When the current state began, in milliseconds before this status was produced.
+  stateAgeMs: signalMs,
+  signals: z.object({
+    eventLoopDelayP99Ms: signalMs.nullable(),
+    eventLoopDelayMaxMs: signalMs.nullable(),
+    cpuPercent: z.number().int().min(0).max(100).nullable(),
+    parseBacklogBytes: signalMs.nullable(),
+    executingCommands: z.number().int().min(0).max(65_536).nullable(),
+    heartbeatGapMs: signalMs,
+    oldestCommandAgeMs: signalMs.nullable(),
+  }),
+});
+export type WorkerStatus = z.infer<typeof WorkerStatusSchema>;
 export const ServerStatusResultSchema = z.object({
   serverId: OpaqueIdSchema,
   relayInstanceId: OpaqueIdSchema,
@@ -102,6 +124,10 @@ export const ServerStatusResultSchema = z.object({
   runCount: z.number().int().min(0).max(M0_LIMITS.maxRuns),
   admission: z.enum(["ready", "busy", "unavailable"]),
   health: z.enum(["live", "unverifiable"]),
+  // Live workers only; a lost worker's terminals are unverifiable, which `health` reports.
+  // Optional on the wire because a server from before issue #103 does not send it; this server
+  // always does.
+  workers: z.array(WorkerStatusSchema).max(M0_LIMITS.maxRuns).optional(),
 });
 export const TerminalListParamsSchema = z.object({
   limit: z.number().int().min(1).max(M0_LIMITS.listPage),

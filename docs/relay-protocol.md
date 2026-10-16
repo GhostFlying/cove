@@ -224,6 +224,8 @@ Reset 不删除 task、workspace、仓库目录或 rollout。旧 session 保留�
   得到 RECOVERY_EXPIRED（not-accepted，早于客户端自己的期限，因此不必退役整个连接），已发出的输入等命令得到 RESULT_UNKNOWN
   （不重放），尚未发出的得到 BUSY。确认与 detach 在 worker 存活期间
   没有期限；客户端为它们等待 `ROUTE_CONTROL_DEADLINE_MS`（150 s，仅作 server 不应答时的兜底），不能早于 server 放弃。细节见 [终端架构](terminal-architecture.md) 3.3 节“worker 存活与命令期限”。
+  worker 的过载状态只作提示：`server.status` 的 `workers[]` 报告它（旧 server 不带该字段），订阅上的
+  `worker-health` 事件（无 seq、不占信用、无需 ACK）在状态变化时告知客户端；判据见同节“worker 过载状态”。
 - 预览（preview）事件不带请求 ID，只靠 previewId 与请求关联：`preview-result` 在 `status` 为 `transfer` 时必须携带它完成的
   `previewId`，为 `unchanged` 时不得携带。客户端只在结果与实际收到的传输 ID 精确匹配时完成预览；同一请求出现第二个或不匹配的
   传输、或结果 ID 不符时按无效应答结束该预览，不能把迟到的旧传输归到同一 run 的新请求上。

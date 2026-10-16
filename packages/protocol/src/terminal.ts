@@ -133,7 +133,8 @@ function matchingRefs(value: TerminalMetadata, connection?: ConnectionRef): bool
     value.type === "baseline-end" ||
     value.type === "preview-start" ||
     value.type === "preview-chunk" ||
-    value.type === "preview-end"
+    value.type === "preview-end" ||
+    value.type === "worker-health"
   )
     return (
       (!externalEventSubscription(value) || connection !== undefined) &&
@@ -249,12 +250,18 @@ export {
   validateExternalEventBinding,
 } from "./terminal-events.js";
 export type { TerminalCommand, TerminalResult, TerminalError } from "./terminal-command.js";
-export { RunEventSchema, validateContiguousEvents } from "./terminal-events.js";
+export {
+  RunEventSchema,
+  validateContiguousEvents,
+  WORKER_HEALTH_REASONS,
+  WorkerHealthSchema,
+} from "./terminal-events.js";
 export type {
   ExternalTerminalEvent,
   RunEvent,
   RunEventDelivery,
   TerminalEvent,
+  WorkerHealth,
 } from "./terminal-events.js";
 export {
   BaselineControlSchema,

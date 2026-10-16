@@ -198,7 +198,7 @@ export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/worker-pipe-burst.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/three-client-acks.test.mjs", minimumTests: 1 },
   { project: "cli", file: "apps/cli/tests/many-subscription-acks.test.mjs", minimumTests: 1 },
-  { project: "cli", file: "apps/cli/tests/slow-worker-liveness.test.mjs", minimumTests: 3 },
+  { project: "cli", file: "apps/cli/tests/slow-worker-liveness.test.mjs", minimumTests: 4 },
   { project: "cli", file: "apps/cli/tests/client-lifetime.test.mjs", minimumTests: 3 },
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 66 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
@@ -257,6 +257,7 @@ export const requiredSuites = [
     file: "apps/server/tests/author/worker-pipe-session.test.mjs",
     minimumTests: 11,
   },
+  { project: "server", file: "apps/server/tests/author/worker-health.test.mjs", minimumTests: 5 },
   {
     project: "server",
     file: "apps/server/tests/author/operation-receipts.test.mjs",

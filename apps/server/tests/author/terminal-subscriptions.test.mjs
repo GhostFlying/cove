@@ -20,6 +20,8 @@ import {
   profile,
   encoding,
   geometry,
+  frame,
+  worker,
 } from "./subscription-byte-peer.mjs";
 
 const turns = async () => {
@@ -403,6 +405,68 @@ describe("private terminal subscription delivery", () => {
       const sent = f.pipeWrites.map((item) => decode(item.data, true).metadata.type);
       expect(sent).not.toContain("recover");
       expect(sent).toContain("unsubscribe");
+      expect(f.session.closed).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("tells each active subscription when its worker becomes overloaded and normal again", async () => {
+    // Issue #103: informational health, published without credit and level-triggered.
+    const f = fixture();
+    const a = f.connect("a");
+    try {
+      const first = (await f.attach(a, 0, "first")).subscription;
+      const beat = (p99) =>
+        frame({
+          type: "heartbeat",
+          worker,
+          load: {
+            windowMs: 1000,
+            eventLoopDelayP99Ms: p99,
+            eventLoopDelayMaxMs: p99,
+            cpuPercent: 100,
+            parseBacklogBytes: 0,
+            executingCommands: 0,
+          },
+        });
+      const seconds = (from, to, p99) => {
+        for (let now = from; now <= to; now += 1000) {
+          f.clock(now);
+          f.session.receive(beat(p99));
+          f.session.tick();
+          a.service.tick();
+        }
+      };
+      const health = () =>
+        a.writes
+          .map((item) => decode(item.data).metadata)
+          .filter((metadata) => metadata.type === "worker-health");
+      // A healthy worker adds nothing: the client starts from "normal".
+      seconds(1000, 3000, 10);
+      expect(health()).toEqual([]);
+      seconds(4000, 9000, 450);
+      const overloaded = { state: "overloaded", reasons: ["event-loop-delay"] };
+      expect(health()).toEqual([
+        { type: "worker-health", run, subscription: first, health: overloaded },
+      ]);
+      // A route opened while the worker is overloaded learns it once it is active.
+      const second = (await f.attach(a, 0, "second")).subscription;
+      seconds(10_000, 11_000, 450);
+      expect(health()).toEqual([
+        { type: "worker-health", run, subscription: first, health: overloaded },
+        { type: "worker-health", run, subscription: second, health: overloaded },
+      ]);
+      // Prompt again: both routes are told once the hold period has passed, and nothing else
+      // about them changed.
+      seconds(12_000, 30_000, 10);
+      const normal = { state: "normal", reasons: [] };
+      expect(health().slice(2)).toEqual([
+        { type: "worker-health", run, subscription: first, health: normal },
+        { type: "worker-health", run, subscription: second, health: normal },
+      ]);
+      expect(a.service.snapshot(first.subscriptionId).route.phase).toBe("active");
+      expect(a.service.snapshot(second.subscriptionId).route.phase).toBe("active");
       expect(f.session.closed).toBe(false);
     } finally {
       await f.dispose();

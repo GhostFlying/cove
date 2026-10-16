@@ -103,6 +103,8 @@ export interface WorkerExecution {
   responseSettled(requestId: string): void;
   deliveryCapacity(): void;
   snapshot(): WorkerExecutionSnapshot;
+  // PTY output read but not yet parsed, over every run: the heartbeat's backlog signal.
+  parseBacklogBytes?(): number;
   shutdown(reason: string): Promise<readonly RunSessionDisposalReceipt[]>;
 }
 
@@ -589,6 +591,13 @@ class WorkerExecutionCore {
     };
   }
 
+  parseBacklogBytes(): number {
+    let bytes = 0;
+    for (const record of this.#runs.values())
+      if (record.session) bytes += record.session.snapshot().queuedBytes;
+    return bytes;
+  }
+
   snapshot(): WorkerExecutionSnapshot {
     const account = this.#account.snapshot();
     const runs = [...this.#runs.values()]
@@ -683,6 +692,7 @@ export function createWorkerExecution(options: WorkerExecutionOptions): WorkerEx
     responseSettled: (requestId: string) => core.responseSettled(requestId),
     deliveryCapacity: () => core.deliveryCapacity(),
     snapshot: () => core.snapshot(),
+    parseBacklogBytes: () => core.parseBacklogBytes(),
     shutdown: (reason: string) => core.shutdown(reason),
   });
 }

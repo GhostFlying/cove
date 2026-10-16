@@ -250,6 +250,7 @@ export {
   PipeHelloSchema,
   PipeReadySchema,
   PipeHeartbeatSchema,
+  WorkerLoadSchema,
   SpawnArgumentsSchema,
   RunStatusSchema,
   composeSpawnPayload,
@@ -266,6 +267,7 @@ export {
 export type {
   PipeMetadata,
   PipeCommand,
+  WorkerLoad,
   PipeResult,
   RunStatus,
   SpawnArguments,

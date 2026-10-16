@@ -25,6 +25,7 @@ import {
   type ExternalTerminalEvent,
   type RunEvent,
   type TerminalCommand,
+  type WorkerHealth,
 } from "@cove/protocol/terminal";
 import type {
   ClientError,
@@ -59,6 +60,10 @@ import {
 } from "./input-notices.js";
 
 type RecoveryReason = "gap" | "released-view" | "resize-context" | "expired";
+const NORMAL_HEALTH: WorkerHealth = Object.freeze({
+  state: "normal",
+  reasons: Object.freeze([]),
+}) as unknown as WorkerHealth;
 type Phase = "idle" | "await-marker" | "baseline" | "replay" | "ready" | "unavailable" | "disposed";
 
 interface Operation {
@@ -347,6 +352,7 @@ export class RoutedTerminalController implements TerminalController {
   // replaceView or a new attach clears it.
   private fatal: DomainError | undefined;
   private recoverySequence = 0;
+  private workerHealth: WorkerHealth = NORMAL_HEALTH;
   private resizeRequests = 0;
   private appearanceRequests = 0;
   private appliedSeq = 0;
@@ -2106,6 +2112,10 @@ export class RoutedTerminalController implements TerminalController {
       pendingInputIntents: this.pendingInputIntents,
       pendingControlIntents: this.controlLog.length,
       recoverySequence: this.recoverySequence,
+      workerHealth: Object.freeze({
+        state: this.workerHealth.state,
+        reasons: Object.freeze([...this.workerHealth.reasons]),
+      }) as WorkerHealth,
       ...(this.control.epoch !== undefined ? { controlEpoch: this.control.epoch } : {}),
     });
   }
@@ -2159,8 +2169,16 @@ export class RoutedTerminalController implements TerminalController {
           ? event.subscription
           : event.type === "baseline-chunk" || event.type === "baseline-end"
             ? event.subscription
-            : undefined;
+            : event.type === "worker-health"
+              ? event.subscription
+              : undefined;
     if (!ref || !sameSubscriptionRef(ref, this.ref)) return;
+    // Informational, outside the run's sequence and credit: it is only recorded and published.
+    if (event.type === "worker-health") {
+      this.workerHealth = { state: event.health.state, reasons: [...event.health.reasons] };
+      this.publish();
+      return;
+    }
     if (event.type === "run-event" && event.event.type === "control") {
       this.control.observe(event.event, ref);
       this.publish();
@@ -2223,6 +2241,9 @@ export class RoutedTerminalController implements TerminalController {
     if (token === null || sequence === null) return null;
     this.token = token;
     this.recoverySequence = sequence;
+    // The server reports health per subscription attempt, starting from "normal"; it resends
+    // the worker's health once the new attempt is active if it is not normal.
+    this.workerHealth = NORMAL_HEALTH;
     // A new subscription starts without the previous one's fatal view failure.
     if (kind === "attach") {
       this.fatal = undefined;

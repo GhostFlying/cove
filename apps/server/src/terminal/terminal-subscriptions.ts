@@ -20,6 +20,7 @@ import {
   type TerminalError,
   type TerminalResult,
   type ExternalTerminalEvent,
+  type WorkerHealth,
 } from "@cove/protocol/terminal";
 import type { PipeCommand, PipeEvent } from "@cove/protocol/pipe";
 import type { RuntimeResult } from "@cove/protocol/runtime";
@@ -56,6 +57,7 @@ const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 // results. Results never draw on the connection's shared item or byte budgets, so other
 // connections' output cannot make the server retire a route whose ACK the worker accepted.
 const ROUTE_RESULT_SLOTS = 3;
+const NORMAL_HEALTH: WorkerHealth = Object.freeze({ state: "normal", reasons: [] }) as WorkerHealth;
 const RESULT_SLOT_BYTES = HEADER_BYTES + MAX_METADATA_BYTES + PREPAID_DELIVERY_OVERHEAD;
 
 type Supported =
@@ -89,6 +91,8 @@ type Route = {
   resultSlotsOut: number;
   waitingResults: Request[];
   dropped: boolean;
+  // The worker health this route's client was last given (see publishHealth()).
+  deliveredHealth: WorkerHealth;
 };
 type Request = {
   command: Supported;
@@ -419,6 +423,7 @@ export class TerminalSubscriptions {
         resultSlotsOut: 0,
         waitingResults: [],
         dropped: false,
+        deliveredHealth: NORMAL_HEALTH,
       };
       this.routes.set(subscriptionId, route);
     } else internalId = this.id("r");
@@ -737,6 +742,9 @@ export class TerminalSubscriptions {
       route.credit = undefined;
       route.attempt++;
       request.attempt = route.attempt;
+      // The new attempt's fence drops a health event still queued for the old one, and the
+      // client resets its copy when it starts a recovery; publishHealth() resends a change.
+      route.deliveredHealth = NORMAL_HEALTH;
       route.phase = "opening";
       // Counted from acceptance, not from now: the recover may have waited in the route queue.
       route.deadline = request.recoverDeadlines!.deadline;
@@ -1150,7 +1158,40 @@ export class TerminalSubscriptions {
           if (!(request.command.type === "input" && request.domain?.dispatched))
             this.finish(request, this.error(request.command, route.failure!));
       }
+    this.publishHealth();
   }
+  // Tells each active route's client the current health of the worker serving it (issue #103;
+  // informational only). Level-triggered: a route records the health its client was last
+  // given, and a differing current value is published on a later tick. The event takes no
+  // credit and needs no ACK; when delivery has no room it is simply tried again, never a reason
+  // to retire the route. Changes are rare (the health has hysteresis), so a route has at most a
+  // few such events in flight. A route starts at "normal", which the client assumes, so a
+  // healthy worker adds no event.
+  private publishHealth(): void {
+    for (const route of this.routes.values()) {
+      if (this.closed || this.delivery.closed) return;
+      if (route.phase !== "active") continue;
+      const health = this.runtime.workerHealth(route.ref.run);
+      if (
+        !health ||
+        (health.state === route.deliveredHealth.state &&
+          health.reasons.join() === route.deliveredHealth.reasons.join())
+      )
+        continue;
+      const admitted = this.delivery.admit(
+        {
+          type: "worker-health",
+          run: structuredClone(route.ref.run),
+          subscription: structuredClone(route.ref),
+          health,
+        },
+        new Uint8Array(),
+        { control: false, fence: this.fence(route) },
+      );
+      if (admitted) route.deliveredHealth = health;
+    }
+  }
+
   close(): void {
     if (this.closed) return;
     this.closedState = true;

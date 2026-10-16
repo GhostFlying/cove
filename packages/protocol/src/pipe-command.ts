@@ -64,10 +64,28 @@ export const PipeReadySchema = z.object({
   buildVersion: build,
   effectiveBudgets: EffectiveBudgetsSchema,
 });
-// Worker-to-runtime liveness only; it carries no state and needs no reply.
+// The worker's own load over the interval since its previous heartbeat (issue #103 health).
+// Explicit measurements, not engine state; the runtime combines them with what it observes
+// itself (heartbeat gap, oldest command age) to judge overload. Milliseconds are capped at an
+// hour and the CPU share at 100 by the worker. cpuPercent is the main thread's share of one
+// core, null where the platform cannot measure it; it is supporting data, never a trigger.
+const loadMs = z.number().int().min(0).max(3_600_000);
+export const WorkerLoadSchema = z.object({
+  windowMs: loadMs,
+  eventLoopDelayP99Ms: loadMs,
+  eventLoopDelayMaxMs: loadMs,
+  cpuPercent: z.number().int().min(0).max(100).nullable(),
+  // PTY output read but not yet parsed, over every run on the worker.
+  parseBacklogBytes: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  // Commands the worker has started and not yet answered.
+  executingCommands: z.number().int().min(0).max(65_536),
+});
+export type WorkerLoad = z.infer<typeof WorkerLoadSchema>;
+// Worker-to-runtime liveness and load; it needs no reply.
 export const PipeHeartbeatSchema = z.object({
   type: z.literal("heartbeat"),
   ...common,
+  load: WorkerLoadSchema,
 });
 
 export const SpawnArgumentsSchema = z.object({

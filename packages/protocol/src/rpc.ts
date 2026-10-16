@@ -353,6 +353,7 @@ export {
   WRITE_RPC_METHODS,
   OperationRecordSchema,
   RunRecordSchema,
+  WorkerStatusSchema,
   isWriteRpcMethod,
   validateRpcMethodParams,
 } from "./rpc-methods.js";
@@ -361,5 +362,6 @@ export type {
   RunRecord,
   RpcDomain,
   RpcMethod,
+  WorkerStatus,
   WriteRpcMethod,
 } from "./rpc-methods.js";
