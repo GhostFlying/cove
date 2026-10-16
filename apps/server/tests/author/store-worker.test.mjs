@@ -11,7 +11,12 @@ import {
   uncertainStoreOutcome,
 } from "../../dist/store/store-errors.js";
 import { prepareHome } from "../../dist/store/home.js";
-import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/identity.js";
+import {
+  instanceStopCall,
+  loadOrCreateIdentity,
+  recordInstanceStart,
+} from "../../dist/store/identity.js";
+import { RunLog } from "../../dist/store/runs.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
 import { ConfigService, sqliteConfigState } from "../../dist/store/config.js";
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
@@ -388,6 +393,53 @@ describe("store worker shutdown", () => {
     await reopened.close();
     await reopened.close();
     stores.splice(stores.indexOf(reopened), 1);
+  });
+
+  it("writes the final stop records after a saturated queue drains, then releases the lock", async () => {
+    const layout = await home();
+    const store = await open(layout, { inFlight: 1, queued: 1 });
+    const identity = await loadOrCreateIdentity(store);
+    await recordInstanceStart(store, "instance", 1);
+    const runs = new RunLog(store, () => 7);
+    const run = { serverId: identity.serverId, relayInstanceId: "instance", runId: "run-1" };
+    await runs.started(run, "/", null);
+    await runs.spawned(run);
+    // Saturate: one call in the worker, one queued; a third is refused.
+    const { flag, release } = gate();
+    const blocked = store.call("test.block", { flag });
+    const queued = store.call("test.get", { sql: "SELECT 1 AS one" });
+    expect((await settle(runs.stoppedWithServer("instance", true))).error).toMatchObject({
+      reason: "busy",
+      outcome: "not-sent",
+    });
+    // The orderly stop's records are final calls of close: not refused by the saturated queue.
+    const closing = settle(
+      store.close([runs.stoppedWithServerCall("instance", true), instanceStopCall("instance", 9)]),
+    );
+    expect((await settle(store.call("test.get", { sql: "SELECT 1" }))).error).toMatchObject({
+      reason: "closed",
+      outcome: "not-sent",
+    });
+    expect(await openElsewhere(layout)).toBe("in-use");
+    release();
+    expect(await blocked).toBe("released");
+    expect(await queued).toEqual({ one: 1 });
+    expect((await closing).error).toBeUndefined();
+    stores.splice(stores.indexOf(store), 1);
+    expect(await openElsewhere(layout)).toBe("opened");
+    const reopened = await open(layout);
+    expect(
+      await reopened.call("test.get", {
+        sql: "SELECT stopped_at_ms AS stopped FROM relay_instances WHERE relay_instance_id = ?",
+        params: ["instance"],
+      }),
+    ).toEqual({ stopped: 9 });
+    expect(
+      await reopened.call("test.get", {
+        sql: "SELECT lifecycle, verification FROM runs WHERE run_id = ?",
+        params: ["run-1"],
+      }),
+    ).toEqual({ lifecycle: "stopped-with-server", verification: "final" });
   });
 
   it("releases the lock and the worker when opening fails", async () => {

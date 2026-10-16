@@ -24,7 +24,7 @@ import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-r
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
 import { resolveHome } from "../store/home.js";
 import { StoreError, type Store } from "../store/database.js";
-import { recordInstanceStart, recordInstanceStop } from "../store/identity.js";
+import { instanceStopCall, recordInstanceStart } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
 import { RunLog } from "../store/runs.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
@@ -312,16 +312,16 @@ export async function startLocalEntry(
         }
         // D9: this instance's runs end with the server. Only the worker's own exit report proves
         // that every PTY it owned ended. The store closes last, which releases the data directory
-        // lock after the rendezvous is gone.
+        // lock after the rendezvous is gone. The stop records are the store's final calls: they
+        // run after the drain, without the queue limits, so a saturated queue cannot refuse them.
         if (store) {
           try {
-            await local.runs?.stoppedWithServer(instance, receipt?.status === "exited");
-            await recordInstanceStop(store, instance, Date.now());
-          } catch {
-            failed = true;
-          }
-          try {
-            await store.close();
+            await store.close([
+              ...(local.runs
+                ? [local.runs.stoppedWithServerCall(instance, receipt?.status === "exited")]
+                : []),
+              instanceStopCall(instance, Date.now()),
+            ]);
           } catch {
             failed = true;
           }

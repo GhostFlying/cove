@@ -1,4 +1,4 @@
-import type { Store } from "./database.js";
+import type { FinalStoreCall, Store } from "./database.js";
 
 export type ServerIdentity = {
   readonly serverId: string;
@@ -36,4 +36,12 @@ export function recordInstanceStop(
   now: number,
 ): Promise<void> {
   return store.call("identity.recordStop", { relayInstanceId, at: now });
+}
+
+// The instance stop record as a final call of Store.close (see RunLog.stoppedWithServerCall).
+export function instanceStopCall(
+  relayInstanceId: string,
+  now: number,
+): Extract<FinalStoreCall, { operation: "identity.recordStop" }> {
+  return { operation: "identity.recordStop", args: { relayInstanceId, at: now } };
 }
