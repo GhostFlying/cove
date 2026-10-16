@@ -1,3 +1,4 @@
+import { PIPE_LIVENESS_WINDOW_MS } from "@cove/protocol/pipe";
 import { describe, it, expect } from "vitest";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { fixture, run, geometry, decode } from "./terminal-control-byte-peer.mjs";
@@ -336,8 +337,10 @@ describe("private shared terminal control and binary input", () => {
       // The timed-out input ends alone; the worker is still live (issue #103). It is lost only
       // once it stays silent for the whole liveness window.
       expect(f.session.closed).toBe(false);
-      f.clock(2000);
-      f.session.tick();
+      for (let now = 2000; now <= PIPE_LIVENESS_WINDOW_MS + 2000; now += 1000) {
+        f.clock(now);
+        f.session.tick();
+      }
       expect(f.session.closed).toBe(true);
       const recovery = a.service.handle(
         command("recover", ref, "recover", {

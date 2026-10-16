@@ -1,3 +1,4 @@
+import { PIPE_LIVENESS_WINDOW_MS } from "@cove/protocol/pipe";
 import { describe, expect, test } from "vitest";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import {
@@ -441,7 +442,8 @@ describe("P2-B2 independent actual compiled control contracts", () => {
         expect(r.inputFrames()).toHaveLength(1);
         // A worker silent after the handoff: the input's deadline passes and, with no frame for
         // the whole liveness window, the worker is lost (issue #103 measures silence per tick).
-        if (loss === "timeout") for (let second = 0; second <= 30; second++) r.advance(1000);
+        if (loss === "timeout")
+          for (let second = 0; second <= PIPE_LIVENESS_WINDOW_MS / 1000; second++) r.advance(1000);
         else r.session.loseContact();
         expect(await p).toMatchObject({
           type: "error",

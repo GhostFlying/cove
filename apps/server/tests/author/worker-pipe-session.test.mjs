@@ -5,6 +5,9 @@ import { domainError } from "@cove/protocol/errors";
 import {
   HEADER_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_HEARTBEAT_INTERVAL_MS,
+  PIPE_LIVENESS_MIN_HEARTBEATS,
+  PIPE_LIVENESS_WINDOW_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   createPipeDecoder,
   encodePipeFrame,
@@ -43,6 +46,7 @@ function fixture(
   identityLimit = 32,
   forward = undefined,
   timeoutMs = 100,
+  livenessWindowMs = 3000,
 ) {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
@@ -65,6 +69,7 @@ function fixture(
     },
     now: () => now,
     timeoutMs,
+    ...(livenessWindowMs !== null && { livenessWindowMs }),
     identityLimit,
     contactLost: () => {
       lost++;
@@ -384,8 +389,9 @@ describe("bounded worker pipe session", () => {
     expect(f.lost()).toBe(0);
   });
 
-  // Issue #103: a busy worker is not a lost one. These run with timeoutMs 100 (the liveness
-  // window and the command deadline) and advance the clock in ticks of 10.
+  // Issue #103: a busy worker is not a lost one. These run with a command deadline (timeoutMs)
+  // of 100 and a liveness window of 3000, the smallest valid one, and advance the clock in
+  // ticks of 10.
   const advance = (f, from, to, frames = () => []) => {
     for (let now = from + 10; now <= to; now += 10) {
       f.clock(now);
@@ -418,9 +424,9 @@ describe("bounded worker pipe session", () => {
     // A worker that sends nothing at all for the whole window is hung, and is lost.
     f.settleWrites();
     const silent = f.session.request(ack(f, 0, "silent"));
-    advance(f, 2000, 2090);
+    advance(f, 2000, 4990);
     expect(f.lost()).toBe(0);
-    advance(f, 2090, 2110);
+    advance(f, 4990, 5010);
     expect(f.lost()).toBe(1);
     expect((await silent).error.kind).toBe("RESULT_UNKNOWN");
   });
@@ -451,8 +457,37 @@ describe("bounded worker pipe session", () => {
     f.session.transportReleased();
   });
 
+  it("keeps the liveness window independent of a short command deadline", async () => {
+    // A window shorter than PIPE_LIVENESS_MIN_HEARTBEATS heartbeats would declare a live worker
+    // lost on one late timer turn, so the session refuses it.
+    expect(() =>
+      fixture(
+        { ...M0_LIMITS },
+        32,
+        undefined,
+        100,
+        PIPE_LIVENESS_MIN_HEARTBEATS * PIPE_HEARTBEAT_INTERVAL_MS - 1,
+      ),
+    ).toThrow("Invalid session limits");
+    // Without the option (as production composes it) the window is PIPE_LIVENESS_WINDOW_MS,
+    // however short the command deadline: here 100 ms, as a negotiated recoveryDeadlineMs may be.
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 100, null);
+    f.start();
+    f.session.tick();
+    for (let now = 1000; now < PIPE_LIVENESS_WINDOW_MS; now += 1000) {
+      f.clock(now);
+      f.session.tick();
+    }
+    expect(f.lost()).toBe(0);
+    expect(f.session.ready).toBe(true);
+    f.clock(PIPE_LIVENESS_WINDOW_MS);
+    f.session.tick();
+    expect(f.lost()).toBe(1);
+    f.session.transportReleased();
+  });
+
   it("does not charge a stall of the runtime's own clock ticks to the worker", async () => {
-    const f = fixture({ ...M0_LIMITS }, 32, undefined, 15_000);
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 15_000, 15_000);
     f.start();
     f.session.tick();
     // The runtime's event loop stalls for 20 s; the worker's frames wait unread in the pipe.
@@ -1236,8 +1271,8 @@ describe("bounded worker pipe session", () => {
     f.start();
     const command = f.command("stop", "stop", { operationId: "stop" });
     const held = f.session.request(command);
-    // The stop's deadline passes at 100; the silent worker is lost once the window ends at 110.
-    advance(f, 0, 120);
+    // The stop's deadline passes at 100; the silent worker is lost once the window ends at 3000.
+    advance(f, 0, 3010);
     expect((await held).error.acceptance).toBe("unknown");
     expect(f.session.receive(f.reply(command, { operationId: "stop" }))).toBe(0);
     expect(f.lost()).toBe(1);

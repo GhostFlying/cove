@@ -9,6 +9,8 @@ import {
   MAX_READ_BYTES,
   MAX_METADATA_BYTES,
   PIPE_HEARTBEAT_INTERVAL_MS,
+  PIPE_LIVENESS_MIN_HEARTBEATS,
+  PIPE_LIVENESS_WINDOW_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_ROUTE_CONTROL_FRAME_BYTES,
   type PipeCommand,
@@ -148,11 +150,13 @@ export class WorkerPipeSession {
   // They are not part of queuedBytes or physicalBytes (see ROUTE_CONTROL_FRAME_BYTES).
   private prepaidFrames = 0;
   private prepaidBytes = 0;
-  // Liveness (issue #103): the worker is lost after timeoutMs without any frame from it, not
-  // when one command is slow. `heard` records a frame since the last tick; `silentMs` is the
+  // Liveness (issue #103): the worker is lost after livenessWindowMs without any frame from it,
+  // not when one command is slow. `heard` records a frame since the last tick; `silentMs` is the
   // silence the runtime itself observed, at most PIPE_HEARTBEAT_INTERVAL_MS per tick, so a
   // stall of the runtime's own event loop (whose unread frames wait in the OS pipe) is not
-  // charged to the worker.
+  // charged to the worker. The window therefore bounds runtime-observed silence, not wall-clock
+  // time: recurring runtime stalls stretch the wall-clock time to detection.
+  private readonly livenessWindowMs: number;
   private heard = false;
   private silentMs = 0;
   private lastTick: number | undefined;
@@ -165,7 +169,12 @@ export class WorkerPipeSession {
       transport: PipeByteTransport;
       codec: PipeCodec;
       now: () => number;
+      // Each command's deadline (recoveryDeadlineMs in production): past it the command alone
+      // ends with an explicit outcome while the worker stays live.
       timeoutMs: number;
+      // Runtime-observed silence after which the worker is lost, and the handshake deadline.
+      // Defaults to PIPE_LIVENESS_WINDOW_MS; independent of timeoutMs (issue #103).
+      livenessWindowMs?: number;
       identityLimit: number;
       contactLost?: (worker: WorkerRef) => void;
     },
@@ -175,12 +184,16 @@ export class WorkerPipeSession {
       options.composition.bytes.controlReserve < SESSION_CONTROL_RESERVE ||
       !Number.isSafeInteger(options.timeoutMs) ||
       options.timeoutMs < 1 ||
+      !Number.isSafeInteger(options.livenessWindowMs ?? PIPE_LIVENESS_WINDOW_MS) ||
+      (options.livenessWindowMs ?? PIPE_LIVENESS_WINDOW_MS) <
+        PIPE_LIVENESS_MIN_HEARTBEATS * PIPE_HEARTBEAT_INTERVAL_MS ||
       !Number.isSafeInteger(options.identityLimit) ||
       options.identityLimit < 1 ||
       options.identityLimit > 4096
     )
       throw new Error("Invalid session limits");
     this.composition = options.composition;
+    this.livenessWindowMs = options.livenessWindowMs ?? PIPE_LIVENESS_WINDOW_MS;
     this.worker = Object.freeze({ ...options.worker });
     this.hello = {
       type: "hello",
@@ -212,7 +225,7 @@ export class WorkerPipeSession {
     if (
       !Number.isSafeInteger(now) ||
       now < this.lastNow ||
-      now > Number.MAX_SAFE_INTEGER - this.options.timeoutMs
+      now > Number.MAX_SAFE_INTEGER - Math.max(this.options.timeoutMs, this.livenessWindowMs)
     )
       throw new Error("Invalid monotonic clock");
     this.lastNow = now;
@@ -227,7 +240,8 @@ export class WorkerPipeSession {
       return false;
     }
     this.state = "hello";
-    this.handshakeDeadline = this.now() + this.options.timeoutMs;
+    // A worker that never says ready is silent: the liveness window bounds the handshake too.
+    this.handshakeDeadline = this.now() + this.livenessWindowMs;
     if (!this.enqueue(bytes, "status", undefined)) {
       this.loseContact();
       return false;
@@ -803,8 +817,8 @@ export class WorkerPipeSession {
   }
 
   // Liveness and command deadlines (issue #103, docs/terminal-architecture.md 3.3 "worker 存活与
-  // 命令期限"). A busy worker is not a lost one: the worker is lost only after timeoutMs without
-  // any frame from it (its heartbeat keeps coming while commands queue behind parsing), besides
+  // 命令期限"). A busy worker is not a lost one: the worker is lost only after livenessWindowMs of
+  // runtime-observed silence (its heartbeat keeps coming while commands queue behind parsing), besides
   // process, pipe and protocol failures handled elsewhere. A command past its own deadline ends
   // alone, with an explicit outcome (see expire()). Route control has no deadline while the
   // worker is live.
@@ -822,7 +836,7 @@ export class WorkerPipeSession {
       this.heard = false;
       this.silentMs = 0;
     } else this.silentMs += Math.min(elapsed, PIPE_HEARTBEAT_INTERVAL_MS);
-    if (this.silentMs >= this.options.timeoutMs) {
+    if (this.silentMs >= this.livenessWindowMs) {
       this.loseContact();
       return;
     }
