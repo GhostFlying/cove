@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { lstat, open, unlink } from "node:fs/promises";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
-import { Store, StoreError } from "../store/database.js";
+import { Store, StoreError, type StoreOptions } from "../store/database.js";
 import { prepareHome, type HomeLayout } from "../store/home.js";
 import {
   isRecordedInstance,
@@ -21,12 +21,15 @@ export type ServerPersistence = {
 // anything else is touched, so a refused second server leaves the running one, its rendezvous and
 // its files alone. The caller owns `store` and must close it last (Store.close releases the lock
 // after the database is closed).
+// `storeOptions` is passed only by test entries (ServerTestHooks in main.ts).
 export async function openPersistence(
   home: string,
   now: () => number = Date.now,
+  storeOptions: Pick<StoreOptions, "operationModules" | "limits"> = {},
 ): Promise<ServerPersistence> {
   const layout = await prepareHome(home);
   const store = await Store.open({
+    ...storeOptions,
     databasePath: layout.databasePath,
     backupDirectory: layout.backupDirectory,
     now,
