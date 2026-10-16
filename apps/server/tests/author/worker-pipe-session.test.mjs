@@ -579,6 +579,56 @@ describe("bounded worker pipe session", () => {
     f.session.transportReleased();
   });
 
+  it("starts a command's age at its real handover after a runtime stall", async () => {
+    // Issue #103 review: a frame handed over by drain() after a stall, before the next tick,
+    // took the last tick's clock, so its age started a minute early and read as overloaded.
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 120_000, 120_000);
+    f.start();
+    f.session.tick();
+    f.block();
+    // A stop (which never counts toward command age) is handed over and the transport blocks.
+    const stop = f.session.request(f.command("stop", "blocker", { operationId: "blocker" }));
+    const status = f.session.request(f.command("status", "late"));
+    expect(f.writes).toHaveLength(2);
+    // The runtime stalls for a minute; the transport drains before any tick.
+    f.clock(60_000);
+    f.unblock();
+    f.session.drain();
+    expect(f.writes).toHaveLength(3);
+    f.session.tick();
+    expect(f.session.workerStatus().signals.oldestCommandAgeMs).toBe(0);
+    f.clock(61_000);
+    f.session.tick();
+    expect(f.session.workerStatus().signals.oldestCommandAgeMs).toBe(1000);
+    f.session.loseContact();
+    expect((await status).error.kind).toBe("RESULT_UNKNOWN");
+    expect((await stop).error.kind).toBe("RESULT_UNKNOWN");
+    f.session.transportReleased();
+  });
+
+  it("refuses a handover when the clock is invalid, before the transport writes", async () => {
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 120_000, 120_000);
+    f.start();
+    f.clock(5000);
+    f.session.tick();
+    f.block();
+    const stop = f.session.request(f.command("stop", "blocker", { operationId: "blocker" }));
+    const status = f.session.request(f.command("status", "late"));
+    expect(f.writes).toHaveLength(2);
+    // The clock goes backwards: the handover fails closed and nothing more is written.
+    f.clock(4000);
+    f.unblock();
+    f.session.drain();
+    expect(f.writes).toHaveLength(2);
+    expect(f.lost()).toBe(1);
+    expect((await status).error).toMatchObject({
+      kind: "WORKER_UNAVAILABLE",
+      acceptance: "not-accepted",
+    });
+    expect((await stop).error.kind).toBe("RESULT_UNKNOWN");
+    f.session.transportReleased();
+  });
+
   it("does not charge a stall of the runtime's own clock ticks to the worker", async () => {
     const f = fixture({ ...M0_LIMITS }, 32, undefined, 15_000, 15_000);
     f.start();

@@ -649,15 +649,29 @@ export class WorkerPipeSession {
         const request = item.request;
         const handing = (): void => {
           if (!request || request.sent) return;
-          if (request.withdrawn) {
-            // The transport hands over late a frame whose command expiry already answered as
-            // never sent: delivering it now could apply a command the caller was told was not.
-            // Fail closed: contact is lost, and the throw stops the transport's lower write.
+          // The command's age starts at the real handover. drain() and result-driven promotion
+          // run without a tick, so the last tick's clock may predate a runtime stall; a fresh,
+          // validated sample is taken here. The clock is foreign code and may reenter, so the
+          // once-only transition and the refusals below are checked after sampling.
+          let at: number | undefined;
+          try {
+            at = this.now();
+          } catch {
+            // An invalid clock fails closed below, before anything is sent.
+          }
+          if (request.sent) return;
+          if (at === undefined || this.closed || request.withdrawn) {
+            // Nothing may be delivered once its caller was, or is about to be, told it was not:
+            // an invalid clock, contact already lost (its command ended not-accepted), or a late
+            // handover of a frame whose expiry answered it as never sent. Contact is lost, and
+            // the throw stops the transport's lower write.
             this.loseContact();
-            throw new Error("Late handover of a withdrawn frame");
+            throw new Error(
+              request.withdrawn ? "Late handover of a withdrawn frame" : "Frame handover refused",
+            );
           }
           request.sent = true;
-          request.sentAt = this.lastNow;
+          request.sentAt = at;
           request.onSent?.();
         };
         try {
