@@ -57,6 +57,13 @@ const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 // results. Results never draw on the connection's shared item or byte budgets, so other
 // connections' output cannot make the server retire a route whose ACK the worker accepted.
 const ROUTE_RESULT_SLOTS = 3;
+// A worker-health event (issue #103) is informational and must never displace terminal data:
+// admitted against the shared item and byte budgets, it could make the route's next output
+// frame fail admission, which retires the route with RESYNC_REQUIRED. Each route therefore
+// also reserves one slot of the same size at attach for its health events. At most one is in
+// delivery at a time; changes meanwhile coalesce, because publishHealth() is level-triggered
+// and sends the then-current value once the slot is back.
+const ROUTE_HEALTH_SLOTS = 1;
 const NORMAL_HEALTH: WorkerHealth = Object.freeze({ state: "normal", reasons: [] }) as WorkerHealth;
 const RESULT_SLOT_BYTES = HEADER_BYTES + MAX_METADATA_BYTES + PREPAID_DELIVERY_OVERHEAD;
 
@@ -91,8 +98,10 @@ type Route = {
   resultSlotsOut: number;
   waitingResults: Request[];
   dropped: boolean;
-  // The worker health this route's client was last given (see publishHealth()).
+  // The worker health this route's client was last given, and the route's prepaid health slot
+  // while it is free (undefined while delivery holds it; see publishHealth()).
   deliveredHealth: WorkerHealth;
+  healthSlot: ByteReservation | undefined;
 };
 type Request = {
   command: Supported;
@@ -374,12 +383,13 @@ export class TerminalSubscriptions {
     if (command.type === "attach") {
       const lease = this.composition.bytes.reserve(8192 + ROUTE_CONTROL_BYTES);
       const resultSlots: ByteReservation[] = [];
-      for (let index = 0; lease && index < ROUTE_RESULT_SLOTS; index++) {
+      // The last slot becomes the route's health slot (see ROUTE_HEALTH_SLOTS).
+      for (let index = 0; lease && index < ROUTE_RESULT_SLOTS + ROUTE_HEALTH_SLOTS; index++) {
         const slot = this.composition.bytes.reserve(RESULT_SLOT_BYTES);
         if (!slot) break;
         resultSlots.push(slot);
       }
-      if (!lease || resultSlots.length < ROUTE_RESULT_SLOTS) {
+      if (!lease || resultSlots.length < ROUTE_RESULT_SLOTS + ROUTE_HEALTH_SLOTS) {
         lease?.release();
         for (const slot of resultSlots) slot.release();
         requestLease.release();
@@ -401,6 +411,7 @@ export class TerminalSubscriptions {
         requestLease.release();
         return this.reject(command, "COUNTER_EXHAUSTED");
       }
+      const healthSlot = resultSlots.pop()!;
       route = {
         ref: {
           run: structuredClone(command.run),
@@ -424,6 +435,7 @@ export class TerminalSubscriptions {
         waitingResults: [],
         dropped: false,
         deliveredHealth: NORMAL_HEALTH,
+        healthSlot,
       };
       this.routes.set(subscriptionId, route);
     } else internalId = this.id("r");
@@ -1093,13 +1105,15 @@ export class TerminalSubscriptions {
     this.reap(route);
   }
 
-  // Releases a route's lease and free result slots. Slots still held by delivery are released
-  // when they come back.
+  // Releases a route's lease and free result and health slots. Slots still held by delivery are
+  // released when they come back.
   private dropRoute(route: Route): void {
     if (route.dropped) return;
     route.dropped = true;
     route.lease.release();
     for (const slot of route.resultSlots.splice(0)) slot.release();
+    route.healthSlot?.release();
+    route.healthSlot = undefined;
   }
   // Half of recoveryDeadlineMs: the client times the same attach with recoveryDeadlineMs from
   // before it was sent, and an attach it times out itself is unknown, which makes it retire the
@@ -1163,14 +1177,16 @@ export class TerminalSubscriptions {
   // Tells each active route's client the current health of the worker serving it (issue #103;
   // informational only). Level-triggered: a route records the health its client was last
   // given, and a differing current value is published on a later tick. The event takes no
-  // credit and needs no ACK; when delivery has no room it is simply tried again, never a reason
-  // to retire the route. Changes are rare (the health has hysteresis), so a route has at most a
-  // few such events in flight. A route starts at "normal", which the client assumes, so a
-  // healthy worker adds no event.
+  // credit and needs no ACK. It travels only in the route's prepaid health slot, as a prepaid
+  // control item, so it is outside the connection's item limit, its byte budgets and the
+  // ordinary-output counts: it can never make terminal output fail admission. While the slot is
+  // in delivery (or when delivery refuses the event, which returns the slot) the route simply
+  // waits for a later tick, so changes coalesce and nothing here ever retires a route. A route
+  // starts at "normal", which the client assumes, so a healthy worker adds no event.
   private publishHealth(): void {
     for (const route of this.routes.values()) {
       if (this.closed || this.delivery.closed) return;
-      if (route.phase !== "active") continue;
+      if (route.phase !== "active" || !route.healthSlot) continue;
       const health = this.runtime.workerHealth(route.ref.run);
       if (
         !health ||
@@ -1178,6 +1194,19 @@ export class TerminalSubscriptions {
           health.reasons.join() === route.deliveredHealth.reasons.join())
       )
         continue;
+      const lease = route.healthSlot;
+      route.healthSlot = undefined;
+      let owned = true;
+      // Delivery releases this exactly once: on refusal, cancellation or the write callback.
+      const slot: ByteReservation = {
+        bytes: lease.bytes,
+        release: () => {
+          if (!owned) return;
+          owned = false;
+          if (route.dropped) lease.release();
+          else route.healthSlot = lease;
+        },
+      };
       const admitted = this.delivery.admit(
         {
           type: "worker-health",
@@ -1186,7 +1215,7 @@ export class TerminalSubscriptions {
           health,
         },
         new Uint8Array(),
-        { control: false, fence: this.fence(route) },
+        { control: true, fence: this.fence(route), prepaid: slot },
       );
       if (admitted) route.deliveredHealth = health;
     }

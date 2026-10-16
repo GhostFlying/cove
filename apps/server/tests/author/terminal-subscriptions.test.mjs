@@ -9,6 +9,7 @@ import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { PIPE_ROUTE_CONTROL_COMMANDS } from "@cove/protocol/pipe";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import { SESSION_CONTROL_RESERVE } from "../../dist/terminal/worker-pipe-session.js";
 import {
   fixture,
@@ -458,7 +459,8 @@ describe("private terminal subscription delivery", () => {
         { type: "worker-health", run, subscription: second, health: overloaded },
       ]);
       // Prompt again: both routes are told once the hold period has passed, and nothing else
-      // about them changed.
+      // about them changed. Each route's health slot comes back when its frame is written.
+      a.settleWrites();
       seconds(12_000, 30_000, 10);
       const normal = { state: "normal", reasons: [] };
       expect(health().slice(2)).toEqual([
@@ -471,6 +473,93 @@ describe("private terminal subscription delivery", () => {
     } finally {
       await f.dispose();
     }
+  });
+
+  it("delivers worker health in a prepaid slot that never displaces terminal output", async () => {
+    // Issue #103 review: health admitted against the ordinary item and byte budgets made the
+    // next output frame fail admission, which retired a live route with RESYNC_REQUIRED.
+    // The tightest valid budgets: credit and ordinary connection bytes of one maximal frame.
+    const f = fixture({
+      subscriptionCreditBytes: MAX_FRAME_BYTES,
+      outboundConnectionBytes: MAX_FRAME_BYTES,
+    });
+    const a = f.connect("bytes");
+    const b = f.connect("items", { itemLimit: 5 });
+    try {
+      const refA = (await f.attach(a, 0, "a")).subscription;
+      const refB = (await f.attach(b, 0, "b")).subscription;
+      a.settleWrites();
+      b.settleWrites();
+      const beat = (p99) =>
+        frame({
+          type: "heartbeat",
+          worker,
+          load: {
+            windowMs: 1000,
+            eventLoopDelayP99Ms: p99,
+            eventLoopDelayMaxMs: p99,
+            cpuPercent: 100,
+            parseBacklogBytes: 0,
+            executingCommands: 0,
+          },
+        });
+      const seconds = (from, to, p99) => {
+        for (let now = from; now <= to; now += 1000) {
+          f.clock(now);
+          f.session.receive(beat(p99));
+          f.session.tick();
+          a.service.tick();
+          b.service.tick();
+        }
+      };
+      const types = (connection) =>
+        connection.writes.map((item) => decode(item.data).metadata.type);
+      // Output 1 takes almost all of the ordinary byte budget; its write stays in flight.
+      const outbound = f.budgets.outboundConnectionBytes;
+      const half = Math.floor(outbound / 2);
+      f.session.receive(f.output(refA, 1, new Uint8Array(half).fill(65)));
+      const first = a.writes.at(-1).data.byteLength;
+      const overhead = first - half;
+      // The worker becomes overloaded; both routes' health events are admitted and held.
+      seconds(1000, 7000, 450);
+      expect(types(a).filter((type) => type === "worker-health")).toHaveLength(1);
+      expect(types(b).filter((type) => type === "worker-health")).toHaveLength(1);
+      // Output 2 fits only if health took none of the ordinary bytes (its event is ~300 bytes).
+      const rest = outbound - first - 50 - overhead;
+      f.session.receive(f.output(refA, 2, new Uint8Array(rest).fill(66)));
+      // With itemLimit 5 a connection has room for one ordinary item: health must not be it.
+      f.session.receive(f.output(refB, 1));
+      expect(types(a).slice(-2)).toEqual(["worker-health", "run-event"]);
+      expect(types(b).slice(-2)).toEqual(["worker-health", "run-event"]);
+      expect(a.service.snapshot(refA.subscriptionId).route.phase).toBe("active");
+      expect(b.service.snapshot(refB.subscriptionId).route.phase).toBe("active");
+      // While the slot is in flight a change waits, then the current value goes out once.
+      seconds(8000, 25_000, 10);
+      expect(types(a).filter((type) => type === "worker-health")).toHaveLength(1);
+      a.settleWrites();
+      b.settleWrites();
+      seconds(26_000, 26_000, 10);
+      const normal = { state: "normal", reasons: [] };
+      for (const [connection, ref] of [
+        [a, refA],
+        [b, refB],
+      ]) {
+        const health = connection.writes
+          .map((item) => decode(item.data).metadata)
+          .filter((metadata) => metadata.type === "worker-health");
+        expect(health).toHaveLength(2);
+        expect(health[1]).toEqual({
+          type: "worker-health",
+          run,
+          subscription: ref,
+          health: normal,
+        });
+      }
+      expect(f.session.closed).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
   });
 
   it("retires only an expired route and reports its first cause on the next correlated command", async () => {
