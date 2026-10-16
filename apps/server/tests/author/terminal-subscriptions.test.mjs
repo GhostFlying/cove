@@ -9,6 +9,7 @@ import { M0_CAPABILITIES, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
 import { PIPE_ROUTE_CONTROL_COMMANDS } from "@cove/protocol/pipe";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import { MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import { SESSION_CONTROL_RESERVE } from "../../dist/terminal/worker-pipe-session.js";
 import {
@@ -35,6 +36,36 @@ const command = (type, ref, requestId, rest = {}) => ({
   requestId,
   ...rest,
 });
+
+// Issue #103 review: an ACK already sent to the worker is left running when a recover queued
+// behind it expires, so it must report its own outcome, not the route's RECOVERY_EXPIRED.
+// `end(f, held)` makes the worker end the held ACK; `expected` is the error the ACK must report.
+async function ackOutcomeAfterExpiry(end, expected) {
+  const f = fixture({ recoveryDeadlineMs: 20 });
+  const a = f.connect("a");
+  try {
+    const ref = (await f.attach(a, 0, "replay")).subscription;
+    f.session.receive(f.output(ref, 1));
+    const ack = a.service.handle(command("applied-ack", ref, "ack", { appliedSeq: 1 }));
+    const held = f.latest();
+    expect(held.type).toBe("applied-ack");
+    const recover = a.service.handle(command("recover", ref, "rec", { reason: "expired" }));
+    f.clock(10);
+    a.service.tick();
+    expect((await recover).error).toMatchObject({
+      kind: "RECOVERY_EXPIRED",
+      acceptance: "not-accepted",
+    });
+    end(f, held);
+    expect((await ack).error).toMatchObject(expected);
+    // Later requests still get the route's first failure.
+    expect(
+      (await a.service.handle(command("recover", ref, "after", { reason: "expired" }))).error,
+    ).toMatchObject({ kind: "RECOVERY_EXPIRED" });
+  } finally {
+    await f.dispose();
+  }
+}
 
 // Issue #103 review: an acceptance past the marker deadline must not admit a marker; the
 // attempt ends RECOVERY_EXPIRED (not-accepted) and stays fenced. `type` is the command whose
@@ -462,6 +493,32 @@ describe("private terminal subscription delivery", () => {
     } finally {
       await f.dispose();
     }
+  });
+
+  it("keeps the contact-loss result of a sent ACK when a recover behind it expired", async () => {
+    expect.hasAssertions();
+    await ackOutcomeAfterExpiry((f) => f.session.loseContact(), {
+      kind: "RESULT_UNKNOWN",
+      acceptance: "unknown",
+    });
+  });
+
+  it("keeps the worker's refusal of a sent ACK when a recover behind it expired", async () => {
+    expect.hasAssertions();
+    await ackOutcomeAfterExpiry(
+      (f, held) =>
+        f.session.receive(
+          frame({
+            type: "error",
+            worker,
+            run,
+            requestId: held.requestId,
+            commandType: "applied-ack",
+            error: domainError("RESYNC_REQUIRED"),
+          }),
+        ),
+      { kind: "RESYNC_REQUIRED", acceptance: "not-accepted" },
+    );
   });
 
   it("never sends a queued recover whose deadline passed before its ACK was answered and no tick ran", async () => {
