@@ -226,6 +226,9 @@ decisions without concrete evidence or a user request.
   reproducible and free of private session data.
 - Update affected design/usage documentation with behavior changes. Report what
   changed, what was checked and what remains unverified.
+- A change to a surface Shepherd/tend consumes (CLI commands, flags, exit codes, JSON
+  output, run/control semantics, recipe env) updates `docs/integrations/shepherd-tend.md`,
+  including its changelog, in the same PR.
 
 Add nested AGENTS.md files only for real domain-specific constraints. Keep task
 assignments out of this file. Convert enforceable rules into CI checks as tooling

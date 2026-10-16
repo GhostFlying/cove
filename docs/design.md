@@ -345,7 +345,8 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 ### 7.1 以 tend 实现 Shepherd，经 CLI 集成（方向已接受，未排期）
 
 状态：用户于 2026-10-16 接受本节方向与程序化输入规则（见下文“已决定”）；实现未排期，不属于 M1，
-具体 milestone 另行批准。字段名与命令语法在实现时确定。
+具体 milestone 另行批准。字段名与命令语法在实现时确定。面向 tend 开发者的现状与变更记录见
+[Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 
 角色名仍为 Shepherd，拟由 [tend](https://github.com/GhostFlying/tend) 实现：以持久任务账本为中心，
 包含主 agent、pull 模式的 runner 与独立验收，并有自己的服务与 UI。依据 tend 公开设计（提交 `648d921`）：
