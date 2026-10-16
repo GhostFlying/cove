@@ -127,7 +127,7 @@ Server 服务需要脱离启动 SSH 会话和 UI 生命周期；服务管理器�
 持久化 terminal ID、PID 或画面，不等于持久化活进程。
 已确认一期不提供独立 PTY keeper。服务管理器重新拉起 server 只恢复业务记录，不能将旧运行实例标为 live。
 终端快照持久化已选 A：只保存 tab 配置和运行记录，画面、恢复基线与 scrollback 只保留在内存中，首期不落盘。
-最后的 agent 业务状态后续通过 agent hook 实现，不能由旧 PID、最后画面或终端安静推断任务已完成。
+最后的 agent 业务状态由 Shepherd（tend）负责（Cove 不实现 agent hook，见[设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)），不能由旧 PID、最后画面或终端安静推断任务已完成。
 未来如需 server 重启后保留 PTY，再单独评估 keeper；不以网络/模块拆分承诺初版具有此能力。
 
 活跃会话期间不得因 desktop 自动更新而替换 server。
