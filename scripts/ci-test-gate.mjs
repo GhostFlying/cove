@@ -273,6 +273,11 @@ export const requiredSuites = [
   },
   {
     project: "server",
+    file: "apps/server/tests/author/repo-registration.test.mjs",
+    minimumTests: 8,
+  },
+  {
+    project: "server",
     file: "apps/server/tests/author/terminal-subscriptions.test.mjs",
     minimumTests: 14,
   },
