@@ -118,11 +118,17 @@ test("effective limits reject nonfinite, oversized and contradictory budgets", (
 });
 
 test("domain codes are complete and sequential without interpolating user bytes", () => {
-  // 21 M0 kinds keep their codes; the 18 M1 domain kinds are appended after them.
-  expect(DOMAIN_ERROR_KINDS).toHaveLength(39);
+  // 21 M0 kinds keep their codes; the 19 M1 domain kinds are appended after them.
+  expect(DOMAIN_ERROR_KINDS).toHaveLength(40);
   expect(DOMAIN_ERROR_KINDS.map((kind) => ERROR_CODES[kind])).toEqual(
-    Array.from({ length: 39 }, (_, index) => 1000 + index),
+    Array.from({ length: 40 }, (_, index) => 1000 + index),
   );
+  expect(domainError("GIT_UNAVAILABLE")).toMatchObject({
+    code: 1039,
+    message: "GIT UNAVAILABLE",
+    acceptance: "not-accepted",
+    nextAction: "none",
+  });
   expect(ERROR_CODES.COUNTER_EXHAUSTED).toBe(1020);
   expect(ERROR_CODES.OPERATION_ID_CONFLICT).toBe(1015);
   expect(domainError("MANAGED_WORKTREE_NOT_MOUNTABLE")).toMatchObject({
