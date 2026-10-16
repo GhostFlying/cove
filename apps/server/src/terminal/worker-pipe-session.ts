@@ -52,7 +52,10 @@ const ROUTE_CONTROL_WAIT_BYTES = ROUTE_CONTROL_FRAME_BYTES + MAX_METADATA_BYTES 
 const PREPAID: ByteReservation = Object.freeze({ bytes: 0, release() {} });
 
 export interface PipeByteTransport {
-  write(bytes: Uint8Array, settled: (error?: unknown) => void): boolean;
+  // A transport must call `handing` immediately before its first lower write or delivery side
+  // effect: from then on bytes may reach the worker (and a reply may arrive, even synchronously).
+  // A write that throws before calling it delivered nothing.
+  write(bytes: Uint8Array, settled: (error?: unknown) => void, handing: () => void): boolean;
 }
 export interface PipeCodec {
   encode(text: string): Uint8Array;
@@ -69,6 +72,9 @@ type Pending = {
   handoff: ResultHandoff | undefined;
   previewSeal?: PreviewResultSeal;
   sent: boolean;
+  // Called when the transport hands the frame over (`sent` becomes true); see request() and
+  // PipeByteTransport.
+  onSent?: () => void;
   admitted: boolean;
 };
 type Outgoing = {
@@ -280,12 +286,18 @@ export class WorkerPipeSession {
       : "ordinary";
   }
 
+  // `onSent` runs synchronously when the transport calls `handing` for the command's frame, just
+  // before its first lower write or delivery: the first point from which the worker may execute
+  // it, and before any reply. A command that settles without it was never delivered and never
+  // will be: refused at admission, refused by the transport before handing over, or withdrawn
+  // unsent when contact was lost (which drops the whole queue).
   request(
     command: PipeCommand,
     payload: Uint8Array = new Uint8Array(),
     handoff?: ResultHandoff,
+    onSent?: () => void,
   ): Promise<RuntimeResult> {
-    return this.admit(command, payload, handoff);
+    return this.admit(command, payload, handoff, undefined, onSent);
   }
 
   requestUnsubscribe(
@@ -365,6 +377,7 @@ export class WorkerPipeSession {
     payload: Uint8Array,
     handoff: ResultHandoff | undefined,
     previewSeal?: PreviewResultSeal,
+    onSent?: () => void,
   ): Promise<RuntimeResult> {
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
       return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
@@ -500,6 +513,7 @@ export class WorkerPipeSession {
       handoff,
       ...(previewSeal ? { previewSeal } : {}),
       sent: false,
+      ...(onSent ? { onSent } : {}),
       admitted: !waiting,
     };
     if (prepaid) {
@@ -598,13 +612,22 @@ export class WorkerPipeSession {
           this.physicalBytes += item.bytes.buffer.byteLength;
         }
         this.handed.add(item);
-        if (item.request) item.request.sent = true;
+        const request = item.request;
+        const handing = (): void => {
+          if (!request || request.sent) return;
+          request.sent = true;
+          request.onSent?.();
+        };
         try {
           const drainGeneration = this.drainGeneration;
-          const writable = this.options.transport.write(item.bytes, (error) => {
-            this.release(item);
-            if (error !== undefined) this.loseContact();
-          });
+          const writable = this.options.transport.write(
+            item.bytes,
+            (error) => {
+              this.release(item);
+              if (error !== undefined) this.loseContact();
+            },
+            handing,
+          );
           if (!writable && drainGeneration === this.drainGeneration) this.blocked = true;
         } catch {
           this.loseContact();

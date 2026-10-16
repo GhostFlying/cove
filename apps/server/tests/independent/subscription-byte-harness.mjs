@@ -222,8 +222,10 @@ export function fixture({
     composition,
     buildVersion: "ind-build",
     transport: {
-      write(encoded, settled) {
-        commands.push(...decodeFrames(encoded, true).map(({ metadata }) => metadata));
+      write(encoded, settled, handing) {
+        const decoded = decodeFrames(encoded, true);
+        handing();
+        commands.push(...decoded.map(({ metadata }) => metadata));
         settled();
         return true;
       },

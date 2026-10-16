@@ -287,11 +287,13 @@ export async function currentWorkerLink(patch = {}) {
     composition,
     buildVersion: "current-link",
     transport: {
-      write(raw, settled) {
-        for (const frame of frames(raw)) {
-          assert(commands.length < 256);
-          commands.push(structuredClone(frame.metadata));
-        }
+      write(raw, settled, handing) {
+        // Decode and validate first: anything that throws before `handing` delivered nothing.
+        const decoded = [];
+        for (const frame of frames(raw)) decoded.push(structuredClone(frame.metadata));
+        assert(commands.length + decoded.length <= 256);
+        handing();
+        commands.push(...decoded);
         capture("worker-command-handoff", { rawHex: Buffer.from(raw).toString("hex") });
         return endpoint.input.write(raw, (error) => {
           capture("worker-command-callback-before", {

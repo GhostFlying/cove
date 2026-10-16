@@ -43,7 +43,8 @@ function sessionFixture(composition, ref) {
     buildVersion: "author",
     codec,
     transport: {
-      write: (bytes, done) => {
+      write: (bytes, done, handing) => {
+        handing();
         writes.push(bytes);
         done();
         return true;
@@ -275,7 +276,8 @@ describe("runtime admission ownership", () => {
           buildVersion: "author",
           codec,
           transport: {
-            write: () => {
+            write: (_bytes, _settled, handing) => {
+              handing();
               writes++;
               return true;
             },
@@ -411,7 +413,8 @@ describe("runtime admission ownership", () => {
           buildVersion: "author",
           codec,
           transport: {
-            write: () => {
+            write: (_bytes, _settled, handing) => {
+              handing();
               writes++;
               return true;
             },

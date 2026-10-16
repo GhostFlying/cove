@@ -37,8 +37,9 @@ export function carrier(options = {}) {
   const writes = [];
   return {
     writes,
-    write(bytes, callback) {
+    write(bytes, callback, handing) {
       const entry = { bytes: new Uint8Array(bytes), callback, original: bytes };
+      handing?.();
       writes.push(entry);
       options.onWrite?.(entry);
       if (!options.hold) callback();

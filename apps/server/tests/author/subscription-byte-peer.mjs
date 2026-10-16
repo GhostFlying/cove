@@ -69,7 +69,8 @@ export function fixture(changes = {}, limits = {}) {
     buildVersion: "author",
     codec,
     transport: {
-      write: (data, settled) => {
+      write: (data, settled, handing) => {
+        handing();
         pipeWrites.push({ data, settled });
         settled();
         return true;
