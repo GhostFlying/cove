@@ -4,7 +4,8 @@ import { runGit, type GitRunResult } from "./run.js";
 
 // Read-only Git queries about a clone (M1 T2): its top level, common directory, bareness and
 // HEAD. Nothing here writes to a repository: the commands are rev-parse, worktree list,
-// symbolic-ref and check-ref-format, run through runGit with optional locks disabled.
+// symbolic-ref, check-ref-format and version, run through runGit with optional locks and lazy
+// fetching disabled.
 //
 // Real-path rule (docs/milestones/m1.md S1): every path this module returns is a real path
 // (symlinks resolved, no trailing slash), so one clone has one spelling however the operator
@@ -163,18 +164,41 @@ export async function inspectRepository(
   return found.kind === "work-tree" ? cloneOf(found) : found;
 }
 
-// HEAD of a working tree: the checked-out branch (null when detached) and the commit HEAD names
-// (null on an unborn branch, such as a fresh `git init`). Consumers: checkout mounts and binding
-// conversion.
+// HEAD of a working tree. Consumers: checkout mounts and binding conversion.
 //
-// Only refs are read, never objects: `rev-parse --verify HEAD` resolves the ref to an object ID
-// without opening the object, so a commit missing from a partial clone is reported as named, not
-// fetched. Peeling (`HEAD^{commit}`) would open the object and, in a partial clone, fetch it from
-// the promisor remote before Git 2.45's GIT_NO_LAZY_FETCH (set by run.ts) could prevent it.
+// - `head`: the checked-out branch (null when detached) and the commit HEAD resolves to, peeled
+//   through annotated tags; `commit` is null only on an unborn branch (a fresh `git init`, or a
+//   branch whose ref does not exist yet).
+// - `unresolved`: HEAD names an object, but it is not available locally (a partial clone's missing
+//   object, a corrupt repository) or does not peel to a commit (a ref pointing at a blob, tree or
+//   a tag of one). Distinct from unborn: there is something there, but no commit to use.
+// - `unavailable`: Git gave no answer, or is older than 2.45.
+//
+// Peeling opens objects, and in a partial clone opening a missing object would fetch it from the
+// promisor remote (running repository-configured transports and writing to the clone).
+// GIT_NO_LAZY_FETCH (run.ts) prevents that from Git 2.45; older Git ignores it, so readHead
+// refuses to peel there and reports `unavailable`.
 export type HeadState =
   | { kind: "head"; branch: string | null; commit: string | null }
+  | { kind: "unresolved"; branch: string | null }
   | { kind: "not-repository" }
   | { kind: "unavailable" };
+
+const NO_LAZY_FETCH_GIT = [2, 45] as const;
+
+// Whether the installed Git honours GIT_NO_LAZY_FETCH; null when Git gave no usable answer.
+// Not cached: the git on PATH can change while the server runs.
+async function gitHonoursNoLazyFetch(): Promise<boolean | null> {
+  const result = await runGit(["version"], { cwd: "/" });
+  if (result.kind === "failed" || result.code !== 0) return null;
+  const match = /^git version (\d+)\.(\d+)/.exec(result.stdout);
+  if (!match) return null;
+  const [major, minor] = [Number(match[1]), Number(match[2])];
+  return (
+    major > NO_LAZY_FETCH_GIT[0] ||
+    (major === NO_LAZY_FETCH_GIT[0] && minor >= NO_LAZY_FETCH_GIT[1])
+  );
+}
 
 function exitedWith(
   result: GitRunResult,
@@ -183,25 +207,38 @@ function exitedWith(
   return result.kind === "exited" && codes.includes(result.code);
 }
 
+const OBJECT_ID = /^[0-9a-f]{40,64}$/;
+
 export async function readHead(workTree: string): Promise<HeadState> {
-  const [symbolic, commit] = await Promise.all([
+  // The version check and the two ref reads open no object, so they are safe on any Git.
+  const [supported, symbolic, named] = await Promise.all([
+    gitHonoursNoLazyFetch(),
     runGit(["symbolic-ref", "--quiet", "HEAD"], { cwd: workTree }),
     runGit(["rev-parse", "--quiet", "--verify", "HEAD"], { cwd: workTree }),
   ]);
-  if (symbolic.kind === "failed" || commit.kind === "failed") return { kind: "unavailable" };
+  if (symbolic.kind === "failed" || named.kind === "failed") return { kind: "unavailable" };
   // symbolic-ref exits 1 for a detached HEAD and 128 outside a repository; rev-parse --verify
-  // exits 1 when HEAD has no commit yet and 128 outside a repository.
-  if (symbolic.code === 128 || commit.code === 128) return { kind: "not-repository" };
-  if (!exitedWith(symbolic, [0, 1]) || !exitedWith(commit, [0, 1])) return { kind: "unavailable" };
+  // exits 1 when HEAD names no object yet (unborn) and 128 outside a repository.
+  if (symbolic.code === 128 || named.code === 128) return { kind: "not-repository" };
+  if (!exitedWith(symbolic, [0, 1]) || !exitedWith(named, [0, 1])) return { kind: "unavailable" };
   const ref = symbolic.code === 0 ? lines(symbolic.stdout, 1)?.[0] : undefined;
-  const sha = commit.code === 0 ? lines(commit.stdout, 1)?.[0] : undefined;
-  if ((symbolic.code === 0 && !ref) || (commit.code === 0 && !/^[0-9a-f]{40,64}$/.test(sha ?? "")))
+  const id = named.code === 0 ? lines(named.stdout, 1)?.[0] : undefined;
+  if ((symbolic.code === 0 && !ref) || (named.code === 0 && !OBJECT_ID.test(id ?? "")))
     return { kind: "unavailable" };
-  return {
-    kind: "head",
-    branch: ref === undefined ? null : ref.startsWith("refs/heads/") ? ref.slice(11) : ref,
-    commit: sha ?? null,
-  };
+  const branch = ref === undefined ? null : ref.startsWith("refs/heads/") ? ref.slice(11) : ref;
+  if (id === undefined) return { kind: "head", branch, commit: null };
+  if (supported !== true) return { kind: "unavailable" };
+  // Peel the object ID read above (not HEAD again, which may have moved meanwhile). Any refusal
+  // here, in a directory already shown to be a repository, means the object is missing or does
+  // not peel to a commit.
+  const peeled = await runGit(["rev-parse", "--quiet", "--verify", `${id}^{commit}`], {
+    cwd: workTree,
+  });
+  if (peeled.kind === "failed") return { kind: "unavailable" };
+  if (peeled.code !== 0) return { kind: "unresolved", branch };
+  const commit = lines(peeled.stdout, 1)?.[0];
+  if (!commit || !OBJECT_ID.test(commit)) return { kind: "unavailable" };
+  return { kind: "head", branch, commit };
 }
 
 // Whether `name` is a valid branch name by Git's own rules (`refs/heads/<name>` passes

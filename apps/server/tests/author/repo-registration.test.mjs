@@ -252,6 +252,56 @@ describe("repository queries", () => {
     expect(await readHead(await temporary())).toEqual({ kind: "not-repository" });
   });
 
+  it("peels HEAD to a commit and tells a non-commit from an unborn branch", async () => {
+    const root = await temporary();
+    const path = await clone(root, "repo");
+    const commit = await git(path, root, "rev-parse", "HEAD");
+    // A detached HEAD holding an annotated tag's own object ID resolves to the tagged commit.
+    await git(path, root, "tag", "--annotate", "--message", "release", "v1");
+    const tag = await git(path, root, "rev-parse", "v1");
+    expect(tag).not.toBe(commit);
+    // Git refuses to write a non-commit to HEAD or a branch itself, so these refs are written as
+    // loose ref files (the fixture uses the default files ref backend).
+    await writeFile(join(path, ".git", "HEAD"), `${tag}\n`);
+    const annotated = await readHead(path);
+    // HEAD a symbolic ref to a tag of a blob: it names an object, but no commit.
+    const blob = await git(path, root, "rev-parse", "HEAD:README.md");
+    await git(path, root, "tag", "--annotate", "--message", "blob", "blob-tag", blob);
+    await git(path, root, "symbolic-ref", "HEAD", "refs/tags/blob-tag");
+    const blobTag = await readHead(path);
+    // A branch pointing straight at a blob.
+    await writeFile(join(path, ".git", "refs", "heads", "blob"), `${blob}\n`);
+    await git(path, root, "symbolic-ref", "HEAD", "refs/heads/blob");
+    const blobBranch = await readHead(path);
+    // An unborn branch: nothing named at all.
+    await git(path, root, "symbolic-ref", "HEAD", "refs/heads/unborn");
+    const unborn = await readHead(path);
+    expect([annotated, blobTag, blobBranch, unborn]).toEqual([
+      { kind: "head", branch: null, commit },
+      { kind: "unresolved", branch: "refs/tags/blob-tag" },
+      { kind: "unresolved", branch: "blob" },
+      { kind: "head", branch: "unborn", commit: null },
+    ]);
+  });
+
+  it("does not peel HEAD with a Git that cannot disable lazy fetching", async () => {
+    const root = await temporary();
+    const path = await clone(root, "repo");
+    const empty = await clone(root, "empty", { commit: false });
+    const real = await new Promise((done, fail) =>
+      execFile("sh", ["-c", "command -v git"], { env: { PATH: savedEnv.PATH } }, (error, out) =>
+        error ? fail(error) : done(out.trim()),
+      ),
+    );
+    // Git 2.44 predates GIT_NO_LAZY_FETCH; every other command runs the real git.
+    const script = `for last; do :; done\nif [ "$last" = version ]; then echo 'git version 2.44.2'; exit 0; fi\nexec '${real}' "$@"`;
+    process.env.PATH = `${await fakeGit(script)}:${savedEnv.PATH}`;
+    expect([await readHead(path), await readHead(empty)]).toEqual([
+      { kind: "unavailable" },
+      { kind: "head", branch: "main", commit: null },
+    ]);
+  });
+
   it("ignores an inherited GIT_DIR and resolves a linked worktree to its clone", async () => {
     const root = await temporary();
     const main = await clone(root, "main");
@@ -311,7 +361,8 @@ describe("repository queries", () => {
       await git(path, root, "config", key, value);
     const before = await snapshot(path);
 
-    expect(await readHead(path)).toEqual({ kind: "head", branch: "main", commit: missing });
+    // The missing commit is reported as unresolved (not unborn), and was not fetched.
+    expect(await readHead(path)).toEqual({ kind: "unresolved", branch: "main" });
     expect(await inspectRepository(path)).toEqual({
       kind: "clone",
       topLevel: path,
