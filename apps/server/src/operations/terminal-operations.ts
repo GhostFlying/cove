@@ -10,6 +10,8 @@ import { OpaqueIdSchema, type RunRef } from "@cove/protocol/identity";
 import type { RuntimeResult } from "@cove/protocol/runtime";
 import { LocalRuntime } from "../terminal/local-runtime.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
+import { uncertainStoreOutcome } from "../store/store-errors.js";
+import { storeReadError } from "./database-operations.js";
 import { OperationReceipts } from "./operation-receipts.js";
 
 export type OperationOutcome = { operation: OperationRecord } | { error: DomainError };
@@ -18,10 +20,14 @@ export type OperationOutcome = { operation: OperationRecord } | { error: DomainE
 // marked running once spawned and dropped when the worker definitely refused it; exit facts are
 // recorded by the server composition from runtime events.
 export interface RunRecorder {
-  started(run: RunRef, cwd: string, operationId: string): void;
-  spawned(run: RunRef): void;
-  notStarted(run: RunRef): void;
+  started(run: RunRef, cwd: string, operationId: string): Promise<void>;
+  spawned(run: RunRef): Promise<void>;
+  notStarted(run: RunRef): Promise<void>;
 }
+
+const RESULT_UNKNOWN = (): OperationOutcome => ({
+  error: domainError("RESULT_UNKNOWN", "unknown"),
+});
 
 export class TerminalOperations {
   private runCounter = 0;
@@ -67,7 +73,7 @@ export class TerminalOperations {
     // instance, and a changed intent is a conflict. Only a request without a record is new work,
     // and only new work must target the current instance.
     const key = this.key(principalId, params.operationId);
-    const found = this.options.receipts.lookup(key, intent);
+    const found = await this.options.receipts.lookup(key, intent);
     if (found.kind === "existing") return { operation: found.record };
     if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
     if (params.expectedRelayInstanceId !== this.options.composition.relayInstanceId)
@@ -76,8 +82,12 @@ export class TerminalOperations {
     if (this.runCounter === Number.MAX_SAFE_INTEGER) return this.failure("COUNTER_EXHAUSTED");
     const requestId = this.nextRequest();
     if (!requestId) return this.failure("COUNTER_EXHAUSTED");
-    const preparation = this.options.receipts.prepare(key, intent);
+    const preparation = await this.options.receipts.prepare(key, intent);
     if (!preparation) return this.failure("BUSY");
+    if (this.disposed) {
+      preparation.cancel();
+      return this.failure("CAPABILITY_UNAVAILABLE");
+    }
     const run: RunRef = {
       serverId: this.options.composition.serverId,
       relayInstanceId: this.options.composition.relayInstanceId,
@@ -96,20 +106,45 @@ export class TerminalOperations {
       run,
     };
     const runs = this.options.runs;
+    // Store ordering (each step is durable before the next starts): the run record, then the
+    // receipt, then `running`, and only then the spawn. A PTY is never started for an operation
+    // whose receipt or run record the store could not confirm, so a store failure can leave an
+    // uncertain receipt but never an unrecorded process.
     try {
-      runs?.started(run, params.cwd, params.operationId);
+      await runs?.started(run, params.cwd, params.operationId);
     } catch {
+      // No receipt was written: the operation was not accepted. When the store failed with the
+      // record in flight, the record may exist as `starting`; the next start marks it interrupted.
       preparation.cancel();
       this.options.runtime.cancelRunReservation(run, worker);
       return this.failure("BUSY");
     }
-    if (!preparation.commit(record)) {
+    const abandon = async (): Promise<void> => {
       preparation.cancel();
       this.options.runtime.cancelRunReservation(run, worker);
-      this.recordRun(() => runs?.notStarted(run));
+      // Nothing was spawned. Best effort: a failed store keeps the record for the next start.
+      await this.recordRun(() => runs?.notStarted(run));
+    };
+    let committed: boolean;
+    try {
+      committed = await preparation.commit(record);
+    } catch (error) {
+      await abandon();
+      // The receipt may have been committed: the operation's outcome is unknown to the client,
+      // and the next start moves such a receipt to requires_attention. Nothing ran.
+      return uncertainStoreOutcome(error) ? RESULT_UNKNOWN() : this.failure("BUSY");
+    }
+    if (!committed) {
+      await abandon();
       return this.failure("BUSY");
     }
-    this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
+    try {
+      await this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
+    } catch {
+      // The receipt is accepted, but the store cannot record progress: do not spawn.
+      await abandon();
+      return RESULT_UNKNOWN();
+    }
     let result: RuntimeResult;
     try {
       result = await this.options.runtime.spawn({
@@ -136,7 +171,7 @@ export class TerminalOperations {
       (result.type === "result" && result.outcome === "unknown");
     // An uncertain spawn keeps its `starting` record: the next start marks it interrupted.
     if (!uncertain)
-      this.recordRun(() =>
+      await this.recordRun(() =>
         result.type === "error" || result.outcome === "rejected"
           ? runs?.notStarted(run)
           : runs?.spawned(run),
@@ -145,9 +180,9 @@ export class TerminalOperations {
   }
 
   // Run records follow the terminal path; a failed record write never changes its outcome.
-  private recordRun(write: () => void): void {
+  private async recordRun(write: () => Promise<void> | undefined): Promise<void> {
     try {
-      write();
+      await write();
     } catch {
       /* The run keeps its previous record; a restart marks it interrupted. */
     }
@@ -162,7 +197,7 @@ export class TerminalOperations {
     if (!intent) return this.failure("CAPABILITY_UNAVAILABLE");
     // Same order as create: the receipt decides before the stale-instance precondition.
     const key = this.key(principalId, params.operationId);
-    const found = this.options.receipts.lookup(key, intent);
+    const found = await this.options.receipts.lookup(key, intent);
     if (found.kind === "existing") return { operation: found.record };
     if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
     if (
@@ -176,7 +211,7 @@ export class TerminalOperations {
     if (!entry) return this.failure("RUN_NOT_FOUND");
     const requestId = this.nextRequest();
     if (!requestId) return this.failure("COUNTER_EXHAUSTED");
-    const preparation = this.options.receipts.prepare(key, intent);
+    const preparation = await this.options.receipts.prepare(key, intent);
     if (!preparation) return this.failure("BUSY");
     const record: OperationRecord = {
       operationId: params.operationId,
@@ -185,11 +220,23 @@ export class TerminalOperations {
       state: "accepted",
       run: params.run,
     };
-    if (!preparation.commit(record)) {
+    // As in create: the stop is sent only after the store confirmed the receipt and `running`.
+    let committed: boolean;
+    try {
+      committed = await preparation.commit(record);
+    } catch (error) {
+      preparation.cancel();
+      return uncertainStoreOutcome(error) ? RESULT_UNKNOWN() : this.failure("BUSY");
+    }
+    if (!committed) {
       preparation.cancel();
       return this.failure("BUSY");
     }
-    this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
+    try {
+      await this.options.receipts.update(key, { ...record, revision: 1, state: "running" });
+    } catch {
+      return RESULT_UNKNOWN();
+    }
     let result: RuntimeResult;
     try {
       result = await this.options.runtime.stop({
@@ -212,8 +259,24 @@ export class TerminalOperations {
     return this.complete(key, result);
   }
 
-  private complete(key: OperationReceiptKey, result: RuntimeResult): OperationOutcome {
-    const record = this.options.receipts.get(key);
+  // Records the runtime's answer. When the store cannot, the client learns that the outcome is
+  // unknown; the receipt stays running and the next start moves it to requires_attention.
+  private async complete(
+    key: OperationReceiptKey,
+    result: RuntimeResult,
+  ): Promise<OperationOutcome> {
+    try {
+      return await this.recordOutcome(key, result);
+    } catch {
+      return RESULT_UNKNOWN();
+    }
+  }
+
+  private async recordOutcome(
+    key: OperationReceiptKey,
+    result: RuntimeResult,
+  ): Promise<OperationOutcome> {
+    const record = await this.options.receipts.get(key);
     if (!record) return this.failure("OPERATION_NOT_FOUND");
     const uncertain =
       (result.type === "error" && result.error.acceptance === "unknown") ||
@@ -250,27 +313,32 @@ export class TerminalOperations {
           }
         : {}),
     };
-    this.options.receipts.update(key, next);
-    return { operation: this.options.receipts.get(key)! };
+    await this.options.receipts.update(key, next);
+    const stored = await this.options.receipts.get(key);
+    return stored ? { operation: stored } : this.failure("OPERATION_NOT_FOUND");
   }
 
   // Queried by durable identity only; the record may reference a run of an earlier instance.
-  get(principalId: string, operationId: string): OperationOutcome {
+  async get(principalId: string, operationId: string): Promise<OperationOutcome> {
     const key = this.key(principalId, operationId);
-    let record = this.options.receipts.get(key);
-    if (record?.method === "terminal.stop" && record.state === "running" && record.run) {
-      const status = this.options.runtime.registry.get(record.run)?.status;
-      if (status?.status === "exited") {
-        this.options.receipts.update(key, {
-          ...record,
-          revision: record.revision + 1,
-          state: "succeeded",
-          result: { run: record.run, exitCode: status.exitCode, signal: status.signal },
-        });
-        record = this.options.receipts.get(key);
+    try {
+      let record = await this.options.receipts.get(key);
+      if (record?.method === "terminal.stop" && record.state === "running" && record.run) {
+        const status = this.options.runtime.registry.get(record.run)?.status;
+        if (status?.status === "exited") {
+          await this.options.receipts.update(key, {
+            ...record,
+            revision: record.revision + 1,
+            state: "succeeded",
+            result: { run: record.run, exitCode: status.exitCode, signal: status.signal },
+          });
+          record = await this.options.receipts.get(key);
+        }
       }
+      return record ? { operation: record } : this.failure("OPERATION_NOT_FOUND");
+    } catch (error) {
+      return { error: storeReadError(error) };
     }
-    return record ? { operation: record } : this.failure("OPERATION_NOT_FOUND");
   }
   dispose(): void {
     this.disposed = true;

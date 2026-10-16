@@ -45,7 +45,7 @@ afterEach(async () => {
   for (const [name, value] of Object.entries(savedEnv))
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
-  for (const store of stores.splice(0)) store.close();
+  await Promise.all(stores.splice(0).map((store) => store.close()));
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -476,7 +476,7 @@ async function service(git) {
   stores.push(store);
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes);
-  recordInstanceStart(store, "instance", 1);
+  await recordInstanceStart(store, "instance", 1);
   const receipts = new OperationReceipts(
     composition,
     encode,
@@ -500,7 +500,18 @@ describe("repo registration", () => {
     ]);
     // The Git checks run concurrently; the transactions then serialize. Whichever request commits
     // first wins: if `a` wins, its second request returns the same receipt and `b` is refused; if
-    // `b` wins, both `a` requests are refused. Never two registrations, never another error.
+    // `b` wins, both `a` requests are refused. Never two registrations.
+    //
+    // The store answers asynchronously (D6), so the two `a` requests can overlap: while one holds
+    // the operation ID's reservation (its receipts.write call is in flight), the other is refused
+    // as BUSY, not accepted (relay-protocol §11.3; the client retries with the same operation ID).
+    // At most one of them can be BUSY, and its retry gets the other's answer.
+    const busy = [0, 2].filter((index) => outcomes[index].error?.kind === "BUSY");
+    expect(busy.length).toBeLessThan(2);
+    for (const index of busy) {
+      expect(outcomes[index].error.acceptance).toBe("not-accepted");
+      outcomes[index] = await repos.register("principal", { operationId: "a", path });
+    }
     const summary = outcomes.map((outcome) =>
       "error" in outcome
         ? outcome.error.kind
@@ -512,7 +523,16 @@ describe("repo registration", () => {
     ]).toContainEqual(summary);
     // Both requests with operation ID `a` got the same answer: one receipt or the same refusal.
     expect(outcomes[2]).toEqual(outcomes[0]);
-    expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
+    expect((await repos.list({ limit: 10 })).repos).toHaveLength(1);
+  });
+
+  it("reports repo reads on a closed store as unavailable rather than throwing", async () => {
+    const { store, repos } = await service();
+    await store.close();
+    stores.splice(stores.indexOf(store), 1);
+    const unavailable = { error: expect.objectContaining({ kind: "CAPABILITY_UNAVAILABLE" }) };
+    expect(await repos.list({ limit: 10 })).toEqual(unavailable);
+    expect(await repos.get("repo")).toEqual(unavailable);
   });
 
   it("answers a resend from its receipt without consulting Git", async () => {
@@ -536,7 +556,7 @@ describe("repo registration", () => {
     expect((await repos.register("principal", { operationId: "new", path: root })).error).toEqual(
       expect.objectContaining({ kind: "GIT_UNAVAILABLE", acceptance: "not-accepted" }),
     );
-    expect(repos.list({ limit: 10 }).repos).toHaveLength(1);
+    expect((await repos.list({ limit: 10 })).repos).toHaveLength(1);
   });
 
   it("answers a late Git refusal with the receipt a request of the same ID committed meanwhile", async () => {
@@ -585,7 +605,10 @@ describe("repo registration", () => {
     expect(
       (await repos.register("principal", { operationId: "other", path: `${path}/` })).error.kind,
     ).toBe("REPO_ALREADY_REGISTERED");
-    expect(repos.get(update.repoId).repo).toMatchObject({ revision: 1, mainBranch: "develop" });
+    expect((await repos.get(update.repoId)).repo).toMatchObject({
+      revision: 1,
+      mainBranch: "develop",
+    });
   });
 
   // Clones whose main working tree Git cannot name from a linked worktree: once the clone is
@@ -604,7 +627,7 @@ describe("repo registration", () => {
       .error?.kind;
     const registered = (await repos.register("principal", { operationId: "b", path: main }))
       .operation?.state;
-    const paths = repos.list({ limit: 10 }).repos.map((repo) => repo.path);
+    const paths = (await repos.list({ limit: 10 })).repos.map((repo) => repo.path);
     const duplicates = [];
     for (const [operationId, path] of [
       ["c", linked],
@@ -616,7 +639,7 @@ describe("repo registration", () => {
       registered,
       pathIsMain: paths.length === 1 && paths[0] === (await realpath(main)),
       duplicates,
-      count: repos.list({ limit: 10 }).repos.length,
+      count: (await repos.list({ limit: 10 })).repos.length,
     };
   }
 

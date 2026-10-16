@@ -6,13 +6,13 @@ import {
   DisplayNameSchema,
   HostPathSchema,
   M1_LIMITS,
-  RepoRecordSchema,
   type RepoRecord,
 } from "@cove/protocol/workspace";
 import {
   executeDatabaseWrite,
+  storeReadError,
+  type DatabaseWriteApply,
   type DatabaseWriteOutcome,
-  type OperationResultData,
 } from "../operations/database-operations.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { Store } from "../store/database.js";
@@ -40,48 +40,19 @@ import {
 // resend of an executed register returns its original record even though the clone is registered
 // by now (the duplicate check would refuse a new request). Only a request without a receipt runs
 // the Git checks, which are asynchronous and therefore outside the database transaction;
-// executeDatabaseWrite then looks the receipt up again and checks the duplicate and revision
-// preconditions against the current rows in the same transaction that inserts the row and the
-// receipt. Two concurrent registrations of one clone thus serialize on that transaction: one
+// executeDatabaseWrite then makes one store call, receipts.write, whose single transaction looks
+// the receipt up again and runs the named write (store/sql/repos.ts), which checks the duplicate
+// and revision preconditions against the current rows before it writes; the receipt commits with
+// the row. Two concurrent registrations of one clone thus serialize on that transaction: one
 // succeeds, the other is refused (or, with the same operation ID, returns the first's record).
-// A refusal decided after a Git check looks the receipt up once more before it is returned (see
-// RepoService.refuse), so a request never reports "not accepted" for an operation ID whose
+// The store runs in a worker thread (D6), so the receipt lookup and every store read are awaits
+// too. Every refusal decided after an await looks the receipt up once more before it is returned
+// (see RepoService.refuse), so a request never reports "not accepted" for an operation ID whose
 // identical request was accepted meanwhile. A refused request leaves no receipt and changes
 // nothing.
 
-type RepoRow = {
-  repo_id: string;
-  revision: number;
-  display_name: string;
-  path: string;
-  common_dir: string;
-  main_branch: string | null;
-  registered_at_ms: number;
-};
-
-const COLUMNS = "repo_id, revision, display_name, path, common_dir, main_branch, registered_at_ms";
-
-function toRecord(row: RepoRow): RepoRecord {
-  return {
-    repoId: row.repo_id,
-    revision: row.revision,
-    displayName: row.display_name,
-    path: row.path,
-    mainBranch: row.main_branch,
-    registeredAtMs: row.registered_at_ms,
-  };
-}
-
-// A registration with its identity. The common directory is not part of RepoRecord (the wire
-// record), but checkout admission (T3a, D2) compares a mounted worktree's common directory with it.
-export type RegisteredRepo = { record: RepoRecord; commonDir: string };
-
-// Reads one registration; for use inside another domain's transaction (T3a, T3b).
-export function findRepo(store: Store, repoId: string): RegisteredRepo | null {
-  const row = store.db.prepare(`SELECT ${COLUMNS} FROM repos WHERE repo_id = ?`).get(repoId) as
-    RepoRow | undefined;
-  return row ? { record: toRecord(row), commonDir: row.common_dir } : null;
-}
+// The rows, their record mapping, the writes and the in-transaction reader for other domains
+// (findRepo, RegisteredRepo) live with the SQL in store/sql/repos.ts.
 
 // Fixed refusals of a clone path. A path Cove cannot read (missing, permission) is refused like
 // any other path that does not lead to a clone; the fixed error messages carry no path either
@@ -142,10 +113,6 @@ export class RepoService {
     this.git = { discoverRepository, cloneOf, isValidBranchName, ...options.git };
   }
 
-  private get db() {
-    return this.options.store.db;
-  }
-
   private now(): number {
     return (this.options.now ?? Date.now)();
   }
@@ -154,14 +121,14 @@ export class RepoService {
   // checked and executed. Mirrors executeDatabaseWrite's own lookup, which runs again inside the
   // transaction; this earlier one exists so that a resend never depends on a precondition that
   // needs Git (the clone may have moved or be registered by now).
-  private recorded(
+  private async recorded(
     principalId: string,
     method: WriteRpcMethod,
     params: Record<string, unknown> & { operationId: string },
-  ): DatabaseWriteOutcome | null {
+  ): Promise<DatabaseWriteOutcome | null> {
     const intent = canonicalWriteIntent(method, params, this.options.encodeUtf8);
     if (!intent) return { error: domainError("INVALID_ARGUMENT") };
-    const found = this.options.receipts.lookup(
+    const found = await this.options.receipts.lookup(
       { serverId: this.options.serverId, principalId, operationId: params.operationId },
       intent,
     );
@@ -175,14 +142,13 @@ export class RepoService {
     principalId: string,
     method: WriteRpcMethod,
     params: Record<string, unknown> & { operationId: string },
-    apply: () => { result: OperationResultData } | { error: DomainError },
-  ): DatabaseWriteOutcome {
+    apply: DatabaseWriteApply,
+  ): Promise<DatabaseWriteOutcome> {
     return executeDatabaseWrite(
       {
         serverId: this.options.serverId,
         receipts: this.options.receipts,
         encodeUtf8: this.options.encodeUtf8,
-        transaction: (fn) => this.options.store.transaction(fn),
       },
       principalId,
       method,
@@ -191,20 +157,30 @@ export class RepoService {
     );
   }
 
-  get(repoId: string): { repo: RepoRecord } | { error: DomainError } {
-    const found = findRepo(this.options.store, repoId);
-    return found ? { repo: found.record } : { error: domainError("REPO_NOT_FOUND") };
+  async get(repoId: string): Promise<{ repo: RepoRecord } | { error: DomainError }> {
+    try {
+      const found = await this.options.store.call("repos.get", { repoId });
+      return found ? { repo: found.record } : { error: domainError("REPO_NOT_FOUND") };
+    } catch (error) {
+      return { error: storeReadError(error) };
+    }
   }
 
   // Pages in repoId order; `afterRepoId` need not exist any more (it may have been removed).
-  list(params: { limit: number; afterRepoId?: string }): {
-    repos: RepoRecord[];
-    nextAfterRepoId?: string;
-  } {
-    const rows = this.db
-      .prepare(`SELECT ${COLUMNS} FROM repos WHERE repo_id > ? ORDER BY repo_id LIMIT ?`)
-      .all(params.afterRepoId ?? "", params.limit + 1) as RepoRow[];
-    const page = rows.slice(0, params.limit).map(toRecord);
+  async list(params: {
+    limit: number;
+    afterRepoId?: string;
+  }): Promise<{ repos: RepoRecord[]; nextAfterRepoId?: string } | { error: DomainError }> {
+    let rows: RepoRecord[];
+    try {
+      rows = await this.options.store.call("repos.list", {
+        afterRepoId: params.afterRepoId ?? "",
+        limit: params.limit,
+      });
+    } catch (error) {
+      return { error: storeReadError(error) };
+    }
+    const page = rows.slice(0, params.limit);
     return rows.length > params.limit
       ? { repos: page, nextAfterRepoId: page[page.length - 1]!.repoId }
       : { repos: page };
@@ -214,25 +190,22 @@ export class RepoService {
   // same operation ID may have committed: its receipt then answers this one too (the same record,
   // or OPERATION_ID_CONFLICT for a changed intent), never this request's late refusal, which would
   // contradict an operation that was in fact accepted.
-  private refuse(
+  private async refuse(
     principalId: string,
     method: WriteRpcMethod,
     params: Record<string, unknown> & { operationId: string },
     error: DomainError,
-  ): DatabaseWriteOutcome {
-    return this.recorded(principalId, method, params) ?? { error };
-  }
-
-  private registeredCommonDir(commonDir: string): boolean {
-    return this.db.prepare("SELECT 1 FROM repos WHERE common_dir = ?").get(commonDir) !== undefined;
+  ): Promise<DatabaseWriteOutcome> {
+    return (await this.recorded(principalId, method, params)) ?? { error };
   }
 
   async register(principalId: string, params: RegisterParams): Promise<DatabaseWriteOutcome> {
-    const recorded = this.recorded(principalId, "repo.register", params);
+    const recorded = await this.recorded(principalId, "repo.register", params);
     if (recorded) return recorded;
-    // The path is interpreted on this host; a relative path has no meaning to the server.
-    if (!isAbsolute(params.path)) return { error: domainError("INVALID_ARGUMENT") };
     const refuse = (error: DomainError) => this.refuse(principalId, "repo.register", params, error);
+    // The path is interpreted on this host; a relative path has no meaning to the server. It is
+    // decided after the receipt lookup's await, so it is refused like any other late refusal.
+    if (!isAbsolute(params.path)) return refuse(domainError("INVALID_ARGUMENT"));
     const found = await this.git.discoverRepository(params.path);
     if (found.kind !== "work-tree") return refuse(refusalError(found));
     // The common directory is the identity. A clone already registered is recognized by it before
@@ -241,8 +214,15 @@ export class RepoService {
     // tree, and the request must still be reported as the duplicate it is (the registration's
     // stored path is that clone's main working tree). This early answer is advisory; the
     // transaction below checks again.
-    if (this.registeredCommonDir(found.commonDir))
-      return refuse(domainError("REPO_ALREADY_REGISTERED"));
+    let registered: boolean;
+    try {
+      registered = await this.options.store.call("repos.commonDirRegistered", {
+        commonDir: found.commonDir,
+      });
+    } catch (error) {
+      return refuse(storeReadError(error));
+    }
+    if (registered) return refuse(domainError("REPO_ALREADY_REGISTERED"));
     const clone = await this.git.cloneOf(found);
     if (clone.kind !== "clone") return refuse(refusalError(clone));
     if (
@@ -251,40 +231,22 @@ export class RepoService {
     )
       return refuse(domainError("INVALID_ARGUMENT"));
     const displayName = params.displayName ?? defaultDisplayName(clone.topLevel);
-    return this.write(principalId, "repo.register", params, () => {
-      const existing = this.db
-        .prepare("SELECT 1 FROM repos WHERE common_dir = ? OR path = ?")
-        .get(clone.commonDir, clone.topLevel);
-      if (existing) return { error: domainError("REPO_ALREADY_REGISTERED") };
-      const record: RepoRecord = {
+    return this.write(principalId, "repo.register", params, {
+      name: "repo.register",
+      args: {
         repoId: (this.options.newId ?? randomUUID)(),
-        revision: 0,
         displayName,
         path: clone.topLevel,
-        mainBranch: null,
-        registeredAtMs: this.now(),
-      };
-      if (!RepoRecordSchema.safeParse(record).success)
-        return { error: domainError("INVALID_ARGUMENT") };
-      this.db
-        .prepare(`INSERT INTO repos (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-        .run(
-          record.repoId,
-          record.revision,
-          record.displayName,
-          record.path,
-          clone.commonDir,
-          record.mainBranch,
-          record.registeredAtMs,
-        );
-      return { result: { resource: { kind: "repo", id: record.repoId, revision: 0 } } };
+        commonDir: clone.commonDir,
+        at: this.now(),
+      },
     });
   }
 
   // Changes the display name and/or the main-branch setting. Every accepted update is one new
   // revision, also when a value is set to what it already was.
   async update(principalId: string, params: UpdateParams): Promise<DatabaseWriteOutcome> {
-    const recorded = this.recorded(principalId, "repo.update", params);
+    const recorded = await this.recorded(principalId, "repo.update", params);
     if (recorded) return recorded;
     if (typeof params.mainBranch === "string") {
       // The contract's GitRefSchema excludes option-like and whitespace values; Git's own rules
@@ -298,21 +260,16 @@ export class RepoService {
           domainError(valid === null ? "GIT_UNAVAILABLE" : "INVALID_ARGUMENT"),
         );
     }
-    return this.write(principalId, "repo.update", params, () => {
-      const current = this.current(params);
-      if ("error" in current) return current;
-      const row = current.row;
-      const next = {
-        revision: row.revision + 1,
-        displayName: params.displayName ?? row.display_name,
-        mainBranch: params.mainBranch === undefined ? row.main_branch : params.mainBranch,
-      };
-      this.db
-        .prepare(
-          "UPDATE repos SET revision = ?, display_name = ?, main_branch = ? WHERE repo_id = ?",
-        )
-        .run(next.revision, next.displayName, next.mainBranch, row.repo_id);
-      return { result: { resource: { kind: "repo", id: row.repo_id, revision: next.revision } } };
+    return this.write(principalId, "repo.update", params, {
+      name: "repo.update",
+      args: {
+        repoId: params.repoId,
+        ...(params.expectedRevision === undefined
+          ? {}
+          : { expectedRevision: params.expectedRevision }),
+        ...(params.displayName === undefined ? {} : { displayName: params.displayName }),
+        ...(params.mainBranch === undefined ? {} : { mainBranch: params.mainBranch }),
+      },
     });
   }
 
@@ -321,32 +278,15 @@ export class RepoService {
   //
   // Mounts are not consulted: no mount can exist before T3a, and whether a mounted repo may be
   // unregistered is still open (reported with T2). A mount keeps its own repoId and real path.
-  remove(principalId: string, params: RemoveParams): DatabaseWriteOutcome {
-    return this.write(principalId, "repo.remove", params, () => {
-      const current = this.current(params, false);
-      if ("error" in current) return current;
-      this.db.prepare("DELETE FROM repos WHERE repo_id = ?").run(current.row.repo_id);
-      return {
-        result: {
-          resource: { kind: "repo", id: current.row.repo_id, revision: current.row.revision },
-        },
-      };
+  remove(principalId: string, params: RemoveParams): Promise<DatabaseWriteOutcome> {
+    return this.write(principalId, "repo.remove", params, {
+      name: "repo.remove",
+      args: {
+        repoId: params.repoId,
+        ...(params.expectedRevision === undefined
+          ? {}
+          : { expectedRevision: params.expectedRevision }),
+      },
     });
-  }
-
-  // The row an update or removal applies to, after its expected-revision precondition.
-  private current(
-    params: { repoId: string; expectedRevision?: number },
-    grows = true,
-  ): { row: RepoRow } | { error: DomainError } {
-    const row = this.db
-      .prepare(`SELECT ${COLUMNS} FROM repos WHERE repo_id = ?`)
-      .get(params.repoId) as RepoRow | undefined;
-    if (!row) return { error: domainError("REPO_NOT_FOUND") };
-    if (params.expectedRevision !== undefined && params.expectedRevision !== row.revision)
-      return { error: domainError("REVISION_CONFLICT") };
-    if (grows && row.revision === Number.MAX_SAFE_INTEGER)
-      return { error: domainError("COUNTER_EXHAUSTED") };
-    return { row };
   }
 }

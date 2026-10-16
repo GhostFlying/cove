@@ -18,12 +18,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { canonicalWriteIntent } from "@cove/protocol/rpc";
 import { Store, StoreError } from "../../dist/store/database.js";
+import { StoreOperationError } from "../../dist/store/store-errors.js";
 import { MIGRATIONS } from "../../dist/store/migrations.js";
 import { committedSchemaVersion } from "../../dist/store/schema-version.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/identity.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
-import { ConfigService, memoryConfigState, sqliteConfigState } from "../../dist/store/config.js";
+import { ConfigService, sqliteConfigState } from "../../dist/store/config.js";
+import { D6Probe } from "../../dist/entry/d6-probe.js";
 import { RunLog } from "../../dist/store/runs.js";
 import {
   parseStartIdentity,
@@ -39,8 +41,12 @@ const encode = (text) => new TextEncoder().encode(text);
 const directories = [];
 const stores = [];
 
+// Inspection and fault-injection operations (store-test-operations.mjs), added to every store the
+// tests open: the database itself is only reachable through the store.
+const testOperations = new URL("./store-test-operations.mjs", import.meta.url).href;
+
 afterEach(async () => {
-  for (const store of stores.splice(0)) store.close();
+  for (const store of stores.splice(0)) await store.close();
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -56,16 +62,22 @@ async function open(layout, migrations) {
   const store = await Store.open({
     databasePath: layout.databasePath,
     backupDirectory: layout.backupDirectory,
+    operationModules: [testOperations],
     ...(migrations ? { migrations } : {}),
   });
   stores.push(store);
   return store;
 }
 
-function close(store) {
+async function close(store) {
   stores.splice(stores.indexOf(store), 1);
-  store.close();
+  await store.close();
 }
+
+const all = (store, sql, params = []) => store.call("test.all", { sql, params });
+const get = (store, sql, params = []) => store.call("test.get", { sql, params });
+const run = (store, sql, params = []) => store.call("test.run", { sql, params });
+const pragma = (store, value) => store.call("test.pragma", { pragma: value });
 
 async function sha256(path) {
   return createHash("sha256")
@@ -79,7 +91,7 @@ function openElsewhere(layout) {
     const { Store } = await import(${JSON.stringify(new URL("../../dist/store/database.js", import.meta.url).href)});
     try {
       const store = await Store.open(${JSON.stringify({ databasePath: layout.databasePath, backupDirectory: layout.backupDirectory })});
-      store.close();
+      await store.close();
       console.log("opened");
     } catch (error) {
       console.log(error.category ?? "other");
@@ -95,10 +107,10 @@ function openElsewhere(layout) {
   );
 }
 
-function durableReceipts(store, serverId = "server", instance = "instance") {
+async function durableReceipts(store, serverId = "server", instance = "instance") {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition(serverId, instance, { ...M0_LIMITS }, bytes);
-  recordInstanceStart(store, instance, 1);
+  await recordInstanceStart(store, instance, 1);
   return new OperationReceipts(
     composition,
     encode,
@@ -112,17 +124,19 @@ describe("store opening, migrations and the data directory lock", () => {
     expect((await stat(layout.home)).mode & 0o777).toBe(0o700);
     expect((await stat(layout.serverDirectory)).mode & 0o777).toBe(0o700);
     const store = await open(layout);
-    const db = store.db;
     expect(store.schemaVersion).toBe(MIGRATIONS.length);
-    expect(db.pragma("user_version", { simple: true })).toBe(MIGRATIONS.length);
-    expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
-    expect(db.pragma("synchronous", { simple: true })).toBe(2);
-    expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
-    expect(db.pragma("busy_timeout", { simple: true })).toBe(0);
-    expect(db.pragma("locking_mode", { simple: true })).toBe("exclusive");
-    const tables = db
-      .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-      .all()
+    expect(await pragma(store, "user_version")).toBe(MIGRATIONS.length);
+    expect(await pragma(store, "journal_mode")).toBe("wal");
+    expect(await pragma(store, "synchronous")).toBe(2);
+    expect(await pragma(store, "foreign_keys")).toBe(1);
+    expect(await pragma(store, "busy_timeout")).toBe(0);
+    expect(await pragma(store, "locking_mode")).toBe("exclusive");
+    const tables = (
+      await all(
+        store,
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+      )
+    )
       .map((row) => row.name)
       .sort();
     expect(tables).toEqual([
@@ -147,21 +161,21 @@ describe("store opening, migrations and the data directory lock", () => {
   it("refuses a second opener of the same database while the first keeps working", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
+    await loadOrCreateIdentity(store);
     expect(await openElsewhere(layout)).toBe("in-use");
     // The first connection still reads and writes.
-    store.transaction(() => store.db.prepare("UPDATE config SET updated_at_ms = 5").run());
-    expect(store.db.prepare("SELECT updated_at_ms FROM config").get().updated_at_ms).toBe(5);
-    close(store);
+    expect(await run(store, "UPDATE config SET updated_at_ms = 5")).toBe(1);
+    expect((await get(store, "SELECT updated_at_ms FROM config")).updated_at_ms).toBe(5);
+    await close(store);
     expect(await openElsewhere(layout)).toBe("opened");
   });
 
   it("refuses a database newer than this build without changing its file", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
-    store.db.pragma(`user_version = ${MIGRATIONS.length + 1}`);
-    close(store);
+    await loadOrCreateIdentity(store);
+    await pragma(store, `user_version = ${MIGRATIONS.length + 1}`);
+    await close(store);
     const before = await sha256(layout.databasePath);
     const files = (await readdir(layout.serverDirectory)).sort();
     await expect(open(layout)).rejects.toMatchObject({ category: "newer-schema" });
@@ -198,8 +212,8 @@ describe("store opening, migrations and the data directory lock", () => {
   it("refuses a newer schema committed only to a crash-left WAL without touching any file", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
-    close(store);
+    await loadOrCreateIdentity(store);
+    await close(store);
     const newer = MIGRATIONS.length + 1;
     expect(
       await crashAfter(layout.databasePath, [
@@ -221,8 +235,8 @@ describe("store opening, migrations and the data directory lock", () => {
   it("takes the instance lock before reading the database files", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
-    close(store);
+    await loadOrCreateIdentity(store);
+    await close(store);
     const newer = MIGRATIONS.length + 1;
     expect(await crashAfter(layout.databasePath, [`PRAGMA user_version = ${newer}`])).toBe(
       "SIGKILL",
@@ -307,22 +321,22 @@ describe("store opening, migrations and the data directory lock", () => {
     const layout = await home();
     const first = [{ version: 1, name: "one", sql: "CREATE TABLE one (value INTEGER) STRICT;" }];
     const store = await open(layout, first);
-    store.transaction(() => store.db.prepare("INSERT INTO one VALUES (7)").run());
-    close(store);
+    await run(store, "INSERT INTO one VALUES (7)");
+    await close(store);
     const broken = [...first, { version: 2, name: "broken", sql: "CREATE TABLE two (; " }];
     await expect(open(layout, broken)).rejects.toMatchObject({ category: "migration" });
     const unchanged = await open(layout, first);
     expect(unchanged.schemaVersion).toBe(1);
-    expect(unchanged.db.prepare("SELECT value FROM one").get().value).toBe(7);
-    close(unchanged);
+    expect((await get(unchanged, "SELECT value FROM one")).value).toBe(7);
+    await close(unchanged);
     const next = [
       ...first,
       { version: 2, name: "two", sql: "CREATE TABLE two (x INTEGER) STRICT;" },
     ];
     const migrated = await open(layout, next);
-    expect(migrated.db.pragma("user_version", { simple: true })).toBe(2);
+    expect(await pragma(migrated, "user_version")).toBe(2);
     expect(migrated.backupPath).toMatch(/cove-schema-1-\d+-[0-9a-f]{8}\.db$/);
-    close(migrated);
+    await close(migrated);
     const backups = await readdir(layout.backupDirectory);
     // The failed attempt also took a backup before rolling back; both hold schema 1.
     expect(backups.length).toBe(2);
@@ -330,19 +344,20 @@ describe("store opening, migrations and the data directory lock", () => {
       databasePath: join(layout.backupDirectory, backups[0]),
       backupDirectory: layout.backupDirectory,
       migrations: first,
+      operationModules: [testOperations],
     });
-    expect(backup.db.prepare("SELECT value FROM one").get().value).toBe(7);
-    backup.close();
+    expect((await get(backup, "SELECT value FROM one")).value).toBe(7);
+    await backup.close();
   });
 
   it("keeps the server identity and local principal across reopening", async () => {
     const layout = await home();
     const store = await open(layout);
-    const created = loadOrCreateIdentity(store);
+    const created = await loadOrCreateIdentity(store);
     expect(created.created).toBe(true);
-    close(store);
+    await close(store);
     const again = await open(layout);
-    const loaded = loadOrCreateIdentity(again);
+    const loaded = await loadOrCreateIdentity(again);
     expect(loaded).toEqual({ ...created, created: false });
     expect(loaded.principalId).not.toBe(loaded.serverId);
   });
@@ -357,21 +372,26 @@ describe("store opening, migrations and the data directory lock", () => {
     expect(await sha256(layout.databasePath)).toBe(before);
   });
 
-  it("rolls back a failing transaction and keeps the connection usable", async () => {
+  it("rolls back a failing operation, keeps its error kind and keeps the connection usable", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
-    expect(() =>
-      store.transaction(() => {
-        store.db.prepare("UPDATE config SET revision = 9").run();
-        store.db.exec("SELECT * FROM missing");
-      }),
-    ).toThrow(/no such table/);
-    expect(store.db.prepare("SELECT revision FROM config").get().revision).toBe(0);
+    await loadOrCreateIdentity(store);
+    const failed = await store
+      .call("test.failAfterWrite", { sql: "UPDATE config SET revision = 9" })
+      .catch((error) => error);
+    expect(failed).toBeInstanceOf(StoreOperationError);
+    expect(failed).toMatchObject({ code: "SQLITE_IOERR_WRITE", message: "injected failure" });
+    const missing = await all(store, "SELECT * FROM missing").catch((error) => error);
+    expect(missing).toBeInstanceOf(StoreOperationError);
+    expect(missing.code).toBe("SQLITE_ERROR");
+    expect((await get(store, "SELECT revision FROM config")).revision).toBe(0);
+    const unknown = await store.call("no.such.operation", {}).catch((error) => error);
+    expect(unknown).toBeInstanceOf(StoreOperationError);
+    expect(unknown.code).toBeNull();
+    // Every call is one transaction and is observed once, with its execution interval.
     const observed = [];
     store.observe((start, end) => observed.push(end >= start));
-    store.transaction(() => store.transaction(() => store.db.prepare("SELECT 1").get()));
-    // Only the outermost transaction is observed (D6 probe correlation).
+    await get(store, "SELECT 1");
     expect(observed).toEqual([true]);
   });
 });
@@ -389,84 +409,101 @@ describe("durable operation receipts", () => {
   it("keeps committed receipts, their intent and their guards across reopening", async () => {
     const layout = await home();
     let store = await open(layout);
-    let receipts = durableReceipts(store);
-    expect(receipts.prepare(key("a"), "intent-a").commit(record("a"))).toBe(true);
+    let receipts = await durableReceipts(store);
+    expect(await (await receipts.prepare(key("a"), "intent-a")).commit(record("a"))).toBe(true);
     expect(receipts.count).toBe(0);
-    expect(receipts.update(key("a"), record("a", { revision: 1, state: "succeeded" }))).toBe(true);
+    expect(await receipts.update(key("a"), record("a", { revision: 1, state: "succeeded" }))).toBe(
+      true,
+    );
     receipts.dispose();
-    close(store);
+    await close(store);
     store = await open(layout);
-    receipts = durableReceipts(store, "server", "next-instance");
-    expect(receipts.lookup(key("a"), "intent-a")).toMatchObject({
+    receipts = await durableReceipts(store, "server", "next-instance");
+    expect(await receipts.lookup(key("a"), "intent-a")).toMatchObject({
       kind: "existing",
       record: { revision: 1, state: "succeeded" },
     });
-    expect(receipts.lookup(key("a"), "intent-b").kind).toBe("conflict");
-    expect(receipts.lookup({ ...key("a"), principalId: "other" }, "intent-a").kind).toBe("reserve");
-    expect(receipts.update(key("a"), record("a", { revision: 2, state: "running" }))).toBe(false);
-    expect(receipts.prepare(key("a"), "intent-a")).toBeNull();
+    expect((await receipts.lookup(key("a"), "intent-b")).kind).toBe("conflict");
+    expect((await receipts.lookup({ ...key("a"), principalId: "other" }, "intent-a")).kind).toBe(
+      "reserve",
+    );
+    expect(await receipts.update(key("a"), record("a", { revision: 2, state: "running" }))).toBe(
+      false,
+    );
+    expect(await receipts.prepare(key("a"), "intent-a")).toBeNull();
     receipts.dispose();
   });
 
   it("refuses stale successors with a compare-and-set on the stored revision", async () => {
     const layout = await home();
     const store = await open(layout);
-    const receipts = durableReceipts(store);
-    expect(receipts.prepare(key("b"), "intent").commit(record("b"))).toBe(true);
-    expect(receipts.update(key("b"), record("b", { revision: 2, state: "running" }))).toBe(false);
-    expect(receipts.update(key("b"), record("b", { revision: 1, state: "running" }))).toBe(true);
-    expect(receipts.update(key("b"), record("b", { revision: 1, state: "succeeded" }))).toBe(false);
-    expect(receipts.get(key("b"))).toMatchObject({ revision: 1, state: "running" });
+    const receipts = await durableReceipts(store);
+    expect(await (await receipts.prepare(key("b"), "intent")).commit(record("b"))).toBe(true);
+    expect(await receipts.update(key("b"), record("b", { revision: 2, state: "running" }))).toBe(
+      false,
+    );
+    expect(await receipts.update(key("b"), record("b", { revision: 1, state: "running" }))).toBe(
+      true,
+    );
+    expect(await receipts.update(key("b"), record("b", { revision: 1, state: "succeeded" }))).toBe(
+      false,
+    );
+    expect(await receipts.get(key("b"))).toMatchObject({ revision: 1, state: "running" });
     receipts.dispose();
   });
 
   it("moves unfinished receipts of an earlier instance to requires_attention without running them", async () => {
     const layout = await home();
     let store = await open(layout);
-    let receipts = durableReceipts(store);
+    let receipts = await durableReceipts(store);
     const run = { serverId: "server", relayInstanceId: "instance", runId: "run-1" };
     const create = { ...record("c"), method: "terminal.create", run };
     for (const id of ["accepted", "running", "done", "failed"])
-      expect(receipts.prepare(key(id), `intent-${id}`).commit({ ...create, operationId: id })).toBe(
-        true,
-      );
+      expect(
+        await (
+          await receipts.prepare(key(id), `intent-${id}`)
+        ).commit({
+          ...create,
+          operationId: id,
+        }),
+      ).toBe(true);
     for (const [id, state] of [
       ["running", "running"],
       ["done", "succeeded"],
       ["failed", "failed"],
     ])
-      expect(receipts.update(key(id), { ...create, operationId: id, revision: 1, state })).toBe(
-        true,
-      );
+      expect(
+        await receipts.update(key(id), { ...create, operationId: id, revision: 1, state }),
+      ).toBe(true);
     receipts.dispose();
-    close(store);
+    await close(store);
     store = await open(layout);
-    receipts = durableReceipts(store, "server", "restarted");
+    receipts = await durableReceipts(store, "server", "restarted");
     const verified = await receipts.recoverInterrupted();
     expect(verified.map((item) => [item.operationId, item.state, item.revision]).sort()).toEqual([
       ["accepted", "requires_attention", 2],
       ["running", "requires_attention", 3],
     ]);
     for (const id of ["accepted", "running"]) {
-      const current = receipts.get(key(id));
+      const current = await receipts.get(key(id));
       expect(current).toMatchObject({ state: "requires_attention", run });
       expect(current.error).toMatchObject({ kind: "RESULT_UNKNOWN", acceptance: "unknown" });
       // A same-intent resend only returns the record; a late result cannot replace it.
-      expect(receipts.lookup(key(id), `intent-${id}`).kind).toBe("existing");
+      expect((await receipts.lookup(key(id), `intent-${id}`)).kind).toBe("existing");
       expect(
-        receipts.update(key(id), {
+        await receipts.update(key(id), {
           ...current,
           revision: current.revision + 1,
           state: "succeeded",
         }),
       ).toBe(false);
     }
-    expect(receipts.get(key("done"))).toMatchObject({ state: "succeeded", revision: 1 });
-    expect(receipts.get(key("failed"))).toMatchObject({ state: "failed", revision: 1 });
+    expect(await receipts.get(key("done"))).toMatchObject({ state: "succeeded", revision: 1 });
+    expect(await receipts.get(key("failed"))).toMatchObject({ state: "failed", revision: 1 });
     // Explicit recovery still works on the durable record.
-    const attention = receipts.get(key("running"));
+    const attention = await receipts.get(key("running"));
     expect(
-      receipts.recover(key("running"), attention.revision, {
+      await receipts.recover(key("running"), attention.revision, {
         ...attention,
         revision: attention.revision + 1,
         state: "cancelled",
@@ -479,12 +516,14 @@ describe("durable operation receipts", () => {
   it("accepts a verifier's proven outcome instead of requires_attention", async () => {
     const layout = await home();
     const store = await open(layout);
-    let receipts = durableReceipts(store);
+    let receipts = await durableReceipts(store);
     expect(
-      receipts.prepare(key("v"), "intent").commit(record("v", { method: "mount.retry" })),
+      await (
+        await receipts.prepare(key("v"), "intent")
+      ).commit(record("v", { method: "mount.retry" })),
     ).toBe(true);
     receipts.dispose();
-    receipts = durableReceipts(store, "server", "second");
+    receipts = await durableReceipts(store, "server", "second");
     const [outcome] = await receipts.recoverInterrupted({
       // Verifiers may inspect external state asynchronously.
       "mount.retry": async (current) => ({
@@ -500,13 +539,15 @@ describe("durable operation receipts", () => {
   it("commits recovering before an asynchronous verifier and keeps the generic outcome when it throws", async () => {
     const layout = await home();
     const store = await open(layout);
-    let receipts = durableReceipts(store);
+    let receipts = await durableReceipts(store);
     for (const id of ["proven", "throws"])
       expect(
-        receipts.prepare(key(id), `intent-${id}`).commit(record(id, { method: "mount.retry" })),
+        await (
+          await receipts.prepare(key(id), `intent-${id}`)
+        ).commit(record(id, { method: "mount.retry" })),
       ).toBe(true);
     receipts.dispose();
-    receipts = durableReceipts(store, "server", "second");
+    receipts = await durableReceipts(store, "server", "second");
     const seen = [];
     const outcomes = await receipts.recoverInterrupted({
       "mount.retry": async (current) => {
@@ -514,9 +555,11 @@ describe("durable operation receipts", () => {
         // during verification is retried by the next start.
         seen.push([
           current.operationId,
-          store.db
-            .prepare("SELECT state FROM operations WHERE operation_id = ?")
-            .get(current.operationId).state,
+          (
+            await get(store, "SELECT state FROM operations WHERE operation_id = ?", [
+              current.operationId,
+            ])
+          ).state,
         ]);
         await new Promise((done) => setTimeout(done, 1));
         if (current.operationId === "throws") throw new Error("inspection failed");
@@ -632,11 +675,11 @@ describe("operation process ownership", () => {
 
   async function ledgerWithOperation(layout) {
     const store = await open(layout ?? (await home()));
-    const receipts = durableReceipts(store);
+    const receipts = await durableReceipts(store);
     expect(
-      receipts
-        .prepare(operation, "intent")
-        .commit({ operationId: "git-op", method: "config.set", revision: 0, state: "accepted" }),
+      await (
+        await receipts.prepare(operation, "intent")
+      ).commit({ operationId: "git-op", method: "config.set", revision: 0, state: "accepted" }),
     ).toBe(true);
     receipts.dispose();
     return { store, ledger: new ProcessLedger(store, "instance", () => 5) };
@@ -687,13 +730,12 @@ describe("operation process ownership", () => {
 
   // Inserted directly: record() accepts only identities in the current format.
   function insertRaw(store, { pid, pgid, startIdentity }) {
-    store.db
-      .prepare(
-        `INSERT INTO operation_processes (process_id, operation_server_id, operation_principal_id,
-           operation_id, pid, pgid, start_identity, started_by_instance_id, started_at_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'instance', 1)`,
-      )
-      .run(
+    return run(
+      store,
+      `INSERT INTO operation_processes (process_id, operation_server_id, operation_principal_id,
+         operation_id, pid, pgid, start_identity, started_by_instance_id, started_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'instance', 1)`,
+      [
         `raw-${startIdentity}`,
         operation.serverId,
         operation.principalId,
@@ -701,7 +743,8 @@ describe("operation process ownership", () => {
         pid,
         pgid,
         startIdentity,
-      );
+      ],
+    );
   }
 
   it("identifies a recorded process by PID and start identity until it ends", async () => {
@@ -711,24 +754,24 @@ describe("operation process ownership", () => {
     expect(parseStartIdentity(leader.identity)).toMatchObject({
       platform: process.platform,
     });
-    const recorded = ledger.record(operation, {
+    const recorded = await ledger.record(operation, {
       pid: leader.pid,
       pgid: leader.pid,
       startIdentity: leader.identity,
     });
-    expect(ledger.open(operation)).toEqual([recorded]);
+    expect(await ledger.open(operation)).toEqual([recorded]);
     expect(await ledger.check(operation)).toBe("alive");
-    close(store);
+    await close(store);
     leader.release();
     await leader.exited;
     await until(() => ProcessLedger.liveness(recorded).then((state) => state === "ended"));
     // The record survives a restart; the next instance observes the end and records it.
     const reopened = await open(layout);
     const next = new ProcessLedger(reopened, "next", () => 9);
-    expect(next.open(operation)).toEqual([recorded]);
+    expect(await next.open(operation)).toEqual([recorded]);
     expect(await next.check(operation)).toBe("ended");
-    expect(next.open(operation)).toEqual([]);
-    close(reopened);
+    expect(await next.open(operation)).toEqual([]);
+    await close(reopened);
   });
 
   it("treats a live PID with another start identity as a reused PID", async () => {
@@ -740,14 +783,14 @@ describe("operation process ownership", () => {
     // start time; the recorded group (the ended leader's) has no members.
     const { platform, boot } = parseStartIdentity(ended.identity);
     const start = platform === "darwin" ? "1.000000" : "1";
-    ledger.record(operation, {
+    await ledger.record(operation, {
       pid: process.pid,
       pgid: ended.pid,
       startIdentity: `${platform}:${boot}:${start}`,
     });
     await until(() => ledger.check(operation).then((state) => state === "ended"));
-    expect(ledger.open(operation)).toEqual([]);
-    close(store);
+    expect(await ledger.open(operation)).toEqual([]);
+    await close(store);
   });
 
   it("treats a process recorded during another boot as ended without probing its IDs", async () => {
@@ -758,14 +801,14 @@ describe("operation process ownership", () => {
     const { platform, boot, start } = parseStartIdentity(unrelated.identity);
     const earlierBoot = "00000000-0000-4000-8000-000000000000";
     expect(earlierBoot).not.toBe(boot);
-    ledger.record(operation, {
+    await ledger.record(operation, {
       pid: unrelated.pid,
       pgid: unrelated.pid,
       startIdentity: `${platform}:${earlierBoot}:${start}`,
     });
     expect(await ledger.check(operation)).toBe("ended");
-    expect(ledger.open(operation)).toEqual([]);
-    close(store);
+    expect(await ledger.open(operation)).toEqual([]);
+    await close(store);
   });
 
   it("never ends a live group recorded with an identity it cannot parse", async () => {
@@ -784,21 +827,21 @@ describe("operation process ownership", () => {
     ];
     for (const startIdentity of identities) expect(parseStartIdentity(startIdentity)).toBeNull();
     for (const startIdentity of identities) {
-      expect(() =>
+      await expect(
         ledger.record(operation, { pid: live.pid, pgid: live.pid, startIdentity }),
-      ).toThrow(/current format/);
-      insertRaw(store, { pid: live.pid, pgid: live.pid, startIdentity });
+      ).rejects.toThrow(/current format/);
+      await insertRaw(store, { pid: live.pid, pgid: live.pid, startIdentity });
     }
-    for (const record of ledger.open(operation))
+    for (const record of await ledger.open(operation))
       expect(await ProcessLedger.liveness(record)).toBe("unverifiable");
     expect(await ledger.check(operation)).toBe("unverifiable");
-    expect(ledger.open(operation)).toHaveLength(identities.length);
+    expect(await ledger.open(operation)).toHaveLength(identities.length);
     // Once neither the PID nor its group exists, the records end.
     live.release();
     await live.exited;
     await until(() => ledger.check(operation).then((state) => state === "ended"));
-    expect(ledger.open(operation)).toEqual([]);
-    close(store);
+    expect(await ledger.open(operation)).toEqual([]);
+    await close(store);
   });
 
   it("stays unverifiable while the group outlives its leader", async () => {
@@ -825,7 +868,11 @@ describe("operation process ownership", () => {
     await until(() => member.pid !== undefined);
     member.identity = await processStartIdentity(member.pid);
     expect(member.identity).not.toBeNull();
-    ledger.record(operation, { pid: leader.pid, pgid: leader.pid, startIdentity: leader.identity });
+    await ledger.record(operation, {
+      pid: leader.pid,
+      pgid: leader.pid,
+      startIdentity: leader.identity,
+    });
     leader.release();
     await leader.exited;
     expect(await ledger.check(operation)).toBe("unverifiable");
@@ -833,7 +880,7 @@ describe("operation process ownership", () => {
     member.released = true;
     await until(async () => (await processStartIdentity(member.pid)) !== member.identity);
     await until(() => ledger.check(operation).then((state) => state === "ended"));
-    close(store);
+    await close(store);
   });
 });
 
@@ -851,86 +898,120 @@ describe("server configuration", () => {
   it("changes workspaceRoot once per operation ID and survives reopening", async () => {
     const layout = await home();
     let store = await open(layout);
-    loadOrCreateIdentity(store);
-    let receipts = durableReceipts(store);
+    await loadOrCreateIdentity(store);
+    let receipts = await durableReceipts(store);
     let config = service(store, receipts);
-    expect(config.record()).toEqual({
+    expect(await config.record()).toEqual({
       revision: 0,
       settings: { workspaceRoot: { value: "/home/owner/.cove/workspace", isDefault: true } },
     });
     const params = { operationId: "set-1", patch: { workspaceRoot: "/srv/work" } };
-    const first = config.set("principal", params);
+    const first = await config.set("principal", params);
     expect(first.operation).toMatchObject({
       state: "succeeded",
       result: { resource: { kind: "config", id: "server", revision: 1 } },
     });
     receipts.dispose();
-    close(store);
+    await close(store);
     store = await open(layout);
-    receipts = durableReceipts(store, "server", "restarted");
+    receipts = await durableReceipts(store, "server", "restarted");
     config = service(store, receipts);
-    expect(config.set("principal", params)).toEqual(first);
-    expect(config.record().revision).toBe(1);
-    expect(config.workspaceRoot()).toBe("/srv/work");
-    expect(config.set("principal", { ...params, patch: { workspaceRoot: null } })).toMatchObject({
+    expect(await config.set("principal", params)).toEqual(first);
+    expect((await config.record()).revision).toBe(1);
+    expect(await config.workspaceRoot()).toBe("/srv/work");
+    expect(
+      await config.set("principal", { ...params, patch: { workspaceRoot: null } }),
+    ).toMatchObject({
       error: { kind: "OPERATION_ID_CONFLICT" },
     });
     expect(
-      config.set("principal", {
+      await config.set("principal", {
         operationId: "set-2",
         expectedRevision: 0,
         patch: { workspaceRoot: null },
       }),
     ).toMatchObject({ error: { kind: "REVISION_CONFLICT" } });
     // A refused precondition leaves no receipt: the same request may be sent once it holds.
-    expect(receipts.get(key("set-2"))).toBeNull();
+    expect(await receipts.get(key("set-2"))).toBeNull();
     for (const workspaceRoot of ["relative/dir", "/srv/../x", "/srv/x/"])
       expect(
-        config.set("principal", {
+        await config.set("principal", {
           operationId: `bad-${workspaceRoot.length}`,
           patch: { workspaceRoot },
         }),
       ).toMatchObject({ error: { kind: "INVALID_ARGUMENT" } });
-    const reset = config.set("principal", {
+    const reset = await config.set("principal", {
       operationId: "set-3",
       expectedRevision: 1,
       patch: { workspaceRoot: null },
     });
     expect(reset.operation.result.resource.revision).toBe(2);
-    expect(config.record().settings.workspaceRoot.isDefault).toBe(true);
+    expect((await config.record()).settings.workspaceRoot.isDefault).toBe(true);
     receipts.dispose();
   });
 
   it("rolls the receipt back with the change when the transaction fails", async () => {
     const layout = await home();
     const store = await open(layout);
-    loadOrCreateIdentity(store);
-    const receipts = durableReceipts(store);
-    const state = sqliteConfigState(store);
-    const failing = {
-      ...state,
-      write: () => {
-        throw new Error("disk failure");
-      },
-    };
-    const config = service(store, receipts, failing);
+    await loadOrCreateIdentity(store);
+    const receipts = await durableReceipts(store);
+    const config = service(store, receipts);
+    // The receipt insert fails after the configuration row was written in the same transaction.
+    await run(
+      store,
+      `CREATE TEMP TRIGGER refuse_receipts BEFORE INSERT ON operations
+       BEGIN SELECT RAISE(ABORT, 'disk failure'); END`,
+    );
     expect(
-      config.set("principal", { operationId: "fails", patch: { workspaceRoot: "/srv/x" } }),
-    ).toMatchObject({ error: { kind: "BUSY" } });
-    expect(receipts.get(key("fails"))).toBeNull();
+      await config.set("principal", { operationId: "fails", patch: { workspaceRoot: "/srv/x" } }),
+    ).toMatchObject({ error: { kind: "BUSY", acceptance: "not-accepted" } });
+    expect(await get(store, "SELECT revision, workspace_root FROM config")).toEqual({
+      revision: 0,
+      workspace_root: null,
+    });
+    expect(await receipts.get(key("fails"))).toBeNull();
     expect(receipts.count).toBe(0);
     receipts.dispose();
   });
 
   it("serves the D6 control phase from memory with the same results", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    await loadOrCreateIdentity(store);
+    await store.call("config.initialize", { workspaceRoot: "/srv/initial", at: 1 });
+    const probe = new D6Probe(layout.serverDirectory);
     const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
     const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes);
-    const receipts = new OperationReceipts(composition, encode);
-    const config = service(null, receipts, memoryConfigState({ revision: 4, workspaceRoot: null }));
+    await recordInstanceStart(store, "instance", 1);
+    const sqlite = new SqliteReceiptBackend(store, "instance", () => 1);
+    const receipts = new OperationReceipts(composition, encode, probe.receipts(sqlite));
+    const config = service(store, receipts, probe.config(sqliteConfigState(store)));
+    // The control phase (SIGUSR2 in the probe server) is selected directly.
+    probe.mode = "memory";
     const params = { operationId: "mem", patch: { workspaceRoot: "/srv/mem" } };
-    expect(config.set("principal", params).operation.result.resource.revision).toBe(5);
-    expect(config.set("principal", params).operation.result.resource.revision).toBe(5);
+    const first = await config.set("principal", params);
+    expect(first.operation.result.resource.revision).toBe(2);
+    expect(await config.set("principal", params)).toEqual(first);
+    expect(
+      await config.set("principal", { ...params, patch: { workspaceRoot: null } }),
+    ).toMatchObject({ error: { kind: "OPERATION_ID_CONFLICT" } });
+    // Concurrent control writes each advance the revision once.
+    const concurrent = await Promise.all(
+      ["c1", "c2", "c3"].map((operationId) =>
+        config.set("principal", { operationId, patch: { workspaceRoot: "/srv/c" } }),
+      ),
+    );
+    expect(concurrent.map((item) => item.operation.result.resource.revision).sort()).toEqual([
+      3, 4, 5,
+    ]);
+    expect(await config.record()).toMatchObject({ revision: 5 });
     expect(canonicalWriteIntent("config.set", params, encode)).toContain("config.set");
+    // Nothing reached the database.
+    expect(await get(store, "SELECT revision, workspace_root FROM config")).toEqual({
+      revision: 1,
+      workspace_root: "/srv/initial",
+    });
+    expect(await get(store, "SELECT count(*) AS n FROM operations")).toEqual({ n: 0 });
     receipts.dispose();
   });
 
@@ -940,35 +1021,40 @@ describe("server configuration", () => {
 });
 
 describe("durable run records", () => {
-  const run = (instance, runId) => ({ serverId: "server", relayInstanceId: instance, runId });
+  const ref = (instance, runId) => ({ serverId: "server", relayInstanceId: instance, runId });
 
   it("records run starts and exits, ends runs with an orderly stop and interrupts the rest", async () => {
     const layout = await home();
     const store = await open(layout);
     let now = 10;
     const runs = new RunLog(store, () => now);
-    recordInstanceStart(store, "old", 1);
-    runs.started(run("old", "run-1"), "/work", "op-1");
-    runs.spawned(run("old", "run-1"));
-    runs.started(run("old", "run-2"), "/work", "op-2");
-    runs.spawned(run("old", "run-2"));
+    await recordInstanceStart(store, "old", 1);
+    // Not awaited one by one: the store executes calls in the order they are made.
+    const pending = [
+      runs.started(ref("old", "run-1"), "/work", "op-1"),
+      runs.spawned(ref("old", "run-1")),
+      runs.started(ref("old", "run-2"), "/work", "op-2"),
+      runs.spawned(ref("old", "run-2")),
+    ];
     now = 20;
-    runs.exited(run("old", "run-2"), 3, null);
-    runs.started(run("old", "run-3"), "/work", "op-3");
-    runs.notStarted(run("old", "run-3"));
-    expect(runs.live("old").map((item) => item.run.runId)).toEqual(["run-1"]);
-    recordInstanceStart(store, "orderly", 2);
-    runs.started(run("orderly", "run-1"), "/work", "op-4");
-    runs.spawned(run("orderly", "run-1"));
+    pending.push(
+      runs.exited(ref("old", "run-2"), 3, null),
+      runs.started(ref("old", "run-3"), "/work", "op-3"),
+      runs.notStarted(ref("old", "run-3")),
+    );
+    await Promise.all(pending);
+    expect((await runs.live("old")).map((item) => item.run.runId)).toEqual(["run-1"]);
+    await recordInstanceStart(store, "orderly", 2);
+    await runs.started(ref("orderly", "run-1"), "/work", "op-4");
+    await runs.spawned(ref("orderly", "run-1"));
     now = 30;
-    expect(runs.stoppedWithServer("orderly", true)).toBe(1);
-    recordInstanceStart(store, "current", 3);
-    expect(runs.interruptEarlier("current")).toBe(1);
-    const rows = store.db
-      .prepare(
-        "SELECT relay_instance_id, run_id, lifecycle, verification, ended_at_ms, exit_code, last_observed_at_ms FROM runs ORDER BY run_seq",
-      )
-      .all();
+    expect(await runs.stoppedWithServer("orderly", true)).toBe(1);
+    await recordInstanceStart(store, "current", 3);
+    expect(await runs.interruptEarlier("current")).toBe(1);
+    const rows = await all(
+      store,
+      "SELECT relay_instance_id, run_id, lifecycle, verification, ended_at_ms, exit_code, last_observed_at_ms FROM runs ORDER BY run_seq",
+    );
     expect(rows).toEqual([
       {
         relay_instance_id: "old",

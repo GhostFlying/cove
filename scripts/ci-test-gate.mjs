@@ -274,7 +274,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/repo-registration.test.mjs",
-    minimumTests: 22,
+    minimumTests: 23,
   },
   {
     project: "server",
