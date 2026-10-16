@@ -59,8 +59,8 @@ const TERMINALS = 8;
 // Output terminals with a subscribed client (--subscribed-outputs). D6 prescribes all eight, the
 // default since #96 (refused subscription ACKs) was fixed; unsubscribed terminals still print
 // through the worker without WebSocket delivery. A run with fewer than eight validated streams is a
-// workload deviation: its verdict is PROVISIONAL, never final. Raw data saved before this option
-// existed subscribed three.
+// workload deviation: an A or B from it is PROVISIONAL, never final. Raw data saved before this
+// option existed subscribed three.
 const DEFAULT_SUBSCRIBED_OUTPUTS = TERMINALS;
 const LEGACY_SUBSCRIBED_OUTPUTS = 3;
 // Event-loop delay is sampled every 100 ms; a phase needs this share of its samples and no larger
@@ -69,8 +69,8 @@ const SAMPLE_COVERAGE = 0.9;
 const MAX_SAMPLE_GAP_MS = 500;
 // D6 prescribes 64 KiB/s per output terminal. --output-kib-per-second runs all eight streams at a
 // lower rate on a host where one worker cannot sustain 8 x 64 KiB/s: there a busy worker is
-// declared lost (#103) and the run is UNRESOLVED without measuring the database at all. The
-// report records both rates, so a reduced-rate result is never mistaken for the prescribed load.
+// declared lost (#103) and the run is UNRESOLVED without measuring the database at all. A reduced
+// rate is a workload deviation (see analyze): its A is PROVISIONAL, its B stands.
 const OUTPUT_BYTES_PER_SECOND = 64 * 1024;
 const KEY_INTERVAL_MS = 50;
 const WRITES_PER_SECOND = 20;
@@ -870,22 +870,49 @@ function analyze({ config, phases, echo, writes, serverDump, unavailable }) {
     { length: config.subscribedOutputs },
     (_, index) => index,
   ).filter((index) => phases.every((phase) => streamRates(phase)[index] >= minimumRate)).length;
-  // D6 prescribes eight subscribed streams. With fewer, an A or B describes a reduced workload: it
-  // is reported as PROVISIONAL with the measured attribution beside it, never as a final verdict.
+  // D6 prescribes eight subscribed streams at 64 KiB/s each; anything less is a workload deviation,
+  // recorded with the measured attribution beside the verdict:
+  // - Fewer than eight validated streams: an A or B describes a different workload and is
+  //   PROVISIONAL, never final.
+  // - All eight streams at a reduced rate: an A is PROVISIONAL, because a lighter load cannot rule
+  //   out blocking at the prescribed one. A B stands: writes already delay the main thread at the
+  //   lighter load, and more output only adds main-thread work around the same synchronous
+  //   commits, so the effect would not disappear at the full rate.
+  const fewerStreams = validatedStreams < TERMINALS;
+  const reducedRate = config.outputBytesPerSecond < OUTPUT_BYTES_PER_SECOND;
   const workloadDeviation =
-    validatedStreams < TERMINALS
+    fewerStreams || reducedRate
       ? {
           prescribedStreams: TERMINALS,
           subscribedStreams: config.subscribedOutputs,
           validatedStreams,
+          prescribedOutputBytesPerSecondPerTerminal: OUTPUT_BYTES_PER_SECOND,
+          outputBytesPerSecondPerTerminal: config.outputBytesPerSecond,
           // A stream is validated only when subscribed and delivered at 90% of the target rate in
           // every phase; a lost subscription (e.g. a busy worker declared lost, #103) fails it.
-          reason:
-            "fewer than eight subscribed output streams delivered at the target rate in every " +
-            "phase; rerun with all eight subscribed, or investigate the streams that stalled",
+          reason: [
+            ...(fewerStreams
+              ? [
+                  "fewer than eight subscribed output streams delivered at the target rate in " +
+                    "every phase; rerun with all eight subscribed, or investigate the streams that " +
+                    "stalled",
+                ]
+              : []),
+            ...(reducedRate
+              ? [
+                  `output rate ${config.outputBytesPerSecond / 1024} KiB/s per stream is below the ` +
+                    `prescribed ${OUTPUT_BYTES_PER_SECOND / 1024} KiB/s; an A is provisional, a B stands`,
+                ]
+              : []),
+          ].join("; "),
         }
       : null;
-  const verdict = workloadDeviation && measured !== "UNRESOLVED" ? "PROVISIONAL" : measured;
+  const verdict =
+    measured === "UNRESOLVED"
+      ? measured
+      : fewerStreams || (reducedRate && measured === "A")
+        ? "PROVISIONAL"
+        : measured;
   return {
     verdict,
     measuredVerdict: measured,
