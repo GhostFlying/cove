@@ -124,6 +124,10 @@ type Request = {
   // must still be answered before the client's own deadline (see tick()).
   recoverDeadlines?: { deadline: number; markerDeadline: number };
   started?: boolean;
+  // Set when a route-control command (applied-ack, baseline-progress, detach) takes effect: its
+  // credit was advanced and it was handed to the runtime, or its teardown began. From then on
+  // only its own result may answer it (see failQueued()).
+  dispatched?: boolean;
 };
 
 type Teardown = {
@@ -789,6 +793,7 @@ export class TerminalSubscriptions {
             };
       result = await this.runtime.openSubscription(pipe);
     } else if (command.type === "detach") {
+      request.dispatched = true;
       this.retire(route);
       const teardown = this.unsubscribe(route, internalId);
       if (!teardown) {
@@ -806,6 +811,7 @@ export class TerminalSubscriptions {
         this.finish(request, this.error(command, route.failure ?? "STALE_CONNECTION"));
         return;
       }
+      request.dispatched = true;
       result = await this.runtime.ackApplied({
         ...common,
         type: "applied-ack",
@@ -821,6 +827,7 @@ export class TerminalSubscriptions {
         this.finish(request, this.error(command, route.failure ?? "STALE_CONNECTION"));
         return;
       }
+      request.dispatched = true;
       result = await this.runtime.ackBaselineProgress({
         ...common,
         type: "baseline-progress",
@@ -1150,22 +1157,44 @@ export class TerminalSubscriptions {
     this.failQueued(route);
   }
 
-  // Answers the requests of a route that just retired with its failure, except those whose
-  // effect already happened: a route-control command that started executing has advanced the
-  // route's credit and was sent to the worker (an ACK the busy worker answers late, say), and
-  // dispatched input reached the PTY. Those keep their real result, which still arrives:
-  // the worker answers in order, before the unsubscribe that retirement sent. Reporting them
-  // not-accepted would tell the client an applied ACK was not applied.
+  // Ends a recovery that did not complete within recoveryDeadlineMs: its marker reached the
+  // client, but the route's credit was not installed in time. Whether the client already
+  // applied the recovery is unknown to the server, so the route's own failure (reported to
+  // later commands on it) is RECOVERY_EXPIRED/unknown. The requests still queued on the route
+  // are answered per request by failQueued(), like a half-deadline expiry.
+  private expireFullRecovery(route: Route): void {
+    this.retire(route, domainError("RECOVERY_EXPIRED", "unknown"));
+    this.failQueued(route);
+  }
+
+  // Whether the route's recovery passed its deadline without installing its credit (the
+  // marker arrived, but the baseline or replay was not applied in time).
+  private recoveryOverdue(route: Route, now: number): boolean {
+    const credit = route.credit?.snapshot();
+    return (
+      route.phase !== "retired" &&
+      (!credit?.installed || credit.appliedSeq < route.credit!.atSeq) &&
+      now >= route.deadline
+    );
+  }
+
+  // Answers the requests of a route that just retired, each by what actually happened to it:
+  // - A request that has not taken effect gets a definite RECOVERY_EXPIRED (not-accepted),
+  //   even when the recovery's own outcome is unknown: the server never applied or sent it,
+  //   so the client may rely on that (an unknown detach, say, would make it retire its whole
+  //   connection).
+  // - A route-control command that took effect (its credit advanced and it was handed to the
+  //   runtime, or its teardown began; see `dispatched`) and dispatched input keep their real
+  //   result, which still arrives: the worker answers in order, before the unsubscribe that
+  //   retirement sent, or contact loss answers it. Reporting an applied ACK not-accepted
+  //   would tell the client it was not applied.
+  // - An attach or recover whose marker was admitted is answered by that marker.
   private failQueued(route: Route): void {
+    const expired = domainError("RECOVERY_EXPIRED");
     for (const request of route.queue) {
-      const type = request.command.type;
-      if (
-        request.started &&
-        (type === "applied-ack" || type === "baseline-progress" || type === "detach")
-      )
-        continue;
-      if (type === "input" && request.domain?.dispatched) continue;
-      this.finish(request, this.error(request.command, route.failure!));
+      if (request.dispatched || request.marker) continue;
+      if (request.command.type === "input" && request.domain?.dispatched) continue;
+      this.finish(request, this.error(request.command, expired));
     }
   }
 
@@ -1207,17 +1236,7 @@ export class TerminalSubscriptions {
         // ticks, so execute() checks it before a queued recover is dispatched and handoff
         // checks it before a marker is admitted, with the same outcome.
         this.expireRecovery(route);
-      } else if (
-        route.phase !== "retired" &&
-        (!route.credit?.snapshot().installed ||
-          route.credit.snapshot().appliedSeq < route.credit.atSeq) &&
-        now >= route.deadline
-      ) {
-        this.retire(route, domainError("RECOVERY_EXPIRED", "unknown"));
-        for (const request of route.queue)
-          if (!(request.command.type === "input" && request.domain?.dispatched))
-            this.finish(request, this.error(request.command, route.failure!));
-      }
+      } else if (this.recoveryOverdue(route, now)) this.expireFullRecovery(route);
     this.publishHealth();
   }
   // Tells each active route's client the current health of the worker serving it (issue #103;
