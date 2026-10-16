@@ -128,7 +128,11 @@ T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露�
   后续引入时重新检查最新 release；若仍有冲突，明确记录兼容版本例外或按包隔离其依赖，不能静默降级或关闭严格校验。
 - Electron、React Native、Go 与业务运行库在真正建立相应入口时再选定当时最新正式版本；Playwright 已由 B0 的浏览器实验入口固定为 `1.63.0`。
   不为占位安装工具，也不将根 Vite 的版本强加给所有宿主。
-- node-pty 已在 B0 的 macOS/CI 探针中验证单个 PTY；better-sqlite3、打包和最低系统版本仍未验证。单个探针通过不代表原生模块已可交付。
+- node-pty 已在 B0 的 macOS/CI 探针中验证单个 PTY。better-sqlite3 由 server 存储测试在 macOS arm64 与 Ubuntu x64 的 Node 26.10.0 上
+  实际加载，且在 worker thread 中加载（`apps/server/tests/author/store-worker.test.mjs`、`apps/cli/tests/m1/store-worker-entry.test.mjs`）。
+  打包和最低系统版本仍未验证。单个探针通过不代表原生模块已可交付。
+- 存储 worker 的入口是编译产物 `dist/store/store-worker.js`，由 `dist/store/database.js` 按自身 URL 定位，必须与存储模块一起发布；
+  worker 以空 `execArgv` 启动，不继承父进程的 `--input-type` 等选项。
 
 ## 当前验证范围
 
