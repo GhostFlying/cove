@@ -104,7 +104,8 @@ export function fixture(budgetChanges = {}, policyChanges = {}) {
       effectiveBudgets: budgets,
     }),
   );
-  runtime.reserveRun(run, geometry);
+  // The fixture's run stands for a spawned run: only dispatched runs are refreshed by ticks.
+  runtime.registry.markDispatched(run, runtime.reserveRun(run, geometry));
   const latest = () => decode(pipeWrites.at(-1).data).metadata;
   const commands = () =>
     pipeWrites.map((item) => decode(item.data).metadata).filter((m) => m.type !== "hello");

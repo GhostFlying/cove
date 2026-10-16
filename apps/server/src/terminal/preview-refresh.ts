@@ -368,8 +368,18 @@ export class PreviewRefresh {
         const lease = this.runtime.composition.bytes.reserve(1024);
         if (lease) this.schedule.set(status.run.runId, { run: status.run, due: now, lease });
       }
+      // A reserved run is visited only once its spawn has been dispatched. terminal.create awaits
+      // durable store records (run, receipt, `running`) between reserving and spawning, and the
+      // store runs in a worker thread (D6 B), so ticks run inside that window. A status query sent
+      // then reaches the worker before the spawn and is refused, and the run's `live` status
+      // would then wait a full cadence for the next visit. Once dispatched it is due at once.
       const eligible = [...this.schedule.values()]
-        .filter((entry) => entry.due <= now && !this.jobs.has(entry.run.runId))
+        .filter(
+          (entry) =>
+            entry.due <= now &&
+            !this.jobs.has(entry.run.runId) &&
+            this.runtime.registry.isDispatched(entry.run),
+        )
         .sort((a, b) => a.run.runId.localeCompare(b.run.runId));
       if (now < this.nextTurn || !eligible.length) return;
       const next =

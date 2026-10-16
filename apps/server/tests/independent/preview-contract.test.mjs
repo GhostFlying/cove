@@ -142,6 +142,8 @@ function fixture(options = {}) {
       const run = { serverId: "qa-server", relayInstanceId: "qa-instance", runId: id };
       const worker = runtime.reserveRun(run, geometry);
       if (!worker) return null;
+      // A run the worker reports on has been spawned; only dispatched runs are refreshed.
+      registry.markDispatched(run, worker);
       runs.push(run);
       assert.equal(registry.observe(worker, status(run)), true);
       return run;
