@@ -223,7 +223,7 @@ Reset 不删除 task、workspace、仓库目录或 rollout。旧 session 保留�
   判定失联并结束其上全部订阅；worker 慢时订阅保持，输出按确认流控变慢。单条命令超过期限只结束这一条：一半期限内未得到标记的 attach/recover
   得到 RECOVERY_EXPIRED（not-accepted，早于客户端自己的期限，因此不必退役整个连接），已发出的输入等命令得到 RESULT_UNKNOWN
   （不重放），尚未发出的得到 BUSY。确认与 detach 在 worker 存活期间
-  没有期限。细节见 [终端架构](terminal-architecture.md) 3.3 节“worker 存活与命令期限”。
+  没有期限；客户端为它们等待 `ROUTE_CONTROL_DEADLINE_MS`（150 s，仅作 server 不应答时的兜底），不能早于 server 放弃。细节见 [终端架构](terminal-architecture.md) 3.3 节“worker 存活与命令期限”。
 - 预览（preview）事件不带请求 ID，只靠 previewId 与请求关联：`preview-result` 在 `status` 为 `transfer` 时必须携带它完成的
   `previewId`，为 `unchanged` 时不得携带。客户端只在结果与实际收到的传输 ID 精确匹配时完成预览；同一请求出现第二个或不匹配的
   传输、或结果 ID 不符时按无效应答结束该预览，不能把迟到的旧传输归到同一 run 的新请求上。
