@@ -106,6 +106,11 @@ type Request = {
   waitingReply?: Reply | undefined;
   resultGate?: Promise<void>;
   openResultGate?: () => void;
+  // A recover's deadlines, from its acceptance in handle() (the client starts timing it before
+  // that), and whether it has started executing. A recover queued behind an unanswered ACK
+  // must still be answered before the client's own deadline (see tick()).
+  recoverDeadlines?: { deadline: number; markerDeadline: number };
+  started?: boolean;
 };
 
 type Teardown = {
@@ -471,6 +476,12 @@ export class TerminalSubscriptions {
       control,
       settled: false,
       ...(domain ? { domain } : {}),
+      ...(command.type === "recover" && {
+        recoverDeadlines: {
+          deadline: now + this.composition.budgets.recoveryDeadlineMs,
+          markerDeadline: now + this.markerDeadline(),
+        },
+      }),
     };
     this.externalIds.add(command.requestId);
     this.requestLeases.add(requestLease);
@@ -700,6 +711,7 @@ export class TerminalSubscriptions {
 
   private async execute(request: Request): Promise<void> {
     const { command, route, internalId } = request;
+    request.started = true;
     if (request.domain) {
       const reply = await this.options.arbiter!.execute(request.domain);
       this.finish(
@@ -726,9 +738,9 @@ export class TerminalSubscriptions {
       route.attempt++;
       request.attempt = route.attempt;
       route.phase = "opening";
-      const now = this.now();
-      route.deadline = now + this.composition.budgets.recoveryDeadlineMs;
-      route.markerDeadline = now + this.markerDeadline();
+      // Counted from acceptance, not from now: the recover may have waited in the route queue.
+      route.deadline = request.recoverDeadlines!.deadline;
+      route.markerDeadline = request.recoverDeadlines!.markerDeadline;
     }
     const common = {
       worker: route.worker,
@@ -1099,7 +1111,17 @@ export class TerminalSubscriptions {
     }
     const now = this.now();
     for (const route of this.routes.values())
-      if (route.phase === "opening" && now >= route.markerDeadline) {
+      if (
+        (route.phase === "opening" && now >= route.markerDeadline) ||
+        (route.phase === "active" &&
+          route.queue.some(
+            (request) =>
+              !request.started &&
+              !request.settled &&
+              request.recoverDeadlines &&
+              now >= request.recoverDeadlines.markerDeadline,
+          ))
+      ) {
         // A slow worker has not produced this attempt's marker (issue #103). No marker was
         // admitted to delivery (admission moves the route out of "opening" synchronously), so
         // the client cannot know this subscription, and retiring it here keeps it that way: the
@@ -1108,6 +1130,11 @@ export class TerminalSubscriptions {
         // fails this view alone and need not fence its whole connection, as it must for an
         // attach whose outcome is unknown. It must reach the client before the client's own
         // deadline for the same attach, which started earlier; see markerDeadline().
+        //
+        // The second case is a recover still queued behind earlier route commands (an ACK the
+        // busy worker has not answered, say) at its half deadline, counted from its acceptance.
+        // It was never sent to the worker, so its outcome is just as definite, and the route
+        // ends the same way: the client asked to recover it, so it cannot simply continue.
         this.retire(route, domainError("RECOVERY_EXPIRED"));
         for (const request of route.queue)
           if (!(request.command.type === "input" && request.domain?.dispatched))
