@@ -439,7 +439,9 @@ describe("P2-B2 independent actual compiled control contracts", () => {
         const p = c.service.handle(external, binary);
         await turns();
         expect(r.inputFrames()).toHaveLength(1);
-        if (loss === "timeout") r.advance(30_001);
+        // A worker silent after the handoff: the input's deadline passes and, with no frame for
+        // the whole liveness window, the worker is lost (issue #103 measures silence per tick).
+        if (loss === "timeout") for (let second = 0; second <= 30; second++) r.advance(1000);
         else r.session.loseContact();
         expect(await p).toMatchObject({
           type: "error",

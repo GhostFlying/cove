@@ -8,6 +8,7 @@ import {
   MAX_FRAME_BYTES,
   MAX_READ_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_HEARTBEAT_INTERVAL_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_ROUTE_CONTROL_FRAME_BYTES,
   type PipeCommand,
@@ -76,6 +77,9 @@ type Pending = {
   // PipeByteTransport.
   onSent?: () => void;
   admitted: boolean;
+  // Its deadline passed while the worker was live and the caller already has RESULT_UNKNOWN; the
+  // correlation stays until the worker's late reply (see expire()).
+  abandoned: boolean;
 };
 type Outgoing = {
   bytes: Uint8Array;
@@ -144,6 +148,14 @@ export class WorkerPipeSession {
   // They are not part of queuedBytes or physicalBytes (see ROUTE_CONTROL_FRAME_BYTES).
   private prepaidFrames = 0;
   private prepaidBytes = 0;
+  // Liveness (issue #103): the worker is lost after timeoutMs without any frame from it, not
+  // when one command is slow. `heard` records a frame since the last tick; `silentMs` is the
+  // silence the runtime itself observed, at most PIPE_HEARTBEAT_INTERVAL_MS per tick, so a
+  // stall of the runtime's own event loop (whose unread frames wait in the OS pipe) is not
+  // charged to the worker.
+  private heard = false;
+  private silentMs = 0;
+  private lastTick: number | undefined;
 
   constructor(
     private readonly options: {
@@ -336,26 +348,15 @@ export class WorkerPipeSession {
     this.queue.push(item);
   }
 
-  // A waiting command has not reached the worker, so the time it spent waiting is no evidence
-  // of lost contact: the admitted commands ahead of it carry the liveness deadline (tick()
-  // ignores waiting ones), and a transport slot is held only by a frame already handed to the
-  // transport. Its own deadline therefore starts when it takes a slot, read from the clock at
-  // that moment. The clock supplier may reenter (and promote, or close the session) or fail; a
-  // reentrant call returns at once and leaves the work to this loop, which rechecks its
-  // condition after the read, and an invalid clock fails the session closed as tick() does.
+  // Hands waiting route-control commands their window and transport slots, in arrival order.
+  // Route control has no reply deadline while the worker is live (issue #103): timing out an
+  // ACK would retire a healthy subscription, so it waits for the worker's reply and ends only
+  // with contact loss. A reentrant call returns at once and leaves the work to this loop.
   private promoteProgress(): void {
     if (this.closed || this.promoting) return;
     this.promoting = true;
     try {
       while (!this.closed && this.waitingProgress.length && this.progressSlotFree()) {
-        let now: number;
-        try {
-          now = this.now();
-        } catch {
-          this.loseContact();
-          return;
-        }
-        if (this.closed || !this.waitingProgress.length || !this.progressSlotFree()) break;
         const item = this.waitingProgress.shift()!;
         if (item.slot) {
           if (item.slot.unsubscribe) item.slot.route.waitingUnsubscribe = false;
@@ -363,7 +364,6 @@ export class WorkerPipeSession {
           item.slot = undefined;
         }
         item.request!.admitted = true;
-        item.request!.deadline = now + this.options.timeoutMs;
         this.queuePrepaid(item);
       }
     } finally {
@@ -515,6 +515,7 @@ export class WorkerPipeSession {
       sent: false,
       ...(onSent ? { onSent } : {}),
       admitted: !waiting,
+      abandoned: false,
     };
     if (prepaid) {
       if (waiting) {
@@ -670,6 +671,8 @@ export class WorkerPipeSession {
           break;
         }
         const value = checked.value;
+        // Any valid frame is contact (issue #103); see `heard`.
+        this.heard = true;
         if (value.type === "ready") {
           if (this.state !== "hello" || !validatePipeReadiness(this.hello, value)) {
             this.loseContact();
@@ -682,6 +685,7 @@ export class WorkerPipeSession {
           this.loseContact();
           break;
         }
+        if (value.type === "heartbeat") continue;
         if (value.type === "result" || value.type === "error") {
           const pending = this.pending.get(value.requestId);
           if (!pending || !pending.sent || !validatePipeResultForCommand(pending.command, value)) {
@@ -689,6 +693,20 @@ export class WorkerPipeSession {
             break;
           }
           const command = pending.command;
+          if (pending.abandoned) {
+            // The late reply of a command whose caller already has RESULT_UNKNOWN: it was valid,
+            // so it only ends the correlation. Nothing is handed off, sealed or activated; an
+            // accepted subscribe's route stays inactive, so its events stay fenced until the
+            // unsubscribe the subscription layer sent when it gave up on the attach.
+            this.settle(value.requestId);
+            if (
+              command.type === "unsubscribe" ||
+              command.type === "subscribe" ||
+              command.type === "recover"
+            )
+              this.forgetRoute(command.subscription, command.type === "unsubscribe");
+            continue;
+          }
           if (command.type === "preview-refresh") pending.previewSeal?.(structuredClone(value));
           if (this.closed || !this.pending.has(value.requestId)) break;
           if (
@@ -696,18 +714,18 @@ export class WorkerPipeSession {
             value.type === "result" &&
             value.outcome === "accepted"
           ) {
-            // This synchronous acknowledgement is the ingress activation barrier.
-            if (
-              !pending.handoff?.(structuredClone(value)) ||
-              this.closed ||
-              !this.pending.has(value.requestId)
-            ) {
-              this.loseContact();
-              break;
-            }
-            this.routes.find((entry) =>
-              sameSubscriptionRef(entry.ref, command.subscription),
-            )!.active = true;
+            // This synchronous acknowledgement is the ingress activation barrier: only a route
+            // whose marker the consumer admitted is activated. A refusal is the consumer's own
+            // state (its subscription retired at its recovery deadline or with its connection,
+            // and it unsubscribes), not a worker fault, so the route merely stays inactive and
+            // its events stay fenced; the caller gets the result. Losing contact here turned a
+            // slow attach into the loss of every terminal on the worker (issue #103).
+            const activated = !!pending.handoff?.(structuredClone(value));
+            if (this.closed || !this.pending.has(value.requestId)) break;
+            if (activated)
+              this.routes.find((entry) =>
+                sameSubscriptionRef(entry.ref, command.subscription),
+              )!.active = true;
           }
           this.settle(value.requestId);
           if (
@@ -784,14 +802,72 @@ export class WorkerPipeSession {
     route.lease.release();
   }
 
+  // Liveness and command deadlines (issue #103, docs/terminal-architecture.md 3.3 "worker 存活与
+  // 命令期限"). A busy worker is not a lost one: the worker is lost only after timeoutMs without
+  // any frame from it (its heartbeat keeps coming while commands queue behind parsing), besides
+  // process, pipe and protocol failures handled elsewhere. A command past its own deadline ends
+  // alone, with an explicit outcome (see expire()). Route control has no deadline while the
+  // worker is live.
   tick(): void {
     if (this.closed) return;
     const now = this.now();
-    if (
-      (this.state === "hello" && now >= this.handshakeDeadline) ||
-      [...this.pending.values()].some((entry) => entry.admitted && now >= entry.deadline)
-    )
+    const elapsed = this.lastTick === undefined ? 0 : now - this.lastTick;
+    this.lastTick = now;
+    if (this.state === "hello" && now >= this.handshakeDeadline) {
       this.loseContact();
+      return;
+    }
+    if (!this.ready) return;
+    if (this.heard) {
+      this.heard = false;
+      this.silentMs = 0;
+    } else this.silentMs += Math.min(elapsed, PIPE_HEARTBEAT_INTERVAL_MS);
+    if (this.silentMs >= this.options.timeoutMs) {
+      this.loseContact();
+      return;
+    }
+    for (const [requestId, entry] of [...this.pending]) {
+      if (this.closed) return;
+      if (
+        entry.role !== "progress" &&
+        entry.admitted &&
+        !entry.abandoned &&
+        now >= entry.deadline &&
+        this.pending.get(requestId) === entry
+      )
+        this.expire(requestId, entry);
+    }
+  }
+
+  // Ends one command whose deadline passed while the worker is live, keeping the worker.
+  // - Still queued in the runtime (the transport is backpressured): the frame is withdrawn, so
+  //   the worker never sees it, and the caller gets BUSY (not-accepted).
+  // - Already handed to the transport: the worker may have applied it, so the caller gets
+  //   RESULT_UNKNOWN (input with subject "input"; never replayed). The correlation, identity and
+  //   window slot stay until the worker's late reply, which is still validated (a protocol
+  //   violation fails closed) and then discarded in receive(). Keeping the slot keeps every
+  //   window bounded: overload shows as BUSY for later commands, not as unbounded growth.
+  private expire(requestId: string, entry: Pending): void {
+    if (!entry.sent) {
+      const index = this.queue.findIndex((item) => item.request === entry);
+      const item = this.queue[index];
+      if (item && !item.prepaid) {
+        this.queue.splice(index, 1);
+        this.queuedBytes -= item.bytes.buffer.byteLength;
+        if (item.role === "ordinary") this.ordinaryBytes -= item.bytes.buffer.byteLength;
+        item.owned = false;
+        item.lease.release();
+        this.settle(requestId);
+        const command = entry.command;
+        // A withdrawn opener leaves its route to the unsubscribe its owner sends on the refusal.
+        if (command.type === "subscribe" || command.type === "recover")
+          this.forgetRoute(command.subscription, false);
+        entry.resolve(this.error(command, "BUSY"));
+        return;
+      }
+    }
+    entry.abandoned = true;
+    entry.resolve(this.error(entry.command, "RESULT_UNKNOWN", true));
   }
 
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void } {
@@ -828,13 +904,14 @@ export class WorkerPipeSession {
       item.slot = undefined;
     }
     for (const pending of this.pending.values())
-      pending.resolve(
-        this.error(
-          pending.command,
-          pending.sent ? "RESULT_UNKNOWN" : "WORKER_UNAVAILABLE",
-          pending.sent,
-        ),
-      );
+      if (!pending.abandoned)
+        pending.resolve(
+          this.error(
+            pending.command,
+            pending.sent ? "RESULT_UNKNOWN" : "WORKER_UNAVAILABLE",
+            pending.sent,
+          ),
+        );
     for (const requestId of [...this.pending.keys()]) this.settle(requestId);
     for (const route of this.routes) {
       route.active = false;

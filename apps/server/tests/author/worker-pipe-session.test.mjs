@@ -38,7 +38,12 @@ function frame(value, payload = new Uint8Array()) {
   return encoded.value;
 }
 // `forward`, if given, also receives every written frame (to drive a real worker endpoint).
-function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32, forward = undefined) {
+function fixture(
+  budgets = { ...M0_LIMITS },
+  identityLimit = 32,
+  forward = undefined,
+  timeoutMs = 100,
+) {
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const writes = [];
@@ -59,7 +64,7 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32, forward = undef
       },
     },
     now: () => now,
-    timeoutMs: 100,
+    timeoutMs,
     identityLimit,
     contactLost: () => {
       lost++;
@@ -116,6 +121,8 @@ function fixture(budgets = { ...M0_LIMITS }, identityLimit = 32, forward = undef
     clock: (value) => {
       now = value;
     },
+    // The worker's liveness frame (issue #103).
+    heartbeat: () => frame({ type: "heartbeat", worker }),
     lost: () => lost,
   };
 }
@@ -377,42 +384,225 @@ describe("bounded worker pipe session", () => {
     expect(f.lost()).toBe(0);
   });
 
-  it("starts a waiting command's deadline at its slot even when replies precede any tick", async () => {
+  // Issue #103: a busy worker is not a lost one. These run with timeoutMs 100 (the liveness
+  // window and the command deadline) and advance the clock in ticks of 10.
+  const advance = (f, from, to, frames = () => []) => {
+    for (let now = from + 10; now <= to; now += 10) {
+      f.clock(now);
+      for (const bytes of frames(now)) f.session.receive(bytes);
+      f.session.tick();
+    }
+  };
+
+  it("never times out route control while the worker is live and still loses a silent worker", async () => {
     const f = fixture();
     f.start();
     await openRoutes(f, 2 * PIPE_ROUTE_CONTROL_COMMANDS);
-    // Admitted at 0 with timeoutMs 100: four in the window, four waiting.
+    // Four in the window, four waiting; none answered for ten deadlines while the worker beats.
     const acks = Array.from({ length: 2 * PIPE_ROUTE_CONTROL_COMMANDS }, (_, index) =>
       ack(f, index),
     );
     const results = acks.map((command) => f.session.request(command));
     f.settleWrites();
-    // The window answers at 90 with no tick (or other admission) since 0, so the session has no
-    // fresher reading than 0; promotion reads the clock itself.
-    f.clock(90);
+    advance(f, 0, 1000, () => [f.heartbeat()]);
+    expect(f.lost()).toBe(0);
     for (const command of acks.slice(0, PIPE_ROUTE_CONTROL_COMMANDS))
       f.session.receive(f.reply(command));
-    // Measured from admission, or from the stale reading, the promoted ACKs would expire at 100.
-    f.clock(101);
-    f.session.tick();
-    expect(f.lost()).toBe(0);
-    f.clock(189);
-    f.session.tick();
-    expect(f.lost()).toBe(0);
+    f.settleWrites();
+    advance(f, 1000, 2000, () => [f.heartbeat()]);
     for (const command of acks.slice(PIPE_ROUTE_CONTROL_COMMANDS))
       f.session.receive(f.reply(command));
     for (const result of await Promise.all(results))
       expect(result).toMatchObject({ type: "result", outcome: "accepted" });
-    // A worker that never answers still loses contact at the deadline (189 + 100).
+    expect(f.lost()).toBe(0);
+    // A worker that sends nothing at all for the whole window is hung, and is lost.
     f.settleWrites();
     const silent = f.session.request(ack(f, 0, "silent"));
-    f.clock(288);
-    f.session.tick();
+    advance(f, 2000, 2090);
     expect(f.lost()).toBe(0);
-    f.clock(289);
-    f.session.tick();
+    advance(f, 2090, 2110);
     expect(f.lost()).toBe(1);
     expect((await silent).error.kind).toBe("RESULT_UNKNOWN");
+  });
+
+  it("counts any worker frame as contact, so output alone keeps a busy worker live", async () => {
+    const f = fixture();
+    f.start();
+    await openRoutes(f, 1);
+    let seq = 0;
+    const output = () =>
+      frame(
+        {
+          type: "terminal-event",
+          worker,
+          run,
+          subscription: on(0),
+          terminal: { type: "output", run, seq: ++seq },
+        },
+        new Uint8Array([65]),
+      );
+    const status = f.command("status", "slow-status");
+    const held = f.session.request(status);
+    advance(f, 0, 1000, (now) => (now % 50 === 0 ? [output()] : []));
+    expect(f.lost()).toBe(0);
+    // The status ended alone at its deadline; the worker stayed.
+    expect((await held).error).toMatchObject({ kind: "RESULT_UNKNOWN", acceptance: "unknown" });
+    f.session.loseContact();
+    f.session.transportReleased();
+  });
+
+  it("does not charge a stall of the runtime's own clock ticks to the worker", async () => {
+    const f = fixture({ ...M0_LIMITS }, 32, undefined, 15_000);
+    f.start();
+    f.session.tick();
+    // The runtime's event loop stalls for 20 s; the worker's frames wait unread in the pipe.
+    f.clock(20_000);
+    f.session.tick();
+    expect(f.lost()).toBe(0);
+    f.session.receive(f.heartbeat());
+    f.session.tick();
+    // Genuine silence is still detected within a bounded time: 15 more seconds of ticks.
+    for (let second = 1; second <= 14; second++) {
+      f.clock(20_000 + second * 1000);
+      f.session.tick();
+    }
+    expect(f.lost()).toBe(0);
+    f.clock(35_000);
+    f.session.tick();
+    expect(f.lost()).toBe(1);
+    f.session.transportReleased();
+  });
+
+  it("ends a timed-out command alone with an unknown outcome and discards its late reply", async () => {
+    const f = fixture();
+    f.start();
+    const command = f.command("stop", "stop", { operationId: "stop" });
+    const held = f.session.request(command);
+    f.settleWrites();
+    advance(f, 0, 100, () => [f.heartbeat()]);
+    expect((await held).error).toMatchObject({ kind: "RESULT_UNKNOWN", acceptance: "unknown" });
+    expect(f.lost()).toBe(0);
+    expect(f.session.closed).toBe(false);
+    // The abandoned stop keeps its slot until the worker answers: the next stop is refused.
+    const second = f.command("stop", "stop-2", { operationId: "stop-2" });
+    expect((await f.session.request(second)).error.kind).toBe("BUSY");
+    // The late reply is validated and discarded; the worker stays and the slot frees.
+    expect(f.session.receive(f.reply(command, { operationId: "stop" }))).toBeGreaterThan(0);
+    expect(f.lost()).toBe(0);
+    expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
+    const third = f.command("stop", "stop-3", { operationId: "stop-3" });
+    const accepted = f.session.request(third);
+    f.session.receive(f.reply(third, { operationId: "stop-3" }));
+    expect(await accepted).toMatchObject({ type: "result", outcome: "accepted" });
+    // A late reply that breaks the protocol still fails closed.
+    const fourth = f.command("stop", "stop-4", { operationId: "stop-4" });
+    const unknown = f.session.request(fourth);
+    advance(f, 100, 200, () => [f.heartbeat()]);
+    expect((await unknown).error.kind).toBe("RESULT_UNKNOWN");
+    f.session.receive(f.reply(fourth, { operationId: "someone-else" }));
+    expect(f.lost()).toBe(1);
+    f.session.transportReleased();
+  });
+
+  it("withdraws a timed-out command that never reached the transport with BUSY", async () => {
+    const f = fixture();
+    f.start();
+    f.block();
+    // The transport refuses more bytes (write returned false), so the next frames queue.
+    const first = f.command("status", "first");
+    void f.session.request(first);
+    const input = f.command("input", "input", {
+      subscription,
+      epoch: 1,
+      inputSeq: 1,
+    });
+    const held = f.session.request(input, new Uint8Array([65]));
+    const before = f.writes.length;
+    advance(f, 0, 100, () => [f.heartbeat()]);
+    expect((await held).error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(f.lost()).toBe(0);
+    expect(f.session.snapshot().queuedBytes).toBe(0);
+    f.unblock();
+    f.session.drain();
+    // The withdrawn input was never written.
+    expect(writtenIds(f, before)).not.toContain("input");
+    f.session.loseContact();
+    f.session.transportReleased();
+  });
+
+  it("keeps ACKs flowing while a slow subscribe waits past its deadline and never activates it late", async () => {
+    const f = fixture();
+    f.start();
+    await openRoutes(f, 1);
+    const delivered = [];
+    f.session.onEvent((event) => delivered.push(event.subscription.subscriptionId));
+    const slow = f.command("subscribe", "slow", { subscription: on(1), atSeq: 0 });
+    let handoffs = 0;
+    const opened = f.session.request(slow, new Uint8Array(), () => ++handoffs > 0);
+    // The worker keeps answering ACKs on the open route while the subscribe is outstanding.
+    for (let round = 0; round < 20; round++) {
+      const command = ack(f, 0, `ack-${round}`);
+      const result = f.session.request(command);
+      f.settleWrites();
+      advance(f, round * 10, round * 10 + 10, () => [f.reply(command)]);
+      expect(await result).toMatchObject({ type: "result", outcome: "accepted" });
+    }
+    expect(f.lost()).toBe(0);
+    expect((await opened).error.kind).toBe("RESULT_UNKNOWN");
+    // Late acceptance after the caller gave up: no handoff, no activation, events stay fenced.
+    const event = frame(
+      {
+        type: "terminal-event",
+        worker,
+        run,
+        subscription: on(1),
+        terminal: { type: "output", run, seq: 1 },
+      },
+      new Uint8Array([65]),
+    );
+    f.session.receive(f.reply(slow, { recoveryMode: "baseline", atSeq: 0 }));
+    f.session.receive(event);
+    expect(handoffs).toBe(0);
+    expect(delivered).toEqual([]);
+    expect(f.lost()).toBe(0);
+    // The subscription layer's unsubscribe reclaims the route.
+    const unsubscribe = f.command("unsubscribe", "unsubscribe-slow", { subscription: on(1) });
+    const closed = f.session.request(unsubscribe);
+    f.settleWrites();
+    f.session.receive(f.reply(unsubscribe));
+    await closed;
+    expect(f.session.snapshot().routes).toBe(1);
+    f.session.loseContact();
+    f.session.transportReleased();
+  });
+
+  it("leaves a route inactive when its consumer refuses the handoff and keeps the worker", async () => {
+    const f = fixture();
+    f.start();
+    const delivered = [];
+    f.session.onEvent(() => delivered.push(1));
+    const subscribe = f.command("subscribe", "subscribe", { subscription, atSeq: 0 });
+    const pending = f.session.request(subscribe, new Uint8Array(), () => false);
+    const result = f.reply(subscribe, { recoveryMode: "baseline", atSeq: 0 });
+    const event = frame(
+      {
+        type: "terminal-event",
+        worker,
+        run,
+        subscription,
+        terminal: { type: "output", run, seq: 1 },
+      },
+      new Uint8Array([65]),
+    );
+    const chunk = new Uint8Array(result.length + event.length);
+    chunk.set(result);
+    chunk.set(event, result.length);
+    f.session.receive(chunk);
+    expect((await pending).outcome).toBe("accepted");
+    expect(delivered).toEqual([]);
+    expect(f.lost()).toBe(0);
+    f.session.loseContact();
+    f.session.transportReleased();
   });
 
   it("never refuses an opened route's control for byte pressure and keeps essential headroom", async () => {
@@ -1041,13 +1231,13 @@ describe("bounded worker pipe session", () => {
   it("reclaims a raced route when the opener is accepted after the unsubscribe settled", async () =>
     expect(await racedOpener("unsubscribe-then-accepted-opener")).toEqual(RECLAIMED));
 
-  it("makes monotonic deadline loss unknown and ignores late disposed result", async () => {
+  it("makes a silent worker's loss unknown and ignores late disposed result", async () => {
     const f = fixture();
     f.start();
     const command = f.command("stop", "stop", { operationId: "stop" });
     const held = f.session.request(command);
-    f.clock(100);
-    f.session.tick();
+    // The stop's deadline passes at 100; the silent worker is lost once the window ends at 110.
+    advance(f, 0, 120);
     expect((await held).error.acceptance).toBe("unknown");
     expect(f.session.receive(f.reply(command, { operationId: "stop" }))).toBe(0);
     expect(f.lost()).toBe(1);

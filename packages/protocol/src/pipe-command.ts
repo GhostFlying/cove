@@ -27,6 +27,11 @@ export const PIPE_ROUTE_CONTROL_FRAME_BYTES = HEADER_BYTES + MAX_METADATA_BYTES;
 // constant.
 export const PIPE_PREPAID_ROUTE_CONTROL_BYTES =
   PIPE_ROUTE_CONTROL_COMMANDS * PIPE_ROUTE_CONTROL_FRAME_BYTES;
+// A ready worker sends a heartbeat frame at this interval from a timer, independent of command
+// execution (issue #103). The runtime counts any frame as contact and declares the worker lost
+// only after recoveryDeadlineMs without one, so a worker that is merely slow to answer commands
+// (CPU-saturated by parsing, say) is never mistaken for a lost one.
+export const PIPE_HEARTBEAT_INTERVAL_MS = 1000;
 const build = z.string().min(1).max(128);
 const common = { worker: WorkerRefSchema };
 const command = { ...common, run: RunRefSchema, requestId: OpaqueIdSchema };
@@ -44,6 +49,11 @@ export const PipeReadySchema = z.object({
   pipeVersion: z.literal(PIPE_VERSION),
   buildVersion: build,
   effectiveBudgets: EffectiveBudgetsSchema,
+});
+// Worker-to-runtime liveness only; it carries no state and needs no reply.
+export const PipeHeartbeatSchema = z.object({
+  type: z.literal("heartbeat"),
+  ...common,
 });
 
 export const SpawnArgumentsSchema = z.object({
@@ -198,6 +208,7 @@ export type PipeError = z.infer<typeof PipeErrorSchema>;
 export const PipeMetadataSchema = z.discriminatedUnion("type", [
   PipeHelloSchema,
   PipeReadySchema,
+  PipeHeartbeatSchema,
   ...PipeCommandSchema.options,
   PipeResultSchema,
   PipeEventSchema,

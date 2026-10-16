@@ -317,7 +317,13 @@ describe("private terminal subscription delivery", () => {
       );
       expect((await pending).type).toBe("error");
       expect(a.writes.map((item) => decode(item.data).metadata.type)).toEqual(["attach-result"]);
-      expect(f.session.closed).toBe(true);
+      // A refused handoff is the consumer's state, not a worker fault (issue #103): the worker
+      // stays, the route stays fenced, and the closed connection's route is unsubscribed.
+      expect(f.session.closed).toBe(false);
+      await turns();
+      expect(f.pipeWrites.map((item) => decode(item.data, true).metadata.type)).toContain(
+        "unsubscribe",
+      );
     } finally {
       await f.dispose();
     }

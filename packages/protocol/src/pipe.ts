@@ -18,6 +18,7 @@ import {
   PipeCommandSchema,
   PipeErrorSchema,
   PipeEventSchema,
+  PipeHeartbeatSchema,
   PipeHelloSchema,
   PipeReadySchema,
   PipeResultSchema,
@@ -149,7 +150,7 @@ export function validatePipeFrame(
     frame.kind === 1
       ? z.union([PipeHelloSchema, PipeCommandSchema]).safeParse(metadata)
       : frame.kind === 2
-        ? z.union([PipeReadySchema, PipeResultSchema]).safeParse(metadata)
+        ? z.union([PipeReadySchema, PipeHeartbeatSchema, PipeResultSchema]).safeParse(metadata)
         : frame.kind === 3
           ? PipeEventSchema.safeParse(metadata)
           : frame.kind === 4
@@ -248,11 +249,13 @@ export {
   PipeErrorSchema,
   PipeHelloSchema,
   PipeReadySchema,
+  PipeHeartbeatSchema,
   SpawnArgumentsSchema,
   RunStatusSchema,
   composeSpawnPayload,
   validateSpawnPayload,
   PIPE_VERSION,
+  PIPE_HEARTBEAT_INTERVAL_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_ROUTE_CONTROL_FRAME_BYTES,
   PIPE_PREPAID_ROUTE_CONTROL_BYTES,

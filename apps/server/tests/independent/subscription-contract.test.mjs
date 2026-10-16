@@ -845,7 +845,9 @@ describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
     });
   });
 
-  test("F11-02 accepted marker after close loses contact without publication or false exit", async () => {
+  // Issue #103: a marker the closed connection refuses is not a worker fault, so the worker stays
+  // live; the route is never activated and is unsubscribed.
+  test("F11-02 accepted marker after close keeps the worker without publication or false exit", async () => {
     await usingRig({}, async (rig) => {
       const pending = rig.service.handle(rig.attachCommand());
       const pipe = rig.lastCommand("subscribe");
@@ -854,12 +856,17 @@ describe("P2-B1 actual compiled parser/runtime/subscription contracts", () => {
       rig.accept(pipe, { recoveryMode: "replay", atSeq: 3 }, [rig.output(pipe.subscription, 4)]);
       expect((await pending).type).toBe("error");
       await turns();
-      expect(rig.session.closed).toBe(true);
+      expect(rig.session.closed).toBe(false);
       expect(rig.transport.trace().length).toBe(outbound);
       expect(rig.commands.some((command) => ["stop", "set-control"].includes(command.type))).toBe(
         false,
       );
-      expect(rig.runtime.registry.get(run).status.status).toBe("unverifiable");
+      const teardown = rig.commands.filter((command) => command.type === "unsubscribe");
+      expect(teardown.map((command) => command.subscription)).toEqual([pipe.subscription]);
+      rig.accept(teardown[0]);
+      await turns();
+      expect(rig.session.closed).toBe(false);
+      expect(rig.runtime.registry.get(run).status.status).not.toBe("exited");
       expect(rig.service.snapshot()).toMatchObject({ active: 0, pending: 0 });
     });
   });
