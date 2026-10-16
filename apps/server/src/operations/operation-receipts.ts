@@ -11,7 +11,7 @@ import type { ByteReservation } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import {
   checkedReceiptRecord,
-  type DatabaseWriteOutcome,
+  type DatabaseWriteResult,
   type DatabaseWriteRequest,
   type ReceiptLimits,
 } from "./receipt-records.js";
@@ -48,7 +48,7 @@ export interface DurableReceiptBackend {
   unfinished(): Promise<StoredReceipt[]>;
   // One receipt-checked database write: receipt recheck, the named change and the receipt in a
   // single transaction (store/sql/receipts.ts, receipts.write).
-  write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteOutcome>;
+  write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteResult>;
 }
 
 // Proves the outcome of an operation an earlier instance left unfinished. It receives the record
@@ -359,7 +359,7 @@ export class OperationReceipts {
 
   // One receipt-checked database write (operations/database-operations.ts). Without a durable
   // backend there is no database to write to. Rejects on a store failure.
-  async write(request: DatabaseWriteRequest): Promise<DatabaseWriteOutcome> {
+  async write(request: DatabaseWriteRequest): Promise<DatabaseWriteResult> {
     if (!this.durable || !this.valid(request.key))
       return { error: domainError("CAPABILITY_UNAVAILABLE") };
     return this.durable.write(request, this.limits);

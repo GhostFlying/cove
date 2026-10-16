@@ -13,6 +13,13 @@ import type { DatabaseWrites } from "../store/sql/writes.js";
 
 export type OperationResultData = NonNullable<OperationRecord["result"]>;
 export type DatabaseWriteOutcome = { operation: OperationRecord } | { error: DomainError };
+// What a receipt-checked database write answers (store/sql/receipts.ts receipts.write):
+// `committed` is set only when this call applied the change and inserted the receipt, never when
+// the in-transaction recheck found the receipt of an identical request that committed first. A
+// domain whose write is followed by work outside the database (an entry on disk) does that work
+// only for its own commit; a resend must not repeat it.
+export type DatabaseWriteResult =
+  { operation: OperationRecord; committed?: true } | { error: DomainError };
 
 // The limits a stored record must respect.
 export type ReceiptLimits = { serverId: string; operationRecordBytes: number };

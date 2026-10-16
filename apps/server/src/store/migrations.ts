@@ -1,4 +1,5 @@
 import { MIGRATION_001 } from "./migrations/001-initial.js";
+import { MIGRATION_002 } from "./migrations/002-workspace-entry.js";
 
 export type Migration = { readonly version: number; readonly name: string; readonly sql: string };
 
@@ -8,6 +9,7 @@ export type Migration = { readonly version: number; readonly name: string; reado
 // next file with the number the coordinator assigned; merged migrations never change.
 export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: "initial", sql: MIGRATION_001 },
+  { version: 2, name: "workspace-entry", sql: MIGRATION_002 },
 ]);
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

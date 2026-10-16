@@ -1,5 +1,6 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { runGit, type GitRunResult } from "./run.js";
 
 // Read-only Git queries about a clone (M1 T2): its top level, common directory, bareness and
@@ -14,13 +15,16 @@ import { runGit, type GitRunResult } from "./run.js";
 
 // Why a path cannot be used as a clone. `unavailable` means Git gave no answer (it could not be
 // started, timed out, overflowed or was killed); it proves nothing about the path and must be
-// reported as such, never as "not a repository".
+// reported as such, never as "not a repository". `busy` means the caller's bound on its own
+// outstanding work (see ProbeGate) let nothing start: a capacity refusal, which also proves
+// nothing about the path. T2's registration passes no gate and never gets it.
 export type RepositoryRefusal =
   | { kind: "missing" }
   | { kind: "inaccessible" }
   | { kind: "not-repository" }
   | { kind: "bare" }
-  | { kind: "unavailable" };
+  | { kind: "unavailable" }
+  | { kind: "busy" };
 
 // A non-bare clone identified by its real Git common directory. `topLevel` is the real top level
 // of the clone's main working tree, also when the given path was inside one of its linked
@@ -29,12 +33,83 @@ export type RepositoryInspection = { kind: "clone"; topLevel: string; commonDir:
 
 type FsOutcome = { ok: true; path: string } | { ok: false; refusal: RepositoryRefusal };
 
-async function realDirectory(path: string): Promise<FsOutcome> {
+// An optional absolute deadline (performance.now() time) bounds a discovery as a whole: each Git
+// command gets what is left of it when the command starts, a command is not started once it has
+// passed, and a filesystem probe still running then is answered as unavailable (it settles in
+// the background, its failure handled, so it never becomes an unhandled rejection). Nothing is
+// started once the deadline has passed. Without one, each Git command has GIT_TIMEOUT_MS and
+// probes are not timed.
+type Deadline = number | undefined;
+
+// Starts a filesystem probe under the caller's bound on outstanding work (domain/workspaces.ts)
+// once that bound lets it, and resolves with the probe's own promise (wrapped, so that it is not
+// adopted); null when it was not let start by the deadline, and nothing was started. The
+// discovery then answers busy.
+export type ProbeGate = <T>(work: () => Promise<T>) => Promise<{ settled: Promise<T> } | null>;
+
+function left(deadline: Deadline): number | undefined | null {
+  if (deadline === undefined) return undefined;
+  const remaining = Math.floor(deadline - performance.now());
+  return remaining > 0 ? remaining : null;
+}
+
+const LATE = Symbol("late");
+
+async function beforeDeadline<T>(work: Promise<T>, deadline: Deadline): Promise<T | typeof LATE> {
+  const remaining = left(deadline);
+  if (remaining === undefined) return work;
+  if (remaining === null) return LATE;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof LATE>((done) => {
+        timer = setTimeout(() => done(LATE), remaining);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// runGit within the deadline, or null when none is left to start it.
+function gitWithin(
+  args: string[],
+  directory: string,
+  deadline: Deadline,
+): Promise<GitRunResult> | null {
+  const remaining = left(deadline);
+  if (remaining === null) return null;
+  return runGit(args, {
+    cwd: directory,
+    ...(remaining === undefined ? {} : { timeoutMs: remaining }),
+  });
+}
+
+async function realDirectory(
+  path: string,
+  deadline?: Deadline,
+  gate?: ProbeGate,
+): Promise<FsOutcome> {
+  if (left(deadline) === null) return { ok: false, refusal: { kind: "unavailable" } };
+  const probe = async () => {
+    const resolved = await realpath(path);
+    return { resolved, directory: (await stat(resolved)).isDirectory() };
+  };
+  let started: ReturnType<typeof probe>;
+  if (gate) {
+    const admitted = await gate(probe);
+    if (!admitted) return { ok: false, refusal: { kind: "busy" } };
+    started = admitted.settled;
+  } else started = probe();
+  // The answer may be given up at the deadline; a later failure must not go unhandled.
+  started.catch(() => undefined);
   let real: string;
   try {
-    real = await realpath(path);
-    if (!(await stat(real)).isDirectory())
-      return { ok: false, refusal: { kind: "not-repository" } };
+    const found = await beforeDeadline(started, deadline);
+    if (found === LATE) return { ok: false, refusal: { kind: "unavailable" } };
+    if (!found.directory) return { ok: false, refusal: { kind: "not-repository" } };
+    real = found.resolved;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP")
@@ -61,11 +136,18 @@ type Discovery =
 // What Git sees at a real directory. A non-zero exit means Git refused to treat it as a
 // repository work tree: not a repository, a dubious-ownership refusal (safe.directory) or a
 // broken `.git` link; the registration is refused either way and the operator fixes the path.
-async function discover(directory: string): Promise<Discovery> {
-  const flags = await runGit(
+async function discover(
+  directory: string,
+  deadline?: Deadline,
+  gate?: ProbeGate,
+): Promise<Discovery> {
+  const flagsRun = gitWithin(
     ["rev-parse", "--is-bare-repository", "--is-inside-work-tree", "--git-dir", "--git-common-dir"],
-    { cwd: directory },
+    directory,
+    deadline,
   );
+  if (!flagsRun) return { kind: "unavailable" };
+  const flags = await flagsRun;
   if (flags.kind === "failed") return { kind: "unavailable" };
   if (flags.code !== 0) return { kind: "not-repository" };
   const fields = lines(flags.stdout, 4);
@@ -76,13 +158,18 @@ async function discover(directory: string): Promise<Discovery> {
   if (bare === "true") return { kind: "bare" };
   // Inside the `.git` directory of a non-bare clone: a Git directory, not a working tree.
   if (inside !== "true") return { kind: "not-repository" };
-  const top = await runGit(["rev-parse", "--show-toplevel"], { cwd: directory });
+  // The deadline is checked again: the first command may have used most of it.
+  const topRun = gitWithin(["rev-parse", "--show-toplevel"], directory, deadline);
+  if (!topRun) return { kind: "unavailable" };
+  const top = await topRun;
   if (top.kind === "failed") return { kind: "unavailable" };
   if (top.code !== 0) return { kind: "not-repository" };
   const topFields = lines(top.stdout, 1);
   if (!topFields) return { kind: "unavailable" };
   const real = await Promise.all(
-    [gitDir, commonDir, topFields[0]!].map((path) => realDirectory(resolve(directory, path))),
+    [gitDir, commonDir, topFields[0]!].map((path) =>
+      realDirectory(resolve(directory, path), deadline, gate),
+    ),
   );
   for (const item of real) if (!item.ok) return item.refusal;
   const [g, c, t] = real as { ok: true; path: string }[];
@@ -114,13 +201,18 @@ async function mainWorkingTree(directory: string): Promise<{ path: string } | Re
 // already registered clone even when that main working tree cannot be found from here.
 export type WorkTreeDiscovery = Extract<Discovery, { kind: "work-tree" }>;
 
+// `deadline` (performance.now() time) bounds the whole discovery (see Deadline): a read that must
+// answer within a request deadline passes it (domain/workspaces.ts), and `probe` bounds the
+// filesystem work it may leave running (see ProbeGate). T2's registration passes neither, and its
+// refusals are unchanged.
 export async function discoverRepository(
   path: string,
+  options: { deadline?: number; probe?: ProbeGate } = {},
 ): Promise<WorkTreeDiscovery | RepositoryRefusal> {
   if (!isAbsolute(path)) return { kind: "not-repository" };
-  const directory = await realDirectory(path);
+  const directory = await realDirectory(path, options.deadline, options.probe);
   if (!directory.ok) return directory.refusal;
-  return discover(directory.path);
+  return discover(directory.path, options.deadline, options.probe);
 }
 
 // The clone a discovered working tree belongs to.
