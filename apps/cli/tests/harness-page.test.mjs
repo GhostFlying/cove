@@ -730,7 +730,7 @@ test("a first click in a new terminal keeps the input typed right after it", asy
 
 // A process that switches its tty to raw mode and records every byte it reads until the typed
 // line `done`, so each typed byte can be checked to arrive exactly once and in order.
-const BYTE_PROBE = String.raw`import { writeFileSync } from "node:fs";
+const BYTE_PROBE = String.raw`import { renameSync, writeFileSync } from "node:fs";
 const out = process.argv[2];
 process.stdin.setRawMode(true);
 let received = "";
@@ -738,7 +738,10 @@ process.stdin.on("data", (chunk) => {
   received += chunk.toString("latin1");
   const end = received.indexOf("done\r");
   if (end >= 0) {
-    writeFileSync(out, JSON.stringify(received.slice(0, end)));
+    // The test polls for this file and reads it as soon as it exists; writing it in place would
+    // let that read see it created but not yet written. A rename makes it appear complete.
+    writeFileSync(out + ".partial", JSON.stringify(received.slice(0, end)));
+    renameSync(out + ".partial", out);
     process.exit(0);
   }
 });
