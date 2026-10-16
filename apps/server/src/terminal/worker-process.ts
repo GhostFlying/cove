@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { WorkerRef } from "@cove/protocol/identity";
-import { MAX_READ_BYTES } from "@cove/protocol/pipe";
+import { MAX_READ_BYTES, PIPE_HEARTBEAT_FRAME_BYTES } from "@cove/protocol/pipe";
 import { WorkerPipeSession } from "./worker-pipe-session.js";
 import type { LocalRuntime } from "./local-runtime.js";
 import type { LocalTimer } from "./local-runtime-clock.js";
@@ -202,9 +202,11 @@ export class WorkerProcess {
   }
 
   private queueIngress(child: ChildProcessWithoutNullStreams, bytes: Uint8Array): void {
-    // Check both bounds before copying so an unaffordable remainder is never duplicated.
+    // Check both bounds before copying so an unaffordable remainder is never duplicated. The
+    // worker may owe pipeQueuedBytes plus its one prepaid heartbeat frame (issue #103).
     const lease =
-      this.ingressBytes + bytes.byteLength > this.runtime.composition.budgets.pipeQueuedBytes
+      this.ingressBytes + bytes.byteLength >
+      this.runtime.composition.budgets.pipeQueuedBytes + PIPE_HEARTBEAT_FRAME_BYTES
         ? null
         : this.runtime.composition.bytes.reserve(bytes.byteLength);
     if (!lease) {

@@ -5,6 +5,7 @@ import { sameWorkerRef } from "@cove/protocol/identity";
 import {
   HEADER_BYTES,
   MAX_METADATA_BYTES,
+  PIPE_HEARTBEAT_FRAME_BYTES,
   PIPE_HEARTBEAT_INTERVAL_MS,
   PIPE_ROUTE_CONTROL_COMMANDS,
   PIPE_PREPAID_ROUTE_CONTROL_BYTES,
@@ -299,8 +300,24 @@ class WorkerPipeCore {
     );
   }
 
+  // Every byte the worker owes the runtime except the one prepaid heartbeat frame (see
+  // PIPE_HEARTBEAT_FRAME_BYTES), which is outside pipeQueuedBytes. Once the heartbeat has left
+  // the writable's buffer but its callback has not run, subtracting it can undercount the other
+  // frames by at most that one frame, so the outbound total stays within pipeQueuedBytes plus
+  // PIPE_HEARTBEAT_FRAME_BYTES, the bound the runtime's ingress allows.
   #accountedBytes(): number {
-    return this.#reservedReplyBytes + this.#queuedBytes + this.#transportBytes();
+    return Math.max(
+      0,
+      this.#reservedReplyBytes +
+        this.#queuedBytes +
+        this.#transportBytes() -
+        this.#heartbeatOwedBytes(),
+    );
+  }
+
+  #heartbeatOwedBytes(): number {
+    for (const frame of this.#unsettledFrames) if (frame.heartbeat) return frame.bytes.byteLength;
+    return 0;
   }
 
   #recordPeak(): void {
@@ -318,7 +335,8 @@ class WorkerPipeCore {
     let bytes = 0;
     for (const record of this.#pending.values())
       if (record.role === "ordinary" && record.phase === "executing") bytes += MAX_REPLY_BYTES;
-    for (const frame of this.#unsettledFrames) if (!frame.control) bytes += frame.bytes.byteLength;
+    for (const frame of this.#unsettledFrames)
+      if (!frame.control && !frame.heartbeat) bytes += frame.bytes.byteLength;
     // Unknown third-party writable buffering cannot borrow the control reserve.
     return (
       bytes +
@@ -691,10 +709,11 @@ class WorkerPipeCore {
   // The runtime's liveness signal (issue #103). A timer, not command execution, drives it, so it
   // keeps flowing while commands queue behind parsing on a saturated worker; only a worker whose
   // event loop stops for the runtime's whole liveness window (or whose process or pipe ends) is
-  // declared lost. At most one heartbeat is unsettled at a time, and it is an ordinary control
-  // frame: it is sent only when a whole reply still fits the control reserve, so it can never
-  // displace a reply whose capacity was reserved at admission. When it does not fit, control
-  // frames are already queued for the runtime, and they prove liveness just as well.
+  // declared lost. At most one heartbeat is unsettled at a time, in its own prepaid slot
+  // (PIPE_HEARTBEAT_FRAME_BYTES): it neither borrows nor waits for the control reserve or
+  // pipeQueuedBytes, so no command, however slow, can suppress it, and it can never displace a
+  // reply whose capacity was reserved at admission. Only a blocked transport delays it: the
+  // next beat waits until the previous one's write callback has run.
   #startHeartbeat(): void {
     const interval = this.#options.heartbeatIntervalMs ?? PIPE_HEARTBEAT_INTERVAL_MS;
     this.#heartbeatTimer = setInterval(() => this.#beat(), interval);
@@ -703,10 +722,9 @@ class WorkerPipeCore {
   }
 
   #beat(): void {
-    if (this.#state !== "ready" || this.#heartbeatUnsettled || !this.#replyCapacity("status"))
-      return;
+    if (this.#state !== "ready" || this.#heartbeatUnsettled) return;
     const heartbeat: Heartbeat = { type: "heartbeat", worker: this.#hello!.worker };
-    if (this.#enqueue(heartbeat, 2, true, undefined, false, true)) this.#heartbeatUnsettled = true;
+    if (this.#enqueue(heartbeat, 2, false, undefined, false, true)) this.#heartbeatUnsettled = true;
   }
 
   #startExecution(record: RequestRecord, payload?: Uint8Array): void {
@@ -797,19 +815,25 @@ class WorkerPipeCore {
       return false;
     const encoded = encodePipeFrame(kind, metadataBytes, emptyPayload);
     if (!encoded.ok || !this.#hello) return false;
-    const total = this.#accountedBytes() + encoded.value.byteLength;
-    if (total > this.#hello.effectiveBudgets.pipeQueuedBytes) return false;
-    if (
-      control &&
-      this.#controlAccountedBytes() + encoded.value.byteLength >
-        this.#hello.effectiveBudgets.reservedControlBytes
-    )
-      return false;
-    if (
-      !control &&
-      this.#ordinaryAccountedBytes() + encoded.value.byteLength > this.#ordinaryLimit()
-    )
-      return false;
+    if (heartbeat) {
+      // The prepaid slot: one frame of at most PIPE_HEARTBEAT_FRAME_BYTES, never charged to
+      // the reserve or the queue bound (#beat ensures at most one is unsettled).
+      if (encoded.value.byteLength > PIPE_HEARTBEAT_FRAME_BYTES) return false;
+    } else {
+      const total = this.#accountedBytes() + encoded.value.byteLength;
+      if (total > this.#hello.effectiveBudgets.pipeQueuedBytes) return false;
+      if (
+        control &&
+        this.#controlAccountedBytes() + encoded.value.byteLength >
+          this.#hello.effectiveBudgets.reservedControlBytes
+      )
+        return false;
+      if (
+        !control &&
+        this.#ordinaryAccountedBytes() + encoded.value.byteLength > this.#ordinaryLimit()
+      )
+        return false;
+    }
     const frame: OutboundFrame = {
       bytes: encoded.value,
       ...(request && { request }),
