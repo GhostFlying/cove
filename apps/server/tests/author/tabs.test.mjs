@@ -691,6 +691,47 @@ describe("refused spawns", () => {
     expect(env.registry.get(spawned.run)).not.toBeNull();
     expect(kind(await env.operations.create("p", plainCreate("t2")))).toBe("BUSY");
   });
+
+  // Neither refused run leaves a row, but its failed receipt still names its run ID, which the
+  // next instance must not hand out again.
+  async function restarted(env) {
+    expect(await env.rows("SELECT run_id FROM runs")).toEqual([]);
+    env.close();
+    await recordInstanceStart(env.store, "next", 2);
+    const next = env.instance("next");
+    await next.runLog.interruptEarlier("next");
+    return next;
+  }
+
+  it("never hands a refused tab launch's run ID out again after a restart", async () => {
+    const env = await setup();
+    const { outcome } = await env.refuse(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.tabs.create("p", create("c1")),
+    );
+    expect(outcome.operation.run.runId).toBe("run-1");
+    const next = await restarted(env);
+    const reopened = await next.launched(
+      next.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
+    );
+    expect(reopened.outcome.operation.run.runId).toBe("run-2");
+  });
+
+  it("never hands a refused terminal.create's run ID out again after a restart", async () => {
+    const env = await setup();
+    const { outcome } = await env.refuse(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.operations.create("p", plainCreate("t1")),
+    );
+    expect(outcome.operation.run.runId).toBe("run-1");
+    const next = await restarted(env);
+    const created = await next.launched(
+      next.operations.create("p", { ...plainCreate("t2"), expectedRelayInstanceId: "next" }),
+    );
+    expect(created.outcome.operation.run.runId).toBe("run-2");
+  });
 });
 
 describe("tab names", () => {
