@@ -3,6 +3,7 @@ import type { OperationRecord } from "@cove/protocol/rpc";
 import { M1_LIMITS, type RunHistoryRecord, type TabRecord } from "@cove/protocol/workspace";
 import type { Session } from "../session.js";
 import {
+  describeFailure,
   flag,
   integerFlag,
   one,
@@ -102,14 +103,48 @@ async function listRuns(client: Client, tabId: string): Promise<RunHistoryRecord
   return runs;
 }
 
+// The tab a settled write names, read after it. Three answers stay distinct: the tab with its
+// latest run (`latestRun` null when it has none); `tab: null` when there is no tab to show (the
+// operation names none, or the server confirmed TAB_NOT_FOUND, as for a resent create whose tab
+// was closed since); and `tabReadError` when the read itself failed, which says nothing about the
+// tab, so neither `tab` nor `latestRun` is printed.
+type TabView =
+  { tab: TabRecord | null; latestRun: RunHistoryRecord | null } | { tabReadError: string };
+
+async function readTab(client: Client, operation: OperationRecord): Promise<TabView> {
+  const tabId = operation.result?.resource?.kind === "tab" ? operation.result.resource.id : null;
+  if (!tabId) return { tab: null, latestRun: null };
+  try {
+    const outcome = await client.call("tab.get", { tabId });
+    if (outcome.ok) return outcome.value;
+    if (
+      outcome.kind === "rpc-error" &&
+      "kind" in outcome.error &&
+      outcome.error.kind === "TAB_NOT_FOUND"
+    )
+      return { tab: null, latestRun: null };
+    return { tabReadError: `tab.get failed: ${describeFailure(outcome)}` };
+  } catch (error) {
+    return { tabReadError: `tab.get failed: ${error instanceof Error ? error.message : error}` };
+  }
+}
+
 // The ending of a write that starts or stops a run: print the settled operation with the tab as
 // it is now, also when the operation did not succeed (a tab.create whose first run failed still
-// recorded its tab). Exits 1 unless it succeeded.
-async function printTabOperation(client: Client, operation: OperationRecord): Promise<number> {
-  const tabId = operation.result?.resource?.kind === "tab" ? operation.result.resource.id : null;
-  const tab = tabId ? await getTab(client, tabId).catch(() => null) : null;
-  print({ operation, ...(tab ?? {}) });
-  if (operation.state === "succeeded") return 0;
+// recorded its tab). Exits 1 unless the operation succeeded and the tab could be read; the
+// printed operation is the write's outcome either way.
+export async function printTabOperation(
+  client: Client,
+  operation: OperationRecord,
+): Promise<number> {
+  const view = await readTab(client, operation);
+  print({ operation, ...view });
+  if ("tabReadError" in view)
+    process.stderr.write(
+      `cove: ${operation.method} ${operation.operationId} ${operation.state}; ` +
+        `the tab could not be read afterwards (${view.tabReadError})\n`,
+    );
+  if (operation.state === "succeeded") return "tabReadError" in view ? 1 : 0;
   const reason = operation.error ? `: ${operation.error.kind}` : "";
   process.stderr.write(
     `cove: ${operation.method} ${operation.operationId} ${operation.state}${reason}\n`,
