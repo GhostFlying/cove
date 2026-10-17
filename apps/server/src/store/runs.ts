@@ -6,7 +6,8 @@ export type { LiveRunRecord };
 
 // Durable run records (D8, D9) for the runs this server starts. M1 T1 records the M0
 // `terminal.create` runs and the restart semantics; T4 links tab runs, workspace revisions and
-// mount snapshots to the same rows. The SQL is in store/sql/runs.ts.
+// mount snapshots to the same rows (a tab launch writes its row in store/sql/tabs.ts tabs.launch).
+// The SQL is in store/sql/runs.ts.
 //
 // A run of an earlier relay instance is never shown as live (D9): an orderly stop records it as
 // stopped-with-server; any other end of the instance leaves it to the next start, which records it
@@ -38,6 +39,11 @@ export class RunLog {
 
   exited(run: RunRef, exitCode: number | null, signal: string | null): Promise<void> {
     return this.store.call("runs.exited", { run, exitCode, signal, at: this.now() });
+  }
+
+  // Where run numbering continues for a new instance (TerminalOperations).
+  highestNumber(): Promise<number> {
+    return this.store.call("runs.highestNumber", undefined);
   }
 
   live(relayInstanceId: string): Promise<LiveRunRecord[]> {
