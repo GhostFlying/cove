@@ -11,12 +11,14 @@ import {
 } from "@cove/protocol/identity";
 import {
   PipeCommandSchema,
+  SPAWN_ENV_KEYS,
   validateSpawnPayload,
   type PipeCommand,
   type PipeError,
   type PipeEvent,
   type PipeResult,
   type RunStatus,
+  type SpawnEnv,
 } from "@cove/protocol/pipe";
 import { PROFILE, validateAppearance, type Geometry } from "@cove/protocol/profile";
 import { createNativePtyFactory, reportedExit, type NativePtyFactory } from "./native-pty.js";
@@ -177,6 +179,25 @@ function bytesForInputIdentity(subscription: SubscriptionRef): number {
     Buffer.byteLength(subscription.viewId) +
     Buffer.byteLength(subscription.subscriptionId)
   );
+}
+
+// The environment of a run's process: the worker's inherited environment with Cove's run identity
+// (the spawn's validated `env`, SPAWN_ENV_KEYS only) set over it. An identity key the spawn does
+// not set is removed even when the worker inherited one: a server started inside a Cove tab
+// passes that tab's COVE_TAB_ID down to its workers, and a run that belongs to no tab
+// (terminal.create) or to another tab must never claim it (Orca drops unspecified pane identity
+// keys the same way). Nothing here is stored or logged; the map lives only for the native spawn.
+function runEnvironment(
+  inherited: Readonly<Record<string, string | undefined>>,
+  identity: SpawnEnv | undefined,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...inherited };
+  for (const key of SPAWN_ENV_KEYS) {
+    const value = identity?.[key];
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
 }
 
 class WorkerExecutionCore {
@@ -515,7 +536,7 @@ class WorkerExecutionCore {
           file: args.executable,
           args: args.argv,
           cwd: args.cwd,
-          env: this.#env,
+          env: runEnvironment(this.#env, args.env),
           inputBytes: Math.min(this.#budgets.inputQueueBytes, this.#budgets.workerBytes),
           inputTasks: this.#budgets.pendingWorkerCommands,
         },
