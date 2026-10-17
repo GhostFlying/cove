@@ -806,4 +806,35 @@ describe("bounded server preview cache", () => {
     expect(f.commands().map((command) => command.requestId)).toEqual(["holder.s"]);
     await cleaned(f);
   });
+
+  // Issue #115 round-2 review: a refresh's read promoted while the transport is backpressured
+  // is admitted but unsent; if its job expires before drain() hands it over, it is refused at
+  // the handover rather than written.
+  it("author preview never hands over a backpressured status read of a job that expired", async () => {
+    const f = fixture();
+    f.backpressure(true);
+    const holder = f.runtime.getStatus({
+      type: "status",
+      worker: f.runtime.pool.get(run).worker,
+      run,
+      requestId: "holder.s",
+    });
+    await pump();
+    const held = f.latest();
+    const pending = f.runtime.previews.refresh(run);
+    await pump();
+    f.session.receive(f.reply(held, { runStatus: f.status() }));
+    await holder;
+    await pump();
+    // Promoted into the blocked transport queue: admitted, not handed over.
+    expect(f.commands().map((command) => command.requestId)).toEqual(["holder.s"]);
+    f.clock(500);
+    f.runtime.tickPreviews();
+    expect(await pending).toMatchObject({ ok: false });
+    f.backpressure(false);
+    f.session.drain();
+    await pump();
+    expect(f.commands().map((command) => command.requestId)).toEqual(["holder.s"]);
+    await cleaned(f);
+  });
 });

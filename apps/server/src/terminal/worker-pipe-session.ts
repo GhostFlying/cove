@@ -94,7 +94,24 @@ type Pending = {
   // Its deadline passed while the worker was live and the caller already has RESULT_UNKNOWN; the
   // correlation stays until the worker's late reply (see expire()).
   abandoned: boolean;
+  // A status read from requestStatus(): its caller's eligibility is checked again until the
+  // frame is handed over, together with `deadline` (see refuseStatusHandover()).
+  statusGuard?: { eligible: (() => boolean) | undefined };
+  // Answered BUSY at its handover instead of being sent; its frame must never be written.
+  refused?: boolean;
 };
+// Thrown from `handing` for a status read refused at its handover (refuseStatusHandover()). The
+// transport must then not write, as for any refusal; unlike other refusals it is not a contact
+// failure, because the caller already has a definite not-accepted answer.
+class StatusHandoverRefused extends Error {}
+// Whether a status read's caller still wants it. A throwing predicate counts as no.
+function statusEligible(eligible: (() => boolean) | undefined): boolean {
+  try {
+    return eligible?.() ?? true;
+  } catch {
+    return false;
+  }
+}
 // A status read waiting for the worker's single status window (see requestStatus()).
 type StatusWaiter = {
   command: Extract<PipeCommand, { type: "status" }>;
@@ -363,19 +380,25 @@ export class WorkerPipeSession {
   // window, which made a user's focus fail BUSY whenever a background read was in flight.
   //
   // Waiters are served in arrival order, and each keeps the deadline it got here: time spent
-  // waiting is part of its deadline (terminal-architecture 3.3), so it is dispatched with only
-  // the remaining budget. A waiter is answered BUSY (not-accepted), never having been sent, once
-  // its deadline passes or `eligible` (its caller's lifetime: the control job's route, the
-  // preview job) turns false; both are checked on every tick and again immediately before
-  // dispatch. Contact loss answers every waiter WORKER_UNAVAILABLE. A status that was handed
-  // over and then expired keeps the window until the worker's late reply (see expire()); each
-  // waiter is then answered BUSY, the overload signal, and nothing is retried.
+  // waiting is part of its deadline (terminal-architecture 3.3), so it is admitted with only the
+  // remaining budget. Until its frame is handed to the transport, a status read is answered BUSY
+  // (not-accepted) and never sent once its deadline passes or `eligible` (its caller's lifetime:
+  // the control job's route, the preview job) is false or throws. That is checked when it is
+  // requested, while it waits (on every tick and at its turn), while it is admitted but queued
+  // behind a backpressured transport (on every tick), and finally inside `handing`, immediately
+  // before the frame is marked sent (see refuseStatusHandover()). Contact loss answers every
+  // waiter WORKER_UNAVAILABLE. Once handed over, a status is unchanged: if it then expires it is
+  // RESULT_UNKNOWN and keeps the window until the worker's late reply (see expire()); each waiter
+  // is then answered BUSY, the overload signal, and nothing is retried.
   requestStatus(
     command: Extract<PipeCommand, { type: "status" }>,
     eligible?: () => boolean,
   ): Promise<RuntimeResult> {
+    if (!statusEligible(eligible)) return Promise.resolve(this.error(command, "BUSY"));
     if (!this.statusWaiters.length && !this.statusHolder())
-      return this.admit(command, new Uint8Array(), undefined);
+      return this.admit(command, new Uint8Array(), undefined, undefined, undefined, {
+        eligible,
+      });
     if (!this.ready) return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
     // The callers bound the queue (one boundary read and one refresh per run at a time); this
     // cap only keeps a misbehaving caller from growing it.
@@ -419,12 +442,7 @@ export class WorkerPipeSession {
           head.resolve(this.error(head.command, "WORKER_UNAVAILABLE"));
           continue;
         }
-        let live: boolean;
-        try {
-          live = this.now() < head.deadline && (head.eligible?.() ?? true);
-        } catch {
-          live = false;
-        }
+        const live = this.statusLive(head.deadline, head.eligible);
         const holder = this.statusHolder();
         if (live && holder && !holder.abandoned) {
           // Later waiters may already be dead; they are answered without waiting their turn.
@@ -434,14 +452,10 @@ export class WorkerPipeSession {
         this.statusWaiters.shift();
         if (!live || holder) head.resolve(this.error(head.command, "BUSY"));
         else
-          void this.admit(
-            head.command,
-            new Uint8Array(),
-            undefined,
-            undefined,
-            undefined,
-            head.deadline,
-          ).then(head.resolve);
+          void this.admit(head.command, new Uint8Array(), undefined, undefined, undefined, {
+            deadlineAt: head.deadline,
+            eligible: head.eligible,
+          }).then(head.resolve);
       }
     } finally {
       this.promotingStatus = false;
@@ -451,16 +465,41 @@ export class WorkerPipeSession {
   private dropDeadStatusWaiters(): void {
     for (let index = this.statusWaiters.length - 1; index >= 1; index--) {
       const waiter = this.statusWaiters[index]!;
-      let live: boolean;
-      try {
-        live = this.now() < waiter.deadline && (waiter.eligible?.() ?? true);
-      } catch {
-        live = false;
-      }
-      if (live) continue;
+      if (this.statusLive(waiter.deadline, waiter.eligible)) continue;
       this.statusWaiters.splice(index, 1);
       waiter.resolve(this.error(waiter.command, "BUSY"));
     }
+  }
+
+  // Whether an unsent status read may still be sent: before its deadline, and still wanted by its
+  // caller. An invalid clock or a throwing predicate counts as no.
+  private statusLive(
+    deadline: number,
+    eligible: (() => boolean) | undefined,
+    at?: number,
+  ): boolean {
+    let now: number;
+    try {
+      now = at ?? this.now();
+    } catch {
+      return false;
+    }
+    return now < deadline && statusEligible(eligible);
+  }
+
+  // The last check before an admitted status read is handed over (see `handing` in flush()):
+  // a read whose deadline passed or whose caller is gone since its admission (a backpressured
+  // transport can hold it queued past either, and drain() runs without a tick) is answered BUSY
+  // (not-accepted) here and never reaches the transport. Its correlation and the status window
+  // are released, so the next waiter can go; nothing is unknown and nothing is retried.
+  private refuseStatusHandover(request: Pending, at: number): boolean {
+    if (!request.statusGuard || this.statusLive(request.deadline, request.statusGuard.eligible, at))
+      return false;
+    request.refused = true;
+    const requestId = request.command.requestId;
+    if (this.pending.get(requestId) === request) this.settle(requestId);
+    request.resolve(this.error(request.command, "BUSY"));
+    return true;
   }
 
   requestUnsubscribe(
@@ -529,10 +568,12 @@ export class WorkerPipeSession {
     handoff: ResultHandoff | undefined,
     previewSeal?: PreviewResultSeal,
     onSent?: () => void,
-    // An absolute deadline fixed before admission (a status that waited for its window); the
-    // command then gets only what remains of it.
-    deadlineAt?: number,
+    // A status read from requestStatus(): `deadlineAt` is the absolute deadline fixed when it was
+    // requested (a read that waited for its window gets only what remains of it), and
+    // `eligible` is its caller's lifetime, checked again up to the handover.
+    status?: { deadlineAt?: number; eligible: (() => boolean) | undefined },
   ): Promise<RuntimeResult> {
+    const deadlineAt = status?.deadlineAt;
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
       return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
     if (
@@ -674,6 +715,7 @@ export class WorkerPipeSession {
       ...(onSent ? { onSent } : {}),
       admitted: !waiting,
       abandoned: false,
+      ...(status ? { statusGuard: { eligible: status.eligible } } : {}),
     };
     if (prepaid) {
       if (waiting) {
@@ -774,6 +816,7 @@ export class WorkerPipeSession {
         const request = item.request;
         const handing = (): void => {
           if (!request || request.sent) return;
+          if (request.refused) throw new StatusHandoverRefused("Status read refused at handover");
           // The command's age starts at the real handover. drain() and result-driven promotion
           // run without a tick, so the last tick's clock may predate a runtime stall; a fresh,
           // validated sample is taken here. The clock is foreign code and may reenter, so the
@@ -795,6 +838,9 @@ export class WorkerPipeSession {
               request.withdrawn ? "Late handover of a withdrawn frame" : "Frame handover refused",
             );
           }
+          // The last check for a status read, with the clock just sampled (issue #115).
+          if (this.refuseStatusHandover(request, at))
+            throw new StatusHandoverRefused("Status read refused at handover");
           request.sent = true;
           request.sentAt = at;
           request.onSent?.();
@@ -813,8 +859,11 @@ export class WorkerPipeSession {
           // over; expire() may then answer it as never sent.
           if (request && !request.sent) request.offered = true;
           if (!writable && drainGeneration === this.drainGeneration) this.blocked = true;
-        } catch {
-          this.loseContact();
+        } catch (error) {
+          // A status read refused at its handover wrote nothing and is already answered; the
+          // session takes its frame back. Any other throw is a transport failure.
+          if (error instanceof StatusHandoverRefused && request?.refused) this.release(item);
+          else this.loseContact();
         }
       }
     } finally {
@@ -1025,7 +1074,10 @@ export class WorkerPipeSession {
         entry.role !== "progress" &&
         entry.admitted &&
         !entry.abandoned &&
-        now >= entry.deadline &&
+        (now >= entry.deadline ||
+          // An admitted status read still unsent (queued behind a backpressured transport) whose
+          // caller is gone is withdrawn like one past its deadline (issue #115).
+          (!!entry.statusGuard && !entry.sent && !statusEligible(entry.statusGuard.eligible))) &&
         this.pending.get(requestId) === entry
       )
         this.expire(requestId, entry);
