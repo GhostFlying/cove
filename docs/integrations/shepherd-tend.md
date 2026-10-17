@@ -77,16 +77,29 @@ PENDING：PR #121（T4：tab 与 run），未合入：
   停止最新的 run 并等到其退出；`cove tab close <tabId>`：删除 tab 记录，其 run 仍保留（`tabId` 变为 null）。
   tab 有未结束的 run（starting/running，包括 worker 失联而无法核实的 run）时，`reopen` 与 `close` 以
   `LIVE_RUNS_PRESENT` 拒绝。`--run` 不是最新 run 时为 `REVISION_CONFLICT`，旧实例的 run 为 `INSTANCE_MISMATCH`。
-- 写命令输出 `{ operation, tab, latestRun }`，操作未成功时也输出并以 1 退出。首个 run 被 worker 拒绝时 tab 仍保留
-  （无 run），操作为 failed，结果中给出该 tab。
+- 写命令的输出分两类，与 `repo`、`task`、`mount` 相同。**受理前的拒绝**（RPC 错误，未记录任何操作）：stdout 为空，
+  stderr 为 `cove: <method> failed: <KIND> (<acceptance>, next: <nextAction>)`，退出 1；包括 `LIVE_RUNS_PRESENT`、
+  `TASK_NOT_FOUND`、`TAB_NOT_FOUND`、`MOUNT_NOT_FOUND`、`TASK_ARCHIVED`、`INVALID_ARGUMENT`、`REVISION_CONFLICT`、
+  `INSTANCE_MISMATCH`、`BUSY`。错误的 `details`（如 `LIVE_RUNS_PRESENT` 列出的 run）不输出，用 `tab get`/`tab runs`
+  查看。**已受理的操作**：CLI 等到操作结算后输出，记录可用 `cove operation get` 再读。
+  - `tab create`、`tab reopen`、`tab stop`：结算后再读一次 tab，输出 `{ operation, tab, latestRun }`（`latestRun`
+    在 tab 尚无 run 时为 null）。操作不指向 tab，或 server 确认 tab 已不存在（`TAB_NOT_FOUND`，例如以同一
+    `--operation-id` 重发的 create，其 tab 已被 close）时为 `tab: null, latestRun: null`。这次读取本身失败
+    （连接中断、超时等）时输出 `{ operation, tabReadError }`，不含 `tab` 与 `latestRun`，stderr 说明并以 1 退出；
+    `operation` 仍是写入的结果，不要因此重发。操作未成功（failed、requires_attention 等）时同样输出并以 1 退出。
+    首个 run 被 worker 拒绝时 tab 仍保留（无 run），操作为 failed，结果中给出该 tab。
+  - `tab close`：成功时输出操作记录本身（不包在 `{ operation }` 中，与 `task rename/archive` 相同）；操作未成功时
+    stdout 为空，stderr 为 `cove: tab.close <operationId> <state>[: <KIND>]`，退出 1。
 - run 记录（`latestRun` 与 `runs[]`）：`run`、`tabId`、`taskId`、启动时的 `workspaceRevision`、`cwd`、
   `mounts`（启动时各挂载的名称、来源、真实路径，之后的绑定变化不改写）、`lifecycle`（starting、running、exited、
   stopped-with-server、interrupted）、`verification`（live、unverifiable、final）、`startedAtMs`、`endedAtMs`、
   `lastObservedAtMs`、`exitCode`、`signal`。当前实例的 run 只在 worker 报告存活时为 live，worker 失联时为
   unverifiable，只有退出事实才使其 exited。重启后旧实例的 run 为 stopped-with-server 或 interrupted，从不为 live。
 - tab 的 run 也是普通终端 run，出现在 `cove terminal list` 中。
-- run ID 仍为 `run-N`，但新实例从数据库中已记录的最大 N 之后继续编号（此前每个实例都从 `run-1` 开始），
-  因此同一 server 的 run ID 不会重复；也适用于 `cove terminal create`。
+- run ID 仍为 `run-N`，但新实例从本 server 发出过的最大 N 之后继续编号（此前每个实例都从 `run-1` 开始），
+  包括 spawn 被拒、没有 run 记录、只在 failed 操作中出现的 run ID，因此同一 server 的 run ID 从不重发，
+  按 run ID 固定的 `tab stop --run` 不会匹配到别的 run；也适用于 `cove terminal create`。spawn 被 worker 明确拒绝的
+  run 不出现在 `cove terminal list` 中。
 - 尚未注入 `COVE_TASK_ID`/`COVE_TAB_ID`：M0 的 spawn 参数没有环境变量字段，由 #120 补上（见下文 PLANNED）。
   在此之前，tab 中运行的进程不能从环境变量得知自己所属的 task 或 tab。
 
@@ -138,13 +151,14 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
 ## 7. 变更记录
 
-| 日期       | Cove 提交                           | 对 tend 的变化                                                                                                                                                                                                                                                    |
-| ---------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-10-16 | main `399c20b` 时建立本文           | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                                                                                                                                                                             |
-| 2026-10-16 | main `399c20b`                      | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出                                                                                                                                                   |
-| 2026-10-16 | main `399c20b`                      | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                                                                                                                                                                        |
-| 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                             |
-| 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE` |
-| 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                  |
-| 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入          |
-| 2026-10-17 | main `0bba191`；#121（T4，未合入）  | 新增 PENDING #121：`tab create/list/get/runs/reopen/stop/close` 与 run 记录的 JSON 字段；run ID 跨实例不再重复（也适用于 `terminal create`）；`COVE_TASK_ID`/`COVE_TAB_ID` 注入明确为待定（#120），此前文档把它列在 tab 计划中                                    |
+| 日期       | Cove 提交                           | 对 tend 的变化                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------- | ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-16 | main `399c20b` 时建立本文           | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                                                                                                                                                                                                                                                                                                                                                        |
+| 2026-10-16 | main `399c20b`                      | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出                                                                                                                                                                                                                                                                                                                              |
+| 2026-10-16 | main `399c20b`                      | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                                                                                                                                                                                                        |
+| 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE`                                                                                                                                                                            |
+| 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                                                                                                                                                                                             |
+| 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入                                                                                                                                                                                     |
+| 2026-10-17 | main `0bba191`；#121（T4，未合入）  | 新增 PENDING #121：`tab create/list/get/runs/reopen/stop/close` 与 run 记录的 JSON 字段；run ID 跨实例不再重复（也适用于 `terminal create`）；`COVE_TASK_ID`/`COVE_TAB_ID` 注入明确为待定（#120），此前文档把它列在 tab 计划中                                                                                                                                                                                                               |
+| 2026-10-17 | main `0bba191`；#121（T4，未合入）  | 更正 PENDING #121 的输出说明：受理前的拒绝（含 `LIVE_RUNS_PRESENT`、`TASK_NOT_FOUND`、`MOUNT_NOT_FOUND`）stdout 为空、写 stderr 并以 1 退出；`tab close` 输出操作记录本身；tab 已不存在时为 `tab: null, latestRun: null`，结算后读取失败时为 `tabReadError` 并以 1 退出（此前静默省略 tab 字段并以 0 退出）。spawn 被拒的 run ID 重启后也不重发，且不再列在 `terminal list` 中。基准改为 main `0bba191`（#119、#117、#123 不改本文所列接口） |
