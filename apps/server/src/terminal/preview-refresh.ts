@@ -254,12 +254,17 @@ export class PreviewRefresh {
         return;
       }
       const prefix = job.requestPrefix;
-      const statusResult = await this.runtime.getStatus({
-        type: "status",
-        run: job.run,
-        worker: job.worker,
-        requestId: prefix + ".s",
-      });
+      // The read may wait for the worker's status window (issue #115); a job that expired or
+      // ended meanwhile drops it unsent, so it never occupies the window for nobody.
+      const statusResult = await this.runtime.getStatus(
+        {
+          type: "status",
+          run: job.run,
+          worker: job.worker,
+          requestId: prefix + ".s",
+        },
+        () => this.current(job) && this.now() < job.deadline,
+      );
       if (
         statusResult.type !== "result" ||
         statusResult.outcome !== "accepted" ||

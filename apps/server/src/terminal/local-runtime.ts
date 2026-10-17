@@ -23,8 +23,6 @@ export class LocalRuntime implements RuntimeTerminalPort {
   >();
   private disposed = false;
   private previewOwner: PreviewRefresh | undefined;
-  // The settlement of the latest status read queued per worker session (see getStatus).
-  private readonly statusTurns = new Map<WorkerPipeSession, Promise<void>>();
   constructor(
     readonly pool: WorkerPool,
     readonly registry: RunRegistry,
@@ -166,6 +164,7 @@ export class LocalRuntime implements RuntimeTerminalPort {
     command: PipeCommand,
     payload?: Uint8Array,
     unsubscribe = false,
+    statusEligible?: () => boolean,
   ): Promise<RuntimeResult> {
     const placement = this.pool.get(command.run);
     if (this.disposed || !placement || !sameWorkerRef(command.worker, placement.worker))
@@ -189,7 +188,9 @@ export class LocalRuntime implements RuntimeTerminalPort {
     // included, waits for a free slot in the worker's route-control window.
     const result = await (unsubscribe && command.type === "unsubscribe"
       ? placement.session.requestUnsubscribe(command)
-      : placement.session.request(command, payload, this.resultHandoff, markSent));
+      : command.type === "status"
+        ? placement.session.requestStatus(command, statusEligible)
+        : placement.session.request(command, payload, this.resultHandoff, markSent));
     // Never written, so definitely not accepted: release the reservation, which also drops the
     // session's record of the run.
     if (command.type === "spawn" && !sent) this.cancelRunReservation(command.run, command.worker);
@@ -256,32 +257,15 @@ export class LocalRuntime implements RuntimeTerminalPort {
   ): Promise<RuntimeResult> {
     return this.request(input);
   }
-  // A worker has a single status window (the pipe session admits one status at a time and
-  // refuses another with BUSY), and this runtime has two readers of it: preview refresh, which
-  // reads every run's status in the background, and the control arbiter, which reads a run's
-  // control boundary when it does not know it (before the run's first focus, or after an
-  // uncertain result). Refusing one of our own readers because the other held the window made
-  // a user's focus fail BUSY for no reason of its own (issue #115), so status reads to one
-  // worker take turns in arrival order instead. A turn starts once the previous read settled,
-  // including by its own deadline, so the wait is bounded by the deadlines of the reads queued
-  // ahead. A read that expired after its frame was handed over keeps the window until the
-  // worker's late reply; the next one then still gets BUSY, which is the overload signal. The
-  // queue is bounded by the readers: per run, at most one arbiter boundary read (the arbiter
-  // drains a run's control serially) and one refresh job at a time.
-  getStatus(input: Parameters<RuntimeTerminalPort["getStatus"]>[0]): Promise<RuntimeResult> {
-    const session = this.pool.get(input.run)?.session;
-    if (!session) return this.request(input);
-    const previous = this.statusTurns.get(session);
-    const result = previous ? previous.then(() => this.request(input)) : this.request(input);
-    const turn = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.statusTurns.set(session, turn);
-    void turn.then(() => {
-      if (this.statusTurns.get(session) === turn) this.statusTurns.delete(session);
-    });
-    return result;
+  // Status reads wait in arrival order for the worker's single status window rather than being
+  // refused while another read holds it (issue #115; see WorkerPipeSession.requestStatus). The
+  // wait spends the read's own deadline, and `eligible` (the caller's lifetime) lets an unsent
+  // read be dropped when nobody needs its answer any more.
+  getStatus(
+    input: Parameters<RuntimeTerminalPort["getStatus"]>[0],
+    eligible?: () => boolean,
+  ): Promise<RuntimeResult> {
+    return this.request(input, undefined, false, eligible);
   }
   refreshPreview(
     input: Parameters<RuntimeTerminalPort["refreshPreview"]>[0],

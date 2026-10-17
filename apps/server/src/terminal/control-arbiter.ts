@@ -364,12 +364,18 @@ export class ControlArbiter {
   private async boundary(job: ControlJob): Promise<DomainError | undefined> {
     const run = job.run;
     if (run.boundary && !run.uncertain) return;
-    const result = await this.runtime.getStatus({
-      type: "status",
-      worker: run.worker,
-      run: run.ref,
-      requestId: job.context.requestId + ".s",
-    });
+    // The read may wait for the worker's status window (issue #115). If the job's route retires
+    // meanwhile, the read is dropped unsent: sent anyway, a stale read could time out holding the
+    // window and make a later focus on a live route fail BUSY.
+    const result = await this.runtime.getStatus(
+      {
+        type: "status",
+        worker: run.worker,
+        run: run.ref,
+        requestId: job.context.requestId + ".s",
+      },
+      () => this.current(job),
+    );
     if (!this.current(job)) return domainError("STALE_CONNECTION");
     if (result.type === "error") return result.error;
     if (
