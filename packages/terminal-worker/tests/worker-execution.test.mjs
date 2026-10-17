@@ -1479,7 +1479,10 @@ test("retained input identity count rejects a second full subscription", async (
   }
 });
 
-test("worker byte cap rejects model allocation before native spawn and retains run identity", async () => {
+test("worker byte cap refuses a model allocation before native spawn and releases its run identity", async () => {
+  // Too little retained-byte capacity is left for the second run's initial checkpoint, so its
+  // session fails to build before the native factory is called: nothing owns the run, and its
+  // slot and identity bytes are released.
   const budgets = { ...M0_LIMITS, workerBytes: 92 * 1024 };
   const { execution, factory } = await start({}, budgets, undefined, false);
   try {
@@ -1487,12 +1490,50 @@ test("worker byte cap rejects model allocation before native spawn and retains r
     const second = spawnCommand(run("next"), budgets);
     expect(await execution.execute(second.command, second.payload)).toMatchObject({
       type: "error",
+      error: { kind: "BUSY", acceptance: "not-accepted" },
+    });
+    expect(execution.snapshot().runIds).toBe(1);
+    expect(execution.snapshot().accountedBytes).toBe(firstBytes);
+    expect(factory.owned.size).toBe(1);
+    // The same identity is free again: a retry is judged on capacity, not refused as a duplicate.
+    const retry = spawnCommand(run("next"), budgets);
+    expect(
+      await execution.execute({ ...retry.command, requestId: "retry" }, retry.payload),
+    ).toMatchObject({ type: "error", error: { kind: "BUSY", acceptance: "not-accepted" } });
+    expect(execution.snapshot().runIds).toBe(1);
+    expect(execution.snapshot().accountedBytes).toBe(firstBytes);
+  } finally {
+    await execution.shutdown("test");
+  }
+});
+
+test("a native factory failure of unknown ownership keeps the run identity", async () => {
+  // The factory threw: it may have created a PTY, so the answer is unknown and the identity
+  // (and its slot) stays retained.
+  const budgets = { ...M0_LIMITS, maxRuns: 1, listPage: 1 };
+  const factory = fakeFactory();
+  const execution = createWorkerExecution({
+    worker,
+    effectiveBudgets: budgets,
+    factory: {
+      ...factory,
+      spawn() {
+        throw new Error("native failure after the factory boundary");
+      },
+    },
+  });
+  try {
+    const uncertain = spawnCommand(run(), budgets);
+    expect(await execution.execute(uncertain.command, uncertain.payload)).toMatchObject({
+      type: "error",
+      error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" },
+    });
+    expect(execution.snapshot().runIds).toBe(1);
+    const next = spawnCommand(run("next"), budgets);
+    expect(await execution.execute(next.command, next.payload)).toMatchObject({
+      type: "error",
       error: { kind: "BUSY" },
     });
-    expect(execution.snapshot().runIds).toBe(2);
-    expect(execution.snapshot().accountedBytes).toBeGreaterThan(firstBytes);
-    expect(execution.snapshot().accountedBytes).toBeLessThanOrEqual(budgets.workerBytes);
-    expect(factory.owned.size).toBe(1);
   } finally {
     await execution.shutdown("test");
   }
