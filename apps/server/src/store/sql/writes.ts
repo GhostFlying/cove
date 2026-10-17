@@ -1,6 +1,7 @@
 import { configWrites } from "./config.js";
 import { repoWrites } from "./repos.js";
 import { workspaceWrites } from "./workspaces.js";
+import { worktreeWrites } from "./worktrees.js";
 
 // The database writes receipts.write may apply (operations/database-operations.ts). Each is a
 // synchronous function of the connection and its structured-clone-safe arguments that checks its
@@ -13,6 +14,7 @@ export const DATABASE_WRITES = Object.freeze({
   ...configWrites,
   ...repoWrites,
   ...workspaceWrites,
+  ...worktreeWrites,
 });
 
 export type DatabaseWrites = typeof DATABASE_WRITES;

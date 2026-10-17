@@ -49,8 +49,8 @@ T3a（PR #109，合入于 `6a838af`；server `fc41992`，`repo remove` 的 `REPO
 - `cove mount add <taskId> (--checkout SPEC | --worktree SPEC)`、`cove mount remove <taskId> <mountId>`，
   `--expected-revision` 为 workspace revision。checkout SPEC：`REPO_ID[,name=N][,path=P]`（`path=` 在最后）；
   Cove 托管的 worktree 不能作为 checkout（`MANAGED_WORKTREE_NOT_MOUNTABLE`）。移除挂载从不删除目录，
-  已归档 task 也允许。`--worktree` 在 T3b 之前以 `CAPABILITY_UNAVAILABLE` 拒绝且不记录任何内容
-  （`task create` 中的其他挂载也不创建）。会使 task 记录无法放进一次读取响应的 `task create` 或 `mount add`
+  已归档 task 也允许。`--worktree` 在 #124（T3b）合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝且不记录任何内容
+  （`task create` 中的其他挂载也不创建）；合入后的行为见下面的 #124。会使 task 记录无法放进一次读取响应的 `task create` 或 `mount add`
   （例如很多真实路径极长的挂载）以 `INVALID_ARGUMENT` 拒绝且不记录。server 的文件系统工作已满（被放弃且
   尚未结束的检查占满上限）时，`task create` 与 `mount add` 以 `BUSY` 拒绝（未接受、不记录，稍后以同一请求
   重试）。`task list` 由 CLI 取完所有页后输出。
@@ -65,16 +65,42 @@ T3a（PR #109，合入于 `6a838af`；server `fc41992`，`repo remove` 的 `REPO
 
 ## 3. 进行中（PENDING）与计划中（PLANNED）
 
-目前没有 PENDING 项。
+PENDING：PR #124（T3b：托管 worktree 创建），未合入：
+
+- `--worktree REPO_ID[,name=N][,branch=B][,base=REF][,no-fetch]`（`task create` 可多个，`mount add` 一个）
+  在 `<入口目录>/<name>` 创建 Cove 托管的 worktree，新分支 B 默认 `cove/<slug>`，已存在时该挂载以
+  `BRANCH_EXISTS` 失败。创建前从 `origin` fetch；fetch 失败时该挂载以 `FETCH_FAILED` 失败且不创建任何东西，
+  只有显式 `no-fetch` 跳过 fetch。基点依次为：`base=REF`；repo 的 `mainBranch` 设置对应的
+  `origin/<分支>`（远端没有时不换别的分支）；`origin/HEAD`；远端 HEAD（`ls-remote`，`no-fetch` 时不问）；
+  `origin/main`、`master`、`trunk`、`develop` 中第一个存在的。从不用本地 HEAD，都没有时为
+  `MAIN_BRANCH_UNRESOLVED`。挂载先记为 pending，命令等待各仓依次准备完（最多约 30 秒轮询，与其他写命令相同）。
+- 逐仓结果：`operation.result.mounts[]` 每项 `{mountId, state, errorKind?}`；一个仓失败不影响其他仓，
+  操作以第一个失败挂载的错误为 `failed`，已创建的 worktree 保留。task 记录中 worktree 挂载的
+  `branch`、`baseCommit` 有值；每次挂载状态变化都使 workspace revision 加一。被手工删除的托管 worktree
+  读取时为 missing，不会重建。准备中的 worktree 挂载不能 `mount remove`（`OPERATION_EFFECTS_ACTIVE`）。
+- 新命令 `cove mount retry <taskId> <mountId> [--branch B] [--base REF] [--no-fetch] [--operation-id ID]`：
+  只对失败的 worktree 挂载，作为新操作重新准备；未给的选项沿用添加时的设置。输出 `{ operation, task }`，
+  成功为 0，否则 1。
+- 新命令 `cove operation continue <id> [--operation-id ID]` 与 `cove operation abandon <id> [--operation-id ID]`：
+  作用于 `requires_attention` 的操作（例如 server 在 Git 步骤中崩溃，重启后该操作带
+  `progress.completedSteps`、`remainingEffects`、`recoveryActions`），各自是有自己操作 ID 的写操作。
+  该操作启动的 Git 进程可能仍在运行时两者都以 `OPERATION_EFFECTS_ACTIVE` 拒绝（未接受，稍后以同一请求再发）。
+  continue 按当前观察继续，不重复已生效的步骤；abandon 把目标改为 `cancelled`，只删除与记录完全一致的
+  产物（干净或未检出的 worktree、仍在基点的分支），其余留在原处并列入 `progress.remainingEffects`，
+  该挂载变为 failed（`OPERATION_NOT_RESUMABLE`），可再 `mount retry`。输出 `{ operation, target }`；
+  continue 在目标 succeeded 时为 0，abandon 在目标 cancelled 时为 0（有遗留时 stderr 写
+  `left in place: ...`），否则 1。
+- 新的 stderr 提示（`cove: ` 开头，只供人读，不是结构化输出）：`requires_attention` 时提示 continue/abandon；
+  `FETCH_FAILED` 提示 `mount retry ... --no-fetch`；`MAIN_BRANCH_UNRESOLVED` 提示 `--base REF` 或
+  `repo set <repoId> mainBranch`；`BRANCH_EXISTS` 提示 `--branch NEW`。
 
 PLANNED：
 
 M1（已批准，实施中，见 [M1](../milestones/m1.md)）：
 
-- 托管 worktree 挂载（创建前 fetch、主分支解析、`--no-fetch`、`--base`）、逐仓准备结果与 `mount retry`。
 - `tab create/stop/reopen/close` 与 run 历史；`tab create` 保存启动配方（可执行文件与参数），默认 cwd 为 workspace 入口目录。
   注入 `COVE_TASK_ID` 等少量 Cove 标识，不保存其他环境变量。
-- 重启后 run 显示为会话中断的 CLI 读取路径；`operation continue/abandon`。
+- 重启后 run 显示为会话中断的 CLI 读取路径。
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
@@ -115,12 +141,13 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
 ## 7. 变更记录
 
-| 日期       | Cove 提交                           | 对 tend 的变化                                                                                                                                                                                                                                                    |
-| ---------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-10-16 | main `399c20b` 时建立本文           | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                                                                                                                                                                             |
-| 2026-10-16 | main `399c20b`                      | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出                                                                                                                                                   |
-| 2026-10-16 | main `399c20b`                      | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                                                                                                                                                                        |
-| 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                             |
-| 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE` |
-| 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                  |
-| 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入          |
+| 日期       | Cove 提交                           | 对 tend 的变化                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-16 | main `399c20b` 时建立本文           | 首次列出 §2 的可用接口；记录设计 §7.1 的已决定事项（`tab send` 规则、环境变量、重启）                                                                                                                                                                                                                                                                                             |
+| 2026-10-16 | main `399c20b`                      | 更正：重启语义区分正常停止与崩溃，引入提交改为 `d99ef5d`；拆分 `config` 行；区分 CLI 错误与子 server 进程的输出                                                                                                                                                                                                                                                                   |
+| 2026-10-16 | main `399c20b`                      | 更正：子 server 进程退出状态单列一行，注明 `0a76f8c`、`2d3628a`、`c02367b`                                                                                                                                                                                                                                                                                                        |
+| 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                                                                                                                                             |
+| 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE`                                                                                                                 |
+| 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                                                                                                                                  |
+| 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入                                                                                                                          |
+| 2026-10-17 | main `0bba191`；#124（T3b，未合入） | 基准改为 main `0bba191`（`6a838af` 之后只有 server 内部修复、测试与本文的 T3a 记录，所列接口不变）；新增 PENDING 标记，列出 #124 的 `--worktree` 创建（fetch、基点顺序、`no-fetch`、`BRANCH_EXISTS`、`FETCH_FAILED`、`MAIN_BRANCH_UNRESOLVED`）、逐仓结果、`mount retry`、`operation continue/abandon`（含 `OPERATION_EFFECTS_ACTIVE`）与新的 stderr 提示；PLANNED 中相应条目移除 |

@@ -146,7 +146,7 @@ export const receiptOperations = {
   // against the current rows and applies its change, and the receipt is inserted as accepted and
   // advanced to succeeded. A refusal rolls everything back and leaves no receipt. A crash leaves
   // either the change and the receipt or neither, so such an operation is never left accepted or
-  // running for startup verification.
+  // running for startup verification, except a write whose result says `running` (see below).
   "receipts.write": (
     db: Connection,
     args: DatabaseWriteRequest & { relayInstanceId: string; at: number; limits: ReceiptLimits },
@@ -162,7 +162,7 @@ export const receiptOperations = {
     const write = DATABASE_WRITES[args.apply.name] as (
       db: Connection,
       args: unknown,
-    ) => { result: OperationResultData } | { error: DomainError };
+    ) => { result: OperationResultData; running?: true } | { error: DomainError };
     const applied = write(db, args.apply.args);
     if ("error" in applied) throw new Rollback({ error: applied.error });
     const busy = new Rollback({ error: domainError("BUSY") });
@@ -182,9 +182,18 @@ export const receiptOperations = {
       )
     )
       throw busy;
+    // A write that only starts its work (managed worktree creation, T3b: the transaction records
+    // the intent and the Git steps follow outside it) is committed as running instead. Its
+    // executor, or after a restart its startup verifier (operations/recovery-verifiers.ts), brings
+    // it to its outcome; nothing else ever reports it as succeeded.
     const succeeded = checkedReceiptRecord(
       key,
-      { ...accepted, revision: 1, state: "succeeded", result: applied.result },
+      {
+        ...accepted,
+        revision: 1,
+        state: applied.running ? "running" : "succeeded",
+        result: applied.result,
+      },
       limits,
       encodeUtf8,
     );

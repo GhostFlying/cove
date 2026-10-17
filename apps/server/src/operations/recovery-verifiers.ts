@@ -1,3 +1,4 @@
+import { createWorktreeVerifier } from "../domain/worktrees.js";
 import type { Store } from "../store/database.js";
 import type { ReceiptVerifiers } from "./operation-receipts.js";
 
@@ -16,8 +17,13 @@ export type RecoveryContext = {
 // creation and deletion) fill this module without touching the entry. A method without a verifier
 // keeps the generic outcome, requires_attention with RESULT_UNKNOWN; T1 registers none, because
 // its own durable writes (config.set) commit receipt and effect in one transaction and terminal
-// runs of an earlier instance cannot be proven after a restart (D9).
+// runs of an earlier instance cannot be proven after a restart (D9). T3b registers the methods
+// that create managed worktrees: their receipt stays running until the preparation settles it.
 export function createRecoveryVerifiers(context: RecoveryContext): ReceiptVerifiers {
-  void context;
-  return {};
+  const worktrees = createWorktreeVerifier(context);
+  return {
+    "task.create": worktrees,
+    "mount.add": worktrees,
+    "mount.retry": worktrees,
+  };
 }

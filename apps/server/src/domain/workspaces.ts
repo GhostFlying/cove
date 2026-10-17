@@ -41,6 +41,7 @@ import {
 } from "../workspace-fs/entry.js";
 import { jsonSize, PAGE_RESERVE, STRUCTURE_TOKENS } from "./record-bounds.js";
 import { refusalError } from "./repos.js";
+import { WorktreeService } from "./worktrees.js";
 
 // Tasks, workspaces and checkout mounts (docs/milestones/m1.md T3a, S2; D1, D2 = C, D4).
 //
@@ -51,10 +52,11 @@ import { refusalError } from "./repos.js";
 // writes to it, and it is meant for read-only use (D4, a convention Cove does not enforce). Two
 // tasks may mount the same checkout; each shows the other (sharedWithTaskIds), with no lock.
 //
-// Worktree mounts (T3b) are refused with CAPABILITY_UNAVAILABLE right after the receipt lookup,
-// before anything is recorded: creating one needs a durable intent, a startup verifier and
-// operation continue/abandon, which T3b adds together. A task.create that names one is refused as
-// a whole, so no task is left half prepared.
+// Worktree mounts (T3b, domain/worktrees.ts). A worktree spec is planned before the write (its
+// repo, name, branch and path `<entry>/<name>`) and recorded pending in the same transaction as
+// the task or mount and its operation receipt, which stays running. After the commit and the entry
+// write, WorktreeService prepares the operation's worktree mounts and settles the operation; a
+// read reports a worktree mount pending until then, and verifies a ready one like a checkout.
 //
 // Checkout admission (D2). A checkout path must lead to the registered clone itself or to a
 // worktree that shares its Git common directory; the mount records the real top level of that
@@ -597,11 +599,7 @@ export function defaultMountName(displayName: string): string | null {
 }
 
 type CheckoutSpec = Extract<MountSpec, { source: "checkout" }>;
-
-// Worktree mounts are T3b's (see the header).
-function checkoutsOnly(specs: MountSpec[]): CheckoutSpec[] | null {
-  return specs.every((spec) => spec.source === "checkout") ? (specs as CheckoutSpec[]) : null;
-}
+type WorktreeSpec = Extract<MountSpec, { source: "worktree" }>;
 
 export class WorkspaceService {
   private readonly git: { discoverRepository: typeof discoverRepository };
@@ -618,8 +616,28 @@ export class WorkspaceService {
   private readonly checksInFlight = new Map<string, Shared<CheckoutVerdict>>();
   private readonly gitSlots: Slots;
   private readonly fsPermits: FsPermits;
+  // Managed worktree preparation (T3b); it writes the entry through materialize below.
+  readonly worktrees: WorktreeService;
 
   constructor(private readonly options: WorkspaceServiceOptions) {
+    this.worktrees = new WorktreeService({
+      store: options.store,
+      receipts: options.receipts,
+      serverId: options.serverId,
+      relayInstanceId: options.receipts.composition.relayInstanceId,
+      encodeUtf8: options.encodeUtf8,
+      materialize: async (workspaceId) => {
+        const budget = this.options.entryWriteBudgetMs ?? DISCOVERY_MS;
+        return (
+          await this.materialize(workspaceId, {}, budget).observe(performance.now() + budget, {
+            state: "unavailable",
+            revision: null,
+          })
+        ).state;
+      },
+      ...(options.now ? { now: options.now } : {}),
+      ...(options.newId ? { newId: options.newId } : {}),
+    });
     this.gitSlots = new Slots(options.gitConcurrency ?? 4);
     this.fsPermits = new FsPermits(options.fsConcurrency ?? 16);
     this.git = { discoverRepository, ...options.git };
@@ -849,11 +867,11 @@ export class WorkspaceService {
     }
     const { record } = stored;
     const workspace = record.workspace;
-    // A binding that is not there or no longer the admitted checkout is reported, never dropped
-    // and never repaired (S9).
+    // A binding that is not there or no longer the admitted checkout or managed worktree is
+    // reported, never dropped and never repaired (S9).
     const mounts = await Promise.all(
       workspace.mounts.map(async (mount) => {
-        if (mount.state !== "ready" || mount.source !== "checkout") return mount;
+        if (mount.state !== "ready") return mount;
         const check = stored.checkouts[mount.mountId];
         const commonDir = check?.commonDir ?? null;
         const managed = check?.managed ?? false;
@@ -1153,6 +1171,35 @@ export class WorkspaceService {
     };
   }
 
+  // A worktree spec resolved against its registration and planned (see the header).
+  private async resolveWorktree(
+    spec: WorktreeSpec,
+    slug: string,
+    entryPath: string,
+  ): Promise<{ mount: NewMount } | { error: DomainError }> {
+    let repo;
+    try {
+      repo = await this.options.store.call("repos.get", { repoId: spec.repoId });
+    } catch (error) {
+      return { error: storeReadError(error) };
+    }
+    if (!repo) return { error: domainError("REPO_NOT_FOUND") };
+    const name = spec.name ?? defaultMountName(repo.record.displayName);
+    if (!name) return { error: domainError("INVALID_ARGUMENT") };
+    return this.worktrees.plan({
+      spec,
+      repo: { repoId: spec.repoId, commonDir: repo.commonDir },
+      name,
+      slug,
+      entryPath,
+    });
+  }
+
+  // The key a worktree mount's preparation is recorded under: the write's own.
+  private operationKey(principalId: string, operationId: string) {
+    return { serverId: this.options.serverId, principalId, operationId };
+  }
+
   // ---------------------------------------------------------------------------------------------
   // Writes.
 
@@ -1160,8 +1207,7 @@ export class WorkspaceService {
     const recorded = await this.recorded(principalId, "task.create", params);
     if (recorded) return recorded;
     const refuse = (error: DomainError) => this.refuse(principalId, "task.create", params, error);
-    const specs = checkoutsOnly(params.mounts);
-    if (!specs) return refuse(domainError("CAPABILITY_UNAVAILABLE"));
+    const specs = params.mounts;
     let configured: string;
     try {
       configured = await this.options.config.workspaceRoot();
@@ -1193,17 +1239,24 @@ export class WorkspaceService {
     if (occupied.value) return refuse(domainError("WORKSPACE_ENTRY_UNAVAILABLE"));
     const mounts: NewMount[] = [];
     for (const spec of specs) {
-      const found = await this.resolve(spec, group);
+      const found =
+        spec.source === "checkout"
+          ? await this.resolve(spec, group)
+          : await this.resolveWorktree(spec, slug, entryPath);
       if ("error" in found) return refuse(found.error);
       if (mounts.some((other) => other.name === found.mount.name))
         return refuse(domainError("MOUNT_NAME_CONFLICT"));
       mounts.push(found.mount);
     }
-    const changed = await this.recheckCheckouts(mounts, group);
+    const changed = await this.recheckCheckouts(
+      mounts.filter((mount) => mount.source === "checkout"),
+      group,
+    );
     if (changed) return refuse(changed);
     const { outcome, committed } = await this.writeCommitted(principalId, "task.create", params, {
       name: "task.create",
       args: {
+        operation: this.operationKey(principalId, params.operationId),
         taskId,
         workspaceId,
         title: params.title,
@@ -1215,8 +1268,13 @@ export class WorkspaceService {
       },
     });
     // An identical request that committed first answers this one with its own record and writes
-    // nothing; a read publishes the entry if the call that committed did not get to it.
-    if (committed) await this.materializeAfterWrite(workspaceId, group);
+    // nothing; a read publishes the entry if the call that committed did not get to it. Only the
+    // committing call starts the worktree preparation; a restart verifies one left unfinished.
+    if (committed) {
+      await this.materializeAfterWrite(workspaceId, group);
+      if (mounts.some((mount) => mount.source === "worktree"))
+        this.worktrees.start(principalId, params.operationId);
+    }
     return outcome;
   }
 
@@ -1256,8 +1314,7 @@ export class WorkspaceService {
     const recorded = await this.recorded(principalId, "mount.add", params);
     if (recorded) return recorded;
     const refuse = (error: DomainError) => this.refuse(principalId, "mount.add", params, error);
-    const spec = checkoutsOnly([params.mount])?.[0];
-    if (!spec) return refuse(domainError("CAPABILITY_UNAVAILABLE"));
+    const spec = params.mount;
     let task: StoredTask | null;
     try {
       task = await this.options.store.call("tasks.get", { taskId: params.taskId });
@@ -1268,14 +1325,20 @@ export class WorkspaceService {
     // Advisory; the write checks it again with the current row.
     if (task.record.archived) return refuse(domainError("TASK_ARCHIVED"));
     const group = {};
-    const found = await this.resolve(spec, group);
+    const found =
+      spec.source === "checkout"
+        ? await this.resolve(spec, group)
+        : await this.resolveWorktree(spec, task.record.slug, task.record.workspace.entryPath);
     if ("error" in found) return refuse(found.error);
     const { mount } = found;
-    const changed = await this.recheckCheckouts([mount], group);
-    if (changed) return refuse(changed);
+    if (mount.source === "checkout") {
+      const changed = await this.recheckCheckouts([mount], group);
+      if (changed) return refuse(changed);
+    }
     const { outcome, committed } = await this.writeCommitted(principalId, "mount.add", params, {
       name: "mount.add",
       args: {
+        operation: this.operationKey(principalId, params.operationId),
         taskId: params.taskId,
         mount,
         responseBytes: this.responseBytes,
@@ -1285,7 +1348,10 @@ export class WorkspaceService {
           : { expectedWorkspaceRevision: params.expectedWorkspaceRevision }),
       },
     });
-    if (committed) await this.materializeAfterWrite(task.workspaceId, group);
+    if (committed) {
+      await this.materializeAfterWrite(task.workspaceId, group);
+      if (mount.source === "worktree") this.worktrees.start(principalId, params.operationId);
+    }
     return outcome;
   }
 

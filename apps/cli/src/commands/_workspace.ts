@@ -17,9 +17,15 @@ does not enforce read-only use:
     the registered clone itself, or with path= an existing worktree of it that Cove does not
     manage; path= comes last and takes the rest of the value. A path Cove manages as a worktree
     is refused (MANAGED_WORKTREE_NOT_MOUNTABLE).
-A worktree mount is a new Git worktree Cove creates in the workspace entry. It is not available
-yet: the server refuses it with CAPABILITY_UNAVAILABLE and records nothing.
+A worktree mount is a new Git worktree Cove creates and manages at <entry>/NAME:
   --worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]
+    BRANCH (default cove/<task slug>) is a new branch; an existing one fails the mount
+    (BRANCH_EXISTS). Cove first fetches origin; a failed fetch fails the mount and creates
+    nothing (FETCH_FAILED), and only no-fetch skips it. The base is REF, otherwise the remote
+    branch of the repo's mainBranch, origin/HEAD, the remote's HEAD, then origin/main, master,
+    trunk or develop; never the local HEAD (MAIN_BRANCH_UNRESOLVED). The command waits while the
+    mounts are prepared one after another; a failed mount leaves the others and can be retried
+    with cove mount retry.
 NAME defaults to the repo's display name. The workspace entry directory holds cove-workspace.json,
 the manifest of every mount with its real path; a checkout is reached by that real path.`;
 
@@ -96,5 +102,38 @@ export async function printTaskOperation(
   process.stderr.write(
     `cove: ${operation.method} ${operation.operationId} ${operation.state}${reason}\n`,
   );
+  for (const hint of operationHints(operation, taskId)) process.stderr.write(`cove: ${hint}\n`);
   return 1;
+}
+
+// What the operator can do next about an operation that did not succeed (T3b). The hints name
+// commands only; the record printed on stdout is the result.
+export function operationHints(operation: OperationRecord, taskId?: string): string[] {
+  const hints: string[] = [];
+  const id = operation.operationId;
+  if (operation.state === "requires_attention")
+    hints.push(
+      `inspect it with \`cove operation get ${id}\`, then \`cove operation continue ${id}\` ` +
+        `or \`cove operation abandon ${id}\``,
+    );
+  const failedMounts = (operation.result?.mounts ?? []).filter((mount) => mount.state === "failed");
+  for (const mount of failedMounts) {
+    const retry = taskId ? `cove mount retry ${taskId} ${mount.mountId}` : "cove mount retry";
+    if (mount.errorKind === "FETCH_FAILED")
+      hints.push(
+        `mount ${mount.mountId}: fetching origin failed and nothing was created; fix the remote ` +
+          `and run \`${retry}\`, or create it from the commits already fetched with ` +
+          `\`${retry} --no-fetch\``,
+      );
+    else if (mount.errorKind === "MAIN_BRANCH_UNRESOLVED")
+      hints.push(
+        `mount ${mount.mountId}: no main branch was found on origin; run \`${retry} --base REF\`, ` +
+          `or set it with \`cove repo set <repoId> mainBranch BRANCH\` and run \`${retry}\``,
+      );
+    else if (mount.errorKind === "BRANCH_EXISTS")
+      hints.push(
+        `mount ${mount.mountId}: the branch already exists; run \`${retry} --branch NEW\``,
+      );
+  }
+  return hints;
 }
