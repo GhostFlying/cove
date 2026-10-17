@@ -17,9 +17,15 @@ does not enforce read-only use:
     the registered clone itself, or with path= an existing worktree of it that Cove does not
     manage; path= comes last and takes the rest of the value. A path Cove manages as a worktree
     is refused (MANAGED_WORKTREE_NOT_MOUNTABLE).
-A worktree mount is a new Git worktree Cove creates in the workspace entry. It is not available
-yet: the server refuses it with CAPABILITY_UNAVAILABLE and records nothing.
+A worktree mount is a new Git worktree Cove creates and manages at <entry>/NAME:
   --worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]
+    BRANCH (default cove/<task slug>) is a new branch; an existing one fails the mount
+    (BRANCH_EXISTS). Cove first fetches origin; a failed fetch fails the mount and creates
+    nothing (FETCH_FAILED), and only no-fetch skips it. The base is REF, otherwise the remote
+    branch of the repo's mainBranch, origin/HEAD, the remote's HEAD, then origin/main, master,
+    trunk or develop; never the local HEAD (MAIN_BRANCH_UNRESOLVED). The command waits while the
+    mounts are prepared one after another; a failed mount leaves the others and can be retried
+    with cove mount retry.
 NAME defaults to the repo's display name. The workspace entry directory holds cove-workspace.json,
 the manifest of every mount with its real path; a checkout is reached by that real path.`;
 
@@ -81,6 +87,109 @@ export async function getTask(client: Client, taskId: string): Promise<TaskRecor
   return unwrap("task.get", await client.call("task.get", { taskId })).task;
 }
 
+// What a failed or abandoned preparation left in place (the mount outcomes' `left`, m1 T3b),
+// joined with the mount and repo records so the operator can find it: Cove removes only what it
+// can delete without losing work, and leaves the rest for a person to look at. A field the
+// records no longer give is null.
+export type Leftover = {
+  mountId: string;
+  path: string | null;
+  branch: string | null;
+  repoPath: string | null;
+  effects: ("worktree" | "branch")[];
+};
+
+export async function leftoversOf(
+  client: Client,
+  operation: OperationRecord,
+  task?: TaskRecord,
+): Promise<Leftover[]> {
+  const left = (operation.result?.mounts ?? []).filter((mount) => mount.left !== undefined);
+  if (!left.length) return [];
+  const mounts = new Map<string, TaskRecord["workspace"]["mounts"][number]>();
+  const add = (found: TaskRecord) => {
+    for (const mount of found.workspace.mounts) mounts.set(mount.mountId, mount);
+  };
+  try {
+    const resource = operation.result?.resource;
+    if (task) add(task);
+    else if (resource?.kind === "task") add(await getTask(client, resource.id));
+    else {
+      // mount.add and mount.retry name the mount, not its task: look through the tasks.
+      let after: string | undefined;
+      do {
+        const page = unwrap(
+          "task.list",
+          await client.call("task.list", {
+            limit: 100,
+            archived: "include",
+            ...(after ? { afterTaskId: after } : {}),
+          }),
+        );
+        for (const found of page.tasks) add(found);
+        after = page.nextAfterTaskId;
+      } while (after && left.some((mount) => !mounts.has(mount.mountId)));
+    }
+  } catch {
+    // Reported with what is known.
+  }
+  const repos = new Map<string, string | null>();
+  const leftovers: Leftover[] = [];
+  for (const outcome of left) {
+    const mount = mounts.get(outcome.mountId);
+    let repoPath: string | null = null;
+    if (mount) {
+      if (!repos.has(mount.repoId)) {
+        let path: string | null = null;
+        try {
+          path = unwrap("repo.get", await client.call("repo.get", { repoId: mount.repoId })).repo
+            .path;
+        } catch {
+          // As above.
+        }
+        repos.set(mount.repoId, path);
+      }
+      repoPath = repos.get(mount.repoId) ?? null;
+    }
+    leftovers.push({
+      mountId: outcome.mountId,
+      path: mount?.path ?? null,
+      branch: mount?.branch ?? null,
+      repoPath,
+      effects: outcome.left === "both" ? ["worktree", "branch"] : [outcome.left!],
+    });
+  }
+  return leftovers;
+}
+
+// The commands an operator would run to remove the leftovers once they have looked at them; never
+// run by Cove. Without --force: Git itself refuses a worktree with changes and an unmerged branch.
+export function leftoverHints(leftovers: readonly Leftover[]): string[] {
+  const hints: string[] = [];
+  for (const leftover of leftovers) {
+    const repo = leftover.repoPath === null ? "<repo>" : shellQuote(leftover.repoPath);
+    const commands: string[] = [];
+    if (leftover.effects.includes("worktree"))
+      commands.push(
+        `git -C ${repo} worktree remove ${leftover.path === null ? "<path>" : shellQuote(leftover.path)}`,
+      );
+    if (leftover.effects.includes("branch"))
+      commands.push(
+        `git -C ${repo} branch -d ${leftover.branch === null ? "<branch>" : shellQuote(leftover.branch)}`,
+      );
+    hints.push(
+      `mount ${leftover.mountId}: left in place (${leftover.effects.join(", ")}), not removed ` +
+        `because deleting it could lose work; check it, then remove it yourself if it is not needed: ` +
+        commands.map((command) => `\`${command}\``).join(", then "),
+    );
+  }
+  return hints;
+}
+
+function shellQuote(text: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
 // The ending of a write that changes a task's mounts: print the settled operation together with
 // the task as it is now, so per-mount outcomes and the read-only notice are visible even when
 // the operation failed (a partial success is never shown as complete). Exits 1 unless it
@@ -90,11 +199,54 @@ export async function printTaskOperation(
   operation: OperationRecord,
   taskId: string,
 ): Promise<number> {
-  print({ operation, task: describeTask(await getTask(client, taskId)) });
+  const task = await getTask(client, taskId);
+  const leftovers = await leftoversOf(client, operation, task);
+  print({ operation, task: describeTask(task), ...(leftovers.length ? { leftovers } : {}) });
   if (operation.state === "succeeded") return 0;
   const reason = operation.error ? `: ${operation.error.kind}` : "";
   process.stderr.write(
     `cove: ${operation.method} ${operation.operationId} ${operation.state}${reason}\n`,
   );
+  for (const hint of [...operationHints(operation, taskId), ...leftoverHints(leftovers)])
+    process.stderr.write(`cove: ${hint}\n`);
   return 1;
+}
+
+// What the operator can do next about an operation that did not succeed (T3b). The hints name
+// commands only; the record printed on stdout is the result. For requires_attention they offer
+// exactly the actions the server advertises in progress.recoveryActions: an abandon that stopped
+// can only be continued, never abandoned.
+export function operationHints(operation: OperationRecord, taskId?: string): string[] {
+  const hints: string[] = [];
+  const id = operation.operationId;
+  if (operation.state === "requires_attention") {
+    const actions = (operation.progress?.recoveryActions ?? []).map(
+      (action) => `\`cove operation ${action} ${id}\``,
+    );
+    hints.push(
+      actions.length
+        ? `inspect it with \`cove operation get ${id}\`, then ${actions.join(" or ")}`
+        : `inspect it with \`cove operation get ${id}\``,
+    );
+  }
+  const failedMounts = (operation.result?.mounts ?? []).filter((mount) => mount.state === "failed");
+  for (const mount of failedMounts) {
+    const retry = taskId ? `cove mount retry ${taskId} ${mount.mountId}` : "cove mount retry";
+    if (mount.errorKind === "FETCH_FAILED")
+      hints.push(
+        `mount ${mount.mountId}: fetching origin failed and nothing was created; fix the remote ` +
+          `and run \`${retry}\`, or create it from the commits already fetched with ` +
+          `\`${retry} --no-fetch\``,
+      );
+    else if (mount.errorKind === "MAIN_BRANCH_UNRESOLVED")
+      hints.push(
+        `mount ${mount.mountId}: no main branch was found on origin; run \`${retry} --base REF\`, ` +
+          `or set it with \`cove repo set <repoId> mainBranch BRANCH\` and run \`${retry}\``,
+      );
+    else if (mount.errorKind === "BRANCH_EXISTS")
+      hints.push(
+        `mount ${mount.mountId}: the branch already exists; run \`${retry} --branch NEW\``,
+      );
+  }
+  return hints;
 }
