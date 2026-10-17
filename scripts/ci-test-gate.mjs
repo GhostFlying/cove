@@ -284,7 +284,7 @@ export const requiredSuites = [
     file: "apps/server/tests/author/workspaces.test.mjs",
     minimumTests: 74,
   },
-  { project: "server", file: "apps/server/tests/author/tabs.test.mjs", minimumTests: 14 },
+  { project: "server", file: "apps/server/tests/author/tabs.test.mjs", minimumTests: 19 },
   {
     project: "server",
     file: "apps/server/tests/author/store-worker.test.mjs",
@@ -1033,6 +1033,8 @@ export const fileRegisteredDirectories = [
       "s1-repo-registration",
       "s10-storage-identity",
       "s2-task-checkout-mounts",
+      "s5-tabs-runs",
+      "s7-tab-restart",
       "test-isolation",
     ],
   },
