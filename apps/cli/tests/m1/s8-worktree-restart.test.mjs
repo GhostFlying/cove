@@ -27,7 +27,7 @@ afterEach(async () => {
 
 function realGit() {
   return new Promise((done, fail) =>
-    execFile("/bin/sh", ["-c", "command -v git"], { env: process.env }, (error, stdout) =>
+    execFile("/bin/sh", ["-c", "command -v git"], { env: fixture.env }, (error, stdout) =>
       error ? fail(error) : done(stdout.trim()),
     ),
   );
