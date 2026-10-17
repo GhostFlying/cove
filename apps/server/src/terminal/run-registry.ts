@@ -150,6 +150,24 @@ export class RunRegistry {
     return true;
   }
 
+  // Drops a dispatched run whose spawn the worker definitely refused (see
+  // LocalRuntime.retireRefusedSpawn). A run the worker ever reported live or exited was started,
+  // so it is never dropped here, whatever a later answer says.
+  retireRefusedSpawn(run: RunRef, worker: WorkerRef): boolean {
+    const entry = this.entries.get(run.runId);
+    if (
+      !entry ||
+      !sameRunRef(run, entry.run) ||
+      !sameWorkerRef(worker, entry.worker) ||
+      !entry.dispatched ||
+      entry.status.status !== "unverifiable"
+    )
+      return false;
+    this.entries.delete(run.runId);
+    entry.lease.release();
+    return true;
+  }
+
   releaseCapacity(run: RunRef, worker: WorkerRef): boolean {
     const entry = this.entries.get(run.runId);
     if (

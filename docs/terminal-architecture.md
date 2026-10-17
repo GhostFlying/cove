@@ -402,6 +402,12 @@ runtime 缓存不是第二份 headless 模型。已选持久化方案 A：首期
   大文件走独立 HTTP 通道，带宽仍需统一预算；终端二进制数据不进入 JSON-RPC 或 UI 全局状态树。
 - 每个 terminal 限制尺寸、历史行数、解析积压与回放字节，同时设置整个 server 的内存预算；
   仅限制 scrollback 行数不足以限制超宽终端或可变内容的内存。
+- run 名额：每个 run 从预留起占用 runtime 与 worker 的 run 名额（各至多 `maxRuns`）。spawn 未交给 worker 时释放名额。
+  已交出的 spawn 被 worker 明确拒绝（not-accepted，且不是 OPERATION_ID_CONFLICT）时什么都没启动：worker 只在尚未创建任何东西、
+  或原生层在 PTY 存在之前拒绝时这样回答，并且不保留该 run 身份；runtime 随即退役该 run，移除登记、放置与会话路由，
+  它不再出现在 terminal.list/get 中，名额可以复用（#121 评审 P1：此前它一直显示为不可验证、无法 attach 或 stop，并永久占用名额）。
+  结果未知的 spawn 保留名额并显示为不可验证，因为 worker 可能已启动它。run ID 在同一 server 内从不重发
+  （新实例按持久的最高编号续号，见 [M1 D8](milestones/m1.md)），所以被退役的 ID 不需要另设墓碑。
 - 原型先使用每终端 1,000 行历史，对总预算及可配置上限继续测量；这不是冻结的产品默认值。
   恢复按需生成、合并重复请求并限流。同步 serialize 可能阻塞同子进程其他终端，
   必须测量恢复期间的输入延迟，必要时约束历史规模或调整实现，不能只靠增加子进程掩盖长暂停。
