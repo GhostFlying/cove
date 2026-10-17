@@ -153,18 +153,18 @@ test("a run keeps running while no client is connected and stops on tab stop", a
   const { task } = await checkoutTask(home, "Long run");
   // Appends a line every 50 ms; the file growing proves the process runs.
   const beats = join(fixture.root, "beats");
-  const created = await fixture.coveJson(
-    [
-      "tab",
-      "create",
-      task.taskId,
-      "--",
-      "/bin/sh",
-      "-c",
-      `echo $$ > '${beats}.pid'; while :; do echo beat >> '${beats}'; sleep 0.05; done`,
-    ],
-    { home },
-  );
+  const createArgs = [
+    "tab",
+    "create",
+    task.taskId,
+    "--operation-id",
+    "s5-long",
+    "--",
+    "/bin/sh",
+    "-c",
+    `echo $$ > '${beats}.pid'; while :; do echo beat >> '${beats}'; sleep 0.05; done`,
+  ];
+  const created = await fixture.coveJson(createArgs, { home });
   const tabId = created.operation.result.resource.id;
   await waitFor("the run's pid", () => readFile(`${beats}.pid`, "utf8").then(Boolean, () => false));
   await fixture.trackPid(Number((await readFile(`${beats}.pid`, "utf8")).trim()));
@@ -198,6 +198,56 @@ test("a run keeps running while no client is connected and stops on tab stop", a
   expect(closed).toMatchObject({ method: "tab.close", state: "succeeded" });
   expect((await fixture.coveJson(["tab", "list", task.taskId], { home })).tabs).toEqual([]);
   await refused(["tab", "get", tabId], home, "TAB_NOT_FOUND");
+  // The create's record outlives its tab: resending it returns the record, and the server's
+  // TAB_NOT_FOUND is printed as `tab: null`, not as a failed read.
+  const resent = await fixture.cove(createArgs, { home });
+  expect(resent.code).toBe(0);
+  expect(JSON.parse(resent.stdout)).toEqual({
+    operation: created.operation,
+    tab: null,
+    latestRun: null,
+  });
+});
+
+test("a write whose tab cannot be read afterwards prints its operation and reports the failed read", async () => {
+  // The compiled ending of tab create/reopen/stop with a client whose tab.get fails after the
+  // write settled: the receipt is the write's outcome, so it is printed, with `tabReadError`
+  // instead of a tab (which would claim there is none) and a non-zero exit.
+  const { printTabOperation } = await import("../../dist/commands/tab.js");
+  const operation = {
+    operationId: "s5-read",
+    method: "tab.reopen",
+    revision: 2,
+    state: "succeeded",
+    run: { serverId: "server", relayInstanceId: "instance", runId: "run-9" },
+    result: { resource: { kind: "tab", id: "tab-1", revision: 3 } },
+  };
+  const client = {
+    call: async () => ({
+      ok: false,
+      kind: "local-error",
+      error: { category: "transport", reason: "connection-closed" },
+    }),
+  };
+  const stdout = [];
+  const stderr = [];
+  const out = process.stdout.write;
+  const err = process.stderr.write;
+  process.stdout.write = (chunk) => stdout.push(String(chunk)) > 0;
+  process.stderr.write = (chunk) => stderr.push(String(chunk)) > 0;
+  let code;
+  try {
+    code = await printTabOperation(client, operation);
+  } finally {
+    process.stdout.write = out;
+    process.stderr.write = err;
+  }
+  expect(code).toBe(1);
+  expect(JSON.parse(stdout.join(""))).toEqual({
+    operation,
+    tabReadError: "tab.get failed: transport connection-closed",
+  });
+  expect(stderr.join("")).toContain("tab.reopen s5-read succeeded; the tab could not be read");
 });
 
 test("a tab can start in a mount, be created without a run, and its create is deduplicated", async () => {
