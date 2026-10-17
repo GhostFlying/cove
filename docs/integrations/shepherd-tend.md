@@ -1,6 +1,6 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `47229e6`（2026-10-17；`deb33ea` 之后的提交未改变本文所列接口），另列出未合入的 PR #109（T3a）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `6a838af`（2026-10-17，T3a PR #109 合入）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
@@ -30,15 +30,15 @@
 | 终端 run（不属于 tab）   | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                                                                                        | M0 路径；tab 尚未提供（见 §3）                                                                                                                                                                                                                |
 | 查看与停止 run           | `cove terminal list`、`terminal get <runId>`、`terminal stop <runId>`                   | `8b06fe4`                                                                                                        |                                                                                                                                                                                                                                               |
 | 操作身份                 | 写命令接受 `--operation-id ID`；`cove operation get <id>`、`cove operation resend <id>` | `c02367b`（重发只发保存的请求：`2d89043`）                                                                       | 首次发送前把请求保存为本机待定记录；`resend` 只向原 server 原样重发，已有记录时返回原记录、不重复执行                                                                                                                                         |
-| Repo 注册                | `cove repo register/list/get/set/reset/remove`                                          | `200e24d`（T2）                                                                                                  | 注册不改动 clone；`remove` 只删除注册                                                                                                                                                                                                         |
+| Repo 注册                | `cove repo register/list/get/set/reset/remove`                                          | `200e24d`（T2）；`REPO_IN_USE`：`09a61c3`                                                                        | 注册不改动 clone；`remove` 只删除注册，仍有挂载引用时拒绝（见下文 T3a）                                                                                                                                                                       |
+| Task 与 workspace        | `cove task create/list/get/rename/archive/unarchive`                                    | `3d65dc4`（CLI）、`fc41992`（server），T3a                                                                       | 见下文 T3a                                                                                                                                                                                                                                    |
+| Checkout 挂载            | `cove mount add <taskId> --checkout SPEC`、`cove mount remove <taskId> <mountId>`       | `3d65dc4`、`fc41992`，T3a                                                                                        | 托管 worktree 挂载尚未提供（见 §3）；见下文 T3a                                                                                                                                                                                               |
 | 重启后的 run 与操作记录  | server 停止与启动时处理，无单独命令                                                     | `d99ef5d`（存储原语：`299514d`）                                                                                 | 正常停止时当前实例存活的 run 记为 stopped-with-server；启动时，旧实例中仍为 starting/running（没有结束记录）的 run 记为 interrupted/unverifiable，已有的结束记录不变；不探测旧 PID、不重跑。无法证明结果的操作为 requires_attention           |
 | 输出                     | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                                                                                        | 尚无版本号与稳定性承诺（见 §6）                                                                                                                                                                                                               |
 | 退出码与错误             | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                                                                                        | CLI 自身的错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出                                                                                                                                                                               |
 | 子 server 进程的退出状态 | `cove server start`、`cove server init`                                                 | `0a76f8c`（start 保留退出状态，信号为 128+N）、`2d3628a`（就绪前退出时同样保留）、`c02367b`（init 使用同一映射） | 原样转发子 server 进程的 stderr，并以其退出状态结束；`8b06fe4` 时信号结束的 server 仍返回 1                                                                                                                                                   |
 
-## 3. 进行中（PENDING）与计划中（PLANNED）
-
-PENDING：PR #109（T3a：task、workspace 与 checkout 挂载），未合入：
+T3a（PR #109，合入于 `6a838af`；server `fc41992`，`repo remove` 的 `REPO_IN_USE` `09a61c3`，CLI `3d65dc4`）：
 
 - `cove repo remove` 在仍有任一 task（含已归档）的挂载引用该 repo 时返回 `REPO_IN_USE`，先 `cove mount remove`。
 - `cove task create <标题> [--checkout SPEC]... [--worktree SPEC]...`、`task list [--archived exclude/include/only]`、
@@ -62,6 +62,10 @@ PENDING：PR #109（T3a：task、workspace 与 checkout 挂载），未合入：
   读取在约 3 秒内返回，届时未完成的核对为 unavailable。`sharedWithTaskIds` 含已归档 task，直到其挂载移除。CLI 为每个挂载加
   `readOnlyUse`，有 checkout 时加 `notice`。`task create`、`mount add/remove` 输出 `{ operation, task }`，
   操作未成功时仍输出并以 1 退出。
+
+## 3. 进行中（PENDING）与计划中（PLANNED）
+
+目前没有 PENDING 项。
 
 PLANNED：
 
@@ -119,3 +123,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-16 | main `e11f175`（PR #105）           | `cove status` 输出新增 `workers[]`（worker 过载状态，只作提示），由 `e11f175` “feat(terminal): report an overloaded worker without acting on it” 引入                                                                                                             |
 | 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE` |
 | 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                  |
+| 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入          |
