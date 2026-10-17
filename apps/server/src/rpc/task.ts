@@ -5,13 +5,13 @@ import { capabilityUnavailable, type LocalCore, type RpcHandler } from "./contex
 // Task domain module (task.create, task.list, task.get, task.update, task.archive,
 // task.unarchive, mount.add, mount.remove; M1 T3a). The service is built from the composition's
 // store, receipts and configuration once per core, like the repo module; a composition without
-// them (unit tests) reports CAPABILITY_UNAVAILABLE for every method. Worktree mounts are refused
-// with CAPABILITY_UNAVAILABLE until T3b creates them (domain/workspaces.ts).
+// them (unit tests) reports CAPABILITY_UNAVAILABLE for every method. The mount module
+// (rpc/mount.ts) uses the same service, so one worktree executor serves both (T3b).
 const services = new WeakMap<LocalCore, WorkspaceService>();
 const encoder = new TextEncoder();
 const encodeUtf8 = (text: string): Uint8Array => encoder.encode(text);
 
-function service(core: LocalCore): WorkspaceService | null {
+export function service(core: LocalCore): WorkspaceService | null {
   if (!core.store || !core.receipts || !core.config) return null;
   let found = services.get(core);
   if (!found) {
