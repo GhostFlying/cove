@@ -1602,4 +1602,104 @@ describe("status reads waiting for the status window", () => {
     expect(writtenStatus(f)).toEqual(["first"]);
     f.session.transportReleased();
   });
+
+  // Issue #115 round-2 review: deadline and eligibility hold up to the actual handover.
+  it("refuses a read its caller does not want, or whose predicate throws, on a free window", async () => {
+    const f = fixture();
+    f.start();
+    const declined = await f.session.requestStatus(f.command("status", "declined"), () => false);
+    expect(declined.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    const thrown = await f.session.requestStatus(f.command("status", "thrown"), () => {
+      throw new Error("caller gone");
+    });
+    expect(thrown.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(writtenStatus(f)).toEqual([]);
+    expect(f.session.snapshot()).toMatchObject({ pending: 0, identities: 0 });
+    const live = f.command("status", "live");
+    const result = f.session.requestStatus(live, () => true);
+    f.session.receive(answer(f, live));
+    expect((await result).outcome).toBe("accepted");
+    expect(f.lost()).toBe(0);
+    f.session.transportReleased();
+  });
+
+  // Promotes "late" behind "first" while the transport is backpressured, so it is admitted but
+  // still queued unsent when `change` runs.
+  async function promotedUnderBackpressure(f, eligible) {
+    f.block();
+    const first = f.command("status", "first");
+    const held = f.session.requestStatus(first);
+    const late = settled(f.session.requestStatus(f.command("status", "late"), eligible));
+    f.session.receive(answer(f, first));
+    await held;
+    await turns();
+    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(late.value).toBeUndefined();
+    return late;
+  }
+
+  it("never hands over a promoted read whose caller retired while it was backpressured", async () => {
+    const f = fixture();
+    f.start();
+    let wanted = true;
+    const late = await promotedUnderBackpressure(f, () => wanted);
+    wanted = false;
+    // drain() hands queued frames over without a tick in between.
+    f.unblock();
+    f.session.drain();
+    await turns();
+    expect(late.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(f.lost()).toBe(0);
+    // The window and the correlation were released: the next read goes at once.
+    const next = f.command("status", "next");
+    const result = f.session.requestStatus(next);
+    expect(writtenStatus(f)).toEqual(["first", "next"]);
+    f.session.receive(answer(f, next));
+    expect((await result).outcome).toBe("accepted");
+    f.session.transportReleased();
+  });
+
+  it("withdraws a promoted, still queued read on the tick once its caller is gone", async () => {
+    const f = fixture();
+    f.start();
+    let wanted = true;
+    const late = await promotedUnderBackpressure(f, () => wanted);
+    wanted = false;
+    f.session.tick();
+    await turns();
+    expect(late.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    f.unblock();
+    f.session.drain();
+    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(f.lost()).toBe(0);
+    f.session.transportReleased();
+  });
+
+  it("never hands over a promoted read whose deadline passed before drain, with no tick between", async () => {
+    const f = fixture();
+    f.start();
+    // Requested at 0, so its deadline is 100.
+    const late = await promotedUnderBackpressure(f, undefined);
+    f.clock(100);
+    f.unblock();
+    f.session.drain();
+    await turns();
+    expect(late.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(f.lost()).toBe(0);
+    f.session.transportReleased();
+  });
+
+  it("hands over a promoted read drained just before its deadline", async () => {
+    const f = fixture();
+    f.start();
+    const late = await promotedUnderBackpressure(f, undefined);
+    f.clock(99);
+    f.unblock();
+    f.session.drain();
+    expect(writtenStatus(f)).toEqual(["first", "late"]);
+    expect(late.value).toBeUndefined();
+    f.session.transportReleased();
+  });
 });
