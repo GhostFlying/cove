@@ -1264,11 +1264,6 @@ describe("checkout identity", () => {
       for (const blocker of blockers) hung.add(blocker.path);
       const reads = await Promise.all(blockers.map((blocker) => env.tasks.get(blocker.taskId)));
       for (const read of reads) expect(read.task.workspace.mounts[0].state).toBe("unavailable");
-      // A read answers by a timer at its deadline, and a timer can fire up to a millisecond
-      // before performance.now() reaches a fractional deadline. The hung checks count as
-      // abandoned (and saturate the permits) only once their holders are past it; a write
-      // probing before then would wait for a permit until its own deadline instead.
-      await sleep(20);
     };
     const release = async () => {
       hung.clear();
@@ -1318,6 +1313,42 @@ describe("checkout identity", () => {
       (await env.tasks.addMount("p", { operationId: "a", taskId, mount: checkout })).operation
         .state,
     ).toBe("succeeded");
+  });
+
+  it("refuses a write as BUSY at once right after the reads that filled the permits gave up, though their timers fired early", async () => {
+    // A timer can fire before performance.now() reaches a fractional deadline (Node keeps whole
+    // milliseconds against a cached loop clock; about a millisecond, at random). Here every timer
+    // of the reads' budget fires 200 ms early, so that the case is not left to chance.
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...rest) =>
+      realSetTimeout(callback, ms > 500 && ms <= 600 ? ms - 200 : ms, ...rest);
+    try {
+      const { env, fill, release, afterAdmission } = await saturable({
+        readBudgetMs: 600,
+        writeStepBudgetMs: 3000,
+      });
+      const alpha = await env.register("alpha");
+      const { taskId } = await created(env.tasks, "c-t", "T");
+      let filled = 0;
+      // No pause after the reads: the write asks for a permit as soon as they have answered.
+      afterAdmission(async () => {
+        await fill();
+        filled = performance.now();
+      });
+      const added = await env.tasks.addMount("p", {
+        operationId: "a",
+        taskId,
+        mount: { source: "checkout", repoId: alpha.repoId },
+      });
+      const waited = performance.now() - filled;
+      expect(added.error).toMatchObject(busy);
+      // At once: the reads gave up only at their deadline, so the work holding the permits is
+      // abandoned when the write asks, not 200 ms later and not at the write's own deadline.
+      expect(waited).toBeLessThan(100);
+      await release();
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
   });
 
   it("gives every Git discovery of a write the write-step deadline", async () => {
@@ -1578,6 +1609,54 @@ describe("capacity handover", () => {
     finish("first");
     return { held, waiting: await waiting, started: () => started };
   }
+
+  it("answers a queued permit request as soon as every permit is held by work past its deadline", async () => {
+    const permits = new FsPermits(2);
+    const hung = () => new Promise(() => {});
+    const abandonedAt = performance.now() + 100;
+    expect(await permits.start({}, abandonedAt, hung)).not.toBe(null);
+    expect(await permits.start({}, abandonedAt, hung)).not.toBe(null);
+    // Asked while both holders are still within their deadline: the request waits.
+    const asked = performance.now();
+    let started = 0;
+    const answer = await permits.start({}, asked + 3000, async () => (started += 1));
+    const waited = performance.now() - asked;
+    expect(answer).toBe(null);
+    expect(started).toBe(0);
+    // Answered when the holders' work was abandoned (it never settles, so nothing comes free),
+    // not at the request's own deadline.
+    expect(performance.now()).toBeGreaterThanOrEqual(abandonedAt);
+    expect(waited).toBeLessThan(1000);
+    // A request made after that is answered at once, as before.
+    const later = performance.now();
+    expect(await permits.start({}, later + 3000, async () => "late")).toBe(null);
+    expect(performance.now() - later).toBeLessThan(50);
+  });
+
+  it("gives up a Git slot or permit request only at its deadline, though its timer fired early", async () => {
+    // As in the BUSY test above: every timer of these deadlines fires 200 ms early.
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, ms, ...rest) =>
+      realSetTimeout(callback, ms > 500 && ms <= 600 ? ms - 200 : ms, ...rest);
+    try {
+      let finish;
+      const holding = new Promise((done) => (finish = done));
+      const slots = new Slots(1);
+      const held = slots.run({}, performance.now() + 10_000, () => holding, "busy");
+      let deadline = performance.now() + 600;
+      expect(await slots.run({}, deadline, async () => "late", "busy")).toBe("busy");
+      expect(performance.now()).toBeGreaterThanOrEqual(deadline);
+      const permits = new FsPermits(1);
+      expect(await permits.start({}, performance.now() + 10_000, () => holding)).not.toBe(null);
+      deadline = performance.now() + 600;
+      expect(await permits.start({}, deadline, async () => "late")).toBe(null);
+      expect(performance.now()).toBeGreaterThanOrEqual(deadline);
+      finish("done");
+      expect(await held).toBe("done");
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+  });
 
   it("starts no filesystem work for a permit handed over before its deadline but resumed after it", async () => {
     const permits = new FsPermits(1);
