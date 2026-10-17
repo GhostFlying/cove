@@ -51,6 +51,9 @@ function fixture(
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
   const writes = [];
+  // The settle callbacks of writes whose handover the session refused, so a test can deliver a
+  // late or duplicate settle notification for a frame that was never written.
+  const refusedWrites = [];
   let blocked = false;
   let now = 0;
   let lost = 0;
@@ -61,7 +64,12 @@ function fixture(
     codec,
     transport: {
       write: (data, settled, handing) => {
-        handing();
+        try {
+          handing();
+        } catch (error) {
+          refusedWrites.push(settled);
+          throw error;
+        }
         writes.push({ data, settled });
         forward?.(data);
         return !blocked;
@@ -105,6 +113,7 @@ function fixture(
     session,
     bytes,
     writes,
+    refusedWrites,
     ready,
     start,
     command,
@@ -1641,15 +1650,50 @@ describe("status reads waiting for the status window", () => {
   it("never hands over a promoted read whose caller retired while it was backpressured", async () => {
     const f = fixture();
     f.start();
+    // An idle ready session's retained bytes, which every refusal must return to.
+    const idle = f.bytes.snapshot().total;
     let wanted = true;
     const late = await promotedUnderBackpressure(f, () => wanted);
+    // A frame of another kind queued behind the read that will be refused.
+    const stop = f.command("stop", "stop", { operationId: "stop" });
+    const stopped = f.session.request(stop);
+    f.settleWrites();
+    expect(f.session.snapshot().physicalBytes).toBe(0);
     wanted = false;
     // drain() hands queued frames over without a tick in between.
     f.unblock();
     f.session.drain();
     await turns();
     expect(late.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
-    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(f.refusedWrites).toHaveLength(1);
+    expect(f.lost()).toBe(0);
+    // flush() went on past the refused frame: the stop behind it was written, in order.
+    const ids = f.writes
+      .map(({ data }) => createPipeDecoder().read(data).frames[0])
+      .map((value) => JSON.parse(codec.decode(value.metadata)).requestId)
+      .filter(Boolean);
+    expect(ids).toEqual(["first", "stop"]);
+    // The refused frame holds no transport bytes: only the stop's frame is in flight.
+    expect(f.session.snapshot()).toMatchObject({
+      physicalBytes: f.writes.at(-1).data.buffer.byteLength,
+      queuedBytes: 0,
+    });
+    f.settleWrites();
+    f.session.receive(f.reply(stop, { operationId: "stop" }));
+    expect((await stopped).outcome).toBe("accepted");
+    const settledState = f.session.snapshot();
+    expect(settledState).toMatchObject({
+      pending: 0,
+      identities: 0,
+      queuedBytes: 0,
+      physicalBytes: 0,
+    });
+    expect(f.bytes.snapshot().total).toBe(idle);
+    // A late or duplicate settle notification for the refused frame changes nothing.
+    f.refusedWrites[0]();
+    f.refusedWrites[0]();
+    expect(f.session.snapshot()).toEqual(settledState);
+    expect(f.bytes.snapshot().total).toBe(idle);
     expect(f.lost()).toBe(0);
     // The window and the correlation were released: the next read goes at once.
     const next = f.command("status", "next");
@@ -1657,7 +1701,12 @@ describe("status reads waiting for the status window", () => {
     expect(writtenStatus(f)).toEqual(["first", "next"]);
     f.session.receive(answer(f, next));
     expect((await result).outcome).toBe("accepted");
+    // Teardown releases everything exactly once.
+    f.settleWrites();
+    f.session.loseContact();
     f.session.transportReleased();
+    expect(f.session.snapshot()).toMatchObject({ physicalBytes: 0, queuedBytes: 0 });
+    expect(f.bytes.snapshot().total).toBe(0);
   });
 
   it("withdraws a promoted, still queued read on the tick once its caller is gone", async () => {
