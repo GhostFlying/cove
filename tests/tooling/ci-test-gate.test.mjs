@@ -140,7 +140,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "runtime-admission", 21],
     ["author", "local-entry", 50],
     ["independent", "qualified-local-admission", 4],
-    ["author", "worker-pipe-session", 11],
+    ["author", "worker-pipe-session", 48],
     ["author", "operation-receipts", 24],
     ["author", "rpc-dispatch", 4],
     ["author", "store", 24],
@@ -151,7 +151,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "terminal-control", 19],
     ["independent", "terminal-control-contract", 34],
     ["independent", "terminal-control-client", 7],
-    ["author", "preview-cache", 27],
+    ["author", "preview-cache", 42],
     ["independent", "preview-contract", 15],
     ["independent", "preview-client", 4],
   ].map(([directory, name, minimumTests]) => {

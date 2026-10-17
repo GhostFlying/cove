@@ -256,7 +256,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/worker-pipe-session.test.mjs",
-    minimumTests: 11,
+    minimumTests: 48,
   },
   { project: "server", file: "apps/server/tests/author/worker-health.test.mjs", minimumTests: 5 },
   {
@@ -327,7 +327,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/preview-cache.test.mjs",
-    minimumTests: 27,
+    minimumTests: 42,
   },
   {
     project: "server",
