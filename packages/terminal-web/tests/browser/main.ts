@@ -1326,6 +1326,168 @@ const fixture = {
   focus() {
     document.querySelector<HTMLTextAreaElement>(".xterm-helper-textarea")?.focus();
   },
+  // Rebuilds the ready view's xterm, by a newer initialize or by a baseline into a used xterm,
+  // with keyboard focus first in the view, in another control of the page, or nowhere. Reports
+  // where focus is afterwards and the focus intents the rebuild published.
+  async rebuildWithFocus(focus: "view" | "elsewhere" | "none", rebuild: "initialize" | "baseline") {
+    await initialize();
+    await ready(encoder.encode("used"));
+    const other = document.createElement("input");
+    document.body.append(other);
+    try {
+      if (focus === "view") fixture.focus();
+      else if (focus === "elsewhere") other.focus();
+      else (document.activeElement as HTMLElement | null)?.blur();
+      const retired = capturedTerminal;
+      const focusesBefore = focuses.length;
+      if (rebuild === "initialize") {
+        generation++;
+        await view!.initialize({
+          profile: "pragmatic-logical-grid-v1",
+          encoding: "vt-checkpoint-tail-v1",
+          geometry: currentGeometry,
+          appearance,
+          viewGeneration: generation,
+        });
+      } else {
+        await view!.beginBaseline(descriptor(1));
+      }
+      const active = document.activeElement;
+      return {
+        rebuilt: capturedTerminal !== retired,
+        active:
+          active !== null && capturedTerminal?.element?.contains(active)
+            ? "view"
+            : active === other
+              ? "elsewhere"
+              : active === document.body
+                ? "body"
+                : "other",
+        focuses: structuredClone(focuses.slice(focusesBefore)),
+        generation,
+      };
+    } finally {
+      other.remove();
+    }
+  },
+  // The focus handoff's re-entry matrix (terminal-architecture 4.4.8). Handing focus to a rebuilt
+  // xterm runs page focus listeners synchronously. For each rebuild (a newer initialize, or a
+  // baseline into a used xterm), a one-shot focusin listener on the new xterm runs `action`, or
+  // Terminal.focus() throws after running it. Reports the rebuild's result, whether the listener
+  // was reached, what the action's own call returned, and the view's state afterwards, including
+  // whether a following baseline still installs.
+  async focusHandoffReentry(
+    rebuild: "initialize" | "baseline",
+    action:
+      | "initialize"
+      | "dispose"
+      | "hide"
+      | "focus-elsewhere"
+      | "baseline"
+      | "output"
+      | "throw"
+      | "initialize-then-throw",
+  ) {
+    await initialize();
+    await ready(encoder.encode("used"));
+    const other = document.createElement("input");
+    document.body.append(other);
+    const shared = view!;
+    const retired = capturedTerminal;
+    let reached = 0;
+    let nested: Promise<string | undefined> | undefined;
+    const run = () => {
+      reached++;
+      if (action === "initialize" || action === "initialize-then-throw") {
+        generation++;
+        nested = settle(
+          shared.initialize({
+            profile: "pragmatic-logical-grid-v1",
+            encoding: "vt-checkpoint-tail-v1",
+            geometry: currentGeometry,
+            appearance,
+            viewGeneration: generation,
+          }),
+        );
+      } else if (action === "dispose") shared.dispose();
+      else if (action === "hide") shared.setVisibility(false);
+      else if (action === "focus-elsewhere") other.focus();
+      else if (action === "baseline") nested = settle(shared.beginBaseline(descriptor(1)));
+      else if (action === "output") nested = settle(output(encoder.encode("nested"), 2));
+    };
+    const throwing = action === "throw" || action === "initialize-then-throw";
+    const originalFocus = Terminal.prototype.focus;
+    let armed = false;
+    const listener = (event: FocusEvent) => {
+      if (!armed || capturedTerminal === retired) return;
+      if (!capturedTerminal?.element?.contains(event.target as Node)) return;
+      armed = false;
+      run();
+    };
+    fixture.focus();
+    document.addEventListener("focusin", listener, true);
+    if (throwing)
+      Terminal.prototype.focus = function (this: Terminal) {
+        if (!armed || this === retired) return originalFocus.call(this);
+        armed = false;
+        run();
+        throw new Error("injected focus failure");
+      };
+    const failuresBefore = failures.length;
+    const focusesBefore = focuses.length;
+    armed = true;
+    let error: string | undefined;
+    try {
+      if (rebuild === "initialize") {
+        generation++;
+        error = await settle(
+          shared.initialize({
+            profile: "pragmatic-logical-grid-v1",
+            encoding: "vt-checkpoint-tail-v1",
+            geometry: currentGeometry,
+            appearance,
+            viewGeneration: generation,
+          }),
+        );
+      } else error = await settle(shared.beginBaseline(descriptor(1)));
+    } finally {
+      armed = false;
+      document.removeEventListener("focusin", listener, true);
+      Terminal.prototype.focus = originalFocus;
+    }
+    const nestedError = await nested;
+    const active = document.activeElement;
+    const after = {
+      rebuilt: capturedTerminal !== retired,
+      hidden: capturedTerminal?.element?.hasAttribute("hidden") ?? false,
+      active:
+        active !== null && capturedTerminal?.element?.contains(active)
+          ? "view"
+          : active === other
+            ? "elsewhere"
+            : active === document.body
+              ? "body"
+              : "other",
+      ownedRoots: ownedRoots(),
+      failures: failures.slice(failuresBefore).map((failure) => failure.kind),
+      focuses: focuses.length - focusesBefore,
+    };
+    other.remove();
+    // Whether the view (a successor, or the rebuilt one) still installs a baseline: begin one
+    // unless the rebuild or the nested call already began it, then write and finish it.
+    const begun =
+      (rebuild === "baseline" && error === undefined) ||
+      (action === "baseline" && nestedError === undefined);
+    let installs: string | undefined;
+    try {
+      if (!begun) await shared.beginBaseline(descriptor(1));
+      await shared.writeBaselineChunk(encoder.encode("x"));
+      await shared.finishBaseline();
+    } catch (caught) {
+      installs = kindOf(caught);
+    }
+    return { reached, error, nested: nestedError, installs, ...after };
+  },
   evidence,
   dispose() {
     for (const subscription of subscriptions.reverse()) subscription.dispose();

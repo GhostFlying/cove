@@ -506,7 +506,7 @@ setAppearance、setVisibility、dispose，并向 controller 报告 inputIntent�
 | `terminal-delivery.ts`（入口）                                                       | 发送方的 `onHandoff`/`onSettled`/`beforeSend`；路由回调；`owner.preview`/`previewReply`/`invalid`                                               | 嵌套发送、取消、失败                                  | 4.4.5                                                                                                     |
 | `terminal-preview.ts`                                                                | 只完成 promise；计时器同上                                                                                                                      | —                                                     | 预览条目身份（4.4.2）                                                                                     |
 | `web-ports.ts`                                                                       | `fetch`、`AbortController`、`WebSocket` 构造与事件、响应体 reader、`TextEncoder`/`TextDecoder`、`addEventListener`、`setTimeout`/`clearTimeout` | 平台事件晚到                                          | 实现端口契约：回调只在平台事件中异步发生，按端口句柄自身的关闭状态丢弃晚到事件；经上述端口回调进入 client |
-| `xterm-view.ts`                                                                      | xterm `new Terminal`、`open`、`blur`、`resize`、`options.theme`、`refresh`、`dispose`                                                           | blur 回调、抛出                                       | view 操作谓词（4.4.2）                                                                                    |
+| `xterm-view.ts`                                                                      | xterm `new Terminal`、`open`、`focus`、`blur`、`resize`、`options.theme`、`refresh`、`dispose`                                                  | focus 调用页面的 focus/focusin 监听、blur 回调、抛出  | view 操作谓词（4.4.2）                                                                                    |
 | `xterm-view-geometry.ts`                                                             | DOM 与 xterm 尺寸读取（`getBoundingClientRect`、`getComputedStyle`、cell 尺寸）                                                                 | 只触发同步布局，不运行脚本                            | 不可重入的读取；结果由 `measureGrid` 的调用方核对                                                         |
 | `browser-input-intents.ts`                                                           | DOM `addEventListener` 回调、`setTimeout` 标记定时器、`removeEventListener`/`clearTimeout`                                                      | 平台事件中发出 focus/input                            | 平台事件入口；dispose 时撤销                                                                              |
 | `xterm-input-origin.ts`                                                              | 替换的 `triggerDataEvent`、原始 data/binary 方法、`onUserInput` 订阅及其 dispose                                                                | 同步发出 input、INPUT_REJECTED 或致命错误             | 按 backend incarnation 核对                                                                               |
@@ -765,6 +765,10 @@ WebGL 是可替换的绘制后端。上下文丢失时应尝试恢复或切到�
 - 用户切入终端 tab/pane，或应用回到前台且该终端仍是输入焦点时，提交显式 focus 请求和网格尺寸。
 - Server 授予控制权后，控制者可以输入并更新 PTY 尺寸；其他客户端继续观看输出。
 - 单纯连接、后台订阅、组件重建和服务端控制权通知不触发 focus，不互相争抢。
+- 基线重建 xterm 时，旧 xterm 若持有键盘焦点，view 把 DOM 焦点交给新 xterm，使恢复期间的按键仍进入输入暂存，而不是落到 `<body>` 后丢失（#114）。
+  这只移动 DOM 焦点，不发布 focus 意图、不申请控制权；旧 xterm 未持有、或焦点已移到页面其他控件时不抢焦点，隐藏的视图也不聚焦。
+  交出焦点会同步运行页面的 focus 监听，所以重建先提交自身结果（基线先进入 installing），监听返回后再核对；被取代的重建以
+  RESYNC_REQUIRED 结束。隐藏视图时，即使 DOM 焦点尚未发布 focus 意图，view 也让 xterm 失焦，使隐藏的视图不接收按键。
 - 主动重新操作观看中的终端也要能触发 focus；不能仅依赖 DOM focus 事件，因为旧视图可能仍有本地焦点。
 - 观看者遵循 host 发布的终端网格，以缩放或滚动适配显示，不自行改变逻辑列数。
 - 无操作者或全部断线时保留最后有效尺寸，不缩成 0×0，不自动改用其他观看者的尺寸。

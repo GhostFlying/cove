@@ -143,3 +143,112 @@ test("V1-I6 never grammar-classifies reply-shaped genuine input", async () => {
   expect(evidence.inputs.map((item) => item.source)).toEqual(["keyboard", "paste"]);
   expect(evidence.inputs.map((item) => item.bytes)).toEqual([esc("\x1b[0n"), esc("\x1b[?1;2c")]);
 });
+
+// A baseline rebuilds the xterm. Keys typed while it installs must still reach the view, so a
+// rebuild hands keyboard focus to the new xterm when the old one had it (#114). It moves DOM
+// focus only: the rebuild publishes no focus intent, and the next key publishes one as usual.
+// Focus elsewhere on the page, or nowhere, is left where it is.
+test("V1-I7 a rebuilt xterm keeps the keyboard focus the old one had, and takes no other", async () => {
+  const result = await withViewPage(async (page) => {
+    const cases = {};
+    for (const rebuild of ["initialize", "baseline"]) {
+      const item = await page.evaluate(
+        (how) => window.coveView.rebuildWithFocus("view", how),
+        rebuild,
+      );
+      await page.keyboard.type("k");
+      const after = await page.evaluate(() => window.coveView.evidence());
+      cases[`view-${rebuild}`] = { ...item, inputs: after.inputs, focusesAfter: after.focuses };
+    }
+    for (const focus of ["elsewhere", "none"])
+      cases[focus] = await page.evaluate(
+        (where) => window.coveView.rebuildWithFocus(where, "initialize"),
+        focus,
+      );
+    return cases;
+  });
+  for (const rebuild of ["initialize", "baseline"]) {
+    const item = result[`view-${rebuild}`];
+    expect(item.rebuilt).toBe(true);
+    expect(item.active).toBe("view");
+    expect(item.focuses).toEqual([]);
+    expect(item.inputs).toEqual([
+      { viewGeneration: item.generation, source: "keyboard", bytes: [107] },
+    ]);
+    // The key published the focus intent; the rebuild did not.
+    expect(item.focusesAfter.at(-1)).toMatchObject({
+      viewGeneration: item.generation,
+      focused: true,
+    });
+  }
+  expect(result.elsewhere).toMatchObject({ rebuilt: true, active: "elsewhere", focuses: [] });
+  expect(result.none).toMatchObject({ rebuilt: true, active: "body", focuses: [] });
+});
+
+// The focus handoff's re-entry matrix (terminal-architecture 4.4.8). Handing focus to a rebuilt
+// xterm runs page focus listeners synchronously; each action below is taken by one of them, or
+// Terminal.focus() throws after taking it. `error` is the rebuild's result, `nested` that of the
+// listener's own call, and `installs` whether a baseline then still installs into the view.
+const ok = {
+  reached: 1,
+  rebuilt: true,
+  focuses: 0,
+  failures: [],
+  error: undefined,
+  nested: undefined,
+  installs: undefined,
+  hidden: false,
+  active: "view",
+  ownedRoots: 1,
+};
+const handoffOutcomes = (rebuild) => ({
+  // A successor initialized by the listener survives, keeps focus and installs a baseline; the
+  // superseded rebuild rejects RESYNC_REQUIRED.
+  initialize: { ...ok, error: "RESYNC_REQUIRED" },
+  // Disposed: the rebuild rejects RESYNC_REQUIRED, publishes nothing and leaves no root.
+  dispose: {
+    ...ok,
+    error: "RESYNC_REQUIRED",
+    installs: "RESYNC_REQUIRED",
+    active: "body",
+    ownedRoots: 0,
+  },
+  // Hidden: the rebuild completes and the hidden view gives up the focus it was handed.
+  hide: { ...ok, hidden: true, active: "body" },
+  // Focus the page moved on stays where the page put it.
+  "focus-elsewhere": { ...ok, active: "elsewhere" },
+  // An initialize commits only its xterm, so its listener may begin the baseline. A baseline
+  // commits its state before the handoff, so a nested baseline is refused and the outer installs.
+  baseline: rebuild === "initialize" ? ok : { ...ok, nested: "RESYNC_REQUIRED" },
+  // Output cannot be applied to a view that is not ready.
+  output: { ...ok, nested: "RESYNC_REQUIRED" },
+  // A throw while the rebuild owns the view retires the xterm and fails the view.
+  throw: {
+    ...ok,
+    error: "RECOVERY_UNAVAILABLE",
+    installs: "RESYNC_REQUIRED",
+    failures: ["RECOVERY_UNAVAILABLE"],
+    active: "body",
+    ownedRoots: 0,
+  },
+  // A throw after the listener initialized a successor belongs to nobody current: the rebuild
+  // rejects RESYNC_REQUIRED and the successor survives without a failure.
+  "initialize-then-throw": { ...ok, error: "RESYNC_REQUIRED", active: "body" },
+});
+
+test("V1-I8 a focus handoff listener cannot corrupt the rebuild or its successor", async () => {
+  const expected = {};
+  for (const rebuild of ["initialize", "baseline"])
+    for (const [action, outcome] of Object.entries(handoffOutcomes(rebuild)))
+      expected[`${rebuild}/${action}`] = outcome;
+  const result = await withViewPage(async (page) => {
+    const cases = {};
+    for (const key of Object.keys(expected))
+      cases[key] = await page.evaluate(
+        ([how, what]) => window.coveView.focusHandoffReentry(how, what),
+        key.split("/"),
+      );
+    return cases;
+  });
+  expect(result).toEqual(expected);
+});

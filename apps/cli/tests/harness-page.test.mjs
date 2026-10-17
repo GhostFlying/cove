@@ -817,6 +817,72 @@ test("a first click that changes the grid keeps every byte typed right after it"
   });
 });
 
+// The same recovery, with the keys typed after its baseline has started (#114). The baseline
+// rebuilds the xterm, and the old xterm had keyboard focus from the click; the view must hand
+// that focus to the rebuilt xterm, so the keys are still held and sent once the recovery is ready
+// rather than typed into <body> and lost. The tap holds the server's messages from just after the
+// baseline-start frame, so the rebuilt xterm stays installing for as long as the test types.
+test("keys typed after a click's recovery baseline has started are held and sent once", async () => {
+  await withHarness(async ({ directory, server, page, pageErrors }) => {
+    const socket = await tapTerminalSocket(page);
+    const script = join(directory, "byte-probe.mjs");
+    const out = join(directory, "byte-probe.json");
+    await writeFile(script, BYTE_PROBE);
+    const run = await createRun(
+      server.env,
+      directory,
+      [process.execPath, script, out],
+      ["--cols", "61", "--rows", "17"],
+    );
+    await openConnectedPage({ server, page }, "dom");
+    await page.click(`#runs button[data-run-id="${run.runId}"]`);
+    await page.waitForFunction(
+      () => document.getElementById("terminal-status")?.dataset.phase === "ready",
+    );
+    const typed = "after-baseline-start: every byte once";
+    let received;
+    try {
+      await waitForRow(page, "byte-probe-ready");
+      // Mark the attach's xterm, so the test can see the click's baseline replace it.
+      await page.evaluate(() => {
+        document.querySelector("#terminal .xterm").dataset.coveTestRetired = "true";
+      });
+      socket.holdInboundAfter((frame) => frame.metadata.type === "baseline-start");
+      await page.click("#terminal", { position: { x: 24, y: 8 } });
+      await page.waitForFunction(() => {
+        const xterm = document.querySelector("#terminal .xterm");
+        return xterm !== null && xterm.dataset.coveTestRetired === undefined;
+      });
+      expect(socket.holdingInbound).toBe(true);
+      // The rebuilt xterm, not <body>, has keyboard focus while its baseline is installing.
+      expect(
+        await page.evaluate(() =>
+          document.querySelector("#terminal .xterm")?.contains(document.activeElement),
+        ),
+      ).toBe(true);
+      await page.keyboard.type(typed);
+      await page.keyboard.type("done");
+      await page.keyboard.press("Enter");
+      await pageTurn(page);
+      expect(socket.holdingInbound).toBe(true);
+      expect(await statusPhase(page)).not.toBe("ready");
+      expect(socket.outbound.filter((frame) => frame.metadata.type === "input")).toEqual([]);
+      socket.releaseInbound();
+      await waitFor(
+        "the probe's report",
+        async () => (received = JSON.parse(await readFile(out, "utf8").catch(() => "null"))),
+        20_000,
+      );
+    } catch (error) {
+      throw await describePage(page, error);
+    }
+    expect(received).toBe(typed);
+    expect(socket.sockets).toBe(1);
+    expect(await page.textContent("#error")).toBe("");
+    expect(pageErrors).toEqual([]);
+  });
+});
+
 // A focus the server accepted can still fail before its grant is usable: here the grid-changing
 // first click's own recovery is overtaken by another page taking control. The page must report
 // that accepted failure, although a recovery ran meanwhile, and must not take control back. The
