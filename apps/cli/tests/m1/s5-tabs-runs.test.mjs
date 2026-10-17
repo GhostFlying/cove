@@ -147,6 +147,41 @@ process.exit(7);
   expect(runs[0]).toMatchObject({ lifecycle: "exited", exitCode: 7, cwd: entry });
 });
 
+test("a tab's run sees its task and tab IDs, a reopened run too, and a terminal run sees neither", async () => {
+  // The server inherits an identity of some other tab, as when it is started inside a Cove tab:
+  // no run of this server may claim it (#120). Only these fixture variables are printed.
+  fixture.env.COVE_TASK_ID = "inherited-task-fixture";
+  fixture.env.COVE_TAB_ID = "inherited-tab-fixture";
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { task } = await checkoutTask(home, "Identity");
+  const report = join(fixture.root, "identity.txt");
+  const print = [
+    "--",
+    "/bin/sh",
+    "-c",
+    `printf '%s|%s\\n' "\${COVE_TASK_ID-unset}" "\${COVE_TAB_ID-unset}" >> '${report}'`,
+  ];
+  const lines = async () =>
+    (await readFile(report, "utf8").catch(() => "")).split("\n").filter(Boolean);
+
+  const created = await fixture.coveJson(["tab", "create", task.taskId, ...print], { home });
+  const tabId = created.operation.result.resource.id;
+  await latestRun(home, tabId, "the first run to exit", ended);
+  const reopened = await fixture.coveJson(["tab", "reopen", tabId], { home });
+  expect(reopened.operation.run.runId).not.toBe(created.operation.run.runId);
+  await latestRun(home, tabId, "the reopened run to exit", ended);
+  expect(await lines()).toEqual([`${task.taskId}|${tabId}`, `${task.taskId}|${tabId}`]);
+
+  // A terminal run belongs to no tab (D8): it gets no identity, not even the inherited one.
+  const terminal = await fixture.coveJson(["terminal", "create", "--cwd", fixture.root, ...print], {
+    home,
+  });
+  await waitFor("the terminal run's line", async () => (await lines()).length === 3, 15_000);
+  expect((await lines())[2]).toBe("unset|unset");
+  expect(terminal.runId).toBeTruthy();
+});
+
 test("a run keeps running while no client is connected and stops on tab stop", async () => {
   const home = fixture.home("home");
   await fixture.startServer(home);
