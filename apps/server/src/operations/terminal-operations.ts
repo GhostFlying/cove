@@ -53,11 +53,9 @@ export type LaunchAcceptance =
   | {
       kind: "accepted";
       record: OperationRecord;
+      // A tab launch sets `env` to its run identity (D8: COVE_TASK_ID, COVE_TAB_ID); a
+      // terminal.create run belongs to no tab and carries none.
       spawn: SpawnArguments;
-      // Cove's run identity variables for the spawned process (D8: COVE_TASK_ID and similar).
-      // Not transmitted yet: the spawn command has no environment field; #120 adds a bounded one
-      // to the pipe protocol and the worker and passes this map through.
-      environment?: Readonly<Record<string, string>>;
     }
   | { kind: "not-accepted"; outcome: OperationOutcome; runRecorded: boolean };
 

@@ -296,7 +296,13 @@ describe("tab launches", () => {
     // The worker got the spawn only after the run and the accepted receipt were committed.
     const [row] = await env.rows("SELECT lifecycle, tab_id, mounts_json FROM runs");
     expect(row.tab_id).toBe("tab-instance-1");
-    expect(spawn.spawn).toEqual({ executable: "/bin/synthetic", argv: ["run"], cwd: env.entry });
+    // The run's identity travels as the spawn's bounded env (#120), and nothing else does.
+    expect(spawn.spawn).toEqual({
+      executable: "/bin/synthetic",
+      argv: ["run"],
+      cwd: env.entry,
+      env: { COVE_TASK_ID: "task-1", COVE_TAB_ID: "tab-instance-1" },
+    });
     const outcome = await pending;
     expect(outcome.operation).toMatchObject({
       method: "tab.create",
@@ -335,6 +341,7 @@ describe("tab launches", () => {
       executable: "/bin/synthetic-shell",
       argv: ["-l"],
       cwd: join(env.root, "clones", "beta"),
+      env: { COVE_TASK_ID: "task-1", COVE_TAB_ID: "tab-instance-1" },
     });
     expect((await env.tabs.get("tab-instance-1")).tab.name).toBe("shell");
     const pendingMount = await env.tabs.create(
@@ -425,6 +432,11 @@ describe("tab launches", () => {
     expect(reopened.outcome.operation).toMatchObject({
       state: "succeeded",
       run: { runId: "run-2" },
+    });
+    // A reopened run carries the same tab identity.
+    expect(reopened.command.spawn.env).toEqual({
+      COVE_TASK_ID: "task-1",
+      COVE_TAB_ID: "tab-instance-1",
     });
     const runs = await env.tabs.runs({ tabId: "tab-instance-1", limit: 10 });
     expect(runs.runs.map((run) => [run.run.runId, run.lifecycle, run.signal])).toEqual([

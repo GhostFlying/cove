@@ -4,7 +4,7 @@ import { basename } from "node:path";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import { sameRunRef, type RunRef } from "@cove/protocol/identity";
-import type { SpawnArguments } from "@cove/protocol/pipe";
+import type { SpawnArguments, SpawnEnv } from "@cove/protocol/pipe";
 import type { Appearance, Geometry } from "@cove/protocol/profile";
 import { canonicalWriteIntent, type WriteRpcMethod } from "@cove/protocol/rpc";
 import {
@@ -102,13 +102,11 @@ export type TabServiceOptions = {
   loginShell?: () => string;
 };
 
-// The environment identifying a run to the process it starts (D8): only these identifiers, never
-// the server's own environment or any secret. Pending #120: the spawn command has no environment
-// field yet, so TerminalOperations does not transmit this map (see LaunchAcceptance).
-export function coveRunEnvironment(identity: {
-  taskId: string;
-  tabId: string;
-}): Readonly<Record<string, string>> {
+// The environment identifying a tab's run to the process it starts (D8, #120): only these
+// identifiers, never the server's own environment or any secret. It travels as the spawn's bounded
+// `env` (SpawnEnvSchema); the worker sets it over its inherited environment. Task and tab IDs are
+// ResourceIds, so they always fit the schema's printable, length-bounded values.
+export function coveRunEnvironment(identity: { taskId: string; tabId: string }): SpawnEnv {
   return { COVE_TASK_ID: identity.taskId, COVE_TAB_ID: identity.tabId };
 }
 
@@ -244,8 +242,10 @@ export class TabService {
         return {
           kind: "accepted",
           record: answer.operation,
-          spawn: this.spawnArguments(answer.recipe, answer.cwd),
-          environment: coveRunEnvironment({ taskId: answer.taskId, tabId: answer.tabId }),
+          spawn: {
+            ...this.spawnArguments(answer.recipe, answer.cwd),
+            env: coveRunEnvironment({ taskId: answer.taskId, tabId: answer.tabId }),
+          },
         };
       },
     });
