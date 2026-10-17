@@ -98,7 +98,10 @@ import { refusalError } from "./repos.js";
 // of a large page, waits for a permit until its deadline, and permits that come free go to the
 // waiting requests in turn, so a healthy page larger than the bound is still verified in full.
 // When every permit is held by work whose deadline has passed (abandoned work that has not settled)
-// a request does not wait: its check is answered at once without starting anything. A read reports
+// a request does not wait: its check is answered at once without starting anything, and a request
+// already waiting when the last holder's deadline passes is answered then (Places). Every answer
+// given up at a deadline is given up only once performance.now() has reached it (atDeadline), so
+// the work it gave up on already counts as abandoned when the next request asks. A read reports
 // such a check as unavailable; a write is refused with BUSY (not accepted, nothing recorded; the
 // same request may be sent again later), never with a refusal that would describe the path, since
 // nothing about the path is known. Each of a write's own steps answers within writeStepBudgetMs
@@ -254,12 +257,13 @@ class Shared<T> {
     if (left <= 0) return Promise.resolve(late);
     return new Promise((done) => {
       const finish = (value: T) => {
-        clearTimeout(timer);
+        cancel();
         this.observers.delete(finish);
         done(value);
       };
-      // setTimeout fires at once for a delay past 2^31 - 1 ms.
-      const timer = setTimeout(() => finish(late), Math.min(left, 2 ** 31 - 1));
+      // Not before the deadline (see atDeadline): an answer given up means the work it waited for
+      // is past its deadline, which is what makes that work count as abandoned (Places).
+      const cancel = atDeadline(deadline, () => finish(late));
       this.observers.add(finish);
     });
   }
@@ -279,13 +283,33 @@ class Shared<T> {
 // usual timeout.
 const DISCOVERY_MS = 2 * GIT_TIMEOUT_MS;
 
+// Runs `callback` once performance.now() has reached `deadline` (never synchronously), and
+// returns a function that cancels it. A timer cannot be trusted with a fractional deadline: Node
+// keeps its delay in whole milliseconds against a loop clock cached at the start of each turn, so
+// it can fire up to about a millisecond before performance.now() reaches the deadline. A callback
+// that ran then would give up an answer while the work it gave up on still counts as within its
+// deadline (expired, Places' failFast), so the timer is armed again for what is left instead.
+function atDeadline(deadline: number, callback: () => void): () => void {
+  let timer: NodeJS.Timeout;
+  const arm = (): void => {
+    const left = deadline - performance.now();
+    // setTimeout fires at once for a delay past 2^31 - 1 ms.
+    timer = setTimeout(
+      () => (deadline - performance.now() > 0 ? arm() : callback()),
+      Math.min(Math.max(1, Math.ceil(left)), 2 ** 31 - 1),
+    );
+  };
+  arm();
+  return () => clearTimeout(timer);
+}
+
 type Holder = { group: object; deadline: number };
 
 type Waiter = {
   deadline: number;
   go: (holder: Holder) => void;
   expire: () => void;
-  timer?: NodeJS.Timeout;
+  cancel?: () => void;
 };
 
 // A fixed number of places shared by every request of the service (see the header), used for the
@@ -300,12 +324,16 @@ type Waiter = {
 // With `failFast`, a request finds out at once that nothing will come free in time: when every
 // place is held by work whose deadline has passed (abandoned work that has not settled; see the
 // header), acquire answers null without queueing. While some place is held by work still within its
-// deadline, a waiter waits, since that work will settle or be abandoned soon.
+// deadline, a waiter waits, since that work will settle or be abandoned soon. Abandoned work
+// releases nothing, so when every holder's deadline has passed and no place came free, the
+// waiters are answered null then too (watchAbandonment), not at their own deadlines.
 class Places {
   private readonly held = new Set<Holder>();
   private readonly heldBy = new Map<object, number>();
   // In turn order: the request served last moves to the end.
   private readonly queues = new Map<object, Waiter[]>();
+  // Cancels the pending check of watchAbandonment, if any.
+  private abandonmentCheck: (() => void) | null = null;
 
   constructor(
     private readonly size: number,
@@ -330,24 +358,23 @@ class Places {
       const waiter: Waiter = {
         deadline,
         go: (holder) => {
-          clearTimeout(waiter.timer);
+          waiter.cancel?.();
           done(holder);
         },
         expire: () => {
-          clearTimeout(waiter.timer);
+          waiter.cancel?.();
           done(null);
         },
       };
-      waiter.timer = setTimeout(
-        () => {
-          this.drop(group, waiter);
-          waiter.expire();
-        },
-        Math.min(left, 2 ** 31 - 1),
-      );
+      // At the deadline itself, as dispatch measures it (see atDeadline).
+      waiter.cancel = atDeadline(deadline, () => {
+        this.drop(group, waiter);
+        waiter.expire();
+      });
       const queue = this.queues.get(group);
       if (queue) queue.push(waiter);
       else this.queues.set(group, [waiter]);
+      this.watchAbandonment();
     });
   }
 
@@ -386,6 +413,7 @@ class Places {
       if (queue.length) this.queues.set(group, queue);
       if (waiter.deadline - performance.now() > 0) waiter.go(this.take(group, waiter.deadline));
       else waiter.expire();
+      if (!this.queues.size) this.stopWatching();
     }
   }
 
@@ -395,6 +423,32 @@ class Places {
     const at = queue.indexOf(waiter);
     if (at >= 0) queue.splice(at, 1);
     if (!queue.length) this.queues.delete(group);
+    if (!this.queues.size) this.stopWatching();
+  }
+
+  // With failFast, checks the waiters again once the latest deadline of the current holders has
+  // passed: if every place is still held, all of it by work past its deadline, nothing will come
+  // free in time, so every waiter is answered null at once, as acquire would answer a new request.
+  // A place taken meanwhile by work still within its deadline moves the check to that deadline.
+  private watchAbandonment(): void {
+    if (!this.failFast || this.abandonmentCheck || !this.queues.size) return;
+    if (this.held.size < this.size) return;
+    let latest = -Infinity;
+    for (const holder of this.held) latest = Math.max(latest, holder.deadline);
+    this.abandonmentCheck = atDeadline(latest, () => {
+      this.abandonmentCheck = null;
+      const now = performance.now();
+      if (this.held.size >= this.size && [...this.held].every((holder) => holder.deadline <= now)) {
+        const waiters = [...this.queues.values()].flat();
+        this.queues.clear();
+        for (const waiter of waiters) waiter.expire();
+      } else this.watchAbandonment();
+    });
+  }
+
+  private stopWatching(): void {
+    this.abandonmentCheck?.();
+    this.abandonmentCheck = null;
   }
 }
 
