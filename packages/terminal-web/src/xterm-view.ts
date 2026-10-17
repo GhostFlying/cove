@@ -556,6 +556,51 @@ export function createXtermTerminalView(
     }
   };
 
+  // Whether keyboard focus is inside the current xterm.
+  const backendHasFocus = (): boolean => {
+    const element = backend?.terminal.element;
+    const active = container.ownerDocument.activeElement;
+    return element !== undefined && active !== null && element.contains(active);
+  };
+
+  // Replacing the xterm removes its element, and with it the keyboard focus, which falls to
+  // <body>. Keys the user types before the replacement is ready would then reach no view at all:
+  // not held, not sent and not reported, against the recovery input hold of relay-protocol 9.1
+  // (#114). So a replacement of the xterm that had focus hands focus to its successor. It moves
+  // DOM focus only: no focus intent is published, so no control is requested (a rebuild never
+  // produces a focus, 9.1); the next deliberate input publishes one as usual. It never takes focus
+  // the old xterm did not have, nor focus that moved elsewhere while the old one was retired, and
+  // a hidden view stays unfocused. The successor is pristine (modes at their defaults, focus
+  // reporting off), so xterm's focus handling writes nothing towards the PTY.
+  //
+  // Focusing runs page focus/focusin listeners synchronously, which may call back into the view
+  // (rule 3 above, terminal-architecture 4.4.2). The caller therefore commits its whole result
+  // first, so a nested call sees the operation as done, and passes `committed` to check that the
+  // result is still its own afterwards. A superseded operation (a successor initialized, the view
+  // disposed) rejects RESYNC_REQUIRED, also when focus() then threw. A throw while the operation
+  // still owns the view retires the xterm it came from and fails the view, like any xterm call.
+  const handFocusToSuccessor = (
+    hadFocus: boolean,
+    entry: number,
+    committed: () => boolean,
+  ): void => {
+    const current = backend;
+    if (!hadFocus || !visible || !current) return;
+    const document = container.ownerDocument;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    try {
+      current.terminal.focus();
+    } catch (error) {
+      // Check supersession first. Only initialize and dispose move the epoch, and both have
+      // already retired `current`, so the throw belongs to nobody that is still current.
+      fence(entry);
+      failAndRetire(error, current.incarnation);
+    }
+    fence(entry);
+    if (!committed()) throw domainError("RESYNC_REQUIRED");
+  };
+
   const replaceBackend = (entry: number) => {
     retireForReplacement(entry, "Terminal replacement cleanup failed");
     // Retire only this construction's incarnation on failure; a listener called during
@@ -594,6 +639,7 @@ export function createXtermTerminalView(
     if (viewGeneration >= 0 && input.viewGeneration <= viewGeneration)
       throw domainError("RESYNC_REQUIRED");
     const entry = ++epoch;
+    const hadFocus = backendHasFocus();
     // Retiring the old xterm runs its cleanup callbacks; see retireForReplacement.
     retireForReplacement(entry, "Terminal initialization cleanup failed");
     viewGeneration = input.viewGeneration;
@@ -613,6 +659,9 @@ export function createXtermTerminalView(
     fence(entry);
     pristine = true;
     state = "initialized";
+    // Initialize commits only the new xterm: a listener may go on to begin its baseline.
+    const built = backend;
+    handFocusToSuccessor(hadFocus, entry, () => backend === built);
   };
 
   return {
@@ -633,13 +682,27 @@ export function createXtermTerminalView(
           !sameGeometry(checked.currentGeometry, geometry)
         )
           throw domainError("RESYNC_REQUIRED");
+        let hadFocus = false;
         if (!pristine) {
+          hadFocus = backendHasFocus();
           replaceBackend(entry);
           fence(entry);
         }
-        requireBackend();
-        baseline = { descriptor: checked, chunks: 0, bytes: 0 };
+        const current = requireBackend();
+        const progress: BaselineProgress = { descriptor: checked, chunks: 0, bytes: 0 };
+        baseline = progress;
         state = "installing";
+        // After the baseline is committed: see handFocusToSuccessor.
+        handFocusToSuccessor(
+          hadFocus,
+          entry,
+          () =>
+            backend === current &&
+            baseline === progress &&
+            state === "installing" &&
+            progress.chunks === 0 &&
+            !parser.active,
+        );
       }),
 
     writeBaselineChunk: (bytes: Uint8Array): Promise<void> =>
@@ -770,12 +833,14 @@ export function createXtermTerminalView(
               current.terminal.refresh(0, Math.max(0, current.terminal.rows - 1));
             } else {
               element.setAttribute("hidden", "");
-              if (effectivelyFocused) {
+              // A hidden view keeps no keyboard focus, also DOM focus that published no intent
+              // (a click, or a rebuild's handoff, before any key), or keys would reach it unseen.
+              if (effectivelyFocused || backendHasFocus()) {
                 // Blurring runs the focus tracker, whose observers may replace or dispose the view
                 // or set the visibility again; a superseded call then stops silently.
                 current.terminal.blur();
                 if (abandoned()) return;
-                publishFocus(false);
+                if (effectivelyFocused) publishFocus(false);
               }
             }
           } catch (error) {
