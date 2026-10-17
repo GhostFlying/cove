@@ -114,13 +114,6 @@ interface OpenTerminal {
   // changes, a later recovery reaches ready, or the user clicks, so a lasting refusal cannot
   // loop.
   refused?: { readonly grid: Geometry; readonly recoveries: number };
-  // The user is operating this terminal here: set by a click or key in it, cleared when the
-  // page is hidden or another client takes control.
-  operating: boolean;
-  // The controller's recoverySequence of the last ready this page has acted on. Observers see
-  // coalesced snapshots and can miss intermediate phases, so a recovery is recognized by a ready
-  // snapshot with a sequence not handled yet, not by watching the phase leave ready.
-  handledRecovery: number;
   inputNotice: string;
 }
 
@@ -347,28 +340,20 @@ async function openRun(run: RunRef): Promise<void> {
     controller: opened.value,
     view,
     disposables: [],
-    operating: false,
-    handledRecovery: 0,
     inputNotice: "",
   };
   current = entry;
   renderRuns();
   entry.disposables.push(
-    entry.controller.onState((snapshot) => {
+    entry.controller.onState(() => {
       renderTerminalStatus(entry);
-      const holder = snapshot.appliedAuthority?.holder;
-      if (holder && holder.subscriptionId !== snapshot.subscription?.subscriptionId)
-        entry.operating = false;
-      const enteredReady =
-        snapshot.phase === "ready" && snapshot.recoverySequence !== entry.handledRecovery;
-      if (enteredReady) entry.handledRecovery = snapshot.recoverySequence;
-      // A resize is recovered with a fresh baseline into a rebuilt xterm, which drops DOM focus.
-      // Restore DOM focus while the user operates here, so the next key reaches the view. That
-      // takes no control: only a deliberate input or click does (a grant this client held or
-      // was awaiting survives its own resize recovery, relay-protocol 9.1). Never retaking
-      // control on its own also keeps two pages from trading it back and forth.
-      if (enteredReady && entry.operating)
-        terminalHost.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+      // A resize is recovered with a fresh baseline into a rebuilt xterm. The view itself hands
+      // keyboard focus to the rebuilt xterm when the old one had it, from the moment it is built,
+      // so keys typed during the recovery are held (relay-protocol 9.1, #114). The page restores
+      // no focus here: doing it only at ready lost the keys typed before, and could take focus
+      // the user had moved elsewhere meanwhile. Nothing here takes control either: only a
+      // deliberate input or click does (a grant this client held or was awaiting survives its own
+      // resize recovery), which also keeps two pages from trading control back and forth.
       syncSize(entry);
     }),
     entry.controller.onInputOutcome((notice) => {
@@ -452,7 +437,6 @@ function describeControlFailure(outcome: Extract<TerminalControlOutcome, { ok: f
 // A click in the terminal is a deliberate request to operate it.
 function focusCurrent(): void {
   if (!current) return;
-  current.operating = true;
   // A click may ask again for a grid the server refused before.
   delete current.refused;
   takeControl(current);
@@ -568,8 +552,7 @@ function start(): void {
   newTerminalButton.addEventListener("click", () => void createTerminal());
   reconnectButton.addEventListener("click", () => void connect(true));
   terminalHost.addEventListener("pointerdown", focusCurrent);
-  // Typing takes control through the view's own focus intents; remember the intent to operate.
-  terminalHost.addEventListener("keydown", () => current && (current.operating = true), true);
+  // Typing takes control through the view's own focus intents.
   let resizeTimer: ReturnType<typeof setTimeout> | undefined;
   window.addEventListener("resize", () => {
     clearTimeout(resizeTimer);
@@ -581,7 +564,6 @@ function start(): void {
     // Applies in every phase, including mid-recovery: a hidden page releases control; becoming
     // visible again only re-enables taking control.
     const visible = document.visibilityState === "visible";
-    if (!visible) entry.operating = false;
     entry.controller.setInputTarget(visible, false);
   });
   setInterval(() => void refreshRuns(), LIST_REFRESH_MS);
