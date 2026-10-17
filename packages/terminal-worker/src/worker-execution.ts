@@ -547,13 +547,17 @@ class WorkerExecutionCore {
           : "WORKER_UNAVAILABLE",
       );
     }
-    if (created.kind !== "created") {
-      return correlatedError(
-        command,
-        created.kind === "rejected" ? "WORKER_UNAVAILABLE" : "RESULT_UNKNOWN",
-        created.kind === "rejected" ? "not-accepted" : "unknown",
-      );
+    if (created.kind === "rejected") {
+      // The native factory refused before any PTY existed, so nothing owns this run. Its identity
+      // is released rather than retained, since a retained one would hold a run slot for the
+      // worker's life and repeated refusals (an invalid spec, the owner limit) would exhaust them.
+      // The server retires the run on this answer and never issues its run ID again.
+      this.#runs.delete(command.run.runId);
+      this.#releaseBytes(identityBytes);
+      return correlatedError(command, "WORKER_UNAVAILABLE");
     }
+    // An unclassified failure may have left a native owner: the identity stays retained.
+    if (created.kind !== "created") return correlatedError(command, "RESULT_UNKNOWN", "unknown");
     Object.assign(record, { session: created.session, capability: created.capability });
     return accepted(command, { operationId: command.operationId, atSeq: 0 });
   }

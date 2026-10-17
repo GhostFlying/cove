@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
+import { domainError } from "@cove/protocol/errors";
 import { encodePipeFrame } from "@cove/protocol/pipe";
 import { validateRpcResultForCall } from "@cove/protocol/rpc";
 import { defaultTabName, liveRunsUsing, TabService } from "../../dist/domain/tabs.js";
@@ -45,8 +46,13 @@ function counter(prefix) {
 
 // One server instance on `store`: a synthetic worker, the runtime, receipts, terminal operations
 // and the tab service. `recording: false` leaves exit facts out of the store, as when the
-// registry's best-effort write failed.
-function instance(store, relayInstanceId, { recording = true, responseBytes } = {}) {
+// registry's best-effort write failed. `runsPerWorker` lowers the pool's placement limit so a
+// test can fill it with a few runs.
+function instance(
+  store,
+  relayInstanceId,
+  { recording = true, responseBytes, runsPerWorker = M0_LIMITS.maxRuns } = {},
+) {
   const worker = {
     serverId: "server",
     relayInstanceId,
@@ -82,18 +88,14 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
     identityLimit: 32,
   });
   session.start();
-  const frame = (message) =>
-    session.receive(encodePipeFrame(2, encode(JSON.stringify(message)), new Uint8Array()).value);
+  const frame = (message, kind = message.type === "error" ? 4 : 2) =>
+    session.receive(encodePipeFrame(kind, encode(JSON.stringify(message)), new Uint8Array()).value);
   frame({ type: "ready", worker, pipeVersion: 2, buildVersion: "peer", effectiveBudgets: budgets });
   const runLog = new RunLog(store);
   const registry = recording
     ? new RecordingRunRegistry(composition, runLog)
     : new RunRegistry(composition);
-  const runtime = new LocalRuntime(
-    new WorkerPool(composition, 1, budgets.maxRuns),
-    registry,
-    encode,
-  );
+  const runtime = new LocalRuntime(new WorkerPool(composition, 1, runsPerWorker), registry, encode);
   runtime.addWorker(session);
   const receipts = new OperationReceipts(
     composition,
@@ -131,7 +133,7 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
   });
   // Waits for the next command of `type` the worker received and answers it.
   // The store runs in a worker thread, so the command arrives after real (bounded) time.
-  async function answer(type, outcome = "accepted", runStatus, pending) {
+  async function answer(type, outcome = "accepted", runStatus, pending, error) {
     let command;
     let answered = false;
     void pending?.then((value) => (answered = value));
@@ -143,6 +145,17 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
     if (!command)
       throw new Error(`no ${type} command reached the worker: ${JSON.stringify(answered)}`);
     command.answered = true;
+    if (error) {
+      frame({
+        type: "error",
+        worker,
+        run: command.run,
+        requestId: command.requestId,
+        commandType: type,
+        error,
+      });
+      return command;
+    }
     frame({
       type: "result",
       worker,
@@ -158,6 +171,12 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
           : { runStatus: runStatus ?? status(command.run, "live") }),
     });
     return command;
+  }
+  // Waits for the next command of `type` and answers it with the worker's definite refusal, as a
+  // real worker answers a spawn its native factory rejected before any PTY existed.
+  async function refuse(type, errorKind, pending) {
+    const command = await answer(type, "accepted", undefined, pending, domainError(errorKind));
+    return { outcome: await pending, command };
   }
   // A launch whose spawn the worker accepts.
   async function launched(promise, outcome = "accepted") {
@@ -181,6 +200,7 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
   return {
     worker,
     composition,
+    session,
     commands,
     registry,
     runtime,
@@ -189,6 +209,7 @@ function instance(store, relayInstanceId, { recording = true, responseBytes } = 
     tabs,
     runLog,
     answer,
+    refuse,
     launched,
     exit,
     status,
@@ -596,6 +617,79 @@ describe("run history and identity", () => {
     // An exit the registry observed ends the use, also before the store records it.
     env.exit(betaRun);
     expect(await using(join(env.root, "clones", "beta"))).toEqual(ids(entryRun));
+  });
+});
+
+describe("refused spawns", () => {
+  const plainCreate = (operationId) => ({
+    operationId,
+    expectedRelayInstanceId: "instance",
+    executable: "/bin/synthetic",
+    argv: [],
+    cwd: "/",
+    geometry: { cols: 80, rows: 24 },
+  });
+  // A run whose spawn the worker definitely refused started nothing, so the runtime keeps no trace
+  // of it: no terminal (terminal.list/get, and attach reads the registry too), no placement, no
+  // session route, and its stop has no run to address.
+  async function retired(env, run) {
+    const cache = env.runtime.previews.cache;
+    expect(env.registry.get(run)).toBeNull();
+    expect(env.registry.count).toBe(0);
+    expect(env.runtime.pool.get(run)).toBeNull();
+    expect(env.session.forgetUnstartedRun(run)).toBe(false);
+    expect(cache.getRecord(run)).toBeNull();
+    expect(cache.list({ limit: 10 }).runs).toEqual([]);
+    const stop = await env.operations.stop("p", {
+      operationId: `stop-${run.runId}`,
+      expectedRelayInstanceId: "instance",
+      run,
+    });
+    expect(kind(stop)).toBe("RUN_NOT_FOUND");
+  }
+
+  it("retires a terminal.create run the worker refused and reuses its capacity", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const { outcome } = await env.refuse(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.operations.create("p", plainCreate("t1")),
+    );
+    expect(outcome.operation).toMatchObject({ state: "failed", run: { runId: "run-1" } });
+    await retired(env, outcome.operation.run);
+    // The only placement is free again.
+    const next = await env.launched(env.operations.create("p", plainCreate("t2")));
+    expect(next.outcome.operation).toMatchObject({ state: "succeeded", run: { runId: "run-2" } });
+    expect(env.registry.count).toBe(1);
+  });
+
+  it("retires a tab launch the worker refused and reuses its capacity", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const { outcome } = await env.refuse(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.tabs.create("p", create("c1")),
+    );
+    expect(outcome.operation).toMatchObject({ state: "failed", run: { runId: "run-1" } });
+    await retired(env, outcome.operation.run);
+    expect((await env.tabs.get("tab-instance-1")).latestRun).toBeNull();
+    const reopened = await env.launched(
+      env.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
+    );
+    expect(reopened.outcome.operation).toMatchObject({
+      state: "succeeded",
+      run: { runId: "run-2" },
+    });
+  });
+
+  it("keeps a run whose spawn result is unknown, since the worker may have started it", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const { command: spawned } = await env.launched(
+      env.operations.create("p", plainCreate("t1")),
+      "unknown",
+    );
+    expect(env.registry.get(spawned.run)).not.toBeNull();
+    expect(kind(await env.operations.create("p", plainCreate("t2")))).toBe("BUSY");
   });
 });
 

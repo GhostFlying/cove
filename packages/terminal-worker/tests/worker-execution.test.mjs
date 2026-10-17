@@ -1697,18 +1697,34 @@ test("hostile injected stop causes are normalized before cached status and recei
   expect(item.stops).toBe(1);
 });
 
-test("failed spawn retains its run identity", async () => {
-  const factory = fakeFactory({ rejectSpawn: true });
-  const execution = createWorkerExecution({ worker, effectiveBudgets: M0_LIMITS, factory });
-  const spawn = spawnCommand();
-  expect(await execution.execute(spawn.command, spawn.payload)).toMatchObject({
-    type: "error",
-    error: { kind: "WORKER_UNAVAILABLE" },
+test("a spawn the native factory refused releases its run identity and its slot", async () => {
+  const config = { rejectSpawn: true };
+  const budgets = { ...M0_LIMITS, maxRuns: 1, listPage: 1 };
+  const execution = createWorkerExecution({
+    worker,
+    effectiveBudgets: budgets,
+    factory: fakeFactory(config),
   });
-  expect(
-    await execution.execute({ ...spawn.command, requestId: "retry" }, spawn.payload),
-  ).toMatchObject({ type: "error", error: { kind: "OPERATION_ID_CONFLICT" } });
-  expect(execution.snapshot().runIds).toBe(1);
+  try {
+    const before = execution.snapshot().accountedBytes;
+    const refused = spawnCommand(run(), budgets);
+    expect(await execution.execute(refused.command, refused.payload)).toMatchObject({
+      type: "error",
+      error: { kind: "WORKER_UNAVAILABLE", acceptance: "not-accepted" },
+    });
+    expect(execution.snapshot().runIds).toBe(0);
+    expect(execution.snapshot().accountedBytes).toBe(before);
+    // The only run slot is free for the next spawn.
+    config.rejectSpawn = false;
+    const next = spawnCommand(run("next"), budgets);
+    expect(await execution.execute(next.command, next.payload)).toMatchObject({
+      type: "result",
+      outcome: "accepted",
+    });
+    expect(execution.snapshot().runIds).toBe(1);
+  } finally {
+    await execution.shutdown("test");
+  }
 });
 
 test("model query reply uses the writer even with no fact observer", async () => {
