@@ -157,6 +157,13 @@ Node 控制进程：认证、连接、授权及转发
 worker 仍是输出/resize 等终端事件顺序的仲裁方，命令执行结果通过带关联身份的应答确认。
 帧编码待定：需带类型、运行/订阅身份、长度和适用的序号，限制单帧及排队字节；快照和大段输入分块。
 当前操作者相关工作优先，优先级只调整不同终端/请求间尚未发送的工作，不打乱同一终端事件顺序。
+spawn 的载荷是 UTF-8 JSON：可执行文件、参数、cwd，以及可选的 `env`（#120）。`env` 只承载 Cove 的 run 标识
+（`COVE_TASK_ID`、`COVE_TAB_ID`，见 [M1 D8](milestones/m1.md)）：封闭对象，值为 1–128 个可打印 ASCII 字符，
+其他键或值是 schema 错误，worker 重新校验并以 INPUT_REJECTED 拒绝，任意环境变量不能经此进入 PTY。命令部分
+（可执行文件、参数与 cwd 的 JSON）仍以 `argvBytes` 即 8 KiB 为界，`env` 在此之外另有 1 KiB，整个载荷至多 9 KiB。
+worker 以自身继承的环境为底，设置 spawn 给出的标识键，并删除未给出的标识键，继承来的也删除，因为在 Cove tab 中
+启动的 server 会把那个 tab 的标识传给 worker；这对每个 run 都适用，包括 `terminal create`。worker 不保存、不记录
+这些值。首次发布之前不支持 server 与 worker 的混合构建，本变更不升 pipe 版本（[relay-protocol §10](relay-protocol.md#10-发布门槛与验证)）。
 同一 worker 的路由控制命令（applied-ack、baseline-progress、unsubscribe）由 worker 按到达顺序逐条执行；
 runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CONTROL_COMMANDS`，超出即协议违规、worker 失败关闭。
 双方以同一时刻作为窗口位的释放点：runtime 读到应答即释放一个窗口位；worker 在应答帧交给可写流后即不再把该命令计入窗口，
@@ -715,7 +722,7 @@ ACK 仍可能因失联、连接关闭或取值被拒而失败。客户端在 ACK
   只用于功能测试，并相应地等待通知器排空。依赖同步 `onState` 的测试改为等待通知器，每处变更都在 PR 中列出。
 - S3 改用传输层钩子：在转发触发 watcher 恢复的帧之前设置拦截，再在恢复确实未完成时（用 `snapshot()` 拉取确认）请求 focus。
 
-**4.4.9 Orca 对照**（只读，`~/WORKSPACE/bytedance_orca` @ `ac562724ad92915660420035fa88066d0e5b09bc`，路径相对 `src/renderer/src/`）：
+**4.4.9 Orca 对照**（只读，Orca 仓库 @ `ac562724ad92915660420035fa88066d0e5b09bc`，路径相对 `src/renderer/src/`）：
 
 - `components/terminal-pane/pty-dispatcher.ts` 同步内联分发；旁路观察者遍历前复制快照（:157-162），一次性的退出处理器先移除再调用（:194-202），
   `pty-exit-delivery.ts` 对每个回调单独捕获异常。采用：快照遍历与异常隔离。不采用：同步内联分发。
