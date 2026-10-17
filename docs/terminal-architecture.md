@@ -190,6 +190,11 @@ runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CON
 - pipe 不认识的订阅（从未在此打开或已释放）：它没有 worker 路由需要保护，其路由控制只在窗口与排队预算都有空位时接纳。
 
 status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排队预算，预算不足时可能以 BUSY 拒绝。
+每个 worker 只有一个 status 窗口，runtime 自己有两个读者：后台为每个 run 读状态的预览刷新，以及在 run 的首次
+focus（或权威不确定后）读控制边界的仲裁器。二者对同一 worker 的 status 读取按到达顺序轮流发出（`LocalRuntime.getStatus`），
+不再互相以 BUSY 拒绝：过去 focus 恰好遇上预览刷新的 status 在途时，就以 BUSY 失败（#115）。每次轮到时上一条读取已结算
+（包括按自身期限结束），所以等待以排在前面的读取各自的期限为界；已交出后到期的读取仍占着窗口直到 worker 迟到应答，
+下一条照旧得到 BUSY，那是过载信号。
 
 #### worker 存活与命令期限（#103，已选）
 

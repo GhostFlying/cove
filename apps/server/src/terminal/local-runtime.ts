@@ -23,6 +23,8 @@ export class LocalRuntime implements RuntimeTerminalPort {
   >();
   private disposed = false;
   private previewOwner: PreviewRefresh | undefined;
+  // The settlement of the latest status read queued per worker session (see getStatus).
+  private readonly statusTurns = new Map<WorkerPipeSession, Promise<void>>();
   constructor(
     readonly pool: WorkerPool,
     readonly registry: RunRegistry,
@@ -254,8 +256,32 @@ export class LocalRuntime implements RuntimeTerminalPort {
   ): Promise<RuntimeResult> {
     return this.request(input);
   }
+  // A worker has a single status window (the pipe session admits one status at a time and
+  // refuses another with BUSY), and this runtime has two readers of it: preview refresh, which
+  // reads every run's status in the background, and the control arbiter, which reads a run's
+  // control boundary when it does not know it (before the run's first focus, or after an
+  // uncertain result). Refusing one of our own readers because the other held the window made
+  // a user's focus fail BUSY for no reason of its own (issue #115), so status reads to one
+  // worker take turns in arrival order instead. A turn starts once the previous read settled,
+  // including by its own deadline, so the wait is bounded by the deadlines of the reads queued
+  // ahead. A read that expired after its frame was handed over keeps the window until the
+  // worker's late reply; the next one then still gets BUSY, which is the overload signal. The
+  // queue is bounded by the readers: per run, at most one arbiter boundary read (the arbiter
+  // drains a run's control serially) and one refresh job at a time.
   getStatus(input: Parameters<RuntimeTerminalPort["getStatus"]>[0]): Promise<RuntimeResult> {
-    return this.request(input);
+    const session = this.pool.get(input.run)?.session;
+    if (!session) return this.request(input);
+    const previous = this.statusTurns.get(session);
+    const result = previous ? previous.then(() => this.request(input)) : this.request(input);
+    const turn = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.statusTurns.set(session, turn);
+    void turn.then(() => {
+      if (this.statusTurns.get(session) === turn) this.statusTurns.delete(session);
+    });
+    return result;
   }
   refreshPreview(
     input: Parameters<RuntimeTerminalPort["refreshPreview"]>[0],
