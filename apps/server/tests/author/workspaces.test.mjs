@@ -1633,6 +1633,134 @@ describe("capacity handover", () => {
     expect(performance.now() - later).toBeLessThan(50);
   });
 
+  // A controlled clock for the permit checks below: performance.now() (the object perf_hooks
+  // exports is the global one) and setTimeout/clearTimeout, so each step happens at an exact time.
+  // advance(ms) runs the timers due up to then in order, letting promise reactions run after each.
+  async function withControlledClock(body) {
+    const realNow = performance.now;
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    let now = 1000;
+    const timers = new Set();
+    const settle = async () => {
+      for (let turn = 0; turn < 5; turn += 1) await new Promise((done) => setImmediate(done));
+    };
+    performance.now = () => now;
+    globalThis.setTimeout = (callback, ms, ...rest) => {
+      const timer = { at: now + Math.max(1, ms ?? 0), run: () => callback(...rest) };
+      timers.add(timer);
+      return timer;
+    };
+    globalThis.clearTimeout = (timer) =>
+      timers.has(timer) ? timers.delete(timer) : realClearTimeout(timer);
+    const clock = {
+      now: () => now,
+      pending: () => timers.size,
+      async advance(ms) {
+        const until = now + ms;
+        for (;;) {
+          let next;
+          for (const timer of timers)
+            if (timer.at <= until && (!next || timer.at < next.at)) next = timer;
+          if (!next) break;
+          timers.delete(next);
+          now = next.at;
+          next.run();
+          await settle();
+        }
+        now = until;
+        await settle();
+      },
+    };
+    try {
+      await settle();
+      await body(clock);
+    } finally {
+      performance.now = realNow;
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  }
+
+  // Records when a permit request is answered (null: no permit) and with what.
+  function track(clock, permits, group, deadline, work) {
+    const answer = { at: null, value: undefined };
+    void permits.start(group, deadline, work).then((value) => {
+      answer.at = clock.now();
+      answer.value = value;
+    });
+    return answer;
+  }
+
+  it("answers queued permit requests at the new, earlier abandonment time when a shorter-lived holder replaces the longest-lived one", async () => {
+    await withControlledClock(async (clock) => {
+      const permits = new FsPermits(2);
+      const hung = () => new Promise(() => {});
+      let finish;
+      const long = track(
+        clock,
+        permits,
+        {},
+        clock.now() + 20_000,
+        () => new Promise((done) => (finish = done)),
+      );
+      const short = track(clock, permits, {}, clock.now() + 3000, hung);
+      await clock.advance(0);
+      expect(long.value).not.toBe(null);
+      expect(short.value).not.toBe(null);
+      // Both queue: a read (3 s), then a write (20 s); the latest holder deadline is 20 s away.
+      let readStarted = 0;
+      const read = track(clock, permits, {}, clock.now() + 3000, () => {
+        readStarted += 1;
+        return new Promise(() => {});
+      });
+      const write = track(clock, permits, {}, clock.now() + 20_000, async () => "late");
+      await clock.advance(100);
+      expect([read.at, write.at]).toEqual([null, null]);
+      // The 20 s holder settles and the read takes its permit: every holder now ends at 3 s.
+      finish("done");
+      await clock.advance(0);
+      expect(read.at).toBe(1100);
+      expect(readStarted).toBe(1);
+      await clock.advance(2899);
+      expect(write.at).toBe(null);
+      await clock.advance(1);
+      // Every permit is held by abandoned work: the write is answered now, not at 20 s.
+      expect(write).toEqual({ at: 4000, value: null });
+      // As a new request is at that moment.
+      const later = track(clock, permits, {}, clock.now() + 3000, async () => "late");
+      await clock.advance(0);
+      expect(later).toEqual({ at: 4000, value: null });
+      expect(clock.pending()).toBe(0);
+    });
+  });
+
+  it("answers a request queued for its own limit once another request has taken the last permit and every holder is past its deadline", async () => {
+    await withControlledClock(async (clock) => {
+      const permits = new FsPermits(2);
+      const hung = () => new Promise(() => {});
+      const page = {};
+      const first = track(clock, permits, page, clock.now() + 100, hung);
+      await clock.advance(0);
+      expect(first.value).not.toBe(null);
+      // A permit is still free, but this request already holds its half: it waits for its own.
+      let started = 0;
+      const queued = track(clock, permits, page, clock.now() + 3000, async () => (started += 1));
+      await clock.advance(0);
+      expect(queued.at).toBe(null);
+      // Another request takes the free permit at once, filling the permits.
+      const other = track(clock, permits, {}, clock.now() + 100, hung);
+      await clock.advance(0);
+      expect(other.value).not.toBe(null);
+      expect(queued.at).toBe(null);
+      await clock.advance(100);
+      // Both holders are past their deadline: the queued request is answered now, not at 3 s.
+      expect(queued).toEqual({ at: 1100, value: null });
+      expect(started).toBe(0);
+      expect(clock.pending()).toBe(0);
+    });
+  });
+
   it("gives up a Git slot or permit request only at its deadline, though its timer fired early", async () => {
     // As in the BUSY test above: every timer of these deadlines fires 200 ms early.
     const realSetTimeout = globalThis.setTimeout;

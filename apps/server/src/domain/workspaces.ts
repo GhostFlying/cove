@@ -332,8 +332,8 @@ class Places {
   private readonly heldBy = new Map<object, number>();
   // In turn order: the request served last moves to the end.
   private readonly queues = new Map<object, Waiter[]>();
-  // Cancels the pending check of watchAbandonment, if any.
-  private abandonmentCheck: (() => void) | null = null;
+  // The single pending check of watchAbandonment, if any, and the holder deadline it waits for.
+  private abandonmentCheck: { deadline: number; cancel: () => void } | null = null;
 
   constructor(
     private readonly size: number,
@@ -346,8 +346,12 @@ class Places {
     const now = performance.now();
     const left = deadline - now;
     if (left <= 0) return Promise.resolve(null);
-    if (this.held.size < this.size && this.below(group))
-      return Promise.resolve(this.take(group, deadline));
+    if (this.held.size < this.size && this.below(group)) {
+      const holder = this.take(group, deadline);
+      // This can fill the last place while another request waits only for its own limit.
+      this.watchAbandonment();
+      return Promise.resolve(holder);
+    }
     if (
       this.failFast &&
       this.held.size >= this.size &&
@@ -406,15 +410,16 @@ class Places {
           next = entry;
           break;
         }
-      if (!next) return;
+      if (!next) break;
       const [group, queue] = next;
       const waiter = queue.shift()!;
       this.queues.delete(group);
       if (queue.length) this.queues.set(group, queue);
       if (waiter.deadline - performance.now() > 0) waiter.go(this.take(group, waiter.deadline));
       else waiter.expire();
-      if (!this.queues.size) this.stopWatching();
     }
+    // The holders and the waiters changed (release, and the places handed over here).
+    this.watchAbandonment();
   }
 
   private drop(group: object, waiter: Waiter): void {
@@ -423,32 +428,45 @@ class Places {
     const at = queue.indexOf(waiter);
     if (at >= 0) queue.splice(at, 1);
     if (!queue.length) this.queues.delete(group);
-    if (!this.queues.size) this.stopWatching();
+    this.watchAbandonment();
   }
 
   // With failFast, checks the waiters again once the latest deadline of the current holders has
   // passed: if every place is still held, all of it by work past its deadline, nothing will come
   // free in time, so every waiter is answered null at once, as acquire would answer a new request.
-  // A place taken meanwhile by work still within its deadline moves the check to that deadline.
+  //
+  // There is one check, reconciled here after every change of the holders or the waiters (a place
+  // taken by acquire or dispatch, a release, a waiter queued, handed a place or gone at its
+  // deadline). It is needed only while someone waits and every place is held; otherwise it is
+  // cancelled, since a free place answers no abandonment question and a waiter's own deadline
+  // bounds it. While needed, it waits for the latest deadline of the current holders and is armed
+  // again whenever that deadline changes, also when it moves earlier: a release can replace the
+  // longest-lived holder by a shorter-lived one, and a check left at the old deadline would keep
+  // the waiters past the moment a new request would already be refused (#122).
   private watchAbandonment(): void {
-    if (!this.failFast || this.abandonmentCheck || !this.queues.size) return;
-    if (this.held.size < this.size) return;
     let latest = -Infinity;
-    for (const holder of this.held) latest = Math.max(latest, holder.deadline);
-    this.abandonmentCheck = atDeadline(latest, () => {
-      this.abandonmentCheck = null;
-      const now = performance.now();
-      if (this.held.size >= this.size && [...this.held].every((holder) => holder.deadline <= now)) {
+    if (this.failFast && this.queues.size && this.held.size >= this.size)
+      for (const holder of this.held) latest = Math.max(latest, holder.deadline);
+    if (this.abandonmentCheck?.deadline === latest) return;
+    this.abandonmentCheck?.cancel();
+    this.abandonmentCheck = null;
+    if (latest === -Infinity) return;
+    this.abandonmentCheck = {
+      deadline: latest,
+      cancel: atDeadline(latest, () => {
+        this.abandonmentCheck = null;
+        // Reconciliation keeps the check only while every place is held, at the latest holder
+        // deadline, so this holds; checked again so that a missed reconciliation re-arms instead.
+        const now = performance.now();
+        if (this.held.size < this.size || [...this.held].some((h) => h.deadline > now)) {
+          this.watchAbandonment();
+          return;
+        }
         const waiters = [...this.queues.values()].flat();
         this.queues.clear();
         for (const waiter of waiters) waiter.expire();
-      } else this.watchAbandonment();
-    });
-  }
-
-  private stopWatching(): void {
-    this.abandonmentCheck?.();
-    this.abandonmentCheck = null;
+      }),
+    };
   }
 }
 
