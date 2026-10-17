@@ -1,6 +1,6 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `6a838af`（2026-10-17，T3a PR #109 合入）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `0bba191`（2026-10-17；`6a838af` 之后合入的 #119、#117、#123 只改 server 内部的写入许可与 status 读取调度、测试与 CI，本文所列接口不变），另列出未合入的 PR #121（T4）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
@@ -27,7 +27,7 @@
 | 读取设置                 | `cove config get`                                                                       | `c02367b`                                                                                                        |                                                                                                                                                                                                                                               |
 | 修改设置                 | `cove config set workspaceRoot <DIR> [--expected-revision N] [--operation-id ID]`       | `c02367b`                                                                                                        | 只影响之后新建的 workspace                                                                                                                                                                                                                    |
 | 重置设置                 | `cove config reset workspaceRoot [--expected-revision N] [--operation-id ID]`           | `c02367b`                                                                                                        | 同上                                                                                                                                                                                                                                          |
-| 终端 run（不属于 tab）   | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                                                                                        | M0 路径；tab 尚未提供（见 §3）                                                                                                                                                                                                                |
+| 终端 run（不属于 tab）   | `cove terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`      | `8b06fe4`                                                                                                        | M0 路径；tab 见 §3（PENDING #121，其中也改变了 run ID 的编号）                                                                                                                                                                                |
 | 查看与停止 run           | `cove terminal list`、`terminal get <runId>`、`terminal stop <runId>`                   | `8b06fe4`                                                                                                        |                                                                                                                                                                                                                                               |
 | 操作身份                 | 写命令接受 `--operation-id ID`；`cove operation get <id>`、`cove operation resend <id>` | `c02367b`（重发只发保存的请求：`2d89043`）                                                                       | 首次发送前把请求保存为本机待定记录；`resend` 只向原 server 原样重发，已有记录时返回原记录、不重复执行                                                                                                                                         |
 | Repo 注册                | `cove repo register/list/get/set/reset/remove`                                          | `200e24d`（T2）；`REPO_IN_USE`：`09a61c3`                                                                        | 注册不改动 clone；`remove` 只删除注册，仍有挂载引用时拒绝（见下文 T3a）                                                                                                                                                                       |
@@ -65,16 +65,39 @@ T3a（PR #109，合入于 `6a838af`；server `fc41992`，`repo remove` 的 `REPO
 
 ## 3. 进行中（PENDING）与计划中（PLANNED）
 
-目前没有 PENDING 项。
+PENDING：PR #121（T4：tab 与 run），未合入：
+
+- `cove tab create <taskId> [--name N] [--cwd entry|mount:MOUNT_ID] [--start yes|no] [--cols N --rows N] [-- <可执行文件> [参数...]]`：
+  记录 tab（名称、启动配方、cwd），默认立即启动首个 run。`--` 之后为配方；省略时为 server 用户的登录 shell
+  （`-l`）。cwd 默认为 workspace 入口目录；`mount:` 须是记录为 ready 的挂载，已移除为 `MOUNT_NOT_FOUND`，
+  未 ready 为 `INVALID_ARGUMENT`。不传 `--cols/--rows` 时由 server 取默认尺寸（80×24），因此以同一
+  `--operation-id` 重建的请求指纹不变。已归档 task 返回 `TASK_ARCHIVED`。
+- `cove tab list <taskId>`、`tab get <tabId>`（`{ tab, latestRun }`）、`tab runs <tabId>`（新到旧，CLI 取完所有页）。
+- `cove tab reopen <tabId>`：按记录的配方新建 run（新 runId），旧 run 留在历史中；`cove tab stop <tabId> [--run RUN_ID]`：
+  停止最新的 run 并等到其退出；`cove tab close <tabId>`：删除 tab 记录，其 run 仍保留（`tabId` 变为 null）。
+  tab 有未结束的 run（starting/running，包括 worker 失联而无法核实的 run）时，`reopen` 与 `close` 以
+  `LIVE_RUNS_PRESENT` 拒绝。`--run` 不是最新 run 时为 `REVISION_CONFLICT`，旧实例的 run 为 `INSTANCE_MISMATCH`。
+- 写命令输出 `{ operation, tab, latestRun }`，操作未成功时也输出并以 1 退出。首个 run 被 worker 拒绝时 tab 仍保留
+  （无 run），操作为 failed，结果中给出该 tab。
+- run 记录（`latestRun` 与 `runs[]`）：`run`、`tabId`、`taskId`、启动时的 `workspaceRevision`、`cwd`、
+  `mounts`（启动时各挂载的名称、来源、真实路径，之后的绑定变化不改写）、`lifecycle`（starting、running、exited、
+  stopped-with-server、interrupted）、`verification`（live、unverifiable、final）、`startedAtMs`、`endedAtMs`、
+  `lastObservedAtMs`、`exitCode`、`signal`。当前实例的 run 只在 worker 报告存活时为 live，worker 失联时为
+  unverifiable，只有退出事实才使其 exited。重启后旧实例的 run 为 stopped-with-server 或 interrupted，从不为 live。
+- tab 的 run 也是普通终端 run，出现在 `cove terminal list` 中。
+- run ID 仍为 `run-N`，但新实例从数据库中已记录的最大 N 之后继续编号（此前每个实例都从 `run-1` 开始），
+  因此同一 server 的 run ID 不会重复；也适用于 `cove terminal create`。
+- 尚未注入 `COVE_TASK_ID`/`COVE_TAB_ID`：M0 的 spawn 参数没有环境变量字段，由 #120 补上（见下文 PLANNED）。
+  在此之前，tab 中运行的进程不能从环境变量得知自己所属的 task 或 tab。
 
 PLANNED：
 
 M1（已批准，实施中，见 [M1](../milestones/m1.md)）：
 
 - 托管 worktree 挂载（创建前 fetch、主分支解析、`--no-fetch`、`--base`）、逐仓准备结果与 `mount retry`。
-- `tab create/stop/reopen/close` 与 run 历史；`tab create` 保存启动配方（可执行文件与参数），默认 cwd 为 workspace 入口目录。
-  注入 `COVE_TASK_ID` 等少量 Cove 标识，不保存其他环境变量。
-- 重启后 run 显示为会话中断的 CLI 读取路径；`operation continue/abandon`。
+- 向 tab 的 run 注入 `COVE_TASK_ID`、`COVE_TAB_ID`（#120：spawn 增加有上限的 `env`，须在 M1 试用前合入），
+  不保存其他环境变量。tab 与 run 本身见上文 PENDING #121。
+- `operation continue/abandon`。
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
@@ -124,3 +147,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-17 | main `deb33ea`；#109（T3a，未合入） | 基准改为 main `deb33ea`；新增 `repo`（T2，`200e24d`）；新增 PENDING 标记，列出 #109 的 `task`、`mount add/remove`、task 的 JSON 输出（含 unavailable 与读取预算）、记录过大时的 `INVALID_ARGUMENT`、文件系统工作已满时的 `BUSY` 与 `repo remove` 的 `REPO_IN_USE` |
 | 2026-10-17 | main `47229e6`；#109（T3a，未合入） | 基准改为 main `47229e6`；`deb33ea` 之后的 `b62d876`、`a568b22`、`0db08c8`、`47229e6` 只改 CI、测试、terminal-web 与 m0-harness，本文所列接口不变                                                                                                                  |
 | 2026-10-17 | main `6a838af`（PR #109）           | 基准改为 main `6a838af`；T3a 合入，#109 的 PENDING 项改为 AVAILABLE：`task` 与 `mount add/remove`、task 的 JSON 输出、`INVALID_ARGUMENT` 与 `BUSY` 的拒绝由 `fc41992`（server）与 `3d65dc4`（CLI）引入，`repo remove` 的 `REPO_IN_USE` 由 `09a61c3` 引入          |
+| 2026-10-17 | main `0bba191`；#121（T4，未合入）  | 新增 PENDING #121：`tab create/list/get/runs/reopen/stop/close` 与 run 记录的 JSON 字段；run ID 跨实例不再重复（也适用于 `terminal create`）；`COVE_TASK_ID`/`COVE_TAB_ID` 注入明确为待定（#120），此前文档把它列在 tab 计划中                                    |
