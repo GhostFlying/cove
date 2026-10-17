@@ -30,7 +30,7 @@ export interface Arguments {
 export const GLOBAL_FLAGS = ["--home", "--rendezvous"] as const;
 
 // Flags that take no value.
-const SWITCHES = new Set(["--harness", "--reset"]);
+const SWITCHES = new Set(["--harness", "--reset", "--no-fetch"]);
 
 export function parseArguments(argv: readonly string[]): Arguments {
   const words: string[] = [];
