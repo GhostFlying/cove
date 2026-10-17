@@ -58,14 +58,26 @@ export const runOperations = {
     statement(db, "DELETE FROM runs WHERE run_seq = ?").run(row.run_seq);
   },
 
-  // The highest number N among recorded run IDs of the form run-N, 0 when there is none. A new
-  // instance continues after it, so a run ID names one recorded run of this server and a tab's
-  // run history can page by run ID (TerminalOperations, T4).
+  // The highest number N among the run IDs of the form run-N this server ever handed out, 0 when
+  // there is none. A new instance continues after it, so a run ID names one run of this server,
+  // a tab's run history can page by run ID, and a client holding a run ID (the CLI's `--run` pin)
+  // never matches a later run (TerminalOperations, T4).
+  //
+  // A run that never started leaves no row (runs.notStarted), so the run rows alone would let its
+  // number be handed out again after a restart. Every run ID a client can hold came either from
+  // a run row or from an operation receipt naming it (a launch's receipt records its run before
+  // the spawn, and a refused one keeps it as a failed receipt), and receipts are never deleted,
+  // so the maximum over both is a durable high-water mark. A future receipt retention must keep
+  // the highest run number it removes (in a counter) before deleting receipts.
   "runs.highestNumber": (db: Connection): number => {
     const row = statement(
       db,
-      `SELECT MAX(CAST(substr(run_id, 5) AS INTEGER)) AS n FROM runs
-       WHERE run_id GLOB 'run-[1-9]*' AND run_id NOT GLOB 'run-*[^0-9]*'`,
+      `SELECT MAX(CAST(substr(id, 5) AS INTEGER)) AS n FROM (
+         SELECT run_id AS id FROM runs
+         UNION ALL
+         SELECT json_extract(record_json, '$.run.runId') AS id FROM operations
+       )
+       WHERE id GLOB 'run-[1-9]*' AND id NOT GLOB 'run-*[^0-9]*'`,
     ).get() as { n: number | null };
     return row.n ?? 0;
   },
