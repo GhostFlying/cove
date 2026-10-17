@@ -154,6 +154,8 @@ describe("store opening, migrations and the data directory lock", () => {
       "tabs",
       "tasks",
       "workspaces",
+      "worktree_attempts",
+      "worktree_preparations",
     ]);
     expect(store.backupPath).toBeNull();
   });

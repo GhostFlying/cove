@@ -17,7 +17,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { canonicalWriteIntent, validateRpcResultForCall } from "@cove/protocol/rpc";
 import { RepoService } from "../../dist/domain/repos.js";
@@ -1829,7 +1829,8 @@ describe("migration 002", () => {
     await first.close();
     const store = await Store.open(options);
     stores.push(store);
-    expect(store.schemaVersion).toBe(2);
+    // Every later migration applies too; this case is about 002.
+    expect(store.schemaVersion).toBeGreaterThanOrEqual(2);
     expect(
       await store.call("test.all", {
         sql: "SELECT workspace_id, revision, materialized_revision FROM workspaces",
@@ -2685,34 +2686,140 @@ describe("workspace entry", () => {
 });
 
 describe("worktree mounts", () => {
-  it("refuses a worktree mount before anything is recorded until T3b creates them", async () => {
+  // Positive coverage of the T3b path through WorkspaceService; the preparation itself is covered
+  // by worktrees.test.mjs.
+  //
+  // The service's own Git commands (the preparation's update-ref, worktree add, read-tree) run
+  // with the process environment, so they get a temporary HOME and global configuration here, as
+  // in worktrees.test.mjs: never the operator's configuration or its hooks.
+  const isolated = ["HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"];
+  let saved;
+  beforeEach(async () => {
+    saved = Object.fromEntries(isolated.map((name) => [name, process.env[name]]));
+    const home = await temporary();
+    await writeFile(join(home, "gitconfig"), "");
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = join(home, "xdg");
+    process.env.GIT_CONFIG_GLOBAL = join(home, "gitconfig");
+    process.env.GIT_CONFIG_NOSYSTEM = "1";
+  });
+  afterEach(() => {
+    for (const [name, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+
+  it("records a worktree mount pending with the task, then prepares it and settles the receipt", async () => {
     const env = await setup();
     const alpha = await env.register("alpha");
     const checkout = { source: "checkout", repoId: alpha.repoId };
-    const worktree = { source: "worktree", repoId: alpha.repoId, name: "work" };
-    const refused = { kind: "CAPABILITY_UNAVAILABLE", acceptance: "not-accepted" };
-    // A task.create naming one is refused as a whole, its checkout included.
-    expect(
-      (await env.tasks.create("p", { operationId: "c", title: "T", mounts: [checkout, worktree] }))
-        .error,
-    ).toMatchObject(refused);
-    const { taskId } = await created(env.tasks, "c2", "T");
-    expect(
-      (await env.tasks.addMount("p", { operationId: "a", taskId, mount: worktree })).error,
-    ).toMatchObject(refused);
-    // No task, mount, receipt or entry exists for the refused requests.
-    expect(await env.rows("SELECT task_id FROM tasks")).toEqual([{ task_id: taskId }]);
-    expect(await env.rows("SELECT mount_id FROM mounts")).toEqual([]);
-    for (const operationId of ["c", "a"])
-      expect(await env.receipts.get({ serverId: "server", principalId: "p", operationId })).toBe(
-        null,
-      );
+    // No remote: an explicit base and no fetch.
+    const worktree = {
+      source: "worktree",
+      repoId: alpha.repoId,
+      name: "work",
+      base: "main",
+      noFetch: true,
+    };
+    const outcome = await env.tasks.create("p", {
+      operationId: "c",
+      title: "T",
+      mounts: [checkout, worktree],
+    });
+    // The receipt stays running until the preparation settles it; it names the task already.
+    expect(outcome.operation).toMatchObject({ state: "running" });
+    const taskId = outcome.operation.result.resource.id;
+    await env.tasks.worktrees.idle();
+    const key = { serverId: "server", principalId: "p", operationId: "c" };
+    const settled = await env.receipts.get(key);
+    expect(settled.state).toBe("succeeded");
+    expect(settled.result.mounts.map((mount) => mount.state)).toEqual(["ready", "ready"]);
     const { task } = await env.tasks.get(taskId);
-    expect(await readdir(env.workspaceRoot)).toEqual([basename(task.workspace.entryPath)]);
-    expect(task.workspace).toMatchObject({ revision: 0, mounts: [] });
-    // Nothing holds the registration.
+    const work = task.workspace.mounts.find((mount) => mount.name === "work");
+    expect(work).toMatchObject({ source: "worktree", state: "ready" });
+    expect(work.path).toBe(join(task.workspace.entryPath, "work"));
+    expect(await readFile(join(work.path, "README.md"), "utf8")).toBe("test\n");
     expect(
-      (await env.repos.remove("p", { operationId: "rr", repoId: alpha.repoId })).operation.state,
-    ).toBe("succeeded");
+      await env.rows("SELECT branch, state FROM managed_worktrees WHERE mount_id = ?", [
+        work.mountId,
+      ]),
+    ).toEqual([{ branch: `cove/${task.slug}`, state: "ready" }]);
+    // A managed worktree is never a checkout (D2).
+    expect(
+      kind(
+        await env.tasks.addMount("p", {
+          operationId: "a",
+          taskId,
+          mount: { source: "checkout", repoId: alpha.repoId, path: work.path, name: "again" },
+        }),
+      ),
+    ).toBe("MANAGED_WORKTREE_NOT_MOUNTABLE");
+    // A read verifies a ready worktree mount like a checkout: gone is missing, never recreated.
+    await rm(work.path, { recursive: true, force: true });
+    const after = (await env.tasks.get(taskId)).task;
+    expect(after.workspace.mounts.find((mount) => mount.name === "work").state).toBe("missing");
+    await expect(stat(work.path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("prepares a worktree with the service's Git under this suite's temporary home", async () => {
+    const env = await setup();
+    const alpha = await env.register("alpha");
+    const bin = await temporary();
+    const seen = join(bin, "seen");
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\ncase "$*" in *update-ref*) echo "$HOME|$GIT_CONFIG_GLOBAL" >> '${seen}' ;; esac\n` +
+        `PATH='${savedPath}' exec git "$@"\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${bin}:${savedPath}`;
+    await env.tasks.create("p", {
+      operationId: "c",
+      title: "T",
+      mounts: [{ source: "worktree", repoId: alpha.repoId, base: "main", noFetch: true }],
+    });
+    await env.tasks.worktrees.idle();
+    process.env.PATH = savedPath;
+    const [line] = (await readFile(seen, "utf8")).trim().split("\n");
+    expect(line).toBe(`${process.env.HOME}|${join(process.env.HOME, "gitconfig")}`);
+    expect(process.env.HOME).not.toBe(saved.HOME);
+  });
+
+  it("refuses to remove a worktree mount while its preparation is pending", async () => {
+    // The preparation is held before it records its intent, so the mount stays pending.
+    let release;
+    const held = new Promise((done) => (release = done));
+    const env = await setup({
+      wrapStore: (store) => ({
+        call: async (name, args) => {
+          if (name === "worktrees.recordIntent") await held;
+          return store.call(name, args);
+        },
+      }),
+    });
+    const alpha = await env.register("alpha");
+    const { taskId } = await created(env.tasks, "c", "T");
+    const added = await env.tasks.addMount("p", {
+      operationId: "a",
+      taskId,
+      mount: {
+        source: "worktree",
+        repoId: alpha.repoId,
+        name: "work",
+        base: "main",
+        noFetch: true,
+      },
+    });
+    expect(added.operation.state).toBe("running");
+    const mountId = added.operation.result.mounts[0].mountId;
+    expect(kind(await env.tasks.removeMount("p", { operationId: "r", taskId, mountId }))).toBe(
+      "OPERATION_EFFECTS_ACTIVE",
+    );
+    release();
+    await env.tasks.worktrees.idle();
+    // Once it is ready the same mount can be removed; the managed worktree stays (T5 deletes it).
+    const removed = await env.tasks.removeMount("p", { operationId: "r2", taskId, mountId });
+    expect(removed.operation.state).toBe("succeeded");
+    expect(await env.rows("SELECT state FROM managed_worktrees")).toEqual([{ state: "ready" }]);
   });
 });

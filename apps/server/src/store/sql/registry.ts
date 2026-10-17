@@ -6,6 +6,7 @@ import { repoOperations } from "./repos.js";
 import { runOperations } from "./runs.js";
 import { tabOperations } from "./tabs.js";
 import { workspaceOperations } from "./workspaces.js";
+import { worktreeOperations } from "./worktrees.js";
 
 // Every business operation the store executes, by name. Store.call (store/database.ts) sends a
 // name and arguments; the store looks the function up here and runs it as one transaction on its
@@ -20,6 +21,7 @@ export const STORE_OPERATIONS = Object.freeze({
   ...repoOperations,
   ...workspaceOperations,
   ...tabOperations,
+  ...worktreeOperations,
 });
 
 export type StoreOperations = typeof STORE_OPERATIONS;

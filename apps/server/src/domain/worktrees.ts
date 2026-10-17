@@ -1,0 +1,1517 @@
+import { randomUUID } from "node:crypto";
+import { lstat, readdir, readFile, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { domainError, type DomainError, type DomainErrorKind } from "@cove/protocol/errors";
+import type { OperationReceiptKey, OperationRecord, WriteRpcMethod } from "@cove/protocol/rpc";
+import { HostPathSchema, type MountSpec, type WorkspaceRecord } from "@cove/protocol/workspace";
+import {
+  executeDatabaseWriteCommitted,
+  recordedWrite,
+  storeReadError,
+  type DatabaseWriteContext,
+  type DatabaseWriteOutcome,
+} from "../operations/database-operations.js";
+import type { OperationReceipts, ReceiptVerifier } from "../operations/operation-receipts.js";
+import type { Store } from "../store/database.js";
+import { ProcessLedger } from "../store/processes.js";
+import type { NewMount } from "../store/sql/workspaces.js";
+import {
+  attentionRecord,
+  credited,
+  lastRun,
+  remainingArtifacts,
+  settledRecord,
+  type Attempt,
+  type AttemptPhase,
+  type Progress,
+  type StepEntry,
+  type StepName,
+} from "../store/sql/worktrees.js";
+import { isValidBranchName } from "../git/repository.js";
+import {
+  addWorktree,
+  branchCommit,
+  checkOut,
+  createBranch,
+  deleteBranch,
+  fetchRemote,
+  gitPath,
+  isSymbolicRef,
+  listWorktrees,
+  removeWorktree,
+  resolveBase,
+  statusEmpty,
+  type Recording,
+  type StepResult,
+  type StepTimeouts,
+  type WorktreeEntry,
+} from "../git/worktree.js";
+
+// Managed worktree creation (docs/milestones/m1.md T3b, S3, S4, S8; D1, D2; relay-protocol §11.4,
+// §11.5).
+//
+// The threat model (user decision of 2026-10-18, m1.md D1). Cove is single-user, and the
+// authenticated user is its trusted owner: Cove does not defend against the owner attacking
+// themselves, whether by fabricating look-alike artifacts at its managed paths (while the server is
+// down or concurrently), by editing concurrently, or by crafting inputs, and keeps no evidence of
+// provenance for that. The criterion is no data loss, not provenance: what Cove removes is the
+// attempt's own never-ready worktree and branch, matched to the recorded intent by shape, with
+// Git's own refusal as the safeguard (see Removal); the criterion for going on is that the state
+// matches the recorded intent by its shape. Cove never overwrites work (a checkout runs only into
+// a pristine worktree), never removes with force, never repeats a step blindly and never reports
+// an uncertain step as success: whatever it cannot establish goes to requires_attention, never to
+// success and never to a silent retry. Changes the user makes while a step or a cleanup runs are
+// an accepted residual (see the end of Removal).
+// Input validation stays, for correctness rather than as a defense against the owner: RPC
+// arguments are validated and bounded, and branch, base, remote and path values that reach Git are
+// checked by Git's own rules and never passed where they could be read as options (option-looking
+// names, oversized values; git/repository.ts, git/worktree.ts). Content and refs from Git remotes
+// are third-party data and are handled as such: no option injection from remote names or refs (the
+// remote's HEAD names only a remote-tracking ref Cove resolves itself), no lazy fetch beyond the
+// intended one (GIT_NO_LAZY_FETCH, git/run.ts), and the network environment isolation of fetch and
+// ls-remote (networkEnvironment).
+//
+// Order of an attempt. task.create, mount.add or mount.retry commits the mount as pending with an
+// attempt (migration 003) and the operation receipt, which stays running (store/sql/receipts.ts).
+// After the entry is published, the executor prepares the operation's attempts one after another.
+// Each attempt goes through recorded phases, so a continue resumes where it stopped and repeats
+// nothing that completed:
+// 1. planned: the entry is verified (the T3a materialization: the entry and its root are Cove's,
+//    the manifest is current) and its device and inode recorded; then the source remote is
+//    fetched, unless the request said --no-fetch (D1: a fetch that fails fails the mount with
+//    FETCH_FAILED and creates nothing; Cove never drops the fetch on its own);
+// 2. fetched: the entry is verified again (a fetch may take minutes), then the base commit is
+//    resolved (git/worktree.ts resolveBase: never the local HEAD) and recorded;
+// 3. resolved: the branch and the path must be free, then the intent (managed_worktrees: path,
+//    branch, base commit, owning operation) is recorded, durably, before any Git side effect;
+// 4. intent: the three Git steps (branch, worktree, checkout), each a single recorded command in a
+//    process group of its own (git/worktree.ts runGitStep);
+// 5. the attempt settles ready: in one transaction with the managed worktree, the mount, the
+//    workspace revision and, for the operation's last attempt, the operation's final receipt.
+// An attempt that fails ends failed with its error and leaves the others alone: the operation goes
+// on with the next one and ends failed with every mount's outcome (S4); a failed mount can be
+// retried (mount.retry) once its operation ended, or removed. Nothing is started for the task: no
+// run, no tab.
+//
+// The step ledger. Every effect is appended to the attempt's steps (store/sql/worktrees.ts
+// StepEntry) as started before it begins, and then marked with what became of it. Only two things
+// credit an effect to the attempt: Cove's own command exited with status 0 (succeeded), or it was
+// not seen to end and, once its process is known to have ended, the state is exactly what the step
+// makes from the recorded intent (verified, see verifyUncertain). A known failure is never
+// credited, even when the state now looks like what the step would have made: someone else made
+// it (a branch created between Cove's check and its update-ref is not Cove's to use or delete). A
+// credited effect that has since disappeared or changed stops the attempt as requires_attention;
+// it is not made again.
+//
+// Uncertainty first. Before an attempt does anything else, a last step that is started or
+// uncertain is resolved: while any process the operation recorded may still run
+// (store/processes.ts), the operation is requires_attention with `git-process` in its progress,
+// whatever the state looks like (an unfinished checkout can look complete). Once none does, the
+// state is observed again: the step is verified when the state is exactly its effect, void when
+// nothing of it exists (it may run again), and otherwise the attempt stays requires_attention.
+//
+// The entry. Every filesystem-affecting step (worktree add, checkout, a removal) is preceded and
+// followed by a verification of the entry: materialized and still the directory recorded at the
+// attempt's start. Any difference stops the attempt as requires_attention, because the path
+// `<entry>/<name>` may now lead somewhere that is not Cove's. For worktree add and the checkout the
+// check before runs once the step holds its Git slot, immediately before its command starts (step
+// guard): a check made before waiting for the slot (up to GIT_SLOT_WAIT_MS) would let the command
+// write through an entry replaced in the meantime. The check after only detects a change during the
+// step; it cannot undo a write.
+//
+// The checkout. `read-tree -m -u HEAD` keeps untracked files in its way, but it replaces or removes
+// entries someone staged in the worktree's index. So it runs only on a worktree that is exactly
+// what `worktree add --no-checkout` left, checked in the same guard: nothing but its `.git` file,
+// pointing at its own administrative directory, and no index there. Anything else is
+// requires_attention, and whatever is there stays.
+//
+// Ready. Before an attempt settles ready, also when a continue finds every step credited, the entry
+// is verified again and so is each effect: the branch is a plain ref at the base, the worktree is
+// registered at the path on the branch, and the checkout is physically there (its directory, its
+// `.git` file pointing at its administrative directory and back, and an index). A registration
+// alone is no proof: Git keeps it for a worktree whose directory was deleted.
+//
+// Removal (a failed attempt's cleanup, or an abandon) considers the artifacts the ledger credits
+// to the attempt. The worktree is Cove's own and was never reported ready, so nobody was meant to
+// work in it (user decision of 2026-10-18, m1.md D1): Cove cleans it up with Git's own refusal as
+// the only safeguard, adding no clean check of its own, and never uses force (git/worktree.ts):
+// - the worktree, when it is registered at the recorded path on the recorded branch, by plain
+//   `git worktree remove <path>` in the source clone, whether or not the checkout ran; Git
+//   refuses a worktree with changes or untracked files, and any refusal keeps it. Ignored files
+//   go with it, as Git removes them. One exception: a worktree never checked out (no index,
+//   nothing but its `.git` file, which points at its own administrative directory and back, HEAD
+//   still on the branch), which `worktree remove` would refuse as dirty, is removed by deleting
+//   that `.git` file and then the directory, only while it is empty;
+// - the branch, when it is a plain ref (not symbolic) at the recorded base commit that no
+//   worktree has checked out, by `update-ref --no-deref -d` with the base as the old value: it
+//   then holds nothing the base does not. A worktree left in place has it checked out, so it
+//   stays too.
+// Anything else is preserved and listed (the mount's `left` and the remaining effects). A removal
+// that may still be running after its deadline is outstanding: continue and abandon are refused
+// with OPERATION_EFFECTS_ACTIVE until it settled (`mutate`), as for a recorded process.
+//
+// Accepted residual windows (m1.md D1). The checks above and the removal they guard are separate
+// steps, and the user may change the clone or the worktree in between, while a cleanup runs; that
+// is out of scope by decision. Concretely: a branch checked out by a new worktree, a component of
+// the path swapped for a symlink, or the unchecked worktree put to use after its check, may be
+// acted on as checked. Git's refusal in `worktree remove`, the old value for `update-ref -d` and
+// rmdir's refusal of a non-empty directory narrow the windows but do not close them.
+//
+// Restart (createWorktreeVerifier, registered in operations/recovery-verifiers.ts). It reads the
+// store and the process records only; it runs no Git and touches no file. An operation left running
+// by an earlier instance whose attempts were all recorded as ended gets the outcome they record
+// (succeeded only when every one is ready); any other becomes requires_attention with the recorded
+// progress. operation.continue and operation.abandon are explicit writes with their own operation
+// IDs, refused (OPERATION_EFFECTS_ACTIVE, nothing accepted) while a process the operation recorded
+// may still run. A continue after a crash observes the state again for the step that was not seen
+// to end (evidence): a removal whose artifact is gone is recorded removed, and one whose artifact
+// is still there goes through the checks above again; no step is repeated without that.
+//
+// Abandon is accepted before anything is removed: one transaction commits the abandon running and
+// claims the target's pending attempts, so nothing else acts on them; the removals follow, each in
+// the ledger under the abandon's own process records, and one transaction ends both operations
+// (store/sql/worktrees.ts). An abandon interrupted by a restart, or whose removal was not seen to
+// end, is itself requires_attention, and a continue of it resumes its removals.
+//
+// Budgets. All Git and filesystem work of the preparation runs in the server's shared Git slots and
+// filesystem permits (domain/workspaces.ts), with deadlines; no answer in time is an unknown state
+// (requires_attention), never a guess. At most `actors` operations are driven at once and `queue`
+// more wait; a request that would start another is refused with BUSY before it is accepted.
+//
+// One operation is driven by one actor at a time (one server owns the data directory).
+
+const WORKTREE_METHODS: ReadonlySet<WriteRpcMethod> = new Set([
+  "task.create",
+  "mount.add",
+  "mount.retry",
+]);
+
+const STEPS = ["branch", "worktree", "checkout"] as const;
+
+type EntryState = WorkspaceRecord["entryState"];
+
+// The shared Git slots and filesystem permits (domain/workspaces.ts Slots and FsPermits).
+export type WorktreeBudgets = {
+  git<T>(group: object, deadline: number, work: () => Promise<T>, busy: T): Promise<T>;
+  fs<T>(
+    group: object,
+    deadline: number,
+    work: () => Promise<T>,
+  ): Promise<{ settled: Promise<T> } | null>;
+};
+
+export type WorktreeServiceOptions = {
+  store: Store;
+  receipts: OperationReceipts;
+  serverId: string;
+  relayInstanceId: string;
+  encodeUtf8: (text: string) => Uint8Array;
+  // Brings the workspace entry up to its current revision and returns its state
+  // (domain/workspaces.ts materialize). A worktree is only created inside a ready entry.
+  materialize: (workspaceId: string) => Promise<EntryState>;
+  budgets: WorktreeBudgets;
+  timeouts?: StepTimeouts;
+  // Operations driven at once, and accepted ones waiting for that (see the header); 2 and 8.
+  actors?: number;
+  queue?: number;
+  // The deadline of the Git work a request does before it is accepted (the branch name check of
+  // mount.retry), from its start; the server passes its write step budget.
+  requestStepMs?: number;
+  // The deadline of a filesystem operation from its permit (FS_DEADLINE_MS).
+  fsDeadlineMs?: number;
+  // Test hooks: runs inside the filesystem work of an unchecked removal, before it changes
+  // anything.
+  hooks?: { beforeUncheckedRemoval?: (path: string) => Promise<void> };
+  now?: () => number;
+  newId?: () => string;
+};
+
+// How long an actor waits for a Git slot (a step holds one for as long as it runs) and how long
+// a filesystem operation may take, from its permit.
+const GIT_SLOT_WAIT_MS = 60_000;
+const FS_DEADLINE_MS = 20_000;
+const REQUEST_STEP_MS = 20_000;
+
+const UNKNOWN = Symbol("unknown");
+type Unknown = typeof UNKNOWN;
+
+type Outcome =
+  { kind: "ready" } | { kind: "failed"; error: DomainErrorKind } | { kind: "attention" };
+
+const ATTENTION: Outcome = { kind: "attention" };
+const failed = (error: DomainErrorKind): Outcome => ({ kind: "failed", error });
+
+type RetryParams = {
+  operationId: string;
+  taskId: string;
+  mountId: string;
+  branch?: string;
+  base?: string;
+  noFetch?: boolean;
+};
+type TargetParams = { operationId: string; targetOperationId: string };
+
+// A store write of the ledger was refused (the attempt is no longer this actor's) or failed: the
+// actor stops, and the operation is verified at the next start or by an explicit continue.
+class Stopped extends Error {}
+
+// One actor's run: its turn group for the shared budgets, and the operation it acts as (the
+// attempt's own operation, or the abandon that claimed it), under which processes are recorded.
+type Run = { group: object; actor: OperationReceiptKey };
+
+// Seats of the actors (see the header, budgets). A seat is reserved before the request is
+// accepted, so an accepted operation always has one; it runs its work once a running place is
+// free, and a place passes straight to the next waiter.
+type Seat = { run: (work: () => Promise<void>) => Promise<void>; release: () => void };
+
+class Actors {
+  private running = 0;
+  private held = 0;
+  private readonly waiters: (() => void)[] = [];
+
+  constructor(
+    private readonly size: number,
+    private readonly waiting: number,
+  ) {}
+
+  reserve(): Seat | null {
+    if (this.held >= this.size + this.waiting) return null;
+    this.held++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.held--;
+    };
+    return {
+      release,
+      run: async (work) => {
+        if (released) return;
+        if (this.running >= this.size) await new Promise<void>((go) => this.waiters.push(go));
+        else this.running++;
+        try {
+          await work();
+        } finally {
+          const next = this.waiters.shift();
+          if (next) next();
+          else this.running--;
+          release();
+        }
+      },
+    };
+  }
+}
+
+// What a requires_attention record shows of an operation's attempts (OperationProgressSchema):
+// for the first pending one, the steps the ledger records complete and the effects still to come;
+// `git-process` while a recorded process may still run; `more-mounts` when other attempts wait.
+export function progressOf(attempts: readonly Attempt[], processActive: boolean): Progress {
+  const pending = attempts.filter((attempt) => attempt.outcome === "pending");
+  const first = pending[0];
+  const completed: string[] = [];
+  const remaining: string[] = [];
+  if (first) {
+    const phase = PHASE_ORDER.indexOf(first.phase);
+    if (credited(first.steps, "fetch")) completed.push("fetch");
+    else if (!first.noFetch && phase < 1) remaining.push("fetch");
+    if (phase >= 2) completed.push("base");
+    else remaining.push("base");
+    if (phase >= 3) completed.push("intent");
+    else remaining.push("intent");
+    for (const step of STEPS) if (credited(first.steps, step)) completed.push(step);
+    if (failedStep(first)) {
+      for (const artifact of remainingArtifacts(first.steps))
+        remaining.push(artifact === "worktree" ? "remove-worktree" : "delete-branch");
+    } else for (const step of STEPS) if (!credited(first.steps, step)) remaining.push(step);
+    remaining.push("record");
+  }
+  if (processActive) remaining.push("git-process");
+  if (pending.length > 1) remaining.push("more-mounts");
+  return {
+    completedSteps: completed.slice(0, 8),
+    remainingEffects: remaining.slice(-8),
+    recoveryActions: ["continue", "abandon"],
+  };
+}
+
+// The same for an abandon: the removals done so far, and that the rest of them remain.
+function abandonProgress(attempts: readonly Attempt[], processActive: boolean): Progress {
+  const completed: string[] = [];
+  for (const attempt of attempts)
+    for (const step of ["remove-worktree", "delete-branch"] as const)
+      if (lastRun(attempt.steps, step)?.outcome === "removed" && !completed.includes(step))
+        completed.push(step);
+  return {
+    completedSteps: completed,
+    remainingEffects: processActive ? ["cleanup", "record", "git-process"] : ["cleanup", "record"],
+    recoveryActions: ["continue"],
+  };
+}
+
+const PHASE_ORDER: readonly AttemptPhase[] = ["planned", "fetched", "resolved", "intent"];
+
+// The creation step that failed, which turns the rest of the attempt into its cleanup.
+function failedStep(attempt: Pick<Attempt, "steps">): StepName | null {
+  for (const step of STEPS) if (lastRun(attempt.steps, step)?.outcome === "failed") return step;
+  return null;
+}
+
+// Recording hooks of one Git step under `key` (git/worktree.ts runGitStep): the process is
+// recorded before git starts and marked ended once it was seen to exit.
+function recording(ledger: ProcessLedger, key: OperationReceiptKey): Recording {
+  let processId: string | null = null;
+  return {
+    record: async (process) => {
+      processId = (await ledger.record(key, process)).processId;
+    },
+    ended: async () => {
+      if (processId !== null) await ledger.markEnded(processId);
+    },
+  };
+}
+
+type PathState =
+  | { kind: "absent" }
+  | { kind: "present"; directory: boolean; identity: string }
+  | { kind: "unknown" };
+
+async function pathState(path: string): Promise<PathState> {
+  try {
+    const stats = await lstat(path);
+    return {
+      kind: "present",
+      directory: stats.isDirectory() && !stats.isSymbolicLink(),
+      identity: `${stats.dev}:${stats.ino}`,
+    };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT"
+      ? { kind: "absent" }
+      : { kind: "unknown" };
+  }
+}
+
+function errorCode(error: unknown): string | undefined {
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+function operationKey(key: OperationReceiptKey): string {
+  return JSON.stringify([key.serverId, key.principalId, key.operationId]);
+}
+
+export class WorktreeService {
+  private readonly ledger: ProcessLedger;
+  private readonly actors: Actors;
+  // Operations being driven now (see the header); for each, the promise of its actor.
+  private readonly busy = new Map<string, Promise<void>>();
+  // Mutating filesystem work that outlived its deadline, by the operation it ran for (see the
+  // header, removal): until it settles, nothing may continue or finish that operation.
+  private readonly outstanding = new Map<string, Set<Promise<unknown>>>();
+
+  constructor(private readonly options: WorktreeServiceOptions) {
+    this.ledger = new ProcessLedger(options.store, options.relayInstanceId, options.now);
+    this.actors = new Actors(options.actors ?? 2, options.queue ?? 8);
+  }
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  private newId(): string {
+    return (this.options.newId ?? randomUUID)();
+  }
+
+  private get context(): DatabaseWriteContext {
+    return {
+      serverId: this.options.serverId,
+      receipts: this.options.receipts,
+      encodeUtf8: this.options.encodeUtf8,
+    };
+  }
+
+  private get limits() {
+    return {
+      serverId: this.options.serverId,
+      operationRecordBytes: this.options.receipts.composition.budgets.operationRecordBytes,
+    };
+  }
+
+  private key(principalId: string, operationId: string): OperationReceiptKey {
+    return { serverId: this.options.serverId, principalId, operationId };
+  }
+
+  // Settles once every operation being driven now has stopped; for tests and an orderly stop.
+  async idle(): Promise<void> {
+    while (this.busy.size) await Promise.all([...this.busy.values()]);
+  }
+
+  // A seat for an operation about to be accepted (see the header, budgets); null when as many are
+  // driven and waiting as allowed, and the request is refused with BUSY. The caller releases it
+  // when the operation was not committed.
+  reserve(): Seat | null {
+    return this.actors.reserve();
+  }
+
+  // Drives `key` with `work` on `seat`, unless another actor has the operation.
+  private claim(seat: Seat, key: OperationReceiptKey, work: () => Promise<void>): void {
+    const id = JSON.stringify([key.serverId, key.principalId, key.operationId]);
+    if (this.busy.has(id)) {
+      seat.release();
+      return;
+    }
+    const running = seat
+      .run(work)
+      .catch(() => undefined)
+      .finally(() => this.busy.delete(id));
+    this.busy.set(id, running);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Shared budgets (see the header).
+
+  private git<T>(run: Run, work: () => Promise<T>): Promise<T | Unknown> {
+    return this.options.budgets.git<T | Unknown>(
+      run.group,
+      performance.now() + GIT_SLOT_WAIT_MS,
+      work,
+      UNKNOWN,
+    );
+  }
+
+  // A filesystem operation under a permit, answered by its deadline; `work` reports its own
+  // expected errors, and anything else is no answer.
+  private async fs<T>(run: Run, work: () => Promise<T>, mutating = false): Promise<T | Unknown> {
+    const deadline = performance.now() + (this.options.fsDeadlineMs ?? FS_DEADLINE_MS);
+    const admitted = await this.options.budgets.fs(run.group, deadline, work);
+    if (!admitted) return UNKNOWN;
+    if (mutating) this.track(run.actor, admitted.settled);
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<Unknown>((done) => {
+      timer = setTimeout(() => done(UNKNOWN), Math.max(0, deadline - performance.now()));
+      timer.unref();
+    });
+    try {
+      return await Promise.race([admitted.settled.catch((): Unknown => UNKNOWN), late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // Filesystem work that changes something: as fs, and outstanding for its operation until it
+  // settles, whatever the caller was answered (codex #7: a timed-out removal may still run).
+  private mutate<T>(run: Run, work: () => Promise<T>): Promise<T | Unknown> {
+    return this.fs(run, work, true);
+  }
+
+  private track(key: OperationReceiptKey, settled: Promise<unknown>): void {
+    const id = operationKey(key);
+    let set = this.outstanding.get(id);
+    if (!set) this.outstanding.set(id, (set = new Set()));
+    const entry = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    set.add(entry);
+    void entry.then(() => {
+      set.delete(entry);
+      if (!set.size && this.outstanding.get(id) === set) this.outstanding.delete(id);
+    });
+  }
+
+  private pathState(run: Run, path: string): Promise<PathState> {
+    return this.fs(run, () => pathState(path)).then((found) =>
+      found === UNKNOWN ? { kind: "unknown" } : found,
+    );
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Planning (before the write that records the mount).
+
+  // A worktree spec resolved for the write: its branch (`cove/<slug>` unless given, D1) checked by
+  // Git's own rules, and its path `<entry>/<name>`. `repo` and `name` were resolved by the caller.
+  async plan(input: {
+    spec: Extract<MountSpec, { source: "worktree" }>;
+    repo: { repoId: string; commonDir: string };
+    name: string;
+    slug: string;
+    entryPath: string;
+    // The request's turn group for the shared Git slots, and its deadline for this check.
+    group: object;
+    deadline: number;
+  }): Promise<{ mount: NewMount } | { error: DomainError }> {
+    const { spec } = input;
+    const branch = spec.branch ?? `cove/${input.slug}`;
+    const invalid = await this.checkBranchName(input.group, input.deadline, branch);
+    if (invalid) return { error: invalid };
+    const path = join(input.entryPath, input.name);
+    if (!HostPathSchema.safeParse(path).success) return { error: domainError("INVALID_ARGUMENT") };
+    return {
+      mount: {
+        mountId: this.newId(),
+        name: input.name,
+        source: "worktree",
+        repoId: input.repo.repoId,
+        path,
+        commonDir: input.repo.commonDir,
+        branch,
+        spec: {
+          branch: spec.branch ?? null,
+          baseRef: spec.base ?? null,
+          noFetch: spec.noFetch ?? false,
+        },
+      },
+    };
+  }
+
+  // Checks `branch` by Git's own rules (git/repository.ts) in a shared Git slot: null when it is
+  // valid; BUSY when no slot came free by `deadline` (nothing ran), as for any request's Git work
+  // (domain/workspaces.ts).
+  private async checkBranchName(
+    group: object,
+    deadline: number,
+    branch: string,
+  ): Promise<DomainError | null> {
+    const valid = await this.options.budgets.git<boolean | null | Unknown>(
+      group,
+      deadline,
+      () => isValidBranchName(branch),
+      UNKNOWN,
+    );
+    if (valid === UNKNOWN) return domainError("BUSY");
+    if (valid === null) return domainError("GIT_UNAVAILABLE");
+    return valid ? null : domainError("INVALID_ARGUMENT");
+  }
+
+  // Starts preparing the attempts of an operation that was just committed running, on the seat
+  // reserved for it.
+  start(seat: Seat, principalId: string, operationId: string): void {
+    const key = this.key(principalId, operationId);
+    this.claim(seat, key, () => this.drive(key));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The executor.
+
+  private async drive(key: OperationReceiptKey): Promise<void> {
+    const run: Run = { group: {}, actor: key };
+    let attempts: Attempt[];
+    try {
+      attempts = await this.options.store.call("worktrees.attempts", { operation: key });
+    } catch {
+      return;
+    }
+    for (const attempt of attempts) {
+      if (attempt.outcome !== "pending" || attempt.abandon) continue;
+      let outcome: Outcome;
+      try {
+        outcome = await this.prepare(run, attempt);
+      } catch {
+        outcome = ATTENTION;
+      }
+      if (outcome.kind === "attention") return this.attention(key);
+      let settled;
+      try {
+        settled = await this.options.store.call("worktrees.settle", {
+          attemptId: attempt.attemptId,
+          actor: key,
+          outcome: outcome.kind,
+          ...(outcome.kind === "failed" ? { error: domainError(outcome.error) } : {}),
+          limits: this.limits,
+          at: this.now(),
+        });
+      } catch {
+        // Whether it committed is unknown; the next start or a continue verifies it.
+        return;
+      }
+      if (!settled) return this.attention(key);
+      if (settled.revision !== null)
+        await this.options.materialize(attempt.workspaceId).catch(() => "pending");
+    }
+  }
+
+  // Records the operation as requires_attention with what its ledger shows. A store failure
+  // leaves it running; the next start verifies it.
+  private async attention(key: OperationReceiptKey): Promise<void> {
+    try {
+      const attempts = await this.options.store.call("worktrees.attempts", { operation: key });
+      const active = await this.processActive([key]);
+      await this.options.store.call("worktrees.attention", {
+        operation: key,
+        progress: progressOf(attempts, active),
+        limits: this.limits,
+        at: this.now(),
+      });
+    } catch {
+      // See above.
+    }
+  }
+
+  // Whether a process recorded under any of `keys` may still run (store/processes.ts), or
+  // filesystem work of theirs is outstanding (see `mutate`); an unreadable record counts as one
+  // that may.
+  private async processActive(keys: readonly OperationReceiptKey[]): Promise<boolean> {
+    for (const key of keys) {
+      if (this.outstanding.has(operationKey(key))) return true;
+      try {
+        if ((await this.ledger.check(key)) !== "ended") return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Records `patch` in the attempt's ledger (store worktrees.advance) and mirrors it in `attempt`.
+  private async record(
+    run: Run,
+    attempt: Attempt,
+    patch: {
+      step?: StepEntry;
+      phase?: AttemptPhase;
+      baseCommit?: string;
+      entryIdentity?: string;
+    },
+  ): Promise<void> {
+    let recorded: boolean;
+    try {
+      recorded = await this.options.store.call("worktrees.advance", {
+        attemptId: attempt.attemptId,
+        actor: run.actor,
+        ...patch,
+        at: this.now(),
+      });
+    } catch {
+      recorded = false;
+    }
+    if (!recorded) throw new Stopped();
+    if (patch.step) {
+      const last = attempt.steps.at(-1);
+      if (
+        patch.step.outcome !== "started" &&
+        last?.step === patch.step.step &&
+        (last.outcome === "started" || last.outcome === "uncertain")
+      )
+        attempt.steps[attempt.steps.length - 1] = patch.step;
+      else attempt.steps.push(patch.step);
+    }
+    if (patch.phase && PHASE_ORDER.indexOf(patch.phase) > PHASE_ORDER.indexOf(attempt.phase))
+      attempt.phase = patch.phase;
+    if (patch.baseCommit) attempt.baseCommit = patch.baseCommit;
+    if (patch.entryIdentity) attempt.entryIdentity = patch.entryIdentity;
+  }
+
+  // Runs one step in a Git slot, recorded before it starts and after it ends: succeeded only for
+  // a definite exit 0 of Cove's own command. "busy" when no slot came free (nothing started).
+  // A step whose end could not be recorded is treated as uncertain. `guard`, when given, runs once
+  // the slot is held and right before anything is recorded or started (see the header, the
+  // entry); "blocked" when it refused (nothing started). It uses only filesystem permits, never
+  // another Git slot, so it cannot wait on the slot it holds.
+  private async step(
+    run: Run,
+    attempt: Attempt,
+    name: StepName,
+    work: (recorder: Recording) => Promise<StepResult>,
+    options: { onSuccess?: { phase?: AttemptPhase }; guard?: () => Promise<boolean> } = {},
+  ): Promise<"succeeded" | "failed" | "uncertain" | "busy" | "blocked"> {
+    const onSuccess = options.onSuccess ?? {};
+    const done = await this.git(run, async () => {
+      if (options.guard && !(await options.guard())) return "blocked" as const;
+      await this.record(run, attempt, { step: { step: name, outcome: "started" } });
+      const result = await work(recording(this.ledger, run.actor));
+      const outcome =
+        result.kind === "exited" && result.code === 0
+          ? "succeeded"
+          : result.kind === "uncertain"
+            ? "uncertain"
+            : "failed";
+      try {
+        await this.record(run, attempt, {
+          step: { step: name, outcome },
+          ...(outcome === "succeeded" ? onSuccess : {}),
+        });
+      } catch {
+        return "uncertain" as const;
+      }
+      return outcome;
+    });
+    return done === UNKNOWN ? "busy" : done;
+  }
+
+  // The entry check before and after every filesystem-affecting step (see the header): ok when
+  // the entry is materialized and still the directory recorded at the attempt's start (recorded
+  // now if this is the start).
+  private async entry(run: Run, attempt: Attempt): Promise<"ok" | "unavailable" | "changed"> {
+    const state = await this.options.materialize(attempt.workspaceId).catch(() => "unavailable");
+    if (state !== "ready") return "unavailable";
+    const found = await this.pathState(run, dirname(attempt.path));
+    if (found.kind !== "present" || !found.directory) return "changed";
+    if (attempt.entryIdentity === null) {
+      await this.record(run, attempt, { entryIdentity: found.identity });
+      return "ok";
+    }
+    return found.identity === attempt.entryIdentity ? "ok" : "changed";
+  }
+
+  private worktrees(run: Run, clone: string): Promise<WorktreeEntry[] | null> {
+    return this.git(run, () => listWorktrees(clone)).then((found) =>
+      found === UNKNOWN ? null : found,
+    );
+  }
+
+  // Prepares one attempt from its recorded phase (see the header).
+  private async prepare(run: Run, attempt: Attempt): Promise<Outcome> {
+    const repo = attempt.repo;
+    const effects = attempt.steps.some((entry) => entry.step !== "fetch");
+    if (!repo) return effects || attempt.phase === "intent" ? ATTENTION : failed("REPO_NOT_FOUND");
+    const uncertain = await this.verifyUncertain(run, attempt, repo.path, [attempt.operation]);
+    if (uncertain) return uncertain;
+    if (attempt.phase === "planned") {
+      const entry = await this.entry(run, attempt);
+      if (entry === "changed") return ATTENTION;
+      if (entry !== "ok") return failed("WORKSPACE_ENTRY_UNAVAILABLE");
+      if (attempt.noFetch) await this.record(run, attempt, { phase: "fetched" });
+      else {
+        const fetched = await this.step(
+          run,
+          attempt,
+          "fetch",
+          (recorder) => fetchRemote(repo.path, recorder, this.options.timeouts),
+          { onSuccess: { phase: "fetched" } },
+        );
+        // Fetching changes only remote-tracking refs, which are not an artifact of the attempt.
+        if (fetched === "failed") return failed("FETCH_FAILED");
+        // A fetch not seen to end is not a failed fetch: it may still be running.
+        if (fetched !== "succeeded") return ATTENTION;
+      }
+    }
+    if (attempt.phase === "fetched") {
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      const base = await this.git(run, () =>
+        resolveBase(repo.path, {
+          base: attempt.baseRef,
+          mainBranch: repo.mainBranch,
+          offline: attempt.noFetch,
+        }),
+      );
+      if (base === UNKNOWN) return ATTENTION;
+      if (base.kind === "unresolved") return failed("MAIN_BRANCH_UNRESOLVED");
+      if (base.kind === "invalid-base") return failed("INVALID_ARGUMENT");
+      if (base.kind === "unavailable") return failed("GIT_UNAVAILABLE");
+      await this.record(run, attempt, { phase: "resolved", baseCommit: base.commit });
+    }
+    if (attempt.phase === "resolved") {
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      const existing = await this.git(run, () => branchCommit(repo.path, attempt.branch));
+      if (existing === UNKNOWN) return ATTENTION;
+      if (existing === "unavailable") return failed("GIT_UNAVAILABLE");
+      if (existing !== null) return failed("BRANCH_EXISTS");
+      const free = await this.pathState(run, attempt.path);
+      if (free.kind === "unknown") return ATTENTION;
+      if (free.kind === "present") return failed("WORKSPACE_ENTRY_UNAVAILABLE");
+      const worktreeId = this.newId();
+      let recorded: "recorded" | "taken" | "gone";
+      try {
+        recorded = await this.options.store.call("worktrees.recordIntent", {
+          attemptId: attempt.attemptId,
+          actor: run.actor,
+          worktreeId,
+          at: this.now(),
+        });
+      } catch {
+        return ATTENTION;
+      }
+      if (recorded === "taken") return failed("MOUNT_NAME_CONFLICT");
+      if (recorded === "gone") return failed("REPO_NOT_FOUND");
+      attempt.phase = "intent";
+      attempt.worktreeId = worktreeId;
+    }
+    if (failedStep(attempt)) return this.failWith(run, attempt, repo.path);
+    return this.create(run, attempt, repo.path);
+  }
+
+  // The three Git steps of an attempt with its intent recorded.
+  private async create(run: Run, attempt: Attempt, clone: string): Promise<Outcome> {
+    const base = attempt.baseCommit!;
+    // Also on a continue that finds the steps credited (see the header, ready).
+    if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+    if (!credited(attempt.steps, "branch")) {
+      const created = await this.step(run, attempt, "branch", (recorder) =>
+        createBranch(
+          clone,
+          { branch: attempt.branch, baseCommit: base, attemptId: attempt.attemptId },
+          recorder,
+          this.options.timeouts,
+        ),
+      );
+      if (created === "failed") return this.failWith(run, attempt, clone);
+      if (created !== "succeeded") return ATTENTION;
+    }
+    // A credited branch that is gone, moved or replaced by a symbolic ref is not made again.
+    if ((await this.branchState(run, attempt, clone)) !== "intended") return ATTENTION;
+    const ref = `refs/heads/${attempt.branch}`;
+    if (!credited(attempt.steps, "worktree")) {
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      const free = await this.pathState(run, attempt.path);
+      const listed = await this.worktrees(run, clone);
+      // Something at the path that the ledger does not credit to this attempt is not Cove's.
+      if (free.kind !== "absent" || !listed || listed.some((entry) => entry.path === attempt.path))
+        return ATTENTION;
+      const added = await this.step(
+        run,
+        attempt,
+        "worktree",
+        (recorder) =>
+          addWorktree(clone, attempt.path, attempt.branch, recorder, this.options.timeouts),
+        {
+          guard: async () =>
+            (await this.entry(run, attempt)) === "ok" &&
+            (await this.pathState(run, attempt.path)).kind === "absent",
+        },
+      );
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      if (added === "failed") return this.failWith(run, attempt, clone);
+      if (added !== "succeeded") return ATTENTION;
+    }
+    const listed = await this.worktrees(run, clone);
+    const registered = listed?.find((entry) => entry.path === attempt.path);
+    if (registered?.branch !== ref) return ATTENTION;
+    if (!credited(attempt.steps, "checkout")) {
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      const checked = await this.step(
+        run,
+        attempt,
+        "checkout",
+        (recorder) => checkOut(attempt.path, recorder, this.options.timeouts),
+        {
+          guard: async () =>
+            (await this.entry(run, attempt)) === "ok" && (await this.pristine(run, attempt)),
+        },
+      );
+      if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      if (checked === "failed") return this.failWith(run, attempt, clone);
+      if (checked !== "succeeded") return ATTENTION;
+    }
+    // Validated again before ready (see the header): the entry and the checkout itself.
+    if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+    if (!(await this.checkedOut(run, attempt))) return ATTENTION;
+    return { kind: "ready" };
+  }
+
+  // The branch as the recorded intent left it (see the header, removal): intended (a plain ref at
+  // the base), absent, other (a symbolic ref, or another commit), or unknown.
+  private async branchState(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+  ): Promise<"intended" | "absent" | "other" | "unknown"> {
+    const base = attempt.baseCommit;
+    const at = await this.git(run, () => branchCommit(clone, attempt.branch));
+    if (at === UNKNOWN || at === "unavailable") return "unknown";
+    if (at === null) return "absent";
+    if (!base || at !== base) return "other";
+    const symbolic = await this.git(run, () => isSymbolicRef(clone, attempt.branch));
+    if (symbolic === UNKNOWN || symbolic === null) return "unknown";
+    return symbolic ? "other" : "intended";
+  }
+
+  // Whether the worktree is exactly what `worktree add --no-checkout` left (see the header, the
+  // checkout): the unchecked proof, and no index in its administrative directory. Filesystem
+  // permits only (it runs in the checkout's guard).
+  private async pristine(run: Run, attempt: Attempt): Promise<boolean> {
+    const proof = await this.unchecked(run, attempt, "");
+    if (!proof) return false;
+    const index = await this.pathState(run, join(proof.admin, "index"));
+    if (index.kind !== "absent") return false;
+    // `worktree add` writes HEAD as a symbolic ref to the branch; anything else is not its work.
+    const head = await this.fs(run, () =>
+      readFile(join(proof.admin, "HEAD"), "utf8").catch(() => null),
+    );
+    return head === `ref: refs/heads/${attempt.branch}\n`;
+  }
+
+  // Whether the checkout is physically there (see the header, ready): the directory, its `.git`
+  // file naming an administrative directory of the clone whose `gitdir` points back at it, and an
+  // index in that directory.
+  private async checkedOut(run: Run, attempt: Attempt): Promise<boolean> {
+    const common = attempt.repo?.commonDir;
+    if (!common) return false;
+    const dotGitPath = join(attempt.path, ".git");
+    const found = await this.fs(run, async () => {
+      try {
+        if (!(await lstat(attempt.path)).isDirectory()) return false;
+        if (!(await lstat(dotGitPath)).isFile()) return false;
+        const admin = /^gitdir: (.+)\n?$/.exec(await readFile(dotGitPath, "utf8"))?.[1];
+        if (!admin || dirname(admin) !== join(common, "worktrees")) return false;
+        if ((await readFile(join(admin, "gitdir"), "utf8")).trim() !== dotGitPath) return false;
+        return (await lstat(join(admin, "index"))).isFile();
+      } catch {
+        return false;
+      }
+    });
+    return found === true;
+  }
+
+  // A creation step failed: the attempt's own artifacts are removed as described under Removal,
+  // and it fails. GIT_UNAVAILABLE: Git gave no usable answer to a step that should have worked
+  // (its stderr is not interpreted; it may hold paths or remote URLs); BRANCH_EXISTS when the
+  // branch step lost to a branch someone else created.
+  private async failWith(run: Run, attempt: Attempt, clone: string): Promise<Outcome> {
+    const cleaned = await this.cleanup(run, attempt, clone);
+    if (cleaned === "attention") return ATTENTION;
+    if (failedStep(attempt) === "branch") {
+      const existing = await this.git(run, () => branchCommit(clone, attempt.branch));
+      if (existing !== UNKNOWN && existing !== null && existing !== "unavailable")
+        return failed("BRANCH_EXISTS");
+    }
+    return failed("GIT_UNAVAILABLE");
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Uncertain steps (see the header, uncertainty first).
+
+  // Resolves a last step that is started or uncertain; null when there is none (any more), the
+  // attention outcome while it cannot be resolved.
+  private async verifyUncertain(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+    keys: readonly OperationReceiptKey[],
+    abandoning = false,
+  ): Promise<Outcome | null> {
+    const last = attempt.steps.at(-1);
+    if (!last || (last.outcome !== "started" && last.outcome !== "uncertain")) return null;
+    if (await this.processActive(keys)) return ATTENTION;
+    const verdict = await this.evidence(run, attempt, clone, last.step);
+    // A continue cannot go on from an effect that is not proven either way. An abandon can: the
+    // effect is left in place and listed (store/sql/worktrees.ts unproven), never removed.
+    if (verdict === "attention") {
+      if (!abandoning || !(STEPS as readonly string[]).includes(last.step)) return ATTENTION;
+      await this.record(run, attempt, { step: { step: last.step, outcome: "unproven" } });
+      return null;
+    }
+    await this.record(run, attempt, { step: { step: last.step, outcome: verdict } });
+    return null;
+  }
+
+  // What the state proves about a step whose end was not seen, now that its process has ended:
+  // verified (the state is exactly the step's effect), void (nothing of it is there, so
+  // it may run again), removed (a removal's artifact is gone), or attention.
+  private async evidence(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+    step: StepName,
+  ): Promise<"verified" | "void" | "removed" | "attention"> {
+    const base = attempt.baseCommit;
+    const ref = `refs/heads/${attempt.branch}`;
+    switch (step) {
+      // A fetch only changes remote-tracking refs; it is simply run again.
+      case "fetch":
+        return "void";
+      case "branch": {
+        if (!base) return "attention";
+        // Exactly what the step makes: a plain ref at the base.
+        const state = await this.branchState(run, attempt, clone);
+        return state === "intended" ? "verified" : state === "absent" ? "void" : "attention";
+      }
+      case "worktree": {
+        const listed = await this.worktrees(run, clone);
+        if (!listed) return "attention";
+        const registered = listed.find((entry) => entry.path === attempt.path);
+        const at = await this.pathState(run, attempt.path);
+        if (!registered) return at.kind === "absent" ? "void" : "attention";
+        // Exactly what the step makes: registered at the path on the attempt's branch, holding
+        // nothing but the `.git` file `worktree add --no-checkout` writes, which points at its own
+        // entry.
+        return registered.branch === ref && (await this.unchecked(run, attempt, clone)) !== null
+          ? "verified"
+          : "attention";
+      }
+      case "checkout": {
+        const index = await this.git(run, () => gitPath(attempt.path, "index"));
+        if (index === UNKNOWN || index === null) return "attention";
+        const found = await this.pathState(run, index);
+        if (found.kind === "absent")
+          return (await this.unchecked(run, attempt, clone)) !== null ? "void" : "attention";
+        if (found.kind !== "present") return "attention";
+        // Checked out, with nothing changed, untracked or ignored: exactly what the checkout makes.
+        const clean = await this.git(run, () => statusEmpty(attempt.path));
+        return clean === true ? "verified" : "attention";
+      }
+      case "remove-worktree": {
+        const listed = await this.worktrees(run, clone);
+        const at = await this.pathState(run, attempt.path);
+        if (!listed) return "attention";
+        const registered = listed.some((entry) => entry.path === attempt.path);
+        return !registered && at.kind === "absent" ? "removed" : "void";
+      }
+      case "delete-branch": {
+        const at = await this.git(run, () => branchCommit(clone, attempt.branch));
+        if (at === UNKNOWN || at === "unavailable") return "attention";
+        if (at !== null) return "void";
+        const listed = await this.worktrees(run, clone);
+        if (!listed) return "attention";
+        return listed.some((entry) => entry.branch === ref) ? "attention" : "removed";
+      }
+    }
+  }
+
+  // The proof that a worktree was never checked out and is this attempt's: the directory holds
+  // only its `.git` file, which names an administrative directory of the clone whose `gitdir`
+  // points back at it. Returns that file's content and the administrative directory, or null.
+  private async unchecked(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+  ): Promise<{ dotGit: string; admin: string } | null> {
+    const common = attempt.repo?.commonDir;
+    if (!common) return null;
+    const dotGitPath = join(attempt.path, ".git");
+    const found = await this.fs(run, async () => {
+      try {
+        const names = await readdir(attempt.path);
+        if (names.length !== 1 || names[0] !== ".git") return null;
+        const stats = await lstat(dotGitPath);
+        if (!stats.isFile()) return null;
+        const dotGit = await readFile(dotGitPath, "utf8");
+        const match = /^gitdir: (.+)\n?$/.exec(dotGit);
+        const admin = match?.[1];
+        if (!admin || dirname(admin) !== join(common, "worktrees")) return null;
+        const back = await readFile(join(admin, "gitdir"), "utf8");
+        return back.trim() === dotGitPath ? { dotGit, admin } : null;
+      } catch {
+        return null;
+      }
+    });
+    void clone;
+    return found === UNKNOWN ? null : found;
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Removal (see the header). Each removal is recorded in the attempt's ledger; "done" when every
+  // artifact the ledger credits was removed or preserved, "attention" when one was not seen to end
+  // or its state could not be established.
+
+  private async cleanup(run: Run, attempt: Attempt, clone: string): Promise<"done" | "attention"> {
+    if (remainingArtifacts(attempt.steps).includes("worktree")) {
+      // An unproven worktree is left in place (store/sql/worktrees.ts).
+      const removed = credited(attempt.steps, "worktree")
+        ? await this.removeOwnWorktree(run, attempt, clone)
+        : "preserved";
+      if (removed === "attention") return "attention";
+      await this.record(run, attempt, { step: { step: "remove-worktree", outcome: removed } });
+    }
+    if (remainingArtifacts(attempt.steps).includes("branch")) {
+      // A worktree left in place has the branch checked out.
+      const deleted =
+        remainingArtifacts(attempt.steps).includes("worktree") || !credited(attempt.steps, "branch")
+          ? "preserved"
+          : await this.deleteOwnBranch(run, attempt, clone);
+      if (deleted === "attention") return "attention";
+      await this.record(run, attempt, { step: { step: "delete-branch", outcome: deleted } });
+    }
+    return "done";
+  }
+
+  private async removeOwnWorktree(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+  ): Promise<"removed" | "preserved" | "attention"> {
+    // Behind a changed entry, the path may lead somewhere else.
+    if ((await this.entry(run, attempt)) !== "ok") return "preserved";
+    const listed = await this.worktrees(run, clone);
+    if (!listed) return "attention";
+    const registered = listed.find((entry) => entry.path === attempt.path);
+    const at = await this.pathState(run, attempt.path);
+    if (at.kind === "unknown") return "attention";
+    if (!registered) return at.kind === "absent" ? "removed" : "preserved";
+    if (registered.branch !== `refs/heads/${attempt.branch}`) return "preserved";
+    // Never checked out: `worktree remove` would see every file as deleted from an index that
+    // does not exist and refuse, so the directory holding only its `.git` file is removed by hand.
+    if (await this.pristine(run, attempt)) return this.removeUnchecked(run, attempt, clone);
+    // Otherwise Git decides: plain `worktree remove`, whose refusal (changes, untracked files, a
+    // missing index, a lock) keeps the worktree.
+    const removed = await this.step(run, attempt, "remove-worktree", (recorder) =>
+      removeWorktree(clone, attempt.path, recorder, this.options.timeouts),
+    );
+    if (removed === "failed") return "preserved";
+    if (removed !== "succeeded") return "attention";
+    const after = await this.pathState(run, attempt.path);
+    return after.kind === "absent" ? "removed" : "preserved";
+  }
+
+  // A worktree never checked out: without its `.git` file Git no longer sees a worktree there, and
+  // rmdir removes the directory only while it is empty, so a file someone put there in the
+  // meantime keeps it (and the `.git` file is put back).
+  private async removeUnchecked(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+  ): Promise<"removed" | "preserved" | "attention"> {
+    const proof = await this.unchecked(run, attempt, clone);
+    if (!proof) return "preserved";
+    await this.record(run, attempt, { step: { step: "remove-worktree", outcome: "started" } });
+    const dotGitPath = join(attempt.path, ".git");
+    const before = this.options.hooks?.beforeUncheckedRemoval;
+    const result = await this.mutate(run, async () => {
+      if (before) await before(attempt.path);
+      await unlink(dotGitPath);
+      try {
+        await rmdir(attempt.path);
+      } catch (error) {
+        await writeFile(dotGitPath, proof.dotGit, { flag: "wx" }).catch(() => undefined);
+        return errorCode(error) === "ENOTEMPTY" || errorCode(error) === "EEXIST"
+          ? ("preserved" as const)
+          : ("unknown" as const);
+      }
+      const back = await readFile(join(proof.admin, "gitdir"), "utf8");
+      if (back.trim() === dotGitPath) await rm(proof.admin, { recursive: true });
+      return "removed" as const;
+    });
+    if (result === UNKNOWN || result === "unknown") return "attention";
+    return result;
+  }
+
+  private async deleteOwnBranch(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+  ): Promise<"removed" | "preserved" | "attention"> {
+    const base = attempt.baseCommit;
+    if (!base) return "preserved";
+    const ref = `refs/heads/${attempt.branch}`;
+    const state = await this.branchState(run, attempt, clone);
+    if (state === "unknown") return "attention";
+    if (state === "absent") return "removed";
+    if (state === "other") return "preserved";
+    const listed = await this.worktrees(run, clone);
+    if (!listed) return "attention";
+    if (listed.some((entry) => entry.branch === ref)) return "preserved";
+    const deleted = await this.step(run, attempt, "delete-branch", (recorder) =>
+      deleteBranch(clone, attempt.branch, base, recorder, this.options.timeouts),
+    );
+    if (deleted === "failed") return "preserved";
+    return deleted === "succeeded" ? "removed" : "attention";
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // mount.retry
+
+  async retry(principalId: string, params: RetryParams): Promise<DatabaseWriteOutcome> {
+    const recorded = await recordedWrite(this.context, principalId, "mount.retry", params);
+    if (recorded) return recorded;
+    const refuse = async (error: DomainError): Promise<DatabaseWriteOutcome> =>
+      (await recordedWrite(this.context, principalId, "mount.retry", params)) ?? { error };
+    let source;
+    try {
+      source = await this.options.store.call("worktrees.retrySource", {
+        taskId: params.taskId,
+        mountId: params.mountId,
+      });
+    } catch (error) {
+      return refuse(storeReadError(error));
+    }
+    if (!source) return refuse(domainError("MOUNT_NOT_FOUND"));
+    if (source.archived) return refuse(domainError("TASK_ARCHIVED"));
+    if (source.source !== "worktree" || source.state !== "failed" || !source.spec)
+      return refuse(domainError("INVALID_ARGUMENT"));
+    // A process the previous attempt recorded may still be changing what this one would create.
+    if (await this.processActive(source.prior))
+      return refuse(domainError("OPERATION_EFFECTS_ACTIVE"));
+    let task;
+    try {
+      task = await this.options.store.call("tasks.get", { taskId: params.taskId });
+    } catch (error) {
+      return refuse(storeReadError(error));
+    }
+    if (!task) return refuse(domainError("TASK_NOT_FOUND"));
+    // The overrides apply to this attempt only; otherwise the original request is repeated.
+    const branch = params.branch ?? source.spec.branch ?? `cove/${task.record.slug}`;
+    // The seat before any Git runs, so that a retry beyond the cap starts nothing.
+    const seat = this.reserve();
+    if (!seat) return refuse(domainError("BUSY"));
+    let committed = false;
+    try {
+      const invalid = await this.checkBranchName(
+        {},
+        performance.now() + (this.options.requestStepMs ?? REQUEST_STEP_MS),
+        branch,
+      );
+      if (invalid) return refuse(invalid);
+      const written = await executeDatabaseWriteCommitted(
+        this.context,
+        principalId,
+        "mount.retry",
+        params,
+        {
+          name: "mount.retry",
+          args: {
+            operation: this.key(principalId, params.operationId),
+            taskId: params.taskId,
+            mountId: params.mountId,
+            branch,
+            baseRef: params.base ?? source.spec.baseRef,
+            noFetch: params.noFetch ?? source.spec.noFetch,
+            at: this.now(),
+          },
+        },
+      );
+      committed = written.committed;
+      if (committed) {
+        await this.options.materialize(source.workspaceId).catch(() => "pending");
+        this.start(seat, principalId, params.operationId);
+      }
+      return written.outcome;
+    } finally {
+      if (!committed) seat.release();
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // operation.continue and operation.abandon
+
+  // The target of a continue or abandon, or why it cannot be acted on. Refusals are decided before
+  // anything is accepted.
+  private async target(
+    principalId: string,
+    method: "operation.continue" | "operation.abandon",
+    params: TargetParams,
+  ): Promise<
+    { record: OperationRecord; key: OperationReceiptKey } | { outcome: DatabaseWriteOutcome }
+  > {
+    const recorded = await recordedWrite(this.context, principalId, method, params);
+    if (recorded) return { outcome: recorded };
+    const refuse = async (error: DomainError) => ({
+      outcome: await this.refuseTarget(principalId, method, params, error),
+    });
+    const key = this.key(principalId, params.targetOperationId);
+    let record: OperationRecord | null;
+    try {
+      record = await this.options.receipts.get(key);
+    } catch (error) {
+      return refuse(storeReadError(error));
+    }
+    if (!record) return refuse(domainError("OPERATION_NOT_FOUND"));
+    // A continue also resumes an abandon that stopped; an abandon is never abandoned itself.
+    const actionable =
+      WORKTREE_METHODS.has(record.method) ||
+      (method === "operation.continue" && record.method === "operation.abandon");
+    if (!actionable || record.state !== "requires_attention")
+      return refuse(domainError("OPERATION_NOT_RESUMABLE"));
+    // While a process the target recorded may still run, it is neither continued nor
+    // abandoned (S8).
+    const keys = [key];
+    try {
+      if (record.method === "operation.abandon") {
+        const claimed = await this.options.store.call("worktrees.claimed", { abandon: key });
+        for (const attempt of claimed) keys.push(attempt.operation);
+      }
+    } catch (error) {
+      return refuse(storeReadError(error));
+    }
+    if (await this.processActive(keys)) return refuse(domainError("OPERATION_EFFECTS_ACTIVE"));
+    return { record, key };
+  }
+
+  private async refuseTarget(
+    principalId: string,
+    method: WriteRpcMethod,
+    params: TargetParams,
+    error: DomainError,
+  ): Promise<DatabaseWriteOutcome> {
+    return (await recordedWrite(this.context, principalId, method, params)) ?? { error };
+  }
+
+  async continueOperation(
+    principalId: string,
+    params: TargetParams,
+  ): Promise<DatabaseWriteOutcome> {
+    const method = "operation.continue";
+    const found = await this.target(principalId, method, params);
+    if ("outcome" in found) return found.outcome;
+    const { record, key } = found;
+    const seat = this.reserve();
+    if (!seat) return this.refuseTarget(principalId, method, params, domainError("BUSY"));
+    let committed = false;
+    try {
+      const { progress: _progress, error: _error, ...rest } = record;
+      const next: OperationRecord = { ...rest, revision: record.revision + 1, state: "running" };
+      const written = await executeDatabaseWriteCommitted(
+        this.context,
+        principalId,
+        method,
+        params,
+        {
+          name: "operation.continue",
+          args: {
+            target: key,
+            expectedRevision: record.revision,
+            next,
+            limits: this.limits,
+            at: this.now(),
+          },
+        },
+      );
+      committed = written.committed;
+      // The target is running again; its actor goes on from its recorded ledger.
+      if (committed)
+        this.claim(seat, key, () =>
+          record.method === "operation.abandon" ? this.finishAbandon(key) : this.drive(key),
+        );
+      return written.outcome;
+    } finally {
+      if (!committed) seat.release();
+    }
+  }
+
+  async abandonOperation(principalId: string, params: TargetParams): Promise<DatabaseWriteOutcome> {
+    const method = "operation.abandon";
+    const found = await this.target(principalId, method, params);
+    if ("outcome" in found) return found.outcome;
+    const { record, key } = found;
+    const seat = this.reserve();
+    if (!seat) return this.refuseTarget(principalId, method, params, domainError("BUSY"));
+    const abandon = this.key(principalId, params.operationId);
+    let committed = false;
+    try {
+      // Accepted, and the target's attempts claimed, before anything is removed (see the header).
+      const written = await executeDatabaseWriteCommitted(
+        this.context,
+        principalId,
+        method,
+        params,
+        {
+          name: "operation.abandon",
+          args: {
+            operation: abandon,
+            target: key,
+            expectedRevision: record.revision,
+            at: this.now(),
+          },
+        },
+      );
+      committed = written.committed;
+      if (committed) this.claim(seat, abandon, () => this.finishAbandon(abandon));
+      return written.outcome;
+    } finally {
+      if (!committed) seat.release();
+    }
+  }
+
+  // The removals of an accepted abandon, then the transaction that ends it and its target; the
+  // abandon becomes requires_attention when a removal cannot be finished now.
+  private async finishAbandon(abandon: OperationReceiptKey): Promise<void> {
+    const run: Run = { group: {}, actor: abandon };
+    let attempts: Attempt[];
+    let target: OperationReceiptKey;
+    try {
+      const record = await this.options.receipts.get(abandon);
+      const targetId = record?.result?.targetOperationId;
+      if (!targetId) return;
+      target = { ...abandon, operationId: targetId };
+      attempts = await this.options.store.call("worktrees.claimed", { abandon });
+    } catch {
+      return;
+    }
+    const workspaces = new Set<string>();
+    for (const attempt of attempts) {
+      if (attempt.outcome !== "pending") continue;
+      workspaces.add(attempt.workspaceId);
+      let done: "done" | "attention";
+      try {
+        if (!attempt.repo) {
+          // Without the registration there is no clone to act on; nothing is removed.
+          done = "done";
+        } else {
+          const uncertain = await this.verifyUncertain(
+            run,
+            attempt,
+            attempt.repo.path,
+            [abandon, attempt.operation],
+            true,
+          );
+          done = uncertain ? "attention" : await this.cleanup(run, attempt, attempt.repo.path);
+        }
+      } catch {
+        done = "attention";
+      }
+      if (done === "attention") return this.abandonAttention(abandon);
+    }
+    try {
+      const finished = await this.options.store.call("worktrees.finishAbandon", {
+        abandon,
+        target,
+        limits: this.limits,
+        at: this.now(),
+      });
+      if (!finished) return this.abandonAttention(abandon);
+    } catch {
+      return;
+    }
+    for (const workspaceId of workspaces)
+      await this.options.materialize(workspaceId).catch(() => "pending");
+  }
+
+  private async abandonAttention(abandon: OperationReceiptKey): Promise<void> {
+    try {
+      const attempts = await this.options.store.call("worktrees.claimed", { abandon });
+      const active = await this.processActive([abandon]);
+      await this.options.store.call("worktrees.attention", {
+        operation: abandon,
+        progress: abandonProgress(attempts, active),
+        limits: this.limits,
+        at: this.now(),
+      });
+    } catch {
+      // Left running; the next start verifies it.
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Startup verification (operations/recovery-verifiers.ts).
+
+export type WorktreeRecoveryContext = {
+  store: Store;
+  serverId: string;
+  relayInstanceId: string;
+  now: () => number;
+};
+
+// Proves what the store records about a worktree-creating operation, or an abandon, that an
+// earlier instance left unfinished (see the header, restart): the outcome of an operation whose
+// attempts were all recorded as ended, otherwise requires_attention with the recorded progress.
+// Null (the generic requires_attention) when the record names no attempt this server knows.
+export function createWorktreeVerifier(context: WorktreeRecoveryContext): ReceiptVerifier {
+  const ledger = new ProcessLedger(context.store, context.relayInstanceId, context.now);
+  const active = async (key: OperationReceiptKey) => (await ledger.check(key)) !== "ended";
+  return async (record) => {
+    // The verifier receives the record, not its key: the key's principal is looked up. M1 has a
+    // single local principal; an operation ID recorded under several principals is not guessed.
+    const principals = await context.store.call("worktrees.recoveringPrincipals", {
+      serverId: context.serverId,
+      operationId: record.operationId,
+    });
+    if (principals.length !== 1) return null;
+    const key = {
+      serverId: context.serverId,
+      principalId: principals[0]!,
+      operationId: record.operationId,
+    };
+    if (record.method === "operation.abandon") {
+      const claimed = await context.store.call("worktrees.claimed", { abandon: key });
+      return attentionRecord(record, [], null, abandonProgress(claimed, await active(key)));
+    }
+    const attempts = await context.store.call("worktrees.attempts", { operation: key });
+    if (!attempts.length) return null;
+    const revision = await context.store.call("worktrees.workspaceRevision", {
+      workspaceId: attempts[0]!.workspaceId,
+    });
+    // Succeeded or failed only from outcomes the attempts recorded; any attempt still pending,
+    // even one whose every step is recorded complete, is requires_attention.
+    return (
+      settledRecord(record, attempts, revision) ??
+      attentionRecord(record, attempts, revision, progressOf(attempts, await active(key)))
+    );
+  };
+}

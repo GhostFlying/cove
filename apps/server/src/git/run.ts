@@ -65,6 +65,9 @@ export type GitRunOptions = {
   cwd: string;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  // The environment git runs with; gitEnvironment() unless the caller built one from it (a
+  // command that contacts a remote, git/worktree.ts networkEnvironment).
+  env?: NodeJS.ProcessEnv;
 };
 
 // `exited`: git ran to completion with this status (0 or not). `failed`: there is no answer;
@@ -136,7 +139,7 @@ export function runGit(args: readonly string[], options: GitRunOptions): Promise
     try {
       child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", ...GLOBAL_OPTIONS, ...args], {
         cwd: options.cwd,
-        env: gitEnvironment(),
+        env: options.env ?? gitEnvironment(),
         stdio: ["pipe", "pipe", "pipe"],
         shell: false,
         detached: true,

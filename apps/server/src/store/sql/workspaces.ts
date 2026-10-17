@@ -10,10 +10,19 @@ import {
   type MountSource,
   type TaskRecord,
 } from "@cove/protocol/workspace";
+import type { OperationReceiptKey } from "@cove/protocol/rpc";
 import type { OperationResultData } from "../../operations/receipt-records.js";
 import { taskRecordFits } from "../../domain/record-bounds.js";
 import { MANIFEST_NAME } from "../../workspace-fs/manifest.js";
 import { statement, type Connection } from "./statements.js";
+import {
+  attemptOperationOpen,
+  insertPreparation,
+  managedAt,
+  readyWorktreeCommonDir,
+  REUSABLE_MANAGED_STATES,
+  type WorktreeSpec,
+} from "./worktrees.js";
 
 // Tasks, their single workspace and its mounts (docs/milestones/m1.md T3a; the domain rules are in
 // domain/workspaces.ts). Reads are named store operations; the writes run inside receipts.write
@@ -22,7 +31,8 @@ import { statement, type Connection } from "./statements.js";
 // refusal, an archived task, a record too large to read) is checked against the current rows.
 //
 // Revisions: tasks.revision grows on rename, archive and unarchive; workspaces.revision grows on
-// every change of its mounts (add, remove). The entry
+// every change of its mounts (add, remove, and each state change of a managed worktree mount,
+// store/sql/worktrees.ts). The entry
 // directory and the manifest follow workspaces.revision (materialized_revision, migration 002).
 
 type TaskRow = {
@@ -59,9 +69,11 @@ const MOUNT_COLUMNS =
   "mount_id, name, source, repo_id, path, entry_path, state, branch, base_commit, error_json";
 
 // A task as the database records it. The domain verifies the filesystem before it answers: the
-// entry state, and whether each ready checkout is still the admitted binding, for which
-// `checkouts` gives, per checkout mount, the current registration's Git common directory (null
-// when it is gone) and whether its path is now recorded as a managed worktree.
+// entry state, and whether each ready binding is still the admitted one, for which `checkouts`
+// gives, per mount, the Git common directory it must share (null when it is gone) and whether its
+// path is now recorded as a managed worktree: for a checkout the current registration's common
+// directory, for a managed worktree mount (T3b) the one recorded with its ready worktree, whose
+// path is managed by definition and so is never refused as such.
 export type StoredTask = {
   record: TaskRecord;
   workspaceId: string;
@@ -103,7 +115,12 @@ function toTask(db: Connection, row: TaskRow): StoredTask {
   const rows = mountRows(db, row.workspace_id);
   const checkouts: StoredTask["checkouts"] = {};
   for (const mount of rows)
-    if (mount.source === "checkout")
+    if (mount.source === "worktree")
+      checkouts[mount.mount_id] = {
+        commonDir: readyWorktreeCommonDir(db, mount.mount_id),
+        managed: false,
+      };
+    else
       checkouts[mount.mount_id] = {
         commonDir:
           (
@@ -167,21 +184,37 @@ export type ManifestSource = {
   mounts: { name: string; path: string; source: MountSource; state: MountRecord["state"] }[];
 };
 
-// A checkout mount the domain resolved before the write: `path` is the real top level of the
-// working tree the admission check found and `commonDir` the Git common directory it shares with
-// the registered clone. Worktree mounts are refused before the write until T3b.
-export type NewMount = {
-  mountId: string;
-  name: string;
-  source: "checkout";
-  repoId: string;
-  path: string;
-  commonDir: string;
-};
+// A mount the domain resolved before the write. For a checkout, `path` is the real top level of
+// the working tree the admission check found and `commonDir` the Git common directory it shares
+// with the registered clone. For a managed worktree (T3b), `path` is `<entry>/<name>` (real,
+// since the entry is), `commonDir` the registration's, `branch` the branch it will be created
+// on and `spec` what the operator asked for; it is recorded pending, with its preparation, and
+// the operation that records it stays running until domain/worktrees.ts has prepared it.
+export type NewMount =
+  | {
+      mountId: string;
+      name: string;
+      source: "checkout";
+      repoId: string;
+      path: string;
+      commonDir: string;
+    }
+  | {
+      mountId: string;
+      name: string;
+      source: "worktree";
+      repoId: string;
+      path: string;
+      commonDir: string;
+      branch: string;
+      spec: WorktreeSpec;
+    };
 
 // `responseBytes` is the read response budget every record of the workspace must fit
 // (domain/record-bounds.ts).
+// `operation` is the key of the write itself: a worktree mount's preparation names it.
 export type TaskCreateArgs = {
+  operation: OperationReceiptKey;
   taskId: string;
   workspaceId: string;
   title: string;
@@ -193,6 +226,7 @@ export type TaskCreateArgs = {
 };
 
 export type MountAddArgs = {
+  operation: OperationReceiptKey;
   taskId: string;
   expectedWorkspaceRevision?: number;
   mount: NewMount;
@@ -212,7 +246,7 @@ export type TaskArchiveArgs = { taskId: string; expectedRevision?: number; archi
 
 const refuse = (kind: DomainErrorKind): { error: DomainError } => ({ error: domainError(kind) });
 
-type Applied = { result: OperationResultData } | { error: DomainError };
+type Applied = { result: OperationResultData; running?: true } | { error: DomainError };
 
 // Whether `path` is recorded as a Cove-managed worktree, in any state and for any task, archived
 // ones included (D2). The table keeps every worktree Cove created (T3b), also after its task was
@@ -221,14 +255,17 @@ function managedWorktree(db: Connection, path: string): boolean {
   return statement(db, "SELECT 1 FROM managed_worktrees WHERE path = ?").get(path) !== undefined;
 }
 
-// Checks one new checkout mount against the current rows of its workspace and inserts it, ready,
-// with its first binding at `revision`.
+// Checks one new mount against the current rows of its workspace and inserts it with its first
+// binding at `revision`: a checkout ready, a managed worktree pending with its preparation by
+// `operation` at `position`.
 function insertMount(
   db: Connection,
   workspaceId: string,
   revision: number,
   mount: NewMount,
   at: number,
+  operation: OperationReceiptKey,
+  position: number,
 ): { error: DomainError } | null {
   const repo = statement(db, "SELECT common_dir FROM repos WHERE repo_id = ?").get(mount.repoId) as
     { common_dir: string } | undefined;
@@ -236,7 +273,15 @@ function insertMount(
   // The admission check found this common directory before the transaction; the registration
   // must still name the same clone.
   if (mount.commonDir !== repo.common_dir) return refuse("REPO_NOT_FOUND");
-  if (managedWorktree(db, mount.path)) return refuse("MANAGED_WORKTREE_NOT_MOUNTABLE");
+  if (mount.source === "checkout" && managedWorktree(db, mount.path))
+    return refuse("MANAGED_WORKTREE_NOT_MOUNTABLE");
+  // A new worktree's path must not hold a recorded worktree of an earlier mount (its directory,
+  // or its intent, is still there): the mount name is taken in this entry.
+  if (mount.source === "worktree") {
+    const earlier = managedAt(db, mount.path);
+    if (earlier && !REUSABLE_MANAGED_STATES.has(earlier.state))
+      return refuse("MOUNT_NAME_CONFLICT");
+  }
   // A mount cannot take the manifest's name, so a managed worktree `<entry>/<name>` (T3b) never
   // collides with it.
   if (mount.name === MANIFEST_NAME) return refuse("MOUNT_NAME_CONFLICT");
@@ -249,18 +294,40 @@ function insertMount(
     workspaceId,
   ) as { n: number };
   if (count.n >= M1_LIMITS.mountsPerWorkspace) return refuse("INVALID_ARGUMENT");
+  const worktree = mount.source === "worktree" ? mount : null;
   statement(
     db,
     `INSERT INTO mounts (mount_id, workspace_id, name, source, repo_id, path, entry_path, state,
        branch, base_commit, error_json, created_at_ms)
-     VALUES (?, ?, ?, 'checkout', ?, ?, NULL, 'ready', NULL, NULL, NULL, ?)`,
-  ).run(mount.mountId, workspaceId, mount.name, mount.repoId, mount.path, at);
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+  ).run(
+    mount.mountId,
+    workspaceId,
+    mount.name,
+    mount.source,
+    mount.repoId,
+    mount.path,
+    worktree ? mount.path : null,
+    worktree ? "pending" : "ready",
+    worktree?.branch ?? null,
+    at,
+  );
   statement(
     db,
     `INSERT INTO bindings (workspace_id, mount_id, workspace_revision, source, path, branch,
        bound_at_ms, unbound_at_ms)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, NULL)`,
-  ).run(workspaceId, mount.mountId, revision, mount.source, mount.path, at);
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+  ).run(
+    workspaceId,
+    mount.mountId,
+    revision,
+    mount.source,
+    mount.path,
+    worktree?.branch ?? null,
+    at,
+  );
+  if (worktree)
+    insertPreparation(db, mount.mountId, worktree.branch, worktree.spec, operation, position, at);
   return null;
 }
 
@@ -308,7 +375,12 @@ function currentWorkspace(
 }
 
 function outcomeOf(mount: NewMount): NonNullable<OperationResultData["mounts"]>[number] {
-  return { mountId: mount.mountId, state: "ready" };
+  return { mountId: mount.mountId, state: mount.source === "worktree" ? "pending" : "ready" };
+}
+
+// A write that adds a managed worktree stays running until it is prepared (store/sql/receipts.ts).
+function runningIf(mounts: NewMount[]): { running?: true } {
+  return mounts.some((mount) => mount.source === "worktree") ? { running: true } : {};
 }
 
 export const workspaceOperations = {
@@ -433,8 +505,16 @@ export const workspaceWrites = {
          materialized_revision)
        VALUES (?, ?, 0, ?, ?, NULL)`,
     ).run(args.workspaceId, args.taskId, args.entryPath, args.at);
-    for (const mount of args.mounts) {
-      const refused = insertMount(db, args.workspaceId, 0, mount, args.at);
+    for (const [position, mount] of args.mounts.entries()) {
+      const refused = insertMount(
+        db,
+        args.workspaceId,
+        0,
+        mount,
+        args.at,
+        args.operation,
+        position,
+      );
       if (refused) return refused;
     }
     if (!readable(db, args.taskId, args.responseBytes)) return refuse("INVALID_ARGUMENT");
@@ -444,6 +524,7 @@ export const workspaceWrites = {
         workspaceRevision: 0,
         mounts: args.mounts.map(outcomeOf),
       },
+      ...runningIf(args.mounts),
     };
   },
 
@@ -454,7 +535,15 @@ export const workspaceWrites = {
     if ("error" in found) return found;
     if (found.row.archived === 1) return refuse("TASK_ARCHIVED");
     const revision = found.row.workspace_revision + 1;
-    const refused = insertMount(db, found.row.workspace_id, revision, args.mount, args.at);
+    const refused = insertMount(
+      db,
+      found.row.workspace_id,
+      revision,
+      args.mount,
+      args.at,
+      args.operation,
+      0,
+    );
     if (refused) return refused;
     setWorkspaceRevision(db, found.row.workspace_id, revision);
     if (!readable(db, args.taskId, args.responseBytes)) return refuse("INVALID_ARGUMENT");
@@ -464,6 +553,7 @@ export const workspaceWrites = {
         workspaceRevision: revision,
         mounts: [outcomeOf(args.mount)],
       },
+      ...runningIf([args.mount]),
     };
   },
 
@@ -473,11 +563,19 @@ export const workspaceWrites = {
   "mount.remove": (db: Connection, args: MountRemoveArgs): Applied => {
     const found = currentWorkspace(db, args.taskId, args.expectedWorkspaceRevision);
     if ("error" in found) return found;
-    const mount = statement(db, "SELECT 1 FROM mounts WHERE mount_id = ? AND workspace_id = ?").get(
-      args.mountId,
-      found.row.workspace_id,
-    );
+    const mount = statement(
+      db,
+      "SELECT source, state FROM mounts WHERE mount_id = ? AND workspace_id = ?",
+    ).get(args.mountId, found.row.workspace_id) as { source: string; state: string } | undefined;
     if (!mount) return refuse("MOUNT_NOT_FOUND");
+    // A worktree mount whose preparation has not ended still belongs to its operation (T3b):
+    // operation continue or abandon ends it first. So does a settled one while the operation of
+    // its attempt has not ended: that operation's outcome is still to be recorded.
+    if (
+      mount.source === "worktree" &&
+      (mount.state === "pending" || attemptOperationOpen(db, args.mountId))
+    )
+      return refuse("OPERATION_EFFECTS_ACTIVE");
     const revision = found.row.workspace_revision + 1;
     statement(db, "DELETE FROM mounts WHERE mount_id = ?").run(args.mountId);
     statement(
