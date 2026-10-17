@@ -95,6 +95,14 @@ type Pending = {
   // correlation stays until the worker's late reply (see expire()).
   abandoned: boolean;
 };
+// A status read waiting for the worker's single status window (see requestStatus()).
+type StatusWaiter = {
+  command: Extract<PipeCommand, { type: "status" }>;
+  // Absolute, fixed when the read was requested: waiting spends the read's own deadline.
+  deadline: number;
+  eligible: (() => boolean) | undefined;
+  resolve: (result: RuntimeResult) => void;
+};
 type Outgoing = {
   bytes: Uint8Array;
   lease: ByteReservation;
@@ -138,6 +146,9 @@ export class WorkerPipeSession {
   private readonly pending = new Map<string, Pending>();
   private readonly queue: Outgoing[] = [];
   private readonly waitingProgress: Outgoing[] = [];
+  private readonly statusWaiters: StatusWaiter[] = [];
+  private statusPromotionScheduled = false;
+  private promotingStatus = false;
   private readonly handed = new Set<Outgoing>();
   private readonly runs = new Map<string, RunRef>();
   private readonly routes: Route[] = [];
@@ -345,6 +356,113 @@ export class WorkerPipeSession {
     return this.admit(command, payload, handoff, undefined, onSent);
   }
 
+  // A status read that waits for the worker's single status window instead of being refused
+  // (issue #115). The runtime has two readers of that window: preview refresh, which reads every
+  // run's status in the background, and the control arbiter, which reads a run's control
+  // boundary when it does not know it. request() refuses a status while another holds the
+  // window, which made a user's focus fail BUSY whenever a background read was in flight.
+  //
+  // Waiters are served in arrival order, and each keeps the deadline it got here: time spent
+  // waiting is part of its deadline (terminal-architecture 3.3), so it is dispatched with only
+  // the remaining budget. A waiter is answered BUSY (not-accepted), never having been sent, once
+  // its deadline passes or `eligible` (its caller's lifetime: the control job's route, the
+  // preview job) turns false; both are checked on every tick and again immediately before
+  // dispatch. Contact loss answers every waiter WORKER_UNAVAILABLE. A status that was handed
+  // over and then expired keeps the window until the worker's late reply (see expire()); each
+  // waiter is then answered BUSY, the overload signal, and nothing is retried.
+  requestStatus(
+    command: Extract<PipeCommand, { type: "status" }>,
+    eligible?: () => boolean,
+  ): Promise<RuntimeResult> {
+    if (!this.statusWaiters.length && !this.statusHolder())
+      return this.admit(command, new Uint8Array(), undefined);
+    if (!this.ready) return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
+    // The callers bound the queue (one boundary read and one refresh per run at a time); this
+    // cap only keeps a misbehaving caller from growing it.
+    if (this.statusWaiters.length >= this.options.identityLimit)
+      return Promise.resolve(this.error(command, "BUSY"));
+    const deadline = this.now() + this.options.timeoutMs;
+    const promise = new Promise<RuntimeResult>((resolve) => {
+      this.statusWaiters.push({ command: structuredClone(command), deadline, eligible, resolve });
+    });
+    this.promoteStatus();
+    return promise;
+  }
+
+  // The admitted status that holds the worker's status window, if any.
+  private statusHolder(): Pending | undefined {
+    for (const entry of this.pending.values())
+      if (entry.role === "status" && entry.admitted) return entry;
+    return undefined;
+  }
+
+  // Settlement runs inside receive(), expire() or contact loss, so the next waiter is handled
+  // from a microtask rather than from inside it.
+  private scheduleStatusPromotion(): void {
+    if (this.statusPromotionScheduled || !this.statusWaiters.length) return;
+    this.statusPromotionScheduled = true;
+    queueMicrotask(() => {
+      this.statusPromotionScheduled = false;
+      this.promoteStatus();
+    });
+  }
+
+  // Answers waiters that can no longer be sent and dispatches the head once the window is free.
+  private promoteStatus(): void {
+    if (this.promotingStatus) return;
+    this.promotingStatus = true;
+    try {
+      while (this.statusWaiters.length) {
+        const head = this.statusWaiters[0]!;
+        if (this.closed) {
+          this.statusWaiters.shift();
+          head.resolve(this.error(head.command, "WORKER_UNAVAILABLE"));
+          continue;
+        }
+        let live: boolean;
+        try {
+          live = this.now() < head.deadline && (head.eligible?.() ?? true);
+        } catch {
+          live = false;
+        }
+        const holder = this.statusHolder();
+        if (live && holder && !holder.abandoned) {
+          // Later waiters may already be dead; they are answered without waiting their turn.
+          this.dropDeadStatusWaiters();
+          break;
+        }
+        this.statusWaiters.shift();
+        if (!live || holder) head.resolve(this.error(head.command, "BUSY"));
+        else
+          void this.admit(
+            head.command,
+            new Uint8Array(),
+            undefined,
+            undefined,
+            undefined,
+            head.deadline,
+          ).then(head.resolve);
+      }
+    } finally {
+      this.promotingStatus = false;
+    }
+  }
+
+  private dropDeadStatusWaiters(): void {
+    for (let index = this.statusWaiters.length - 1; index >= 1; index--) {
+      const waiter = this.statusWaiters[index]!;
+      let live: boolean;
+      try {
+        live = this.now() < waiter.deadline && (waiter.eligible?.() ?? true);
+      } catch {
+        live = false;
+      }
+      if (live) continue;
+      this.statusWaiters.splice(index, 1);
+      waiter.resolve(this.error(waiter.command, "BUSY"));
+    }
+  }
+
   requestUnsubscribe(
     command: Extract<PipeCommand, { type: "unsubscribe" }>,
   ): Promise<RuntimeResult> {
@@ -411,6 +529,9 @@ export class WorkerPipeSession {
     handoff: ResultHandoff | undefined,
     previewSeal?: PreviewResultSeal,
     onSent?: () => void,
+    // An absolute deadline fixed before admission (a status that waited for its window); the
+    // command then gets only what remains of it.
+    deadlineAt?: number,
   ): Promise<RuntimeResult> {
     if (!this.ready || !sameWorkerRef(command.worker, this.worker))
       return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
@@ -476,7 +597,11 @@ export class WorkerPipeSession {
     const snapshot = JSON.parse(
       this.options.codec.decode(bytes.subarray(16, bytes.byteLength - payload.byteLength)),
     ) as PipeCommand;
-    const deadline = this.now() + this.options.timeoutMs;
+    const now = this.now();
+    // Expired before admission: never sent, so definitely not accepted.
+    if (deadlineAt !== undefined && now >= deadlineAt)
+      return Promise.resolve(this.error(command, "BUSY"));
+    const deadline = Math.min(now + this.options.timeoutMs, deadlineAt ?? Number.MAX_SAFE_INTEGER);
     // Encoding and clock suppliers can reenter; validate admission again before ownership.
     if (!this.ready) return Promise.resolve(this.error(command, "WORKER_UNAVAILABLE"));
     if (this.identities.has(snapshot.requestId))
@@ -905,6 +1030,10 @@ export class WorkerPipeSession {
       )
         this.expire(requestId, entry);
     }
+    if (this.closed) return;
+    // Waiting status reads whose deadline passed or whose caller is gone end on the tick too,
+    // not only when the window frees.
+    this.promoteStatus();
   }
 
   private evaluateHealth(now: number): void {
@@ -999,6 +1128,8 @@ export class WorkerPipeSession {
     }
     entry.abandoned = true;
     entry.resolve(this.error(entry.command, "RESULT_UNKNOWN", true));
+    // An abandoned status keeps the window until its late reply; the waiters are answered BUSY.
+    if (entry.role === "status") this.scheduleStatusPromotion();
   }
 
   onEvent(listener: (event: PipeEvent, payload: Uint8Array) => void): { dispose(): void } {
@@ -1034,6 +1165,9 @@ export class WorkerPipeSession {
       item.owned = false;
       item.slot = undefined;
     }
+    // Waiting status reads were never sent.
+    for (const waiter of this.statusWaiters.splice(0))
+      waiter.resolve(this.error(waiter.command, "WORKER_UNAVAILABLE"));
     for (const pending of this.pending.values())
       if (!pending.abandoned)
         pending.resolve(
@@ -1060,7 +1194,10 @@ export class WorkerPipeSession {
 
   // Settlement ends both the correlation and its identity; see `identities`.
   private settle(requestId: string): void {
+    const settled = this.pending.get(requestId);
     this.pending.delete(requestId);
+    // A freed status window serves the next waiting status read.
+    if (settled?.role === "status") this.scheduleStatusPromotion();
     const lease = this.identities.get(requestId);
     if (lease === PREPAID) this.prepaidIdentities--;
     lease?.release();

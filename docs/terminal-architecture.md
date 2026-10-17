@@ -191,10 +191,16 @@ runtime 的在途窗口与 worker 的排队上限是同一常量 `PIPE_ROUTE_CON
 
 status 与 stop 不在此保证之内：它们走共享控制预留与 pipe 排队预算，预算不足时可能以 BUSY 拒绝。
 每个 worker 只有一个 status 窗口，runtime 自己有两个读者：后台为每个 run 读状态的预览刷新，以及在 run 的首次
-focus（或权威不确定后）读控制边界的仲裁器。二者对同一 worker 的 status 读取按到达顺序轮流发出（`LocalRuntime.getStatus`），
-不再互相以 BUSY 拒绝：过去 focus 恰好遇上预览刷新的 status 在途时，就以 BUSY 失败（#115）。每次轮到时上一条读取已结算
-（包括按自身期限结束），所以等待以排在前面的读取各自的期限为界；已交出后到期的读取仍占着窗口直到 worker 迟到应答，
-下一条照旧得到 BUSY，那是过载信号。
+focus（或权威不确定后）读控制边界的仲裁器。窗口被占用时，新的 status 读取在 pipe 会话中按到达顺序等待
+（`WorkerPipeSession.requestStatus`），不再互相以 BUSY 拒绝：过去 focus 恰好遇上预览刷新的 status 在途时，就以 BUSY 失败（#115）。
+
+- 期限从受理（最初请求）起算，等待也计入：轮到时只带剩余期限发出；发出前（包括恰好到期时）与每个节拍都再检查，
+  已到期的等待者以 BUSY（not-accepted）结束，从未发出。
+- 等待者带有调用方的生存期判据：仲裁器用控制任务所属路由仍有效，预览刷新用其任务未结束且未过期。判据不再成立时同样以
+  BUSY（not-accepted）结束而从不发出，其余等待者保持顺序。否则已退役订阅的陈旧读取可能发出后超时、占住窗口，让之后存活订阅的
+  focus 得到 BUSY。
+- worker 失联（包括 runtime 释放）时，全部等待者以 WORKER_UNAVAILABLE（not-accepted）结束。
+- 已交出后到期的读取仍占着窗口直到 worker 迟到应答；这期间每个等待者与新读取都得到 BUSY，那是过载信号，且从不重试。
 
 #### worker 存活与命令期限（#103，已选）
 

@@ -148,7 +148,7 @@ test("server author and independent suites are fail-closed and fully owned by Vi
     ["author", "terminal-connection-delivery", 7],
     ["independent", "subscription-contract", 30],
     ["independent", "subscription-client", 5],
-    ["author", "terminal-control", 14],
+    ["author", "terminal-control", 19],
     ["independent", "terminal-control-contract", 34],
     ["independent", "terminal-control-client", 7],
     ["author", "preview-cache", 27],

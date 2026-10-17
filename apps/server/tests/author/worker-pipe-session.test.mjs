@@ -1450,3 +1450,156 @@ describe("bounded worker pipe session", () => {
     f.session.transportReleased();
   });
 });
+
+// Issue #115: status reads wait for the worker's single status window instead of being refused,
+// and the wait spends each read's own deadline (terminal-architecture 3.3). The fixture's
+// command deadline is 100 ms.
+describe("status reads waiting for the status window", () => {
+  const writtenStatus = (f) =>
+    f.writes
+      .map(({ data }) => createPipeDecoder().read(data).frames[0])
+      .filter(Boolean)
+      .map((frame) => JSON.parse(codec.decode(frame.metadata)))
+      .filter((metadata) => metadata.type === "status")
+      .map((metadata) => metadata.requestId);
+  const answer = (f, command) =>
+    f.reply(command, {
+      runStatus: {
+        run,
+        status: "live",
+        geometry: { cols: 80, rows: 24 },
+        controlEpoch: 0,
+        controlHolder: null,
+        receivedSeq: 0,
+        parsedSeq: 0,
+        recovery: "ready",
+        exitCode: null,
+        signal: null,
+      },
+    });
+  const settled = (promise) => {
+    const state = { value: undefined };
+    void promise.then((value) => (state.value = value));
+    return state;
+  };
+  const turns = async () => {
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+  };
+
+  it("dispatches a waiter with only the rest of the deadline it got when it was requested", async () => {
+    const f = fixture();
+    f.start();
+    const first = f.command("status", "first");
+    const held = f.session.requestStatus(first);
+    const waiting = f.command("status", "waiting");
+    const second = settled(f.session.requestStatus(waiting));
+    await turns();
+    expect(writtenStatus(f)).toEqual(["first"]);
+    expect(second.value).toBeUndefined();
+    f.clock(60);
+    f.session.receive(answer(f, first));
+    expect((await held).outcome).toBe("accepted");
+    await turns();
+    expect(writtenStatus(f)).toEqual(["first", "waiting"]);
+    // Requested at 0, so it expires at 100, not 100 ms after its dispatch at 60.
+    f.clock(99);
+    f.session.tick();
+    await turns();
+    expect(second.value).toBeUndefined();
+    f.clock(100);
+    f.session.tick();
+    await turns();
+    expect(second.value.error).toMatchObject({ kind: "RESULT_UNKNOWN", acceptance: "unknown" });
+    f.session.transportReleased();
+  });
+
+  it("answers a waiter whose deadline passed at its dispatch BUSY without sending it", async () => {
+    const f = fixture();
+    f.start();
+    const first = f.command("status", "first");
+    const held = f.session.requestStatus(first);
+    const late = settled(f.session.requestStatus(f.command("status", "late")));
+    f.clock(30);
+    const fresh = f.command("status", "fresh");
+    const live = f.session.requestStatus(fresh);
+    // The window frees exactly at the first waiter's deadline, before any tick observes it.
+    f.clock(100);
+    f.session.receive(answer(f, first));
+    await held;
+    await turns();
+    expect(late.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(writtenStatus(f)).toEqual(["first", "fresh"]);
+    f.session.receive(answer(f, fresh));
+    expect((await live).outcome).toBe("accepted");
+    f.session.transportReleased();
+  });
+
+  it("drops a waiter its caller no longer needs, unsent, and keeps the others in order", async () => {
+    const f = fixture();
+    f.start();
+    const first = f.command("status", "first");
+    const held = f.session.requestStatus(first);
+    let wanted = true;
+    const stale = settled(f.session.requestStatus(f.command("status", "stale"), () => wanted));
+    const next = f.command("status", "next");
+    const live = f.session.requestStatus(next, () => true);
+    wanted = false;
+    f.session.tick();
+    await turns();
+    // Answered at the tick, while the window is still held.
+    expect(stale.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    f.session.receive(answer(f, first));
+    await held;
+    await turns();
+    expect(writtenStatus(f)).toEqual(["first", "next"]);
+    f.session.receive(answer(f, next));
+    expect((await live).outcome).toBe("accepted");
+    f.session.transportReleased();
+  });
+
+  it("keeps the window for a handed status that expired, so the next waiter gets BUSY", async () => {
+    const f = fixture();
+    f.start();
+    const first = f.command("status", "first");
+    const held = f.session.requestStatus(first);
+    f.clock(50);
+    const waiting = settled(f.session.requestStatus(f.command("status", "waiting")));
+    f.clock(100);
+    f.session.tick();
+    expect((await held).error.kind).toBe("RESULT_UNKNOWN");
+    await turns();
+    expect(waiting.value.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    // A read requested while the late reply is still owed is refused the same way.
+    const after = await f.session.requestStatus(f.command("status", "after"));
+    expect(after.error).toMatchObject({ kind: "BUSY", acceptance: "not-accepted" });
+    expect(writtenStatus(f)).toEqual(["first"]);
+    // The late reply frees the window; nothing refused earlier is retried.
+    f.session.receive(answer(f, first));
+    await turns();
+    expect(writtenStatus(f)).toEqual(["first"]);
+    const fresh = f.command("status", "fresh");
+    const live = f.session.requestStatus(fresh);
+    f.session.receive(answer(f, fresh));
+    expect((await live).outcome).toBe("accepted");
+    f.session.transportReleased();
+  });
+
+  it("answers every waiter WORKER_UNAVAILABLE, never sent, when contact is lost", async () => {
+    const f = fixture();
+    f.start();
+    const held = f.session.requestStatus(f.command("status", "first"));
+    const waiting = [
+      f.session.requestStatus(f.command("status", "a")),
+      f.session.requestStatus(f.command("status", "b")),
+    ];
+    f.session.loseContact();
+    expect((await held).error.kind).toBe("RESULT_UNKNOWN");
+    for (const result of await Promise.all(waiting))
+      expect(result.error).toMatchObject({
+        kind: "WORKER_UNAVAILABLE",
+        acceptance: "not-accepted",
+      });
+    expect(writtenStatus(f)).toEqual(["first"]);
+    f.session.transportReleased();
+  });
+});

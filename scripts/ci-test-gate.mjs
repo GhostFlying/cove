@@ -312,7 +312,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/terminal-control.test.mjs",
-    minimumTests: 14,
+    minimumTests: 19,
   },
   {
     project: "server",

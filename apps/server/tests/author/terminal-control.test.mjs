@@ -148,6 +148,52 @@ describe("private shared terminal control and binary input", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+  // Issue #115 review: a boundary read still waiting when its subscription retires is dropped
+  // unsent. Sent anyway, it could time out holding the window and make a live focus fail BUSY.
+  it("drops a retired focus's waiting boundary read so a new subscription's focus succeeds", async () => {
+    const f = fixture();
+    const a = f.connect("a");
+    const b = f.connect("b");
+    try {
+      const ar = (await f.attach(a)).subscription;
+      const background = f.runtime.getStatus({
+        type: "status",
+        worker: f.runtime.pool.get(run).worker,
+        run,
+        requestId: "preview.s",
+      });
+      await turns();
+      const held = f.latest();
+      const stale = a.service.handle(command("focus", ar, "a-focus", { focusSeq: 1, geometry }));
+      await turns();
+      a.service.close();
+      await turns();
+      const br = (await f.attach(b)).subscription;
+      const focused = b.service.handle(command("focus", br, "b-focus", { focusSeq: 1, geometry }));
+      await turns();
+      f.session.receive(f.reply(held, { runStatus: status() }));
+      await background;
+      await turns();
+      const read = f.latest();
+      expect(read.type).toBe("status");
+      f.session.receive(f.reply(read, { runStatus: status() }));
+      await turns();
+      const sent = f.latest();
+      expect(sent).toMatchObject({ type: "set-control", holder: holder(br) });
+      f.session.receive(f.reply(sent, { atSeq: 0 }));
+      expect(await focused).toMatchObject({ type: "focus-result", epoch: 1 });
+      expect((await stale).type).toBe("error");
+      // The retired focus's read never reached the worker: only the background read and the
+      // live focus's read did.
+      const statuses = f.pipeWrites
+        .map((value) => decode(value.data, true).metadata)
+        .filter((value) => value.type === "status");
+      expect(statuses).toHaveLength(2);
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
   it("records a worker exit in the run registry before a subscriber publishes it", async () => {
     const f = fixture();
     const a = f.connect();

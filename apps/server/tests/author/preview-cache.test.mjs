@@ -772,4 +772,38 @@ describe("bounded server preview cache", () => {
     expect(c.events().filter((event) => event.metadata.type === "preview-start")).toHaveLength(0);
     await cleaned(f);
   });
+
+  // Issue #115 review: a refresh's status read that waits for the worker's status window ends
+  // with its job. The job expires at 500 ms, before the read's own 1000 ms deadline, so only
+  // the job's lifetime keeps the expired read from ever reaching the worker.
+  it("author preview never sends the waiting status read of an expired job", async () => {
+    const f = fixture();
+    const holder = f.runtime.getStatus({
+      type: "status",
+      worker: f.runtime.pool.get(run).worker,
+      run,
+      requestId: "holder.s",
+    });
+    await pump();
+    const held = f.latest();
+    const pending = f.runtime.previews.refresh(run);
+    let early;
+    void pending.then((outcome) => (early = outcome));
+    await pump();
+    // Waiting for the window, neither sent nor refused.
+    expect(early).toBeUndefined();
+    expect(f.commands().map((command) => command.requestId)).toEqual(["holder.s"]);
+    f.clock(499);
+    f.session.tick();
+    await pump();
+    expect(early).toBeUndefined();
+    f.clock(500);
+    f.runtime.tickPreviews();
+    expect(await pending).toMatchObject({ ok: false });
+    f.session.receive(f.reply(held, { runStatus: f.status() }));
+    await holder;
+    await pump();
+    expect(f.commands().map((command) => command.requestId)).toEqual(["holder.s"]);
+    await cleaned(f);
+  });
 });
