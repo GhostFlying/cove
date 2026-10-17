@@ -1,5 +1,6 @@
 import { configWrites } from "./config.js";
 import { repoWrites } from "./repos.js";
+import { tabWrites } from "./tabs.js";
 import { workspaceWrites } from "./workspaces.js";
 
 // The database writes receipts.write may apply (operations/database-operations.ts). Each is a
@@ -13,6 +14,7 @@ export const DATABASE_WRITES = Object.freeze({
   ...configWrites,
   ...repoWrites,
   ...workspaceWrites,
+  ...tabWrites,
 });
 
 export type DatabaseWrites = typeof DATABASE_WRITES;
