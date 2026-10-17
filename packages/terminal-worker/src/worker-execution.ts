@@ -539,22 +539,29 @@ class WorkerExecutionCore {
           return true;
         },
       });
-    } catch (error) {
+    } catch {
+      // Thrown from the native factory call onwards: a native owner may exist, so the answer is
+      // unknown and the identity stays retained.
+      return correlatedError(command, "RESULT_UNKNOWN", "unknown");
+    }
+    if (created.kind === "rejected" || created.kind === "not-started") {
+      // Nothing owns this run: the session could not be built before the native factory ran
+      // (not-started), or the factory refused before any PTY existed (rejected). Its identity is
+      // released rather than retained, since a retained one would hold a run slot and its bytes
+      // for the worker's life, and repeated refusals (an invalid spec, the owner limit, too little
+      // retained-byte capacity for the initial checkpoint) would exhaust them. The server retires
+      // the run on this not-accepted answer and never issues its run ID again.
+      this.#runs.delete(command.run.runId);
+      this.#releaseBytes(identityBytes);
+      // The error kind (not the ownership classification above) keeps its earlier mapping: a
+      // construction that ran out of capacity is BUSY.
+      const cause = created.kind === "not-started" ? created.cause : undefined;
       return correlatedError(
         command,
-        error instanceof Error && error.message.includes("capacity")
+        cause instanceof Error && cause.message.includes("capacity")
           ? "BUSY"
           : "WORKER_UNAVAILABLE",
       );
-    }
-    if (created.kind === "rejected") {
-      // The native factory refused before any PTY existed, so nothing owns this run. Its identity
-      // is released rather than retained, since a retained one would hold a run slot for the
-      // worker's life and repeated refusals (an invalid spec, the owner limit) would exhaust them.
-      // The server retires the run on this answer and never issues its run ID again.
-      this.#runs.delete(command.run.runId);
-      this.#releaseBytes(identityBytes);
-      return correlatedError(command, "WORKER_UNAVAILABLE");
     }
     // An unclassified failure may have left a native owner: the identity stays retained.
     if (created.kind !== "created") return correlatedError(command, "RESULT_UNKNOWN", "unknown");

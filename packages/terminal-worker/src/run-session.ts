@@ -1217,14 +1217,16 @@ class RunSessionCore {
   }
 }
 
-function startRunSession(options: RunSessionOptions):
+function startRunSession(
+  options: RunSessionOptions,
+  core: RunSessionCore = new RunSessionCore(options),
+):
   | {
       readonly kind: "created";
       readonly session: RunSession;
       readonly capability: WorkerRunSessionCapability;
     }
   | Exclude<NativeSpawnResult, { readonly kind: "created" }> {
-  const core = new RunSessionCore(options);
   let result: NativeSpawnResult;
   try {
     result = options.factory.spawn(
@@ -1275,8 +1277,20 @@ export function createRunSession(options: RunSessionOptions): RunSessionStart {
 }
 
 // Package-internal typed capability; the public session never exposes its owner or model.
+//
+// `not-started`: building the session (its terminal model and initial checkpoint, which may
+// exceed the retained-byte capacity) failed before the native factory was called, so no PTY or
+// native owner can exist. The model releases what it reserved when its construction fails. A
+// failure from the factory call onwards is reported as the factory's own result or thrown, and
+// its ownership is uncertain.
 export function createWorkerRunSession(
   options: RunSessionOptions,
-): ReturnType<typeof startRunSession> {
-  return startRunSession(options);
+): ReturnType<typeof startRunSession> | { readonly kind: "not-started"; readonly cause: unknown } {
+  let core: RunSessionCore;
+  try {
+    core = new RunSessionCore(options);
+  } catch (cause) {
+    return { kind: "not-started", cause };
+  }
+  return startRunSession(options, core);
 }
