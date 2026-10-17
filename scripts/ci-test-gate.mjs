@@ -495,6 +495,11 @@ export const requiredSuites = [
   },
   {
     project: "terminal-worker",
+    file: "packages/terminal-worker/tests/spawn-env-real.test.mjs",
+    minimumTests: 2,
+  },
+  {
+    project: "terminal-worker",
     file: "packages/terminal-worker/tests/pipe-endpoint.test.mjs",
     minimumTests: 34,
   },
