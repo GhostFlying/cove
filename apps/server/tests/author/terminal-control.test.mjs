@@ -109,6 +109,45 @@ describe("private shared terminal control and binary input", () => {
     }
     expect(f.bytes.snapshot().total).toBe(0);
   });
+  // Issue #115: a worker has one status window, and preview refresh reads status in the
+  // background for every run on it. The first focus on a run reads its control boundary
+  // through the same window; it used to be refused BUSY whenever a refresh's status read was
+  // still in flight, so the user's focus failed for no reason of its own.
+  it("takes turns with a background status read for a focus's boundary instead of failing BUSY", async () => {
+    const f = fixture();
+    const a = f.connect();
+    try {
+      const ref = (await f.attach(a)).subscription;
+      const background = f.runtime.getStatus({
+        type: "status",
+        worker: f.runtime.pool.get(run).worker,
+        run,
+        requestId: "preview.s",
+      });
+      await turns();
+      const first = f.latest();
+      expect(first).toMatchObject({ type: "status", requestId: "preview.s" });
+      const writes = f.pipeWrites.length;
+      let early;
+      const focused = a.service.handle(command("focus", ref, "focus", { focusSeq: 1, geometry }));
+      void focused.then((reply) => (early = reply));
+      await turns();
+      // The focus's own status read waits for the window: it is neither sent alongside the
+      // background read nor refused.
+      expect(early).toBeUndefined();
+      expect(f.pipeWrites).toHaveLength(writes);
+      f.session.receive(f.reply(first, { runStatus: status() }));
+      expect(await background).toMatchObject({ type: "result", outcome: "accepted" });
+      await initialStatus(f);
+      const sent = f.latest();
+      expect(sent).toMatchObject({ type: "set-control", holder: holder(ref) });
+      f.session.receive(f.reply(sent, { atSeq: 0 }));
+      expect(await focused).toMatchObject({ type: "focus-result", epoch: 1, atSeq: 0 });
+    } finally {
+      await f.dispose();
+    }
+    expect(f.bytes.snapshot().total).toBe(0);
+  });
   it("records a worker exit in the run registry before a subscriber publishes it", async () => {
     const f = fixture();
     const a = f.connect();
