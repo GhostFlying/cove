@@ -323,6 +323,17 @@ export class WorkerPipeSession {
     return true;
   }
 
+  // Drops the route of a run whose spawn the worker definitely refused. Unlike an unsent spawn,
+  // other commands for the run (a preview refresh or status read sent while the spawn was in
+  // flight) may still be pending; they settle by request ID, and the worker, which owns no session
+  // for the run, has no events for it, so the route is not needed for them.
+  forgetRefusedRun(run: RunRef): boolean {
+    const found = this.runs.get(run.runId);
+    if (!found || !sameRunRef(found, run)) return false;
+    this.runs.delete(run.runId);
+    return true;
+  }
+
   private encode(metadata: PipeMetadata, payload: Uint8Array): Uint8Array | null {
     try {
       const encodedMetadata = this.options.codec.encode(JSON.stringify(metadata));

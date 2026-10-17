@@ -11,6 +11,17 @@ import type { ByteReservation } from "./runtime-retained-bytes.js";
 import { PreviewRefresh, type PreviewPolicy } from "./preview-refresh.js";
 import type { PreviewResultSeal } from "./worker-pipe-session.js";
 
+// Whether a handed-over spawn's answer proves that the worker started nothing. After the frame
+// was handed over, the pipe session itself answers only RESULT_UNKNOWN, so a not-accepted error
+// is the worker's own: it either refused the command before creating anything or its native
+// factory rejected the spawn before a PTY existed. OPERATION_ID_CONFLICT is excluded: it says the
+// worker already holds a run with this ID, which is evidence of an owner, not of its absence.
+function refusedSpawn(result: RuntimeResult): boolean {
+  return result.type === "error"
+    ? result.error.acceptance === "not-accepted" && result.error.kind !== "OPERATION_ID_CONFLICT"
+    : result.outcome === "rejected";
+}
+
 export class LocalRuntime implements RuntimeTerminalPort {
   private readonly listeners = new Map<
     (event: PipeEvent, payload: Uint8Array) => void,
@@ -149,6 +160,17 @@ export class LocalRuntime implements RuntimeTerminalPort {
     return this.pool.release(proof.run, proof.worker);
   }
 
+  // A handed-over spawn the worker definitely refused started no PTY: the run is retired, so it is
+  // no terminal and holds no run capacity. Without this a refused spawn stayed listed as an
+  // unverifiable run nobody could attach to or stop, and each one kept a run slot for the life of
+  // the instance. Run IDs are never handed out twice (terminal operations number them from a
+  // durable high-water mark), so the retired ID needs no tombstone here.
+  private retireRefusedSpawn(run: RunRef, worker: WorkerRef): void {
+    if (!this.registry.retireRefusedSpawn(run, worker)) return;
+    this.pool.get(run)?.session.forgetRefusedRun(run);
+    this.pool.release(run, worker);
+  }
+
   private unavailable(command: PipeCommand): RuntimeResult {
     return {
       type: "error",
@@ -175,7 +197,8 @@ export class LocalRuntime implements RuntimeTerminalPort {
     // ready, ...) or queued and then withdrawn unsent (contact lost while the transport was
     // blocked) never reaches the worker, so the run must not be treated as known to the worker
     // (preview ticks would poll it) or keep holding run resources. A spawn that was handed over
-    // keeps its reservation even when its result is unknown: the worker may have spawned it.
+    // keeps its reservation even when its result is unknown: the worker may have spawned it. Only
+    // the worker's definite refusal retires it (retireRefusedSpawn).
     let sent = false;
     const markSent =
       command.type === "spawn"
@@ -194,6 +217,8 @@ export class LocalRuntime implements RuntimeTerminalPort {
     // Never written, so definitely not accepted: release the reservation, which also drops the
     // session's record of the run.
     if (command.type === "spawn" && !sent) this.cancelRunReservation(command.run, command.worker);
+    else if (command.type === "spawn" && refusedSpawn(result))
+      this.retireRefusedSpawn(command.run, command.worker);
     if (result.type === "result" && result.runStatus)
       this.registry.observe(placement.worker, result.runStatus);
     if (!placement.session.ready) this.registry.contactLost(placement.worker);
