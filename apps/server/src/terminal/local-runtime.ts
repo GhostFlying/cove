@@ -207,13 +207,29 @@ export class LocalRuntime implements RuntimeTerminalPort {
             this.registry.markDispatched(command.run, command.worker);
           }
         : undefined;
+    // A spawn whose deadline passed was answered RESULT_UNKNOWN and keeps its run. The worker's
+    // late answer still proves the outcome: a refusal retires the run as if it had come in time
+    // (the caller's unknown answer and its receipt stay as they are; nothing is replayed).
+    const lateSpawnReply =
+      command.type === "spawn"
+        ? (late: RuntimeResult) => {
+            if (!this.disposed && refusedSpawn(late))
+              this.retireRefusedSpawn(command.run, command.worker);
+          }
+        : undefined;
     // An unsubscribe carries no result handoff; every route-control command, this one
     // included, waits for a free slot in the worker's route-control window.
     const result = await (unsubscribe && command.type === "unsubscribe"
       ? placement.session.requestUnsubscribe(command)
       : command.type === "status"
         ? placement.session.requestStatus(command, statusEligible)
-        : placement.session.request(command, payload, this.resultHandoff, markSent));
+        : placement.session.request(
+            command,
+            payload,
+            this.resultHandoff,
+            markSent,
+            lateSpawnReply,
+          ));
     // Never written, so definitely not accepted: release the reservation, which also drops the
     // session's record of the run.
     if (command.type === "spawn" && !sent) this.cancelRunReservation(command.run, command.worker);

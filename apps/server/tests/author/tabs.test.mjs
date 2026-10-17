@@ -63,6 +63,8 @@ function instance(
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", relayInstanceId, budgets, bytes);
   const commands = [];
+  // The session's clock: still unless a test moves it past a command's deadline.
+  const clock = { ms: 0 };
   const session = new WorkerPipeSession({
     worker,
     composition,
@@ -83,7 +85,7 @@ function instance(
         return true;
       },
     },
-    now: () => 0,
+    now: () => clock.ms,
     timeoutMs: 100_000,
     identityLimit: 32,
   });
@@ -133,7 +135,7 @@ function instance(
   });
   // Waits for the next command of `type` the worker received and answers it.
   // The store runs in a worker thread, so the command arrives after real (bounded) time.
-  async function answer(type, outcome = "accepted", runStatus, pending, error) {
+  async function received(type, pending) {
     let command;
     let answered = false;
     void pending?.then((value) => (answered = value));
@@ -145,6 +147,10 @@ function instance(
     if (!command)
       throw new Error(`no ${type} command reached the worker: ${JSON.stringify(answered)}`);
     command.answered = true;
+    return command;
+  }
+  async function answer(type, outcome = "accepted", runStatus, pending, error, received_) {
+    const command = received_ ?? (await received(type, pending));
     if (error) {
       frame({
         type: "error",
@@ -178,6 +184,16 @@ function instance(
     const command = await answer(type, "accepted", undefined, pending, domainError(errorKind));
     return { outcome: await pending, command };
   }
+  // Lets the next command of `type` pass its deadline unanswered, so its caller gets
+  // RESULT_UNKNOWN, and only then delivers the worker's definite refusal.
+  async function refuseLate(type, errorKind, pending) {
+    const command = await received(type, pending);
+    clock.ms += 100_001;
+    session.tick();
+    const outcome = await pending;
+    await answer(type, "accepted", undefined, undefined, domainError(errorKind), command);
+    return { outcome, command };
+  }
   // A launch whose spawn the worker accepts.
   async function launched(promise, outcome = "accepted") {
     const command = await answer(
@@ -210,6 +226,7 @@ function instance(
     runLog,
     answer,
     refuse,
+    refuseLate,
     launched,
     exit,
     status,
@@ -673,6 +690,37 @@ describe("refused spawns", () => {
     expect(outcome.operation).toMatchObject({ state: "failed", run: { runId: "run-1" } });
     await retired(env, outcome.operation.run);
     expect((await env.tabs.get("tab-instance-1")).latestRun).toBeNull();
+    const reopened = await env.launched(
+      env.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
+    );
+    expect(reopened.outcome.operation).toMatchObject({
+      state: "succeeded",
+      run: { runId: "run-2" },
+    });
+  });
+
+  it("retires a run whose refusal arrives after the launch was answered unknown", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const { outcome } = await env.refuseLate(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.tabs.create("p", create("c1")),
+    );
+    // The launch itself is answered unknown, before the worker's answer.
+    expect(outcome.operation).toMatchObject({
+      state: "requires_attention",
+      run: { runId: "run-1" },
+      error: { kind: "RESULT_UNKNOWN" },
+    });
+    // The late refusal proves nothing started: the runtime drops the run, and its starting
+    // record goes (best effort, not awaited), so the tab no longer counts it as live.
+    for (let i = 0; i < 500 && (await env.rows("SELECT 1 FROM runs")).length; i++)
+      await new Promise((done) => setTimeout(done, 2));
+    expect(await env.rows("SELECT run_id FROM runs")).toEqual([]);
+    await retired(env, outcome.operation.run);
+    // The caller's receipt is not rewritten, and nothing was sent again.
+    expect((await env.operations.get("p", "c1")).operation).toEqual(outcome.operation);
+    expect(env.commands.filter((item) => item.type === "spawn")).toHaveLength(1);
     const reopened = await env.launched(
       env.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
     );

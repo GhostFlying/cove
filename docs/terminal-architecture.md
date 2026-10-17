@@ -403,9 +403,14 @@ runtime 缓存不是第二份 headless 模型。已选持久化方案 A：首期
 - 每个 terminal 限制尺寸、历史行数、解析积压与回放字节，同时设置整个 server 的内存预算；
   仅限制 scrollback 行数不足以限制超宽终端或可变内容的内存。
 - run 名额：每个 run 从预留起占用 runtime 与 worker 的 run 名额（各至多 `maxRuns`）。spawn 未交给 worker 时释放名额。
-  已交出的 spawn 被 worker 明确拒绝（not-accepted，且不是 OPERATION_ID_CONFLICT）时什么都没启动：worker 只在尚未创建任何东西、
-  或原生层在 PTY 存在之前拒绝时这样回答，并且不保留该 run 身份；runtime 随即退役该 run，移除登记、放置与会话路由，
-  它不再出现在 terminal.list/get 中，名额可以复用（#121 评审 P1：此前它一直显示为不可验证、无法 attach 或 stop，并永久占用名额）。
+  已交出的 spawn 被 worker 明确拒绝（not-accepted，且不是 OPERATION_ID_CONFLICT）时什么都没启动。worker 只在三种情况下这样回答：
+  命令检查未通过而尚未创建任何东西；调用原生层之前构建会话失败（如剩余的保留字节容纳不下初始 checkpoint，`not-started`）；
+  原生层在 PTY 存在之前拒绝（`rejected`）。后两种情况它释放该 run 的身份与身份字节，不再保留。从调用原生层起的任何其他失败
+  （原生层抛出、未分类的失败）所有权不确定，答复为 RESULT_UNKNOWN，身份保留。
+  runtime 收到明确拒绝即退役该 run，移除登记、放置与会话路由，它不再出现在 terminal.list/get 中，名额可以复用；
+  有存储的 server 同时删除该 run 的 starting 记录（tab 指回上一个 run）。拒绝在命令期限之后才到达时同样如此：调用方已得到的
+  RESULT_UNKNOWN 与回执不变，不重放任何东西，迟到的应答经会话校验后交给 runtime 核对（#121 评审：此前被拒的 run 一直显示为
+  不可验证、无法 attach 或 stop，并永久占用名额；迟到的拒绝还让 starting 记录挡住 tab reopen）。
   结果未知的 spawn 保留名额并显示为不可验证，因为 worker 可能已启动它。run ID 在同一 server 内从不重发
   （新实例按持久的最高编号续号，见 [M1 D8](milestones/m1.md)），所以被退役的 ID 不需要另设墓碑。
 - 原型先使用每终端 1,000 行历史，对总预算及可配置上限继续测量；这不是冻结的产品默认值。

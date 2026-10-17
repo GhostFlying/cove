@@ -83,6 +83,8 @@ type Pending = {
   // Called when the transport hands the frame over (`sent` becomes true); see request() and
   // PipeByteTransport.
   onSent?: () => void;
+  // Called with the worker's valid late reply when the command was abandoned (see request()).
+  onLateReply?: (result: RuntimeResult) => void;
   // The runtime clock when the transport handed the frame over (health's command age).
   sentAt?: number;
   // The transport took the frame (flush() called its write) but has not handed it over.
@@ -375,13 +377,20 @@ export class WorkerPipeSession {
   // it, and before any reply. A command that settles without it was never delivered and never
   // will be: refused at admission, refused by the transport before handing over, or withdrawn
   // unsent when contact was lost (which drops the whole queue).
+  //
+  // `onLateReply` receives the worker's reply to a command whose deadline already answered its
+  // caller RESULT_UNKNOWN. The reply is validated like any other; the caller's answer is not
+  // changed and nothing is replayed. It lets the owner of the command's resources reconcile a
+  // fact the reply proves (a spawn the worker refused started nothing). It may be foreign code:
+  // a throw is contained.
   request(
     command: PipeCommand,
     payload: Uint8Array = new Uint8Array(),
     handoff?: ResultHandoff,
     onSent?: () => void,
+    onLateReply?: (result: RuntimeResult) => void,
   ): Promise<RuntimeResult> {
-    return this.admit(command, payload, handoff, undefined, onSent);
+    return this.admit(command, payload, handoff, undefined, { onSent, onLateReply });
   }
 
   // A status read that waits for the worker's single status window instead of being refused
@@ -578,7 +587,10 @@ export class WorkerPipeSession {
     payload: Uint8Array,
     handoff: ResultHandoff | undefined,
     previewSeal?: PreviewResultSeal,
-    onSent?: () => void,
+    hooks?: {
+      onSent?: (() => void) | undefined;
+      onLateReply?: ((result: RuntimeResult) => void) | undefined;
+    },
     // A status read from requestStatus(): `deadlineAt` is the absolute deadline fixed when it was
     // requested (a read that waited for its window gets only what remains of it), and
     // `eligible` is its caller's lifetime, checked again up to the handover.
@@ -723,7 +735,8 @@ export class WorkerPipeSession {
       handoff,
       ...(previewSeal ? { previewSeal } : {}),
       sent: false,
-      ...(onSent ? { onSent } : {}),
+      ...(hooks?.onSent ? { onSent: hooks.onSent } : {}),
+      ...(hooks?.onLateReply ? { onLateReply: hooks.onLateReply } : {}),
       admitted: !waiting,
       abandoned: false,
       ...(status ? { statusGuard: { eligible: status.eligible } } : {}),
@@ -952,6 +965,12 @@ export class WorkerPipeSession {
               command.type === "recover"
             )
               this.forgetRoute(command.subscription, command.type === "unsubscribe");
+            try {
+              pending.onLateReply?.(structuredClone(value));
+            } catch {
+              // The reply was valid; a failing reconciler does not make the worker faulty.
+            }
+            if (this.closed) break;
             continue;
           }
           if (command.type === "preview-refresh") pending.previewSeal?.(structuredClone(value));
