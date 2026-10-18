@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import type { RunRef } from "@cove/protocol/identity";
 import type { OperationReceiptKey } from "@cove/protocol/rpc";
+import { M1_LIMITS } from "@cove/protocol/workspace";
 import {
   executeDatabaseWriteCommitted,
   recordedWrite,
@@ -427,7 +428,15 @@ export class BindingService {
     } catch {
       return this.attention(key);
     }
-    if (runs.live.length) return restore(domainError("LIVE_RUNS_PRESENT"));
+    // Not expected once accepted (no run is accepted that uses a path being deleted,
+    // store/sql/deletions.ts), but a run the acceptance left out as exited may still be recorded
+    // live. The final error names the runs, as a refusal does, as many as a stored record keeps.
+    if (runs.live.length)
+      return restore(
+        domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, {
+          runs: runs.live.slice(0, M1_LIMITS.storedErrorRuns),
+        }),
+      );
     const group = {};
     const before = await this.observe(group, deletion.clone, deletion.path);
     if (before === "unknown") return this.attention(key);

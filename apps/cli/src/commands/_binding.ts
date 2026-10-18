@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 import type { CallOutcome } from "@cove/client";
+import type { DomainError } from "@cove/protocol/errors";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import {
   flag,
@@ -47,15 +48,19 @@ function mountIds(args: Arguments, command: string): [string, string] {
   return [taskId, mountId];
 }
 
-// Lists the runs a LIVE_RUNS_PRESENT refusal names before the command fails with it: they are
-// what the operator has to end first.
-function reportLiveRuns(outcome: Exclude<CallOutcome<unknown>, { ok: true }>): void {
-  if (outcome.kind !== "rpc-error" || !("kind" in outcome.error)) return;
-  if (outcome.error.kind !== "LIVE_RUNS_PRESENT") return;
-  for (const run of outcome.error.details?.runs ?? [])
+// Lists the runs a LIVE_RUNS_PRESENT error names: they are what the operator has to end first. A
+// refusal carries them in the RPC error response; a deletion that was accepted and then found a
+// run keeps a few in its final record (the only other place they are known).
+function printLiveRuns(error: DomainError | undefined): void {
+  if (error?.kind !== "LIVE_RUNS_PRESENT") return;
+  for (const run of error.details?.runs ?? [])
     process.stderr.write(
       `cove: live run ${run.runId} uses the path; end it first (\`cove tab list <taskId>\` shows its tab)\n`,
     );
+}
+
+function reportLiveRuns(outcome: Exclude<CallOutcome<unknown>, { ok: true }>): void {
+  if (outcome.kind === "rpc-error" && "kind" in outcome.error) printLiveRuns(outcome.error);
 }
 
 // Asks on the terminal; anything but y or yes declines.
@@ -131,6 +136,7 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
         { operationId, taskId, mountId, confirmed: true, ...expectedWorkspaceRevision(args) },
         reportLiveRuns,
       );
+      printLiveRuns(operation.error);
       return printTaskOperation(session.client, operation, taskId);
     });
   }
