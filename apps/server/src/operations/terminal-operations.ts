@@ -27,7 +27,8 @@ export type OperationOutcome = { operation: OperationRecord } | { error: DomainE
 // recorded by the server composition from runtime events. A tab launch records its run inside the
 // transaction that accepts it (store/sql/tabs.ts), so `started` serves terminal.create only.
 export interface RunRecorder {
-  started(run: RunRef, cwd: string, operationId: string): Promise<void>;
+  // "refused": nothing was recorded because the cwd is in a managed worktree being deleted (T5).
+  started(run: RunRef, cwd: string, operationId: string): Promise<"recorded" | "refused" | void>;
   spawned(run: RunRef): Promise<void>;
   notStarted(run: RunRef): Promise<void>;
   // The highest N of the recorded run IDs `run-N` (store/sql/runs.ts runs.highestNumber).
@@ -183,14 +184,22 @@ export class TerminalOperations {
       // receipt. A PTY is never started for an operation whose receipt or run record the store
       // could not confirm.
       accept: async (run, preparation) => {
+        let started;
         try {
-          await runs?.started(run, params.cwd, params.operationId);
+          started = await runs?.started(run, params.cwd, params.operationId);
         } catch {
           // No receipt was written: the operation was not accepted. When the store failed with
           // the record in flight, the record may exist as `starting`; the next start marks it
           // interrupted.
           return { kind: "not-accepted", outcome: this.failure("BUSY"), runRecorded: false };
         }
+        // The cwd is in a managed worktree being deleted (m1 T5, store/sql/deletions.ts).
+        if (started === "refused")
+          return {
+            kind: "not-accepted",
+            outcome: this.failure("OPERATION_EFFECTS_ACTIVE"),
+            runRecorded: false,
+          };
         const record: OperationRecord = {
           operationId: params.operationId,
           method: "terminal.create",

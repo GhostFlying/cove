@@ -1,4 +1,5 @@
 import type { RunRef } from "@cove/protocol/identity";
+import { deletionPending } from "./deletions.js";
 import { statement, type Connection } from "./statements.js";
 
 export type LiveRunRecord = {
@@ -10,10 +11,13 @@ export type LiveRunRecord = {
 
 // Durable run records (D8, D9); see store/runs.ts for the lifecycle they implement.
 export const runOperations = {
+  // "refused", with nothing written, when the cwd is in a managed worktree being deleted
+  // (store/sql/deletions.ts).
   "runs.started": (
     db: Connection,
     args: { run: RunRef; cwd: string; operationId: string | null; at: number },
-  ): void => {
+  ): "recorded" | "refused" => {
+    if (deletionPending(db, [args.cwd])) return "refused";
     statement(
       db,
       `INSERT INTO runs (server_id, relay_instance_id, run_id, cwd, mounts_json, operation_id,
@@ -28,6 +32,7 @@ export const runOperations = {
       args.at,
       args.at,
     );
+    return "recorded";
   },
 
   "runs.spawned": (db: Connection, args: { run: RunRef; at: number }): void => {

@@ -23,8 +23,9 @@ export class RunLog {
   ) {}
 
   // Recorded when a run is accepted, before the spawn command reaches a worker, so a crash at any
-  // later point still leaves a record for the next start to mark interrupted.
-  started(run: RunRef, cwd: string, operationId: string | null): Promise<void> {
+  // later point still leaves a record for the next start to mark interrupted. "refused", with
+  // nothing recorded, when the cwd is in a managed worktree being deleted (T5).
+  started(run: RunRef, cwd: string, operationId: string | null): Promise<"recorded" | "refused"> {
     return this.store.call("runs.started", { run, cwd, operationId, at: this.now() });
   }
 
