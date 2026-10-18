@@ -9,6 +9,7 @@ import {
   type TabRecord,
 } from "@cove/protocol/workspace";
 import { tabReadFits } from "../../domain/tab-bounds.js";
+import { deletionPending } from "./deletions.js";
 import {
   checkedReceiptRecord,
   type DatabaseWriteRequest,
@@ -388,6 +389,10 @@ export const tabOperations = {
     const cwd = resolveCwd(db, task, storedCwd(tab.cwd_json));
     if ("error" in cwd) return fail(cwd.error.kind);
     const mounts = mountSnapshot(db, task.workspace_id);
+    // A worktree being deleted gets no new run (store/sql/deletions.ts): not in its cwd, and not
+    // through the snapshot of an entry run, which maps every mount of the workspace.
+    if (deletionPending(db, [cwd.path, ...mounts.map((mount) => mount.path)]))
+      return fail("OPERATION_EFFECTS_ACTIVE");
     const runSeq = Number(
       statement(
         db,
