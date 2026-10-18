@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import {
   canonicalOperationIntent,
   RPC_METHODS,
@@ -21,6 +22,22 @@ import { storeReadError } from "./database-operations.js";
 import { OperationReceipts, type ReceiptPreparation } from "./operation-receipts.js";
 
 export type OperationOutcome = { operation: OperationRecord } | { error: DomainError };
+
+// The cwd a terminal run is recorded with: its real path on this host. Every path the store
+// compares runs against is recorded real (workspace entries and managed worktrees under the
+// resolved workspace root, checkouts by their registration), so a run started through an alias of
+// a directory (macOS /tmp for /private/tmp, a symlink that already exists) is matched like any
+// other: it is refused while that directory's worktree is being deleted, and it blocks a deletion
+// or a conversion while it lives (m1 T5, store/sql/deletions.ts, tabs.liveRunsUsing). The PTY
+// still starts in the directory as the client spelled it, which is the same directory. A path
+// that cannot be resolved is recorded as given; the worker refuses to start in it.
+export async function recordedCwd(cwd: string): Promise<string> {
+  try {
+    return await realpath(cwd);
+  } catch {
+    return cwd;
+  }
+}
 
 // Durable run records (store/runs.ts). Only the hook D9 needs: a run is recorded when accepted,
 // marked running once spawned and dropped when the worker definitely refused it; exit facts are
@@ -186,7 +203,7 @@ export class TerminalOperations {
       accept: async (run, preparation) => {
         let started;
         try {
-          started = await runs?.started(run, params.cwd, params.operationId);
+          started = await runs?.started(run, await recordedCwd(params.cwd), params.operationId);
         } catch {
           // No receipt was written: the operation was not accepted. When the store failed with
           // the record in flight, the record may exist as `starting`; the next start marks it

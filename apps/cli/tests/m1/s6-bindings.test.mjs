@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { waitFor } from "../recording-view.mjs";
@@ -668,4 +668,79 @@ test("no run is accepted in a worktree while its deletion waits to remove it", a
   // Runs are accepted again once it ended.
   const after = await fixture.coveJson(["tab", "create", task.taskId, "--start", "no"], { home });
   expect(after.operation.state).toBe("succeeded");
+});
+
+// A task with one worktree and an alias of its workspace entry that exists before any of this
+// (like macOS /tmp for /private/tmp): the same directory under another spelling. `terminal`
+// starts a long-running terminal run in the worktree through the alias.
+async function aliasedWorktree(home) {
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const { task } = await fixture.coveJson(
+    ["task", "create", "Aliased", "--worktree", alpha.repoId],
+    { home },
+  );
+  const [mount] = worktreeMounts(task);
+  const alias = join(fixture.root, "alias");
+  await symlink(task.workspace.entryPath, alias);
+  const terminal = () =>
+    fixture.cove(
+      [
+        "terminal",
+        "create",
+        "--cwd",
+        join(alias, mount.name),
+        "--",
+        process.execPath,
+        "-e",
+        "setInterval(() => {}, 1000)",
+      ],
+      { home },
+    );
+  return { task, mount, terminal };
+}
+
+test("a terminal run started through a path alias of the worktree blocks its deletion", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { task, mount, terminal } = await aliasedWorktree(home);
+  const started = await terminal();
+  expect(started.code).toBe(0);
+  const run = JSON.parse(started.stdout);
+  const busy = await fixture.cove(
+    ["mount", "delete-worktree", task.taskId, mount.mountId, "--yes"],
+    { home },
+  );
+  expect(busy.code).toBe(1);
+  expect(busy.stderr).toContain("LIVE_RUNS_PRESENT");
+  expect(busy.stderr).toContain(`live run ${run.runId} uses the path`);
+  expect(await exists(mount.path)).toBe(true);
+  await fixture.coveJson(["terminal", "stop", run.runId], { home });
+});
+
+test("a terminal run through a path alias is refused while the worktree is being deleted", async () => {
+  const home = fixture.home("home");
+  const wrapper = await installWrapper();
+  await fixture.startServer(home);
+  const { task, mount, terminal } = await aliasedWorktree(home);
+  // The deletion passed its run checks and is held in Git before `worktree remove --force`.
+  await wrapper.block("list");
+  fixture.spawnCove(
+    ["mount", "delete-worktree", task.taskId, mount.mountId, "--yes", "--operation-id", "s6-alias"],
+    { home },
+  );
+  await wrapper.blocked("list");
+  const refused = await terminal();
+  expect(refused.code).toBe(1);
+  expect(refused.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
+  await wrapper.release("list");
+  let deleted;
+  await waitFor(
+    "the deletion to end",
+    async () =>
+      (deleted = await fixture.coveJson(["operation", "get", "s6-alias"], { home })).state !==
+      "running",
+    30_000,
+  );
+  expect(deleted.state).toBe("succeeded");
+  expect(await exists(mount.path)).toBe(false);
 });
