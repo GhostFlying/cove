@@ -416,7 +416,8 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
     result: { ...domain.result, mounts: [...domain.result.mounts, domain.result.mounts[0]] },
   };
   expect(validateOperationRecord(overfull, encoder)).toBeNull();
-  // `left` with either of the fields it excludes, or an unknown value, is refused.
+  // `left` with either of the fields it excludes, or an unknown value, is refused; the source
+  // counts of a conversion (m1 T5) go with `left` on its single mount only.
   for (const extra of [
     { sourceChanges: domain.result.sourceChanges },
     { targetOperationId: domain.result.targetOperationId },
@@ -424,6 +425,25 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
     expect(
       validateOperationRecord({ ...leftOver, result: { ...leftOver.result, ...extra } }, encoder),
     ).toBeNull();
+  const converted = {
+    ...leftOver,
+    method: "binding.convert",
+    result: {
+      ...leftOver.result,
+      mounts: leftOver.result.mounts.slice(0, 1),
+      sourceChanges: domain.result.sourceChanges,
+    },
+  };
+  expect(encoder(JSON.stringify(converted)).byteLength).toBeLessThanOrEqual(
+    M0_LIMITS.operationRecordBytes,
+  );
+  expect(validateOperationRecord(converted, encoder)).toEqual(converted);
+  expect(
+    validateOperationRecord(
+      { ...converted, result: { ...converted.result, mounts: leftOver.result.mounts.slice(0, 2) } },
+      encoder,
+    ),
+  ).toBeNull();
   const unknownLeft = leftOver.result.mounts.map((mount) => ({ ...mount, left: "checkout" }));
   expect(
     validateOperationRecord(
