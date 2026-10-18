@@ -359,6 +359,7 @@ async function installWrapper() {
 case "$*" in
   *"read-tree -m -u HEAD"*) step=checkout ;;
   *"worktree remove --force"*) step=remove ;;
+  *"worktree list --porcelain -z"*) step=list ;;
   *) step= ;;
 esac
 if [ -n "$step" ] && [ "$(cat "${control}/block" 2>/dev/null)" = "$step" ]; then
@@ -478,4 +479,193 @@ test("a worktree an abandoned preparation left in place is deleted; a deletion i
   );
   // The branch is kept.
   expect(await alpha.git("branch", "--list", mount.branch)).toContain(mount.branch);
+});
+
+// The workspace manifest's view of a mount.
+async function manifestMount(entryPath, name) {
+  const manifest = JSON.parse(await readFile(join(entryPath, "cove-workspace.json"), "utf8"));
+  return manifest.mounts.find((mount) => mount.name === name);
+}
+
+test("while a conversion prepares its target the checkout stays bound, and the switch waits for the task's runs", async () => {
+  const home = fixture.home("home");
+  const wrapper = await installWrapper();
+  await fixture.startServer(home);
+  const { alpha, task, mount } = await checkoutTask(home);
+  const remoteMain = await alpha.push("feature.txt", "feature\n");
+  const { entryPath } = task.workspace;
+
+  // The preparation is held in its checkout step.
+  await wrapper.block("checkout");
+  fixture.spawnCove(["mount", "convert", task.taskId, mount.mountId, "--operation-id", "s6-held"], {
+    home,
+  });
+  await wrapper.blocked("checkout");
+  // Nothing about the mount changed yet: same binding, same revision, same manifest.
+  const during = await fixture.coveJson(["task", "get", task.taskId], { home });
+  expect(during.workspace.revision).toBe(task.workspace.revision);
+  expect(during.workspace.mounts).toEqual([
+    expect.objectContaining({
+      mountId: mount.mountId,
+      source: "checkout",
+      state: "ready",
+      path: alpha.clone,
+    }),
+  ]);
+  expect(await manifestMount(entryPath, mount.name)).toMatchObject({
+    source: "checkout",
+    path: alpha.clone,
+  });
+  const history = await fixture.coveJson(["mount", "history", task.taskId, mount.mountId], {
+    home,
+  });
+  expect(history.bindings).toEqual([
+    expect.objectContaining({ source: "checkout", path: alpha.clone, unboundAtMs: null }),
+  ]);
+  // A run started from the entry now sees the checkout, not the unready target.
+  const { tabId } = await liveTab(home, task.taskId, "during");
+  const started = await fixture.coveJson(["tab", "get", tabId], { home });
+  expect(started.latestRun.mounts).toEqual([
+    { name: mount.name, source: "checkout", path: alpha.clone },
+  ]);
+
+  // The target is ready, but that run of the task still uses the checkout: not switched.
+  await wrapper.release("checkout");
+  let held;
+  await waitFor(
+    "the conversion to stop before switching",
+    async () =>
+      (held = await fixture.coveJson(["operation", "get", "s6-held"], { home })).state ===
+      "requires_attention",
+    30_000,
+  );
+  expect(held).toMatchObject({
+    method: "binding.convert",
+    error: { kind: "LIVE_RUNS_PRESENT" },
+    progress: { remainingEffects: ["switch-binding"], recoveryActions: ["continue", "abandon"] },
+  });
+  const unswitched = await fixture.coveJson(["task", "get", task.taskId], { home });
+  expect(unswitched.workspace.revision).toBe(task.workspace.revision);
+  expect(unswitched.workspace.mounts[0]).toMatchObject({ source: "checkout", path: alpha.clone });
+
+  // Once the run ended, continue switches the binding.
+  await stopped(home, tabId);
+  const continued = await fixture.coveJson(
+    ["operation", "continue", "s6-held", "--operation-id", "s6-held-continue"],
+    { home },
+  );
+  expect(continued.target).toMatchObject({
+    operationId: "s6-held",
+    state: "succeeded",
+    result: { mounts: [{ mountId: mount.mountId, state: "ready" }] },
+  });
+  const after = await fixture.coveJson(["task", "get", task.taskId], { home });
+  expect(after.workspace.revision).toBe(task.workspace.revision + 1);
+  expect(after.workspace.mounts[0]).toMatchObject({
+    mountId: mount.mountId,
+    source: "worktree",
+    state: "ready",
+    path: join(entryPath, mount.name),
+    baseCommit: remoteMain,
+  });
+  expect(await manifestMount(entryPath, mount.name)).toMatchObject({
+    source: "worktree",
+    path: join(entryPath, mount.name),
+  });
+});
+
+test("a conversion whose preparation fails leaves the checkout bound and the revision unchanged", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { alpha, task, mount } = await checkoutTask(home);
+  // The remote is unreachable: the fetch fails before anything is created.
+  await alpha.git("remote", "set-url", "origin", join(fixture.root, "no-such-remote.git"));
+  const result = await fixture.cove(["mount", "convert", task.taskId, mount.mountId], { home });
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("FETCH_FAILED");
+  const printed = JSON.parse(result.stdout);
+  expect(printed.operation).toMatchObject({
+    method: "binding.convert",
+    state: "failed",
+    result: { mounts: [{ mountId: mount.mountId, state: "failed" }] },
+  });
+  expect(printed.task.workspace.revision).toBe(task.workspace.revision);
+  expect(printed.task.workspace.mounts).toEqual([
+    expect.objectContaining({
+      mountId: mount.mountId,
+      source: "checkout",
+      state: "ready",
+      path: alpha.clone,
+    }),
+  ]);
+  const history = await fixture.coveJson(["mount", "history", task.taskId, mount.mountId], {
+    home,
+  });
+  expect(history.bindings).toEqual([
+    expect.objectContaining({ source: "checkout", path: alpha.clone, unboundAtMs: null }),
+  ]);
+  expect(await exists(join(task.workspace.entryPath, mount.name))).toBe(false);
+  // The checkout is still usable as the mount's cwd.
+  const tab = await fixture.coveJson(
+    ["tab", "create", task.taskId, "--cwd", `mount:${mount.mountId}`, "--start", "no"],
+    { home },
+  );
+  expect(tab.operation.state).toBe("succeeded");
+});
+
+test("no run is accepted in a worktree while its deletion waits to remove it", async () => {
+  const home = fixture.home("home");
+  const wrapper = await installWrapper();
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const { task } = await fixture.coveJson(
+    ["task", "create", "Delete while busy", "--worktree", alpha.repoId],
+    { home },
+  );
+  const [mount] = worktreeMounts(task);
+  // The deletion passed its run checks and is held in Git before `worktree remove --force`.
+  await wrapper.block("list");
+  fixture.spawnCove(
+    ["mount", "delete-worktree", task.taskId, mount.mountId, "--yes", "--operation-id", "s6-busy"],
+    { home },
+  );
+  await wrapper.blocked("list");
+  // An entry tab maps every mount of the workspace, the worktree among them; a terminal run would
+  // start in it. Both are refused while the deletion is pending.
+  const entryTab = await fixture.cove(
+    ["tab", "create", task.taskId, "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    { home },
+  );
+  expect(entryTab.code).toBe(1);
+  expect(entryTab.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
+  const terminal = await fixture.cove(
+    [
+      "terminal",
+      "create",
+      "--cwd",
+      mount.path,
+      "--",
+      process.execPath,
+      "-e",
+      "setInterval(() => {}, 1000)",
+    ],
+    { home },
+  );
+  expect(terminal.code).toBe(1);
+  expect(terminal.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
+
+  await wrapper.release("list");
+  let deleted;
+  await waitFor(
+    "the deletion to end",
+    async () =>
+      (deleted = await fixture.coveJson(["operation", "get", "s6-busy"], { home })).state !==
+      "running",
+    30_000,
+  );
+  expect(deleted.state).toBe("succeeded");
+  expect(await exists(mount.path)).toBe(false);
+  // Runs are accepted again once it ended.
+  const after = await fixture.coveJson(["tab", "create", task.taskId, "--start", "no"], { home });
+  expect(after.operation.state).toBe("succeeded");
 });
