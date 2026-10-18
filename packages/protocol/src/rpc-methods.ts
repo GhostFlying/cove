@@ -6,7 +6,7 @@ import { EffectiveBudgetsSchema, M0_LIMITS } from "./budgets.js";
 import { DomainErrorSchema } from "./errors.js";
 import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./identity.js";
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
-import { RunStatusSchema, SpawnArgumentsSchema } from "./pipe.js";
+import { RunStatusSchema, SpawnCommandSchema } from "./pipe.js";
 import { WorkerHealthSchema } from "./terminal-events.js";
 import * as W from "./workspace.js";
 import {
@@ -139,7 +139,9 @@ export const TerminalListResultSchema = z.object({
 });
 export const TerminalGetParamsSchema = z.object({ run: RunRefSchema });
 export const TerminalGetResultSchema = z.object({ record: RunRecordSchema });
-export const TerminalCreateParamsSchema = SpawnArgumentsSchema.extend({
+// A run that belongs to no tab: the client names a command only. It carries no environment (the
+// spawn `env` is the server's, for a tab run; D8), and an `env` member a client sends is dropped.
+export const TerminalCreateParamsSchema = SpawnCommandSchema.extend({
   operationId: OpaqueIdSchema,
   expectedRelayInstanceId: OpaqueIdSchema,
   geometry: GeometrySchema,

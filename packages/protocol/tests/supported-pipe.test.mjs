@@ -8,6 +8,11 @@ import {
   PIPE_VERSION,
   PipeCommandSchema,
   RunStatusSchema,
+  SPAWN_ENV_KEYS,
+  SPAWN_ENV_PAYLOAD_BYTES,
+  SPAWN_ENV_VALUE_CHARS,
+  SpawnArgumentsSchema,
+  SpawnCommandSchema,
   composeSpawnPayload,
   createPipeDecoder,
   encodePipeFrame,
@@ -17,6 +22,7 @@ import {
   validateSpawnPayload,
 } from "@cove/protocol/pipe";
 import { createPipeDecoder as createProbeDecoder } from "@cove/protocol/provisional/pipe";
+import { RPC_METHODS, canonicalOperationIntent } from "@cove/protocol/rpc";
 
 const worker = {
   serverId: "s1",
@@ -124,6 +130,110 @@ test("spawn is a closed command with payload, geometry and profile", () => {
     validatePipeFrame(frame(1, bytes), { ...command, run: { ...run, serverId: "s2" } }).ok,
   ).toBe(false);
   expect(PipeCommandSchema.safeParse({ ...command, type: "exec" }).success).toBe(false);
+});
+
+// #120: the spawn `env` carries only Cove's run identity. Fixture values only.
+const identity = { COVE_TASK_ID: "task-fixture-1", COVE_TAB_ID: "tab-fixture-1" };
+const spawnCommand = (bytes) => ({
+  type: "spawn",
+  worker,
+  run,
+  requestId: "q1",
+  operationId: "o1",
+  geometry,
+  profile: "pragmatic-logical-grid-v1",
+  appearance: DEFAULT_APPEARANCE,
+  effectiveBudgets: M0_LIMITS,
+  spawnPayloadBytes: bytes.length,
+});
+
+test("spawn env accepts the Cove identity keys and a spawn without it is the command-only payload", () => {
+  expect(SPAWN_ENV_KEYS).toEqual(["COVE_TASK_ID", "COVE_TAB_ID"]);
+  const withEnv = { ...spawnArgs, env: identity };
+  const composed = composeSpawnPayload(withEnv, encoder);
+  expect(JSON.parse(new TextDecoder().decode(composed.bytes))).toEqual(withEnv);
+  const command = spawnCommand(composed.bytes);
+  expect(validatePipeFrame(frame(1, composed.bytes), command).ok).toBe(true);
+  expect(validateSpawnPayload(command, composed.bytes, withEnv, encoder)).toEqual(withEnv);
+  // Either key alone, an empty map, and printable ASCII up to the bound (space, quote, backslash).
+  for (const env of [
+    { COVE_TAB_ID: "t" },
+    {},
+    { COVE_TASK_ID: ` !"\\~${"a".repeat(SPAWN_ENV_VALUE_CHARS - 5)}` },
+  ])
+    expect(composeSpawnPayload({ ...spawnArgs, env }, encoder)?.arguments.env).toEqual(env);
+  // No env: the payload is the command-only JSON, with no env member.
+  const plain = composeSpawnPayload(spawnArgs, encoder);
+  expect(new TextDecoder().decode(plain.bytes)).toBe(JSON.stringify(spawnArgs));
+  expect(plain.arguments).not.toHaveProperty("env");
+  // The env member is part of the canonical bytes: dropping it does not reproduce the payload.
+  const oldReencoded = encoder(JSON.stringify(SpawnCommandSchema.parse(withEnv)));
+  expect(Buffer.from(oldReencoded).equals(Buffer.from(composed.bytes))).toBe(false);
+});
+
+test("spawn env rejects unknown keys, oversized values and control characters", () => {
+  const rejected = [
+    { PATH: "/usr/bin" },
+    { LD_PRELOAD: "/tmp/x.so" },
+    { cove_task_id: "lowercase" },
+    { COVE_TASK_ID: "t", COVE_HOME: "/elsewhere" },
+    { COVE_TASK_ID: "a".repeat(SPAWN_ENV_VALUE_CHARS + 1) },
+    { COVE_TASK_ID: "" },
+    { COVE_TASK_ID: "line\nbreak" },
+    { COVE_TASK_ID: "nul\u0000byte" },
+    { COVE_TASK_ID: "esc\u001b[31m" },
+    { COVE_TASK_ID: "tab\there" },
+    { COVE_TASK_ID: "del\u007f" },
+    { COVE_TASK_ID: "café" },
+    { COVE_TASK_ID: 7 },
+    { COVE_TASK_ID: null },
+    ["COVE_TASK_ID=x"],
+    "COVE_TASK_ID=x",
+  ];
+  for (const env of rejected) {
+    expect(SpawnArgumentsSchema.safeParse({ ...spawnArgs, env }).success).toBe(false);
+    expect(composeSpawnPayload({ ...spawnArgs, env }, encoder)).toBeNull();
+  }
+  // A worker re-validates the payload it receives: an unknown key a sender wrote by hand is
+  // refused rather than stripped and run.
+  const forged = { ...spawnArgs, env: { ...identity, PATH: "/tmp" } };
+  const bytes = encoder(JSON.stringify(forged));
+  expect(validateSpawnPayload(spawnCommand(bytes), bytes, forged, encoder)).toBeNull();
+});
+
+test("the identity has its own payload room and a client cannot send one with terminal.create", () => {
+  // The largest identity, every character needing a JSON escape, stays within its room.
+  const largest = Object.fromEntries(
+    SPAWN_ENV_KEYS.map((key) => [key, '"'.repeat(SPAWN_ENV_VALUE_CHARS)]),
+  );
+  const extra =
+    encoder(JSON.stringify({ ...spawnArgs, env: largest })).length -
+    encoder(JSON.stringify(spawnArgs)).length;
+  expect(extra).toBeLessThanOrEqual(SPAWN_ENV_PAYLOAD_BYTES);
+  // A command at its own pre-#120 bound still composes with the largest identity.
+  const filler = "a".repeat(
+    M0_LIMITS.argvBytes - encoder(JSON.stringify({ ...spawnArgs, argv: [""] })).length,
+  );
+  const full = { ...spawnArgs, argv: [filler] };
+  expect(encoder(JSON.stringify(full)).length).toBe(M0_LIMITS.argvBytes);
+  const composed = composeSpawnPayload({ ...full, env: largest }, encoder);
+  expect(composed).not.toBeNull();
+  expect(PipeCommandSchema.safeParse(spawnCommand(composed.bytes)).success).toBe(true);
+  expect(
+    composeSpawnPayload({ ...spawnArgs, argv: [`${filler}a`], env: identity }, encoder),
+  ).toBeNull();
+  // terminal.create names a command only: an env member is dropped, never forwarded.
+  const params = RPC_METHODS["terminal.create"].params.parse({
+    ...spawnArgs,
+    env: identity,
+    operationId: "op1",
+    expectedRelayInstanceId: "i1",
+    geometry,
+  });
+  expect(params).not.toHaveProperty("env");
+  const intent = canonicalOperationIntent("terminal.create", { ...params, env: identity }, encoder);
+  expect(intent).not.toBeNull();
+  expect(intent).not.toContain("COVE_TASK_ID");
 });
 
 test("input bytes are opaque and require bound worker/run/subscription", () => {

@@ -88,10 +88,45 @@ export const PipeHeartbeatSchema = z.object({
   load: WorkerLoadSchema,
 });
 
-export const SpawnArgumentsSchema = z.object({
+// What a client may ask a run to execute (terminal.create extends this): never an environment.
+export const SpawnCommandSchema = z.object({
   executable: z.string().min(1).max(M0_LIMITS.executableBytes),
   argv: z.array(z.string()).max(M0_LIMITS.argvCount),
   cwd: z.string().min(1).max(M0_LIMITS.cwdBytes),
+});
+
+// Cove's run identity variables (M1 D8, #120): the only environment a spawn can carry. The server
+// sets them for a tab's run; the worker sets exactly these over its inherited environment and
+// removes any inherited copy it was not given (see worker-execution.ts). The schema is closed:
+// an unknown key, an empty or over-long value or any character outside printable ASCII (no
+// control characters, so no NUL, newline or escape) is a schema error, so arbitrary environment
+// can never reach a PTY through this field. Values are identifiers, not secrets, but nothing logs
+// them either.
+export const SPAWN_ENV_KEYS = ["COVE_TASK_ID", "COVE_TAB_ID"] as const;
+export type SpawnEnvKey = (typeof SPAWN_ENV_KEYS)[number];
+export const SPAWN_ENV_VALUE_CHARS = 128;
+const SpawnEnvValueSchema = z
+  .string()
+  .regex(new RegExp(`^[\\x20-\\x7e]{1,${SPAWN_ENV_VALUE_CHARS}}$`));
+export const SpawnEnvSchema = z.strictObject(
+  Object.fromEntries(SPAWN_ENV_KEYS.map((key) => [key, SpawnEnvValueSchema.optional()])) as {
+    [K in SpawnEnvKey]: z.ZodOptional<typeof SpawnEnvValueSchema>;
+  },
+);
+export type SpawnEnv = z.infer<typeof SpawnEnvSchema>;
+// The most the `env` member can add to the JSON spawn payload: every key with a value of the
+// largest length whose characters all need a JSON escape (`\"` or `\\`), plus punctuation. The
+// payload bound below is the command bound plus this, so adding the identity never makes a
+// recipe that fitted before #120 unframable.
+export const SPAWN_ENV_PAYLOAD_BYTES = 1024;
+const SPAWN_PAYLOAD_BYTES = M0_LIMITS.argvBytes + SPAWN_ENV_PAYLOAD_BYTES;
+
+// The spawn payload. `env` is optional and absent for a run that belongs to no tab
+// (terminal.create), and then the payload is the command-only JSON it always was. Before the first
+// release, server and worker must come from the same build: mixed builds are unsupported and the
+// pipe version is not bumped for this change (relay-protocol §10).
+export const SpawnArgumentsSchema = SpawnCommandSchema.extend({
+  env: SpawnEnvSchema.optional(),
 });
 export type SpawnArguments = z.infer<typeof SpawnArgumentsSchema>;
 
@@ -104,7 +139,7 @@ export const PipeCommandSchema = z.discriminatedUnion("type", [
     profile: ProfileSchema,
     appearance: AppearanceSchema,
     effectiveBudgets: EffectiveBudgetsSchema,
-    spawnPayloadBytes: z.number().int().min(1).max(M0_LIMITS.argvBytes),
+    spawnPayloadBytes: z.number().int().min(1).max(SPAWN_PAYLOAD_BYTES),
   }),
   z.object({ type: z.literal("stop"), ...command, operationId: OpaqueIdSchema }),
   z.object({
@@ -264,8 +299,11 @@ export function composeSpawnPayload(
   let argvBytes = 0;
   for (const arg of args.argv) argvBytes += encodeUtf8(arg).byteLength;
   if (argvBytes > M0_LIMITS.argvBytes) return null;
+  // The command part keeps its pre-#120 bound; the identity has its own room on top.
+  const { env: _env, ...command } = args;
+  if (encodeUtf8(JSON.stringify(command)).byteLength > M0_LIMITS.argvBytes) return null;
   const bytes = encodeUtf8(JSON.stringify(args));
-  if (bytes.byteLength < 1 || bytes.byteLength > M0_LIMITS.argvBytes) return null;
+  if (bytes.byteLength < 1 || bytes.byteLength > SPAWN_PAYLOAD_BYTES) return null;
   return { arguments: args, bytes };
 }
 
