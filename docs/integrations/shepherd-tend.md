@@ -1,6 +1,6 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `64de013`（2026-10-18，PR #128 合入；`ffa1910` 之后只有 #128 的提交），另列出未合入的 PR #124（T3b）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `66048d7`（2026-10-18，PR #124 合入；`64de013` 之后只有 `9a89968`（只改 AGENTS.md 与工程计划）与 #124 的提交）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
@@ -33,7 +33,8 @@
 | Repo 注册                | `cove repo register/list/get/set/reset/remove`                                          | `200e24d`（T2）；`REPO_IN_USE`：`09a61c3`                                                                        | 注册不改动 clone；`remove` 只删除注册，仍有挂载引用时拒绝（见下文 T3a）                                                                                                                                                                       |
 | Task 与 workspace        | `cove task create/list/get/rename/archive/unarchive`                                    | `3d65dc4`（CLI）、`fc41992`（server），T3a                                                                       | 见下文 T3a                                                                                                                                                                                                                                    |
 | Tab 与 run               | `cove tab create/list/get/runs/reopen/stop/close`                                       | `c63d7cd`（server）、`d6f495a`（CLI），T4                                                                        | 见下文 T4                                                                                                                                                                                                                                     |
-| Checkout 挂载            | `cove mount add <taskId> --checkout SPEC`、`cove mount remove <taskId> <mountId>`       | `3d65dc4`、`fc41992`，T3a                                                                                        | 托管 worktree 挂载尚未提供（见 §3）；见下文 T3a                                                                                                                                                                                               |
+| Checkout 挂载            | `cove mount add <taskId> --checkout SPEC`、`cove mount remove <taskId> <mountId>`       | `3d65dc4`、`fc41992`，T3a                                                                                        | 见下文 T3a；托管 worktree 挂载见下一行                                                                                                                                                                                                        |
+| 托管 worktree 挂载       | `--worktree SPEC`、`cove mount retry`、`cove operation continue/abandon`                | `79106c0`（protocol）、`4df69ac`（server）、`b2f71b2`（CLI），T3b                                                | 见下文 T3b                                                                                                                                                                                                                                    |
 | 重启后的 run 与操作记录  | server 停止与启动时处理，无单独命令                                                     | `d99ef5d`（存储原语：`299514d`）                                                                                 | 正常停止时当前实例存活的 run 记为 stopped-with-server；启动时，旧实例中仍为 starting/running（没有结束记录）的 run 记为 interrupted/unverifiable，已有的结束记录不变；不探测旧 PID、不重跑。无法证明结果的操作为 requires_attention           |
 | 输出                     | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                                                                                        | 尚无版本号与稳定性承诺（见 §6）                                                                                                                                                                                                               |
 | 退出码与错误             | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                                                                                        | CLI 自身的错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出                                                                                                                                                                               |
@@ -50,8 +51,7 @@ T3a（PR #109，合入于 `6a838af`；server `fc41992`，`repo remove` 的 `REPO
 - `cove mount add <taskId> (--checkout SPEC | --worktree SPEC)`、`cove mount remove <taskId> <mountId>`，
   `--expected-revision` 为 workspace revision。checkout SPEC：`REPO_ID[,name=N][,path=P]`（`path=` 在最后）；
   Cove 托管的 worktree 不能作为 checkout（`MANAGED_WORKTREE_NOT_MOUNTABLE`）。移除挂载从不删除目录，
-  已归档 task 也允许。`--worktree` 在 #124（T3b）合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝且不记录任何内容
-  （`task create` 中的其他挂载也不创建）；合入后的行为见下面的 #124。会使 task 记录无法放进一次读取响应的 `task create` 或 `mount add`
+  已归档 task 也允许。`--worktree` 见下文 T3b。会使 task 记录无法放进一次读取响应的 `task create` 或 `mount add`
   （例如很多真实路径极长的挂载）以 `INVALID_ARGUMENT` 拒绝且不记录。server 的文件系统工作已满（被放弃且
   尚未结束的检查占满上限）时，`task create` 与 `mount add` 以 `BUSY` 拒绝（未接受、不记录，稍后以同一请求
   重试）。`task list` 由 CLI 取完所有页后输出。
@@ -111,9 +111,7 @@ T4（PR #121，合入于 `ffa1910`；server `c63d7cd`，被拒 spawn 的 run 退
 - 不保存其他环境变量；不能经 CLI 或 RPC 传入任意环境变量（配方环境变量见下文 PLANNED）。
 - CLI 命令、参数、JSON 输出与退出码都不变。
 
-## 3. 进行中（PENDING）与计划中（PLANNED）
-
-PENDING：PR #124（T3b：托管 worktree 创建），未合入：
+T3b（PR #124，合入于 `66048d7`；protocol `79106c0`，server `4df69ac`，CLI `b2f71b2`）：
 
 - `--worktree REPO_ID[,name=N][,branch=B][,base=REF][,no-fetch]`（`task create` 可多个，`mount add` 一个）
   在 `<入口目录>/<name>` 创建 Cove 托管的 worktree，新分支 B 默认 `cove/<slug>`，已存在时该挂载以
@@ -166,9 +164,13 @@ PENDING：PR #124（T3b：托管 worktree 创建），未合入：
   `repo set <repoId> mainBranch`；`BRANCH_EXISTS` 提示 `--branch NEW`；每个遗留提示人工检查后可执行的命令
   `git -C <repo> worktree remove <path>`、`git -C <repo> branch -d <branch>`（Cove 不执行）。
 
+## 3. 进行中（PENDING）与计划中（PLANNED）
+
+PENDING：无。
+
 PLANNED：
 
-M1（已批准，实施中，见 [M1](../milestones/m1.md)）：上文 PENDING #124 之外，没有其他计划中的 tend 接口。
+M1（已批准，实施中，见 [M1](../milestones/m1.md)）：T5 的绑定变更与托管 worktree 删除（`mount convert`、`mount delete-worktree`、`mount history`）。
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
@@ -224,3 +226,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `64de013`（PR #128）                       | 基准改为 main `64de013`；#120 合入，#128 的 PENDING 项改为 AVAILABLE（§2 #120）：tab 的 run 注入 `COVE_TASK_ID`/`COVE_TAB_ID` 由 `341011e`（protocol）、`8dd7a10`（worker）与 `a4c8f15`（server）引入；CLI 接口不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-18 | main `64de013`；#124（T3b，未合入）             | 新增 PENDING #124：`--worktree` 创建（fetch 使用 SSH agent 且不交互、基点顺序、`no-fetch`、`BRANCH_EXISTS`、`FETCH_FAILED`、`MAIN_BRANCH_UNRESOLVED`）、`BUSY` 上限（含受理前分支名检查占用的共享 Git 槽位）、逐仓结果及其 `left`、`mount retry`（上次尝试的进程可能运行时拒绝）、`operation continue/abandon`（含 `OPERATION_EFFECTS_ACTIVE`；abandon 先接受再删除（停在基点、未被检出的普通分支；以普通的 `git worktree remove` 删除 worktree，Git 拒绝时保留；没有 index 的未检出 worktree），不强制；超时后仍可能运行的删除结束前拒绝 continue；可自身 `requires_attention` 并由 continue 继续）及其 `leftovers` 输出（失败的 `task create`/`mount add`/`mount retry` 有遗留时也带）、`requires_attention` 的情形（含检出前已有文件或暂存内容、已检出 worktree 消失）与 progress 词汇、所属操作未结束的挂载不能 `mount remove/retry`，以及按 `recoveryActions` 给出的 stderr 提示与遗留的人工删除命令；PLANNED 中托管 worktree 与 `operation continue/abandon` 两项移除 |
 | 2026-10-18 | main `9a89968`；#124（T3b，未合入）             | 更正 PENDING #124 的 abandon 判据：从未 ready 的托管 worktree 不论检出是否执行过，都以普通的 `git worktree remove`（不加 `--force`）删除，Git 的拒绝是唯一的防护（拒绝时保留并列入 `left`，分支随之保留），被忽略的文件随之删除；此前的说明要求状态完全干净且忽略文件也算改动                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-10-18 | main `66048d7`（PR #124）                       | 基准改为 main `66048d7`；T3b 合入，#124 的 PENDING 项改为 AVAILABLE（§2 T3b）：`--worktree` 创建、`BUSY` 上限、逐仓结果与 `left`、`mount retry`、`operation continue/abandon` 及其 `leftovers` 输出与 stderr 提示由 `79106c0`（protocol）、`4df69ac`（server）与 `b2f71b2`（CLI）引入；删除 T3a 中“合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝”的说明；PLANNED 补列此前遗漏的 M1 T5（`mount convert`、`mount delete-worktree`、`mount history`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
