@@ -478,11 +478,16 @@ export const ResourceRefSchema = z.object({
 });
 // Per-mount outcome of a multi-repo preparation; partial success stays visible (m1 S4). Only the
 // mount ID, its state and the error kind are kept; names, paths and full errors live in the mount
-// records (task.get).
+// records (task.get). `left` names what a failed or abandoned preparation left in place because
+// deleting it could lose work (m1 T3b): the managed worktree, its
+// branch, or both. A reference like the rest: the path and the branch name are in the mount
+// record, the clone in the repo record.
+export const MountLeftoverSchema = z.enum(["worktree", "branch", "both"]);
 export const MountOutcomeSchema = z.object({
   mountId: ResourceIdSchema,
   state: MountStateSchema,
   errorKind: z.enum(DOMAIN_ERROR_KINDS).optional(),
+  left: MountLeftoverSchema.optional(),
 });
 
 // Compact result policy. Every schema-valid operation record must fit operationRecordBytes
@@ -490,23 +495,32 @@ export const MountOutcomeSchema = z.object({
 // Results therefore hold references only, and the fields split by method:
 // - terminal writes use `run`, `exitCode` and `signal`;
 // - every other write uses the domain fields below and never these three (its run, if any, is
-//   the record-level `run`).
+//   the record-level `run`);
+// - a result with any mount's `left` carries neither `sourceChanges` nor `targetOperationId`:
+//   `left` is only ever on a worktree-preparing write (task.create, mount.add, mount.retry), and
+//   those two belong to binding conversion and to continue/abandon. The budget needs it.
 // workspace-contract.test.mjs builds the largest record this schema admits and checks the budget.
 export const TERMINAL_RESULT_KEYS = ["run", "exitCode", "signal"] as const;
-export const OperationResultDataSchema = z.object({
-  run: RunRefSchema.optional(),
-  exitCode: z.number().int().nullable().optional(),
-  signal: z.string().max(64).nullable().optional(),
-  resource: ResourceRefSchema.optional(),
-  workspaceRevision: SequenceSchema.optional(),
-  mounts: z.array(MountOutcomeSchema).max(M1_LIMITS.mountsPerWorkspace).optional(),
-  // Changes left in the source on conversion (D3), counted only.
-  sourceChanges: z
-    .object({
-      staged: z.number().int().min(0),
-      unstaged: z.number().int().min(0),
-      untracked: z.number().int().min(0),
-    })
-    .optional(),
-  targetOperationId: OpaqueIdSchema.optional(),
-});
+export const OperationResultDataSchema = z
+  .object({
+    run: RunRefSchema.optional(),
+    exitCode: z.number().int().nullable().optional(),
+    signal: z.string().max(64).nullable().optional(),
+    resource: ResourceRefSchema.optional(),
+    workspaceRevision: SequenceSchema.optional(),
+    mounts: z.array(MountOutcomeSchema).max(M1_LIMITS.mountsPerWorkspace).optional(),
+    // Changes left in the source on conversion (D3), counted only.
+    sourceChanges: z
+      .object({
+        staged: z.number().int().min(0),
+        unstaged: z.number().int().min(0),
+        untracked: z.number().int().min(0),
+      })
+      .optional(),
+    targetOperationId: OpaqueIdSchema.optional(),
+  })
+  .refine(
+    (result) =>
+      !result.mounts?.some((mount) => mount.left !== undefined) ||
+      (result.sourceChanges === undefined && result.targetOperationId === undefined),
+  );

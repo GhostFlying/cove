@@ -384,13 +384,26 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
       targetOperationId: id(128),
     },
   };
+  // The same with every mount's `left` set, which the schema admits only without sourceChanges
+  // and targetOperationId.
+  const leftOver = {
+    ...domain,
+    result: {
+      ...domain.result,
+      mounts: domain.result.mounts.map((mount) => ({ ...mount, left: "worktree" })),
+      sourceChanges: undefined,
+      targetOperationId: undefined,
+    },
+  };
+  delete leftOver.result.sourceChanges;
+  delete leftOver.result.targetOperationId;
   // Control characters are the widest JSON escape for the free-form signal text.
   const terminal = {
     ...common,
     method: "terminal.create",
     result: { run, exitCode: -max, signal: "\u0001".repeat(64) },
   };
-  for (const record of [domain, terminal]) {
+  for (const record of [domain, leftOver, terminal]) {
     expect(encoder(JSON.stringify(record)).byteLength).toBeLessThanOrEqual(
       M0_LIMITS.operationRecordBytes,
     );
@@ -403,6 +416,21 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
     result: { ...domain.result, mounts: [...domain.result.mounts, domain.result.mounts[0]] },
   };
   expect(validateOperationRecord(overfull, encoder)).toBeNull();
+  // `left` with either of the fields it excludes, or an unknown value, is refused.
+  for (const extra of [
+    { sourceChanges: domain.result.sourceChanges },
+    { targetOperationId: domain.result.targetOperationId },
+  ])
+    expect(
+      validateOperationRecord({ ...leftOver, result: { ...leftOver.result, ...extra } }, encoder),
+    ).toBeNull();
+  const unknownLeft = leftOver.result.mounts.map((mount) => ({ ...mount, left: "checkout" }));
+  expect(
+    validateOperationRecord(
+      { ...leftOver, result: { ...leftOver.result, mounts: unknownLeft } },
+      encoder,
+    ),
+  ).toBeNull();
   const longStep = { ...progress, completedSteps: [id(33)] };
   expect(validateOperationRecord({ ...domain, progress: longStep }, encoder)).toBeNull();
   const tooManySteps = { ...progress, remainingEffects: [...progress.remainingEffects, "x"] };
