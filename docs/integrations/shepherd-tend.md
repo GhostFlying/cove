@@ -166,11 +166,33 @@ T3b（PR #124，合入于 `66048d7`；protocol `79106c0`，server `4df69ac`，CL
 
 ## 3. 进行中（PENDING）与计划中（PLANNED）
 
-PENDING：无。
+PENDING：
+
+T5（PR #131，未合入；绑定变更与托管 worktree 删除，见 [M1](../milestones/m1.md) D3/D10）：
+
+- `cove mount convert <taskId> <mountId> [--branch B] [--base REF] [--no-fetch] [--expected-revision N] [--operation-id ID]`：
+  把 ready 的 checkout 挂载换成同仓库的新托管 worktree（`<entry>/<name>`，基准规则与 `--worktree` 创建相同），
+  保留 mountId 与名称。输出与 `mount add` 相同（`{operation, task[, leftovers]}`），成功以 0 退出；操作结果带
+  `sourceChanges: {staged, unstaged, untracked}`（来源 checkout 的改动计数，改动留在来源，不进入新 worktree；
+  有改动时 stderr 另有一行提示）。准备的失败、`left`、`mount retry`、`operation continue/abandon` 与 T3b 相同；
+  失败时挂载已是 failed 的 worktree 挂载（绑定在接受时切换）。本 task 有使用该 checkout 的存活 run 时受理前拒绝
+  `LIVE_RUNS_PRESENT`；挂载不是 ready 的 checkout、或 task 已归档时 `INVALID_ARGUMENT` / `TASK_ARCHIVED`。
+- `cove mount delete-worktree <taskId> <mountId> [--yes] [--expected-revision N] [--operation-id ID]`：删除挂载的托管
+  worktree（含未提交与未跟踪的改动，`git worktree remove --force`）并移除挂载，分支保留；也适用于失败或放弃的准备
+  留下的 worktree（`left`）。**脚本必须传 `--yes`**：无终端且无 `--yes` 时以 2 退出、stdout 为空、不发送请求；
+  终端上 y/N 询问，回答非 y 时以 1 退出、不发送请求。成功时输出 `{operation, task}` 并以 0 退出（挂载已不在 task 中）。
+  受理前的拒绝：有存活 run 使用它 `LIVE_RUNS_PRESENT`；checkout 挂载或没有可删的托管 worktree `INVALID_ARGUMENT`；
+  挂载的准备或另一次删除未结束 `OPERATION_EFFECTS_ACTIVE`。受理后什么都没删除时操作为 failed（挂载恢复原状态）：
+  `LIVE_RUNS_PRESENT`、`GIT_UNAVAILABLE`（含 Git 拒绝，例如被 lock 的 worktree）或 `INVALID_ARGUMENT`（路径上不是
+  Git 已知的 worktree）。删除未能确认（重启、Git 步骤未看到结束）时为 `requires_attention`，`recoveryActions` 只有
+  `continue`；删除不能 abandon（`OPERATION_NOT_RESUMABLE`）。删除期间挂载为 pending。
+- `LIVE_RUNS_PRESENT` 拒绝时，`mount convert` 与 `mount delete-worktree` 在 stderr 为每个 run 打一行
+  `cove: live run <runId> uses the path; ...`（只供人读）。
+- `cove mount history <taskId> <mountId>`：输出 `{bindings: [{workspaceRevision, mountId, source, path, branch, boundAtMs, unboundAtMs}]}`，
+  按时间先后，当前绑定 `unboundAtMs` 为 null；挂载移除或 worktree 删除后仍可查询；task 不存在 `TASK_NOT_FOUND`，
+  挂载从未存在 `MOUNT_NOT_FOUND`。
 
 PLANNED：
-
-M1（已批准，实施中，见 [M1](../milestones/m1.md)）：T5 的绑定变更与托管 worktree 删除（`mount convert`、`mount delete-worktree`、`mount history`）。
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
@@ -227,3 +249,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `64de013`；#124（T3b，未合入）             | 新增 PENDING #124：`--worktree` 创建（fetch 使用 SSH agent 且不交互、基点顺序、`no-fetch`、`BRANCH_EXISTS`、`FETCH_FAILED`、`MAIN_BRANCH_UNRESOLVED`）、`BUSY` 上限（含受理前分支名检查占用的共享 Git 槽位）、逐仓结果及其 `left`、`mount retry`（上次尝试的进程可能运行时拒绝）、`operation continue/abandon`（含 `OPERATION_EFFECTS_ACTIVE`；abandon 先接受再删除（停在基点、未被检出的普通分支；以普通的 `git worktree remove` 删除 worktree，Git 拒绝时保留；没有 index 的未检出 worktree），不强制；超时后仍可能运行的删除结束前拒绝 continue；可自身 `requires_attention` 并由 continue 继续）及其 `leftovers` 输出（失败的 `task create`/`mount add`/`mount retry` 有遗留时也带）、`requires_attention` 的情形（含检出前已有文件或暂存内容、已检出 worktree 消失）与 progress 词汇、所属操作未结束的挂载不能 `mount remove/retry`，以及按 `recoveryActions` 给出的 stderr 提示与遗留的人工删除命令；PLANNED 中托管 worktree 与 `operation continue/abandon` 两项移除 |
 | 2026-10-18 | main `9a89968`；#124（T3b，未合入）             | 更正 PENDING #124 的 abandon 判据：从未 ready 的托管 worktree 不论检出是否执行过，都以普通的 `git worktree remove`（不加 `--force`）删除，Git 的拒绝是唯一的防护（拒绝时保留并列入 `left`，分支随之保留），被忽略的文件随之删除；此前的说明要求状态完全干净且忽略文件也算改动                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-10-18 | main `66048d7`（PR #124）                       | 基准改为 main `66048d7`；T3b 合入，#124 的 PENDING 项改为 AVAILABLE（§2 T3b）：`--worktree` 创建、`BUSY` 上限、逐仓结果与 `left`、`mount retry`、`operation continue/abandon` 及其 `leftovers` 输出与 stderr 提示由 `79106c0`（protocol）、`4df69ac`（server）与 `b2f71b2`（CLI）引入；删除 T3a 中“合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝”的说明；PLANNED 补列此前遗漏的 M1 T5（`mount convert`、`mount delete-worktree`、`mount history`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 新增 PENDING #131：`mount convert`（`sourceChanges`、绑定在接受时切换）、`mount delete-worktree`（脚本须 `--yes`，无终端时以 2 退出且不发送；分支保留；不能 abandon）、`mount history`，以及 `LIVE_RUNS_PRESENT` 时逐 run 的 stderr 提示；PLANNED 中 M1 T5 一项移除                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
