@@ -176,6 +176,27 @@ decisions without concrete evidence or a user request.
   chat, Web App, Shepherd integration or agent-final-status hook implementation.
   Do not use those deferred features as prerequisites for the initial workflows.
 
+## Trust the authenticated owner
+
+- Cove is single-user: whoever passes authentication is the trusted owner, with no
+  motive to attack their own installation. Do not design for or report findings
+  that need that user (via CLI, an RPC client or their own filesystem/repos) to
+  attack themselves: fabricated look-alike artifacts, concurrent edits between
+  Cove's check and its git/filesystem call (document these as residual windows),
+  or inputs crafted to harm their own installation.
+- Judge deleting, adopting, overwriting or recovering local artifacts by data loss,
+  not provenance: allow what cannot lose user work, whoever created the artifact.
+- Keep input validation and bounds for correctness and robustness (honest mistakes,
+  oversized data); they are not a security boundary against the owner.
+- Focus security on how anyone becomes the user: unauthenticated surfaces,
+  credentials/tokens/pairing/sessions, network and relay exposure, and anything
+  reachable before auth. Handle third-party data, such as git remote content and
+  refs, safely.
+- Crash recovery, sequential non-malicious user changes, Cove's own overlapping work
+  and never reporting an uncertain effect as success stay in scope.
+- Every independent review prompt states this model and tells reviewers not to
+  report self-attack findings.
+
 ## Validate and report
 
 - Follow [engineering section 6.9](docs/engineering-plan.md)
