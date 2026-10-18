@@ -252,6 +252,11 @@ export {
   PipeHeartbeatSchema,
   WorkerLoadSchema,
   SpawnArgumentsSchema,
+  SpawnCommandSchema,
+  SpawnEnvSchema,
+  SPAWN_ENV_KEYS,
+  SPAWN_ENV_PAYLOAD_BYTES,
+  SPAWN_ENV_VALUE_CHARS,
   RunStatusSchema,
   composeSpawnPayload,
   validateSpawnPayload,
@@ -271,6 +276,8 @@ export type {
   PipeResult,
   RunStatus,
   SpawnArguments,
+  SpawnEnv,
+  SpawnEnvKey,
 } from "./pipe-command.js";
 export type { PipeError, PipeEvent } from "./pipe-command.js";
 export {

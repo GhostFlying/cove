@@ -1,7 +1,7 @@
 import type { Appearance, Geometry } from "./profile.js";
 import type { RunRef, SubscriptionRef, WorkerRef } from "./identity.js";
 import type { EffectiveBudgets } from "./budgets.js";
-import type { PipeCommand, PipeResult, PipeError, PipeEvent, RunStatus } from "./pipe.js";
+import type { PipeCommand, PipeResult, PipeError, PipeEvent, RunStatus, SpawnEnv } from "./pipe.js";
 
 export type RuntimeResult = PipeResult | PipeError;
 
@@ -14,6 +14,8 @@ export interface RuntimeTerminalPort {
     executable: string;
     argv: readonly string[];
     cwd: string;
+    // Cove's run identity variables (SpawnEnvSchema); absent for a run that belongs to no tab.
+    env?: SpawnEnv | undefined;
     geometry: Geometry;
     appearance: Appearance;
     effectiveBudgets: EffectiveBudgets;

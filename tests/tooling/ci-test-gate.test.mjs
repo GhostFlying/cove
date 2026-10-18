@@ -970,7 +970,7 @@ test("supported worker pipe suite is mandatory with compiled cases", async () =>
   const suite = requiredSuites.find(
     ({ file }) => file === "packages/protocol/tests/supported-pipe.test.mjs",
   );
-  expect(suite).toMatchObject({ project: "protocol", minimumTests: 8 });
+  expect(suite).toMatchObject({ project: "protocol", minimumTests: 16 });
   expect(await readVitestOwnedTestFiles()).toContain(suite.file);
   expect(() => verifyDiscovery([], [suite.file], [suite])).toThrow(/Required suite protocol:/);
 });
