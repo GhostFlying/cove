@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { link, lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { CallOutcome } from "@cove/client";
 import { OpaqueIdSchema } from "@cove/protocol/identity";
 import {
   canonicalWriteIntent,
@@ -197,6 +198,9 @@ export async function submitWrite<M extends WriteRpcMethod>(
   session: Session,
   method: M,
   params: Record<string, unknown> & { operationId: string },
+  // Sees a call that did not return the accepted record before the command fails with it (T5: a
+  // refusal that lists the live runs in its details).
+  onFailure?: (outcome: Exclude<CallOutcome<unknown>, { ok: true }>) => void,
 ): Promise<OperationRecord> {
   const pending: PendingOperation = {
     version: 1,
@@ -212,7 +216,9 @@ export async function submitWrite<M extends WriteRpcMethod>(
         `or parameters; nothing was sent. Use a fresh --operation-id for this request ` +
         `(\`cove operation resend ${params.operationId}\` sends the saved one)`,
     );
-  const accepted = unwrap(method, await session.client.call(method, saved.params as never));
+  const outcome = await session.client.call(method, saved.params as never);
+  if (!outcome.ok) onFailure?.(outcome);
+  const accepted = unwrap(method, outcome);
   return settle(session.client, (accepted as { operation: OperationRecord }).operation);
 }
 
