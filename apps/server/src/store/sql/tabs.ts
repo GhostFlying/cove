@@ -180,6 +180,12 @@ function resolveCwd(
     "SELECT path, state FROM mounts WHERE mount_id = ? AND workspace_id = ?",
   ).get(cwd.mountId, task.workspace_id) as { path: string; state: string } | undefined;
   if (!mount) return refuse("MOUNT_NOT_FOUND");
+  // An accepted deletion holds its mount non-ready until it ends. A tab in that mount is refused
+  // as a run in a worktree being deleted, like an entry tab or a terminal run there, so a client
+  // can tell "retry once the deletion ended" from an invalid cwd (m1 T5, D10).
+  if (mount.state !== "ready" && deletionPending(db, [mount.path])) {
+    return refuse("OPERATION_EFFECTS_ACTIVE");
+  }
   if (mount.state !== "ready") return refuse("INVALID_ARGUMENT");
   return { path: mount.path };
 }

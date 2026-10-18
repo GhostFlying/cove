@@ -623,6 +623,13 @@ test("no run is accepted in a worktree while its deletion waits to remove it", a
     { home },
   );
   const [mount] = worktreeMounts(task);
+  // A tab in the worktree that has no run, so it does not block the deletion; reopening it would
+  // start one.
+  const idle = await fixture.coveJson(
+    ["tab", "create", task.taskId, "--cwd", `mount:${mount.mountId}`, "--start", "no"],
+    { home },
+  );
+  const idleTabId = idle.operation.result.resource.id;
   // The deletion passed its run checks and is held in Git before `worktree remove --force`.
   await wrapper.block("list");
   fixture.spawnCove(
@@ -638,6 +645,17 @@ test("no run is accepted in a worktree while its deletion waits to remove it", a
   );
   expect(entryTab.code).toBe(1);
   expect(entryTab.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
+  // A tab whose cwd is the worktree is refused for the same reason, not as an invalid cwd: it can
+  // be retried once the deletion ended.
+  const mountTab = await fixture.cove(
+    ["tab", "create", task.taskId, "--cwd", `mount:${mount.mountId}`, "--start", "no"],
+    { home },
+  );
+  expect(mountTab.code).toBe(1);
+  expect(mountTab.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
+  const reopened = await fixture.cove(["tab", "reopen", idleTabId], { home });
+  expect(reopened.code).toBe(1);
+  expect(reopened.stderr).toContain("OPERATION_EFFECTS_ACTIVE");
   const terminal = await fixture.cove(
     [
       "terminal",
