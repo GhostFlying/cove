@@ -1395,6 +1395,7 @@ test("M1 CLI suites are registered per file and join the required inventory", as
         "s3-managed-worktrees",
         "s4-worktree-failures",
         "s5-tabs-runs",
+        "s6-bindings",
         "s7-tab-restart",
         "s8-worktree-restart",
         "s9-worktree-drift",
