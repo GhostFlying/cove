@@ -438,7 +438,7 @@ export function attemptOperationOpen(db: Connection, mountId: string): boolean {
 
 const ENDED_STATES: ReadonlySet<string> = new Set(["succeeded", "failed", "cancelled"]);
 
-function bumpWorkspace(db: Connection, workspaceId: string): number {
+export function bumpWorkspace(db: Connection, workspaceId: string): number {
   const { revision } = statement(db, "SELECT revision FROM workspaces WHERE workspace_id = ?").get(
     workspaceId,
   ) as { revision: number };
@@ -493,8 +493,9 @@ export function resultWith(
 
 // What an ended attempt left in place (the mount outcome's `left`). Only a failed attempt has
 // leftovers: a ready one keeps its worktree and branch as the mount's, and a pending one may still
-// remove them. The result never carries sourceChanges or targetOperationId (they belong to binding
-// conversion and to continue/abandon), so the schema's exclusion holds.
+// remove them. The result never carries targetOperationId (it belongs to continue/abandon), and
+// sourceChanges only for a binding conversion, which prepares exactly one mount (m1 T5), so the
+// schema's exclusion holds.
 function leftOf(steps: readonly StepEntry[]): { left?: "worktree" | "branch" | "both" } {
   const remaining = remainingArtifacts(steps);
   if (remaining.length === 2) return { left: "both" };
@@ -567,7 +568,7 @@ function attentionReceipt(
 
 // Replaces the receipt `key` with `next` (its successor), inside the caller's transaction: a
 // compare-and-set on the revision `current` was read at.
-function replaceReceipt(
+export function replaceReceipt(
   db: Connection,
   key: OperationReceiptKey,
   current: OperationRecord,
@@ -597,7 +598,7 @@ function replaceReceipt(
 }
 
 // The running receipt `key`, or null.
-function runningReceipt(db: Connection, key: OperationReceiptKey): OperationRecord | null {
+export function runningReceipt(db: Connection, key: OperationReceiptKey): OperationRecord | null {
   const found = receiptOf(db, key);
   return found && found.state === "running" ? found.record : null;
 }

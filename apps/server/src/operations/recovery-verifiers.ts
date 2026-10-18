@@ -1,3 +1,4 @@
+import { createBindingVerifier } from "../domain/bindings.js";
 import { createWorktreeVerifier } from "../domain/worktrees.js";
 import type { Store } from "../store/database.js";
 import type { ReceiptVerifiers } from "./operation-receipts.js";
@@ -19,7 +20,9 @@ export type RecoveryContext = {
 // its own durable writes (config.set) commit receipt and effect in one transaction and terminal
 // runs of an earlier instance cannot be proven after a restart (D9). T3b registers the methods
 // that create managed worktrees, whose receipt stays running until the preparation settles it, and
-// operation.abandon, whose receipt stays running until its removals ended.
+// operation.abandon, whose receipt stays running until its removals ended. T5 adds binding.convert,
+// which prepares its worktree like mount.add, and binding.delete, whose receipt stays running until
+// its deletion ended (domain/bindings.ts).
 export function createRecoveryVerifiers(context: RecoveryContext): ReceiptVerifiers {
   const worktrees = createWorktreeVerifier(context);
   return {
@@ -27,5 +30,7 @@ export function createRecoveryVerifiers(context: RecoveryContext): ReceiptVerifi
     "mount.add": worktrees,
     "mount.retry": worktrees,
     "operation.abandon": worktrees,
+    "binding.convert": worktrees,
+    "binding.delete": createBindingVerifier(context),
   };
 }

@@ -1,5 +1,6 @@
 import type { WorktreeService } from "../domain/worktrees.js";
 import { capabilityUnavailable, type RpcHandler } from "./context.js";
+import { service as bindings } from "./binding.js";
 import { service } from "./task.js";
 
 // Mount domain module (mount.retry, operation.continue, operation.abandon; M1 T3b). It drives the
@@ -9,6 +10,9 @@ import { service } from "./task.js";
 export const handle: RpcHandler<"mount"> = (core, { method, params, principalId }) => {
   const worktrees = service(core)?.worktrees;
   if (!worktrees) return capabilityUnavailable();
+  // Built before a continue so that the binding module has registered how a binding.delete
+  // requiring attention is resumed (domain/bindings.ts).
+  bindings(core);
   switch (method) {
     case "mount.retry":
       return worktrees.retry(principalId, params as Parameters<WorktreeService["retry"]>[1]);

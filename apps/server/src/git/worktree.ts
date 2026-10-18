@@ -37,6 +37,8 @@ import { gitEnvironment, runGit, type GitRunResult } from "./run.js";
 //   removed by the domain itself (its `.git` file, then an empty directory);
 // - `update-ref --no-deref -d refs/heads/<b> <base>`, which deletes exactly that ref (never what a
 //   symbolic ref points at) and only while it still points at the recorded base commit.
+// The only forced command is the deletion of a managed worktree that the user explicitly confirmed
+// (binding.delete, m1 T5, D10; domain/bindings.ts): forceRemoveWorktree, which keeps the branch.
 
 // The remote Cove fetches and resolves the main branch from (D1). A clone without it gets
 // FETCH_FAILED (or MAIN_BRANCH_UNRESOLVED with --no-fetch) and the operator passes --base.
@@ -471,6 +473,38 @@ export async function statusEmpty(worktree: string): Promise<boolean | null> {
   return status.stdout === "";
 }
 
+// What a conversion leaves in the source checkout (m1 T5, D3: shown, never carried over), counted
+// from `status --porcelain=v1 -z` without ignored files: entries with a staged change, entries
+// with an unstaged one (an entry may have both; a submodule's own changes count as unstaged) and
+// untracked entries (an untracked directory counts once). Null when Git gave no usable answer.
+// Only counts are kept, never paths.
+export async function sourceChanges(
+  checkout: string,
+): Promise<{ staged: number; unstaged: number; untracked: number } | null> {
+  const status = await runGit(
+    ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--ignore-submodules=none"],
+    { cwd: checkout },
+  );
+  if (status.kind !== "exited" || status.code !== 0) return null;
+  const counts = { staged: 0, unstaged: 0, untracked: 0 };
+  const fields = status.stdout.split("\0");
+  for (let index = 0; index < fields.length; index++) {
+    const entry = fields[index]!;
+    if (!entry) continue;
+    if (entry.length < 4 || entry[2] !== " ") return null;
+    const x = entry[0]!;
+    const y = entry[1]!;
+    if (x === "?" && y === "?") counts.untracked++;
+    else {
+      if (x !== " ") counts.staged++;
+      if (y !== " ") counts.unstaged++;
+    }
+    // A rename or copy is followed by the field of its original path.
+    if (x === "R" || x === "C" || y === "R" || y === "C") index++;
+  }
+  return counts;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Steps. Each takes the recording hooks of runGitStep.
 
@@ -569,6 +603,20 @@ export function removeWorktree(
   timeouts: StepTimeouts = {},
 ): Promise<StepResult> {
   return step(["worktree", "remove", path], clone, recording, timeouts);
+}
+
+// The deletion a user confirmed (m1 T5, D10): `worktree remove --force <path>` in the source
+// clone removes the registered worktree with its uncommitted, untracked and ignored files and keeps
+// its branch. One --force only: Git still refuses a locked worktree (that takes `-f -f`), and a
+// lock is the owner's own explicit protection, so it stays. A worktree whose directory is already
+// gone is deregistered.
+export function forceRemoveWorktree(
+  clone: string,
+  path: string,
+  recording: Recording,
+  timeouts: StepTimeouts = {},
+): Promise<StepResult> {
+  return step(["worktree", "remove", "--force", path], clone, recording, timeouts);
 }
 
 export function deleteBranch(
