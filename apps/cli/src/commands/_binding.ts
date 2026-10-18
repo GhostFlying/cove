@@ -28,7 +28,10 @@ export const commands = `  mount convert <taskId> <mountId> [--branch BRANCH] [-
 export const notes = `mount convert switches a checkout mount to a new managed worktree of the same repository, created
 from a commit by the same base rule as mount add (D3). Changes in the checkout stay there: they
 are counted in the result (sourceChanges) and never stashed, reset or carried over. It is refused
-while a run of this task uses the checkout (LIVE_RUNS_PRESENT, with the runs).
+while a run of this task uses the checkout (LIVE_RUNS_PRESENT, with the runs). The mount stays the
+checkout until the worktree is ready and verified; if preparing it fails the checkout stays bound.
+A run of the task that started using the checkout meanwhile stops the switch (requires_attention):
+end it and run \`cove operation continue\`, or abandon to remove the worktree.
 mount delete-worktree deletes the managed worktree of a mount, including its uncommitted and
 untracked changes, and removes the mount; the branch is kept. It also deletes a worktree that a
 failed or abandoned preparation left in place. A checkout is never deleted. It asks for

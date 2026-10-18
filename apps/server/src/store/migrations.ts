@@ -1,7 +1,7 @@
 import { MIGRATION_001 } from "./migrations/001-initial.js";
 import { MIGRATION_002 } from "./migrations/002-workspace-entry.js";
 import { MIGRATION_003 } from "./migrations/003-worktree-preparations.js";
-import { MIGRATION_004 } from "./migrations/004-worktree-deletions.js";
+import { MIGRATION_004 } from "./migrations/004-binding-changes.js";
 
 export type Migration = { readonly version: number; readonly name: string; readonly sql: string };
 
@@ -13,7 +13,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 1, name: "initial", sql: MIGRATION_001 },
   { version: 2, name: "workspace-entry", sql: MIGRATION_002 },
   { version: 3, name: "worktree-preparations", sql: MIGRATION_003 },
-  { version: 4, name: "worktree-deletions", sql: MIGRATION_004 },
+  { version: 4, name: "binding-changes", sql: MIGRATION_004 },
 ]);
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

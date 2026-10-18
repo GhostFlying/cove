@@ -16,7 +16,7 @@ import type { OperationReceipts, ReceiptVerifier } from "../operations/operation
 import type { Store } from "../store/database.js";
 import { ProcessLedger } from "../store/processes.js";
 import type { bindingOperations, DeletionRow } from "../store/sql/bindings.js";
-import { attentionRecord, type Progress } from "../store/sql/worktrees.js";
+import { attentionRecord, type Attempt, type Progress } from "../store/sql/worktrees.js";
 import {
   forceRemoveWorktree,
   listWorktrees,
@@ -57,16 +57,24 @@ import type { WorktreeService } from "./worktrees.js";
 //    registration and the live runs are checked; a seat for the preparation is reserved (BUSY when
 //    none), the branch is checked by Git's rules and the source changes are counted, both in the
 //    shared Git slots;
-// 2. one transaction rechecks all of it and binds the mount (same ID and name) to a pending
-//    worktree at `<entry>/<name>`: the checkout binding is unbound, the worktree binding recorded,
-//    the workspace revision grows by one, and the preparation and its attempt are recorded as for
-//    mount.add (store/sql/bindings.ts binding.convert);
-// 3. the entry follows (the manifest names the pending worktree), and WorktreeService prepares it
-//    exactly as for mount.add, including its failure, restart verification, retry, continue and
-//    abandon. Runs started earlier keep their recorded mapping, which still names the checkout.
-// The binding switches at acceptance, not once the worktree is ready: a preparation that fails
-// leaves a failed worktree mount (retry it, or remove it and add the checkout again); the checkout
-// stays in the mount's binding history either way.
+// 2. one transaction rechecks all of it and records the conversion and the target's attempt
+//    (store/sql/bindings.ts binding.convert; migration 004). The mount is not changed: it keeps its
+//    checkout binding, the manifest still names the checkout, and the workspace revision stays;
+// 3. WorktreeService prepares the target `<entry>/<name>` exactly as for mount.add (fetch, base,
+//    intent, branch, worktree, checkout, each verified), including its restart verification,
+//    continue and abandon. Runs started meanwhile, also from the entry, see the checkout;
+// 4. only once the target is verified ready (switchConversion), one transaction checks the
+//    preconditions again (the same ready checkout, the task active, no run of the task using the
+//    checkout) and switches: the mount becomes the ready worktree mount at the target, the
+//    checkout binding is unbound and the worktree binding recorded, and the revision grows by one,
+//    together with the operation's final receipt (store/sql/bindings.ts bindings.switch). Runs
+//    started earlier keep their recorded mapping, which names the checkout.
+// This is design §3's order: prepare, verify, then switch. A preparation that fails, or is
+// abandoned, never touched the mount: the checkout stays bound and the result's `left` names what
+// was left in place, as for T3b. A switch refused because a precondition no longer holds (a run
+// of the task started using the checkout during the preparation) leaves the prepared target and
+// the operation requires_attention with that reason: continue switches once it is gone, abandon
+// removes the target as T3b removes any unbound preparation.
 //
 // binding.delete (D10) deletes the managed worktree bound to a mount and removes the mount; the
 // branch is always kept. The worktree may be ready, or what a failed or abandoned preparation left
@@ -78,8 +86,11 @@ import type { WorktreeService } from "./worktrees.js";
 // 2. one transaction rechecks it and accepts the deletion before Git removes anything: the mount
 //    becomes pending (no tab may start in it, and nothing else acts on it), the deletion is
 //    recorded with the mount's prior state (migration 004) and the receipt stays running;
-// 3. the deletion runs on the seat (finishDeletion): the live runs are checked once more (a run
-//    of this task started at the entry since step 2); the state is observed; a registered
+//    From then on no run is accepted whose cwd or mount mapping uses the worktree
+//    (store/sql/deletions.ts), so no run of Cove's own can start between the checks and the
+//    removal;
+// 3. the deletion runs on the seat (finishDeletion): the live runs are checked once more (one the
+//    acceptance left out as exited but still recorded live); the state is observed; a registered
 //    worktree is removed with `git worktree remove --force` as a recorded step in a process group
 //    of its own (git/worktree.ts); then the state is observed again. One transaction ends it with
 //    the operation's receipt: deleted (Git no longer lists it and its directory is gone: the mount
@@ -148,6 +159,13 @@ type Unknown = typeof UNKNOWN;
 // something Git does not know as a worktree (foreign), or unknown.
 type Observed = "registered" | "gone" | "foreign" | "unknown";
 
+// What a requires_attention conversion whose target is ready but not switched to shows.
+const SWITCH_PROGRESS: Progress = {
+  completedSteps: ["intent", "branch", "worktree", "checkout"],
+  remainingEffects: ["switch-binding"],
+  recoveryActions: ["continue", "abandon"],
+};
+
 // What a requires_attention deletion shows (OperationProgressSchema).
 function deletionProgress(processActive: boolean): Progress {
   return {
@@ -169,6 +187,7 @@ export class BindingService {
       options.now,
     );
     options.worktrees.resumeWith("binding.delete", (key) => this.finishDeletion(key));
+    options.worktrees.convertWith((attempt, key) => this.switchConversion(attempt, key));
   }
 
   private now(): number {
@@ -320,14 +339,71 @@ export class BindingService {
       );
       // Only the committing call writes the entry and starts the preparation; a restart verifies
       // one left unfinished.
+      // Only the committing call starts the preparation; a restart verifies one left
+      // unfinished. Nothing in the workspace changed, so the entry is not written now.
       if (written.committed) {
-        await worktrees.materialize(task.workspaceId).catch(() => "pending");
         accepted = true;
         worktrees.start(seat, principalId, params.operationId);
       }
       return written.outcome;
     } finally {
       if (!accepted) seat.release();
+    }
+  }
+
+  // Step 4 of a conversion (see the header): its target was prepared and verified ready by the
+  // worktree executor, which hands it over here on the operation's seat.
+  private async switchConversion(attempt: Attempt, key: OperationReceiptKey): Promise<void> {
+    const { store } = this.options;
+    let conversion;
+    try {
+      conversion = await store.call("bindings.conversion", { attemptId: attempt.attemptId });
+    } catch {
+      // Left running; the next start verifies it.
+      return;
+    }
+    if (!conversion) return this.switchAttention(key);
+    let runs;
+    try {
+      runs = await this.runsUsing(conversion.sourcePath, conversion.taskId);
+    } catch {
+      return this.switchAttention(key);
+    }
+    if (runs.live.length) return this.switchAttention(key, domainError("LIVE_RUNS_PRESENT"));
+    let switched;
+    try {
+      switched = await store.call("bindings.switch", {
+        attemptId: attempt.attemptId,
+        actor: key,
+        exited: runs.exited,
+        responseBytes: this.options.responseBytes,
+        limits: this.limits,
+        at: this.now(),
+      });
+    } catch {
+      // Whether it committed is unknown; the next start or a continue verifies it.
+      return;
+    }
+    if (!switched) return this.switchAttention(key);
+    if (switched.kind === "refused") return this.switchAttention(key, switched.error);
+    await this.options.worktrees.materialize(switched.workspaceId).catch(() => "pending");
+  }
+
+  // A prepared target whose switch was refused (or could not be checked) leaves the operation
+  // requires_attention with the reason when known: continue switches once the reason is gone (a
+  // run ended), abandon removes the target as T3b does for any unbound preparation. The checkout
+  // stays bound either way. A store failure leaves it running; the next start verifies it.
+  private async switchAttention(key: OperationReceiptKey, error?: DomainError): Promise<void> {
+    try {
+      await this.options.store.call("worktrees.attention", {
+        operation: key,
+        progress: SWITCH_PROGRESS,
+        ...(error ? { error } : {}),
+        limits: this.limits,
+        at: this.now(),
+      });
+    } catch {
+      // See above.
     }
   }
 
