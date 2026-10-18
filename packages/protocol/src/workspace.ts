@@ -496,9 +496,11 @@ export const MountOutcomeSchema = z.object({
 // - terminal writes use `run`, `exitCode` and `signal`;
 // - every other write uses the domain fields below and never these three (its run, if any, is
 //   the record-level `run`);
-// - a result with any mount's `left` carries neither `sourceChanges` nor `targetOperationId`:
-//   `left` is only ever on a worktree-preparing write (task.create, mount.add, mount.retry), and
-//   those two belong to binding conversion and to continue/abandon. The budget needs it.
+// - a result with any mount's `left` carries no `targetOperationId`, and `sourceChanges` only when
+//   it has exactly one mount: `left` is only ever on a worktree-preparing write (task.create,
+//   mount.add, mount.retry, binding.convert), `targetOperationId` belongs to continue/abandon, and
+//   `sourceChanges` to binding conversion, which prepares exactly one mount (m1 T5). The budget
+//   needs it: sixteen mounts with `left` and the source counts would not fit.
 // workspace-contract.test.mjs builds the largest record this schema admits and checks the budget.
 export const TERMINAL_RESULT_KEYS = ["run", "exitCode", "signal"] as const;
 export const OperationResultDataSchema = z
@@ -522,5 +524,6 @@ export const OperationResultDataSchema = z
   .refine(
     (result) =>
       !result.mounts?.some((mount) => mount.left !== undefined) ||
-      (result.sourceChanges === undefined && result.targetOperationId === undefined),
+      (result.targetOperationId === undefined &&
+        (result.sourceChanges === undefined || result.mounts.length === 1)),
   );
