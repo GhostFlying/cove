@@ -7,7 +7,9 @@ import { statement, type Connection } from "./statements.js";
 // deletion's worktree or lies below it. Both checks run inside store transactions, which the store
 // serializes, so a run and a deletion of the path it uses are never both accepted: Cove's own
 // overlapping work cannot start a run between the deletion's last run check and its
-// `git worktree remove --force`. (Comparison is on the recorded paths, as in tabs.liveRunsUsing.)
+// `git worktree remove --force`. (Comparison is on the recorded paths, as in tabs.liveRunsUsing.
+// They are all real paths, a terminal run's cwd included (terminal-operations.ts recordedCwd), so
+// a cwd spelled through a pre-existing alias of the worktree is matched too.)
 export function deletionPending(db: Connection, paths: readonly string[]): boolean {
   const deleting = (
     statement(
