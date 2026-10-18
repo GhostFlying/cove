@@ -140,6 +140,7 @@ describe("store opening, migrations and the data directory lock", () => {
       .map((row) => row.name)
       .sort();
     expect(tables).toEqual([
+      "binding_conversions",
       "bindings",
       "config",
       "managed_worktrees",

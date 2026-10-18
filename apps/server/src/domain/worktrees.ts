@@ -181,8 +181,9 @@ import {
 // One operation is driven by one actor at a time (one server owns the data directory).
 
 // The writes that prepare managed worktrees through attempts. binding.convert (m1 T5,
-// domain/bindings.ts) prepares the converted mount's worktree like mount.add, so it is continued,
-// abandoned and verified at startup like the others.
+// domain/bindings.ts) prepares its target like mount.add while the mount stays the checkout, so it
+// is continued, abandoned and verified at startup like the others; only its switch to a ready
+// target is the binding module's (convertWith).
 const WORKTREE_METHODS: ReadonlySet<WriteRpcMethod> = new Set([
   "task.create",
   "mount.add",
@@ -412,6 +413,9 @@ export class WorktreeService {
   private readonly outstanding = new Map<string, Set<Promise<unknown>>>();
   // Other methods whose requires_attention operations operation.continue resumes, with the work
   // that resumes one (binding.delete, domain/bindings.ts). They are never abandoned.
+  // How a verified conversion target is switched to (binding.convert, domain/bindings.ts): a
+  // conversion's attempt never settles ready here, since its mount is still the checkout.
+  private converter: ((attempt: Attempt, key: OperationReceiptKey) => Promise<void>) | null = null;
   private readonly resumers = new Map<
     WriteRpcMethod,
     (key: OperationReceiptKey) => Promise<void>
@@ -477,6 +481,12 @@ export class WorktreeService {
   // actor's seat.
   resumeWith(method: WriteRpcMethod, resume: (key: OperationReceiptKey) => Promise<void>): void {
     this.resumers.set(method, resume);
+  }
+
+  // Registers how a conversion's target, once prepared and verified ready, is switched to. Its
+  // failure settles here as for any attempt (the checkout stays bound).
+  convertWith(convert: (attempt: Attempt, key: OperationReceiptKey) => Promise<void>): void {
+    this.converter = convert;
   }
 
   // Drives the operation `key` with `work` on `seat` (reserved for it before it was accepted),
@@ -642,6 +652,12 @@ export class WorktreeService {
         outcome = ATTENTION;
       }
       if (outcome.kind === "attention") return this.attention(key);
+      if (attempt.conversion && outcome.kind === "ready") {
+        // Without the binding module the target cannot be switched to: left for a continue.
+        if (!this.converter) return this.attention(key);
+        await this.converter(attempt, key);
+        continue;
+      }
       let settled;
       try {
         settled = await this.options.store.call("worktrees.settle", {

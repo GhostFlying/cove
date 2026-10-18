@@ -7,13 +7,16 @@ import { Rollback, statement, type Connection } from "./statements.js";
 import { tabOperations } from "./tabs.js";
 import { readable } from "./workspaces.js";
 import {
+  actable,
   attemptOperationOpen,
+  attemptsOf,
   bumpWorkspace,
-  insertPreparation,
+  insertConversionAttempt,
   managedAt,
   replaceReceipt,
   REUSABLE_MANAGED_STATES,
   runningReceipt,
+  settledRecord,
   type ManagedState,
   type WorktreeSpec,
 } from "./worktrees.js";
@@ -22,9 +25,10 @@ import {
 // in domain/bindings.ts). Tables involved:
 // - mounts and bindings (migration 001): a mount keeps its ID across a conversion; bindings keeps
 //   one row per binding the mount had, the current one with unbound_at_ms NULL;
-// - worktree_preparations and worktree_attempts (migration 003): a conversion records its
-//   worktree's preparation exactly as mount.add does, so the T3b executor, its restart
-//   verification and operation continue/abandon handle it unchanged (store/sql/worktrees.ts);
+// - worktree_attempts (migration 003) and binding_conversions (migration 004): a conversion
+//   records its target's attempt without a worktree_preparations row, so the T3b executor, its
+//   restart verification and operation continue/abandon prepare the target while the mount keeps
+//   its checkout binding; bindings.switch rebinds the mount once the target is verified;
 // - managed_worktrees (migration 001): a deletion ends with the worktree `deleted`;
 // - worktree_deletions (migration 004): a deletion between its acceptance and its outcome.
 //
@@ -267,6 +271,160 @@ export const bindingOperations = {
     }));
   },
 
+  // The pending conversion whose target attempt `attemptId` is (migration 004), or null.
+  "bindings.conversion": (
+    db: Connection,
+    args: { attemptId: string },
+  ): { taskId: string; mountId: string; workspaceId: string; sourcePath: string } | null => {
+    const row = statement(
+      db,
+      `SELECT c.mount_id, c.workspace_id, c.source_path, w.task_id FROM binding_conversions c
+         JOIN workspaces w ON w.workspace_id = c.workspace_id
+       WHERE c.attempt_id = ? AND c.outcome = 'pending'`,
+    ).get(args.attemptId) as
+      { mount_id: string; workspace_id: string; source_path: string; task_id: string } | undefined;
+    return row
+      ? {
+          taskId: row.task_id,
+          mountId: row.mount_id,
+          workspaceId: row.workspace_id,
+          sourcePath: row.source_path,
+        }
+      : null;
+  },
+
+  // Switches a converted mount to its verified target in one transaction (design §3; D3), with
+  // the operation's final receipt: the preconditions are checked again with the current rows (the
+  // mount is still the same ready checkout of an active task, and no run of the task without an
+  // end record uses the checkout, less `exited`), then the mount becomes the ready worktree mount
+  // at the target, the checkout binding is unbound and the worktree binding recorded at the new
+  // revision, the target's intent becomes the ready managed worktree, the attempt ends ready and
+  // the conversion `switched`. "refused", with nothing written, when a precondition does not hold
+  // any more: the target stays prepared and the operation is left for an explicit continue or
+  // abandon. Null when the attempt is not pending and actable by its own operation, its intent is
+  // not the attempt's, or the receipt is not running.
+  "bindings.switch": (
+    db: Connection,
+    args: {
+      attemptId: string;
+      actor: OperationReceiptKey;
+      exited: RunRef[];
+      responseBytes: number;
+      limits: ReceiptLimits;
+      at: number;
+    },
+  ):
+    | { kind: "switched"; workspaceId: string; revision: number }
+    | { kind: "refused"; error: DomainError }
+    | null => {
+    const attempt = actable(db, args.attemptId, args.actor);
+    if (!attempt || attempt.abandon_operation_id !== null) return null;
+    const conversion = statement(
+      db,
+      `SELECT mount_id, workspace_id, source_path, spec_branch, spec_base_ref, spec_no_fetch
+       FROM binding_conversions WHERE attempt_id = ? AND outcome = 'pending'`,
+    ).get(args.attemptId) as
+      | {
+          mount_id: string;
+          workspace_id: string;
+          source_path: string;
+          spec_branch: string | null;
+          spec_base_ref: string | null;
+          spec_no_fetch: number;
+        }
+      | undefined;
+    if (!conversion) return null;
+    const owner = {
+      serverId: attempt.operation_server_id,
+      principalId: attempt.operation_principal_id,
+      operationId: attempt.operation_id,
+    };
+    const receipt = runningReceipt(db, owner);
+    if (!receipt) return null;
+    const managed = managedAt(db, attempt.path);
+    if (!managed || managed.state !== "intent" || managed.worktreeId !== attempt.worktree_id)
+      return null;
+    const mount = statement(
+      db,
+      `SELECT m.mount_id, m.workspace_id, w.task_id, t.archived, w.revision AS workspace_revision,
+         m.source, m.state, m.path, m.repo_id, m.branch
+       FROM mounts m JOIN workspaces w ON w.workspace_id = m.workspace_id
+         JOIN tasks t ON t.task_id = w.task_id
+       WHERE m.mount_id = ?`,
+    ).get(conversion.mount_id) as MountRow | undefined;
+    // A pending conversion keeps the mount from being removed or converted again
+    // (attemptOperationOpen), so these are not expected; they are refused all the same.
+    if (!mount) return { kind: "refused", error: domainError("MOUNT_NOT_FOUND") };
+    if (mount.archived === 1) return { kind: "refused", error: domainError("TASK_ARCHIVED") };
+    if (
+      mount.source !== "checkout" ||
+      mount.state !== "ready" ||
+      mount.path !== conversion.source_path
+    )
+      return { kind: "refused", error: domainError("INVALID_ARGUMENT") };
+    const live = liveRuns(db, mount.path, args.exited, mount.task_id);
+    if (live.length) return { kind: "refused", ...liveRunsRefusal(live) };
+    const revision = bumpWorkspace(db, mount.workspace_id);
+    statement(
+      db,
+      `UPDATE mounts SET source = 'worktree', path = ?, entry_path = ?, state = 'ready',
+         branch = ?, base_commit = ?, error_json = NULL
+       WHERE mount_id = ?`,
+    ).run(attempt.path, attempt.path, attempt.branch, managed.baseCommit, mount.mount_id);
+    statement(
+      db,
+      `UPDATE bindings SET unbound_at_ms = ?
+       WHERE workspace_id = ? AND mount_id = ? AND unbound_at_ms IS NULL`,
+    ).run(args.at, mount.workspace_id, mount.mount_id);
+    statement(
+      db,
+      `INSERT INTO bindings (workspace_id, mount_id, workspace_revision, source, path, branch,
+         bound_at_ms, unbound_at_ms)
+       VALUES (?, ?, ?, 'worktree', ?, ?, ?, NULL)`,
+    ).run(mount.workspace_id, mount.mount_id, revision, attempt.path, attempt.branch, args.at);
+    // From now on the mount is an ordinary worktree mount whose current attempt is this one, as
+    // after mount.add (a later delete, remove or retry finds it there).
+    statement(
+      db,
+      `INSERT INTO worktree_preparations (mount_id, spec_branch, spec_base_ref, spec_no_fetch,
+         attempt_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      mount.mount_id,
+      conversion.spec_branch,
+      conversion.spec_base_ref,
+      conversion.spec_no_fetch,
+      args.attemptId,
+    );
+    statement(
+      db,
+      `UPDATE managed_worktrees SET state = 'ready', mount_id = ?, completed_steps_json = ?,
+         updated_at_ms = ?
+       WHERE worktree_id = ?`,
+    ).run(
+      mount.mount_id,
+      JSON.stringify(["intent", "branch", "worktree", "checkout"]),
+      args.at,
+      managed.worktreeId,
+    );
+    statement(
+      db,
+      "UPDATE worktree_attempts SET outcome = 'ready', updated_at_ms = ? WHERE attempt_id = ?",
+    ).run(args.at, args.attemptId);
+    statement(
+      db,
+      `UPDATE binding_conversions SET outcome = 'switched', updated_at_ms = ?
+       WHERE attempt_id = ?`,
+    ).run(args.at, args.attemptId);
+    // Every read of the task must fit one response (domain/record-bounds.ts).
+    if (!readable(db, mount.task_id, args.responseBytes))
+      throw new Rollback({ kind: "refused", error: domainError("INVALID_ARGUMENT") });
+    const final = settledRecord(receipt, attemptsOf(db, owner), revision);
+    if (!final || !replaceReceipt(db, owner, receipt, final, args.limits, args.at))
+      throw new Rollback(null);
+    return { kind: "switched", workspaceId: mount.workspace_id, revision };
+  },
+
   // Ends a pending deletion in one transaction with its operation's final receipt (see migration
   // 004): `deleted` removes the mount, unbinds it and records the worktree deleted; `restored`
   // puts the mount back in its prior state and fails the operation with `error`. Either way the
@@ -335,11 +493,13 @@ export const bindingOperations = {
 
 // Receipt-checked writes (store/sql/writes.ts).
 export const bindingWrites = {
-  // Replaces a ready checkout mount with a new managed worktree (D3): the mount keeps its ID and
-  // name and becomes a pending worktree mount at `<entry>/<name>`; its checkout binding is
-  // unbound and the worktree binding recorded at the new workspace revision; the preparation and
-  // its first attempt are recorded exactly as for mount.add, and the receipt stays running until
-  // the attempt settles it (store/sql/worktrees.ts). The source checkout is never written to.
+  // Accepts the conversion of a ready checkout mount to a new managed worktree (D3) without
+  // changing the mount (design §3: prepare, verify, then switch): the target's attempt is
+  // recorded for the T3b executor with the target path `<entry>/<name>`, and the conversion with
+  // the checkout's path and the request (migration 004). The mount keeps its checkout binding and
+  // the workspace revision is unchanged; bindings.switch rebinds the mount once the target is
+  // verified. The receipt stays running until then, or until the attempt fails or is abandoned.
+  // The source checkout is never written to.
   "binding.convert": (db: Connection, args: ConvertArgs): Applied => {
     const mount = mountRow(db, args.taskId, args.mountId);
     if (!mount) return missing(db, args.taskId);
@@ -351,6 +511,7 @@ export const bindingWrites = {
     if (mount.workspace_revision === Number.MAX_SAFE_INTEGER) return refuse("COUNTER_EXHAUSTED");
     if (mount.archived === 1) return refuse("TASK_ARCHIVED");
     if (mount.source !== "checkout" || mount.state !== "ready") return refuse("INVALID_ARGUMENT");
+    if (attemptOperationOpen(db, args.mountId)) return refuse("OPERATION_EFFECTS_ACTIVE");
     const repo = statement(db, "SELECT common_dir FROM repos WHERE repo_id = ?").get(
       mount.repo_id,
     ) as { common_dir: string } | undefined;
@@ -360,34 +521,35 @@ export const bindingWrites = {
     const earlier = managedAt(db, args.path);
     if (earlier && !REUSABLE_MANAGED_STATES.has(earlier.state))
       return refuse("MOUNT_NAME_CONFLICT");
-    const revision = mount.workspace_revision + 1;
-    statement(
+    const attemptId = insertConversionAttempt(
       db,
-      `UPDATE mounts SET source = 'worktree', path = ?, entry_path = ?, state = 'pending',
-         branch = ?, base_commit = NULL, error_json = NULL
-       WHERE mount_id = ?`,
-    ).run(args.path, args.path, args.branch, args.mountId);
-    statement(
-      db,
-      `UPDATE bindings SET unbound_at_ms = ?
-       WHERE workspace_id = ? AND mount_id = ? AND unbound_at_ms IS NULL`,
-    ).run(args.at, mount.workspace_id, args.mountId);
-    statement(
-      db,
-      `INSERT INTO bindings (workspace_id, mount_id, workspace_revision, source, path, branch,
-         bound_at_ms, unbound_at_ms)
-       VALUES (?, ?, ?, 'worktree', ?, ?, ?, NULL)`,
-    ).run(mount.workspace_id, args.mountId, revision, args.path, args.branch, args.at);
-    insertPreparation(db, args.mountId, args.branch, args.spec, args.operation, 0, args.at);
-    statement(db, "UPDATE workspaces SET revision = ? WHERE workspace_id = ?").run(
-      revision,
-      mount.workspace_id,
+      args.mountId,
+      args.path,
+      args.branch,
+      args.spec,
+      args.operation,
+      args.at,
     );
-    if (!readable(db, args.taskId, args.responseBytes)) return refuse("INVALID_ARGUMENT");
+    statement(
+      db,
+      `INSERT INTO binding_conversions (attempt_id, mount_id, workspace_id, source_path,
+         spec_branch, spec_base_ref, spec_no_fetch, outcome, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    ).run(
+      attemptId,
+      args.mountId,
+      mount.workspace_id,
+      mount.path,
+      args.spec.branch,
+      args.spec.baseRef,
+      args.spec.noFetch ? 1 : 0,
+      args.at,
+      args.at,
+    );
     return {
       result: {
-        resource: { kind: "mount", id: args.mountId, revision },
-        workspaceRevision: revision,
+        resource: { kind: "mount", id: args.mountId, revision: mount.workspace_revision },
+        workspaceRevision: mount.workspace_revision,
         mounts: [{ mountId: args.mountId, state: "pending" }],
         sourceChanges: args.sourceChanges,
       },

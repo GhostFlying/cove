@@ -175,6 +175,10 @@ export type Attempt = {
   repo: { repoId: string; path: string; commonDir: string; mainBranch: string | null } | null;
   // The managed_worktrees row at the attempt's path, whoever recorded it.
   managed: ManagedWorktree | null;
+  // The attempt prepares the target of a binding.convert (migration 004): its mount is still the
+  // checkout it will replace, so settling it never touches the mount, and a ready target is
+  // switched to by the binding module instead (WorktreeService.convertWith).
+  conversion: boolean;
 };
 
 // The last recorded run of `step`, or null when it never ran.
@@ -278,10 +282,28 @@ function toAttempt(db: Connection, row: AttemptRow): Attempt {
           }
         : null,
     managed: managedAt(db, row.path),
+    conversion: isConversion(db, row.attempt_id),
   };
 }
 
-function attemptsOf(db: Connection, operation: OperationReceiptKey): Attempt[] {
+function isConversion(db: Connection, attemptId: string): boolean {
+  return (
+    statement(db, "SELECT 1 FROM binding_conversions WHERE attempt_id = ?").get(attemptId) !==
+    undefined
+  );
+}
+
+// Ends a pending conversion's row as failed (its attempt failed or was abandoned): the checkout
+// stays bound (migration 004). A no-op for any other attempt.
+function failConversion(db: Connection, attemptId: string, at: number): void {
+  statement(
+    db,
+    `UPDATE binding_conversions SET outcome = 'failed', updated_at_ms = ?
+     WHERE attempt_id = ? AND outcome = 'pending'`,
+  ).run(at, attemptId);
+}
+
+export function attemptsOf(db: Connection, operation: OperationReceiptKey): Attempt[] {
   return (
     statement(
       db,
@@ -316,7 +338,7 @@ function sameOperation(a: OperationReceiptKey, b: OperationReceiptKey): boolean 
 
 // The pending attempt `attemptId` when `actor` may act on it: its own operation while no abandon
 // claimed it, or the abandon that claimed it.
-function actable(
+export function actable(
   db: Connection,
   attemptId: string,
   actor: OperationReceiptKey,
@@ -342,12 +364,13 @@ function actable(
 // What a new worktree mount was asked for (MountSpec), stored with it.
 export type WorktreeSpec = { branch: string | null; baseRef: string | null; noFetch: boolean };
 
+// `path` is the worktree's path: the mount's own, except for a conversion's target (T5).
 function insertAttempt(
   db: Connection,
   mountId: string,
   operation: OperationReceiptKey,
   position: number,
-  options: { branch: string; baseRef: string | null; noFetch: boolean },
+  options: { branch: string; baseRef: string | null; noFetch: boolean; path?: string },
   at: number,
 ): string {
   const mount = statement(db, "SELECT workspace_id, path FROM mounts WHERE mount_id = ?").get(
@@ -368,7 +391,7 @@ function insertAttempt(
     position,
     mountId,
     mount.workspace_id,
-    mount.path,
+    options.path ?? mount.path,
     options.branch,
     options.baseRef,
     options.noFetch ? 1 : 0,
@@ -405,10 +428,40 @@ export function insertPreparation(
   ).run(mountId, spec.branch, spec.baseRef, spec.noFetch ? 1 : 0, attemptId);
 }
 
+// The first attempt of a binding.convert (m1 T5): it prepares the target worktree at `path` for
+// the checkout mount `mountId`, which keeps its binding meanwhile, so no worktree_preparations
+// row is written (store/sql/bindings.ts records the conversion).
+export function insertConversionAttempt(
+  db: Connection,
+  mountId: string,
+  path: string,
+  branch: string,
+  spec: WorktreeSpec,
+  operation: OperationReceiptKey,
+  at: number,
+): string {
+  return insertAttempt(
+    db,
+    mountId,
+    operation,
+    0,
+    { branch, baseRef: spec.baseRef, noFetch: spec.noFetch, path },
+    at,
+  );
+}
+
 // Whether the mount's current attempt belongs to an operation that has not ended (any state but
 // succeeded, failed and cancelled): such a mount is neither removed nor retried, so the outcome
 // that operation will record is never taken from under it (store/sql/workspaces.ts mount.remove).
 export function attemptOperationOpen(db: Connection, mountId: string): boolean {
+  // A pending conversion of the mount (T5) owns it the same way until it switched or failed.
+  if (
+    statement(
+      db,
+      "SELECT 1 FROM binding_conversions WHERE mount_id = ? AND outcome = 'pending'",
+    ).get(mountId) !== undefined
+  )
+    return true;
   const row = statement(
     db,
     `SELECT o.state, a.abandon_operation_id, a.abandon_server_id, a.abandon_principal_id
@@ -522,11 +575,14 @@ export function settledRecord(
   };
 }
 
+// `error` names why the operation stopped when that is known (a conversion whose switch was
+// refused, T5); otherwise its outcome is unknown. A stored record never carries error details.
 export function attentionRecord(
   current: OperationRecord,
   attempts: readonly Attempt[],
   revision: number | null,
   progress: Progress,
+  error?: DomainError,
 ): OperationRecord {
   return {
     ...current,
@@ -534,7 +590,7 @@ export function attentionRecord(
     state: "requires_attention",
     result: attempts.length ? resultWith(current, attempts, revision) : current.result,
     progress,
-    error: domainError("RESULT_UNKNOWN", "unknown"),
+    error: error ? domainError(error.kind) : domainError("RESULT_UNKNOWN", "unknown"),
   };
 }
 
@@ -785,13 +841,20 @@ export const worktreeOperations = {
     const row = actable(db, args.attemptId, args.actor);
     if (!row || row.abandon_operation_id !== null || row.phase !== "resolved" || !row.base_commit)
       return "gone";
+    // The mount's current attempt, or the target of its pending conversion (T5).
+    const conversion =
+      statement(
+        db,
+        "SELECT 1 FROM binding_conversions WHERE attempt_id = ? AND outcome = 'pending'",
+      ).get(row.attempt_id) !== undefined;
     const mount = statement(
       db,
       `SELECT m.repo_id, w.task_id FROM mounts m
          JOIN workspaces w ON w.workspace_id = m.workspace_id
-         JOIN worktree_preparations p ON p.mount_id = m.mount_id
-       WHERE m.mount_id = ? AND p.attempt_id = ?`,
-    ).get(row.mount_id, row.attempt_id) as { repo_id: string; task_id: string } | undefined;
+         LEFT JOIN worktree_preparations p ON p.mount_id = m.mount_id
+       WHERE m.mount_id = ? AND (p.attempt_id = ? OR ?)`,
+    ).get(row.mount_id, row.attempt_id, conversion ? 1 : 0) as
+      { repo_id: string; task_id: string } | undefined;
     if (!mount) return "gone";
     const repo = statement(db, "SELECT common_dir FROM repos WHERE repo_id = ?").get(
       mount.repo_id,
@@ -829,10 +892,12 @@ export const worktreeOperations = {
       `UPDATE worktree_attempts SET phase = 'intent', worktree_id = ?, updated_at_ms = ?
        WHERE attempt_id = ?`,
     ).run(args.worktreeId, args.at, args.attemptId);
-    statement(db, "UPDATE mounts SET base_commit = ? WHERE mount_id = ?").run(
-      row.base_commit,
-      row.mount_id,
-    );
+    // A conversion's mount is still the checkout; its base commit is set when it switches.
+    if (!conversion)
+      statement(db, "UPDATE mounts SET base_commit = ? WHERE mount_id = ?").run(
+        row.base_commit,
+        row.mount_id,
+      );
     return "recorded";
   },
 
@@ -912,6 +977,7 @@ export const worktreeOperations = {
           error,
           row.mount_id,
         );
+      failConversion(db, args.attemptId, args.at);
     }
     const revision = current ? bumpWorkspace(db, row.workspace_id) : null;
     const attempts = attemptsOf(db, owner);
@@ -930,6 +996,7 @@ export const worktreeOperations = {
     args: {
       operation: OperationReceiptKey;
       progress: Progress;
+      error?: DomainError;
       limits: ReceiptLimits;
       at: number;
     },
@@ -942,7 +1009,7 @@ export const worktreeOperations = {
       db,
       args.operation,
       receipt,
-      attentionRecord(receipt, attempts, revision, args.progress),
+      attentionRecord(receipt, attempts, revision, args.progress, args.error),
       args.limits,
       args.at,
     );
@@ -992,6 +1059,7 @@ export const worktreeOperations = {
         `UPDATE worktree_attempts SET outcome = 'failed', error_json = ?, updated_at_ms = ?
          WHERE attempt_id = ?`,
       ).run(error, args.at, attempt.attemptId);
+      failConversion(db, attempt.attemptId, args.at);
       const current = statement(db, "SELECT 1 FROM worktree_preparations WHERE attempt_id = ?").get(
         attempt.attemptId,
       );

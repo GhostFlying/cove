@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import type { MountSpec, TaskRecord } from "@cove/protocol/workspace";
@@ -107,8 +108,12 @@ export async function leftoversOf(
   const left = (operation.result?.mounts ?? []).filter((mount) => mount.left !== undefined);
   if (!left.length) return [];
   const mounts = new Map<string, TaskRecord["workspace"]["mounts"][number]>();
+  const entries = new Map<string, string>();
   const add = (found: TaskRecord) => {
-    for (const mount of found.workspace.mounts) mounts.set(mount.mountId, mount);
+    for (const mount of found.workspace.mounts) {
+      mounts.set(mount.mountId, mount);
+      entries.set(mount.mountId, found.workspace.entryPath);
+    }
   };
   try {
     const resource = operation.result?.resource;
@@ -151,10 +156,15 @@ export async function leftoversOf(
       }
       repoPath = repos.get(mount.repoId) ?? null;
     }
+    // A conversion whose target was left in place did not switch: the mount is still the checkout,
+    // and the target is `<entry>/<name>` (m1 T5). Its branch is not in any record.
+    const target =
+      operation.method === "binding.convert" && mount?.source === "checkout"
+        ? { path: join(entries.get(mount.mountId)!, mount.name), branch: null }
+        : { path: mount?.path ?? null, branch: mount?.branch ?? null };
     leftovers.push({
       mountId: outcome.mountId,
-      path: mount?.path ?? null,
-      branch: mount?.branch ?? null,
+      ...target,
       repoPath,
       effects: outcome.left === "both" ? ["worktree", "branch"] : [outcome.left!],
     });
