@@ -503,6 +503,40 @@ test("results split by method and stored errors carry no run details", () => {
   ).not.toBeNull();
 });
 
+test("a failed binding.delete stores up to four blocking runs within the receipt budget", () => {
+  const id = (length) => "a".repeat(length);
+  const run = { serverId: id(128), relayInstanceId: id(128), runId: id(128) };
+  const runs = Array.from({ length: M1_LIMITS.storedErrorRuns }, () => run);
+  const record = {
+    operationId: id(128),
+    method: "binding.delete",
+    revision: Number.MAX_SAFE_INTEGER,
+    state: "requires_attention",
+    result: {
+      resource: { kind: "mount", id: id(40), revision: Number.MAX_SAFE_INTEGER },
+      workspaceRevision: Number.MAX_SAFE_INTEGER,
+    },
+    progress: {
+      completedSteps: Array.from({ length: M1_LIMITS.progressTokens }, () => id(32)),
+      remainingEffects: Array.from({ length: M1_LIMITS.progressTokens }, () => id(32)),
+      recoveryActions: ["continue", "abandon"],
+    },
+    error: domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, { runs }),
+  };
+  expect(encoder(JSON.stringify(record)).byteLength).toBeLessThanOrEqual(
+    M0_LIMITS.operationRecordBytes,
+  );
+  expect(validateOperationRecord(record, encoder)).toEqual(record);
+  const more = domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, {
+    runs: [...runs, run],
+  });
+  expect(validateOperationRecord({ ...record, error: more }, encoder)).toBeNull();
+  // Any other write keeps the runs in the RPC error response only.
+  expect(
+    validateOperationRecord({ ...record, method: "binding.convert", state: "failed" }, encoder),
+  ).toBeNull();
+});
+
 test("tab launches validate appearance exactly like terminal.create", () => {
   const duplicate = {
     palette: [

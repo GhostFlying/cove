@@ -61,7 +61,17 @@ const OperationRecordFieldsSchema = z.object({
   error: DomainErrorSchema.optional(),
 });
 // See the compact result policy in workspace.ts. Error details (blocking runs) belong to the RPC
-// error response, never to a stored record.
+// error response, not to a stored record, with one exception: a binding.delete that was accepted
+// and then found a run using the worktree keeps up to M1_LIMITS.storedErrorRuns (workspace.ts) of them, since
+// its final record is the only place a client can learn which runs stopped it (m1 T5). Its result
+// is small (no mounts, no run), so the budget holds.
+function storedDetailsAllowed(value: z.infer<typeof OperationRecordFieldsSchema>): boolean {
+  const details = value.error?.details;
+  return (
+    details === undefined ||
+    (value.method === "binding.delete" && details.runs.length <= W.M1_LIMITS.storedErrorRuns)
+  );
+}
 export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) => {
   const terminal = TERMINAL_OPERATION_METHODS.has(value.method);
   const keys = Object.keys(value.result ?? {});
@@ -69,7 +79,7 @@ export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) 
   return (
     (!terminal || !!value.run) &&
     keys.every((key) => terminalKeys.includes(key) === terminal) &&
-    value.error?.details === undefined &&
+    storedDetailsAllowed(value) &&
     (!value.run || !value.result?.run || sameRunRef(value.run, value.result.run))
   );
 });

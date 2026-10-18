@@ -22,6 +22,9 @@ export const M1_LIMITS = Object.freeze({
   titleChars: 256,
   displayNameChars: 128,
   refChars: 255,
+  // The blocking runs a failed binding.delete keeps in its stored error (m1 T5); a refusal before
+  // acceptance lists up to 128 in the RPC error response.
+  storedErrorRuns: 4,
 });
 
 // A path interpreted by the execution host. The server validates, normalizes and resolves it;
