@@ -7,12 +7,14 @@ import {
   withSession,
   type Arguments,
 } from "./_common.js";
+import { commands as bindingCommands, notes as bindingNotes, runBinding } from "./_binding.js";
 import { operationIdFor, submitWrite } from "./_pending.js";
 import { MOUNT_SPEC_HELP, parseMountSpec, printTaskOperation } from "./_workspace.js";
 
 export const usage = `  mount add <taskId> (--checkout SPEC | --worktree SPEC) [--expected-revision N] [--operation-id ID]
   mount remove <taskId> <mountId> [--expected-revision N] [--operation-id ID]
   mount retry <taskId> <mountId> [--branch BRANCH] [--base REF] [--no-fetch] [--operation-id ID]
+${bindingCommands}
 
 --expected-revision is the workspace revision. mount remove only changes the workspace: it never
 deletes a checkout or a worktree directory, and it is allowed on an archived task. A worktree
@@ -21,6 +23,7 @@ mount retry prepares a failed worktree mount again as a new operation. It reuses
 base and fetch choice the mount was added with; --branch and --base override them for this
 attempt, and --no-fetch skips the fetch for it. --no-fetch can only turn fetch-skipping on: a
 mount added with no-fetch is retried without a fetch.
+${bindingNotes}
 ${MOUNT_SPEC_HELP}`;
 
 function expectedWorkspaceRevision(args: Arguments): { expectedWorkspaceRevision?: number } {
@@ -89,5 +92,7 @@ export async function run(args: Arguments): Promise<number> {
       return printTaskOperation(session.client, operation, taskId);
     });
   }
+  const binding = sub === undefined ? null : await runBinding(args, sub);
+  if (binding !== null) return binding;
   throw new UsageError(`Unknown mount command ${sub ?? ""}`.trim());
 }
