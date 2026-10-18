@@ -174,9 +174,14 @@ T5（PR #131，未合入；绑定变更与托管 worktree 删除，见 [M1](../m
   把 ready 的 checkout 挂载换成同仓库的新托管 worktree（`<entry>/<name>`，基准规则与 `--worktree` 创建相同），
   保留 mountId 与名称。输出与 `mount add` 相同（`{operation, task[, leftovers]}`），成功以 0 退出；操作结果带
   `sourceChanges: {staged, unstaged, untracked}`（来源 checkout 的改动计数，改动留在来源，不进入新 worktree；
-  有改动时 stderr 另有一行提示）。准备的失败、`left`、`mount retry`、`operation continue/abandon` 与 T3b 相同；
-  失败时挂载已是 failed 的 worktree 挂载（绑定在接受时切换）。本 task 有使用该 checkout 的存活 run 时受理前拒绝
-  `LIVE_RUNS_PRESENT`；挂载不是 ready 的 checkout、或 task 已归档时 `INVALID_ARGUMENT` / `TASK_ARCHIVED`。
+  有改动时 stderr 另有一行提示）。**目标核实 ready 之前挂载仍是 checkout**：准备期间 `task get`、清单与新 run
+  （含入口 tab）看到的都是 checkout，revision 不变；成功时挂载才变为 worktree，revision 加一。准备失败或被放弃时
+  checkout 仍是当前绑定，操作为 failed / cancelled，`left` 与 T3b 相同（`leftovers` 的路径为 `<entry>/<name>`，
+  分支为 null）。目标已 ready、但切换时前提不再成立（准备期间本 task 有 run 开始使用该 checkout）时，操作为
+  `requires_attention`，`error.kind` 为原因（如 `LIVE_RUNS_PRESENT`），`progress.remainingEffects` 为
+  `["switch-binding"]`：结束该 run 后 `operation continue` 完成切换，`operation abandon` 删除目标。转换未结束时
+  该挂载的 `mount remove` 与再次转换为 `OPERATION_EFFECTS_ACTIVE`。本 task 有使用该 checkout 的存活 run 时受理前
+  拒绝 `LIVE_RUNS_PRESENT`；挂载不是 ready 的 checkout、或 task 已归档时 `INVALID_ARGUMENT` / `TASK_ARCHIVED`。
 - `cove mount delete-worktree <taskId> <mountId> [--yes] [--expected-revision N] [--operation-id ID]`：删除挂载的托管
   worktree（含未提交与未跟踪的改动，`git worktree remove --force`）并移除挂载，分支保留；也适用于失败或放弃的准备
   留下的 worktree（`left`）。**脚本必须传 `--yes`**：无终端且无 `--yes` 时以 2 退出、stdout 为空、不发送请求；
@@ -185,9 +190,14 @@ T5（PR #131，未合入；绑定变更与托管 worktree 删除，见 [M1](../m
   挂载的准备或另一次删除未结束 `OPERATION_EFFECTS_ACTIVE`。受理后什么都没删除时操作为 failed（挂载恢复原状态）：
   `LIVE_RUNS_PRESENT`、`GIT_UNAVAILABLE`（含 Git 拒绝，例如被 lock 的 worktree）或 `INVALID_ARGUMENT`（路径上不是
   Git 已知的 worktree）。删除未能确认（重启、Git 步骤未看到结束）时为 `requires_attention`，`recoveryActions` 只有
-  `continue`；删除不能 abandon（`OPERATION_NOT_RESUMABLE`）。删除期间挂载为 pending。
+  `continue`；删除不能 abandon（`OPERATION_NOT_RESUMABLE`）。删除期间挂载为 pending，且
+  **不接受使用该 worktree 的新 run**：该 task 的入口 tab（其挂载映射包含全部挂载）、以该挂载为 cwd 的 tab，以及
+  cwd 在该 worktree 下的 `terminal create`，`tab create`/`tab reopen`/`terminal create` 均以
+  `OPERATION_EFFECTS_ACTIVE` 拒绝；删除结束后恢复。受理后才发现 run 的 failed 记录中，`error.details.runs` 至多
+  带 4 个 run（存储的操作记录只有这一种情形带错误详情）。
 - `LIVE_RUNS_PRESENT` 拒绝时，`mount convert` 与 `mount delete-worktree` 在 stderr 为每个 run 打一行
-  `cove: live run <runId> uses the path; ...`（只供人读）。
+  `cove: live run <runId> uses the path; ...`（只供人读）；`mount delete-worktree` 对受理后失败的记录中带的 run
+  同样打印。
 - `cove mount history <taskId> <mountId>`：输出 `{bindings: [{workspaceRevision, mountId, source, path, branch, boundAtMs, unboundAtMs}]}`，
   按时间先后，当前绑定 `unboundAtMs` 为 null；挂载移除或 worktree 删除后仍可查询；task 不存在 `TASK_NOT_FOUND`，
   挂载从未存在 `MOUNT_NOT_FOUND`。
@@ -250,3 +260,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `9a89968`；#124（T3b，未合入）             | 更正 PENDING #124 的 abandon 判据：从未 ready 的托管 worktree 不论检出是否执行过，都以普通的 `git worktree remove`（不加 `--force`）删除，Git 的拒绝是唯一的防护（拒绝时保留并列入 `left`，分支随之保留），被忽略的文件随之删除；此前的说明要求状态完全干净且忽略文件也算改动                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-10-18 | main `66048d7`（PR #124）                       | 基准改为 main `66048d7`；T3b 合入，#124 的 PENDING 项改为 AVAILABLE（§2 T3b）：`--worktree` 创建、`BUSY` 上限、逐仓结果与 `left`、`mount retry`、`operation continue/abandon` 及其 `leftovers` 输出与 stderr 提示由 `79106c0`（protocol）、`4df69ac`（server）与 `b2f71b2`（CLI）引入；删除 T3a 中“合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝”的说明；PLANNED 补列此前遗漏的 M1 T5（`mount convert`、`mount delete-worktree`、`mount history`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 新增 PENDING #131：`mount convert`（`sourceChanges`、绑定在接受时切换）、`mount delete-worktree`（脚本须 `--yes`，无终端时以 2 退出且不发送；分支保留；不能 abandon）、`mount history`，以及 `LIVE_RUNS_PRESENT` 时逐 run 的 stderr 提示；PLANNED 中 M1 T5 一项移除                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 更正 PENDING #131：`mount convert` 改为目标核实后才切换绑定（准备期间挂载、清单、revision 与新 run 仍是 checkout；失败或放弃时 checkout 保持绑定；切换被拒为 `requires_attention` 且 `remainingEffects` 为 `switch-binding`；转换期间 `mount remove` 为 `OPERATION_EFFECTS_ACTIVE`）；删除期间使用该 worktree 的 `tab create/reopen`（含入口 tab）与 `terminal create` 以 `OPERATION_EFFECTS_ACTIVE` 拒绝；受理后失败的删除记录保留至多 4 个阻塞 run，CLI 一并打印                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
