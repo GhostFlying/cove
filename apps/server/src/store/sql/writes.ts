@@ -1,3 +1,4 @@
+import { bindingWrites } from "./bindings.js";
 import { configWrites } from "./config.js";
 import { repoWrites } from "./repos.js";
 import { tabWrites } from "./tabs.js";
@@ -17,6 +18,7 @@ export const DATABASE_WRITES = Object.freeze({
   ...workspaceWrites,
   ...tabWrites,
   ...worktreeWrites,
+  ...bindingWrites,
 });
 
 export type DatabaseWrites = typeof DATABASE_WRITES;

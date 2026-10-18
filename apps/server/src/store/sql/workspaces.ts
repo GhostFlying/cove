@@ -334,7 +334,7 @@ function insertMount(
 // Whether the task as the transaction is about to commit it can always be read in one response
 // (domain/record-bounds.ts). Checked on the rows themselves, so the refusal comes before the
 // commit: a workspace whose record a read could not return is never accepted.
-function readable(db: Connection, taskId: string, responseBytes: number): boolean {
+export function readable(db: Connection, taskId: string, responseBytes: number): boolean {
   const row = taskRow(db, taskId);
   return row !== undefined && taskRecordFits(toTask(db, row).record, responseBytes);
 }

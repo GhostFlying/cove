@@ -180,10 +180,14 @@ import {
 //
 // One operation is driven by one actor at a time (one server owns the data directory).
 
+// The writes that prepare managed worktrees through attempts. binding.convert (m1 T5,
+// domain/bindings.ts) prepares the converted mount's worktree like mount.add, so it is continued,
+// abandoned and verified at startup like the others.
 const WORKTREE_METHODS: ReadonlySet<WriteRpcMethod> = new Set([
   "task.create",
   "mount.add",
   "mount.retry",
+  "binding.convert",
 ]);
 
 const STEPS = ["branch", "worktree", "checkout"] as const;
@@ -262,7 +266,7 @@ type Run = { group: object; actor: OperationReceiptKey };
 // Seats of the actors (see the header, budgets). A seat is reserved before the request is
 // accepted, so an accepted operation always has one; it runs its work once a running place is
 // free, and a place passes straight to the next waiter.
-type Seat = { run: (work: () => Promise<void>) => Promise<void>; release: () => void };
+export type Seat = { run: (work: () => Promise<void>) => Promise<void>; release: () => void };
 
 class Actors {
   private running = 0;
@@ -406,6 +410,12 @@ export class WorktreeService {
   // Mutating filesystem work that outlived its deadline, by the operation it ran for (see the
   // header, removal): until it settles, nothing may continue or finish that operation.
   private readonly outstanding = new Map<string, Set<Promise<unknown>>>();
+  // Other methods whose requires_attention operations operation.continue resumes, with the work
+  // that resumes one (binding.delete, domain/bindings.ts). They are never abandoned.
+  private readonly resumers = new Map<
+    WriteRpcMethod,
+    (key: OperationReceiptKey) => Promise<void>
+  >();
 
   constructor(private readonly options: WorktreeServiceOptions) {
     this.ledger = new ProcessLedger(options.store, options.relayInstanceId, options.now);
@@ -449,6 +459,30 @@ export class WorktreeService {
   // when the operation was not committed.
   reserve(): Seat | null {
     return this.actors.reserve();
+  }
+
+  // The shared budgets and the entry materialization, for the binding operations
+  // (domain/bindings.ts), which share this service's budgets and actors.
+  get budgets(): WorktreeBudgets {
+    return this.options.budgets;
+  }
+
+  materialize(workspaceId: string): Promise<EntryState> {
+    return this.options.materialize(workspaceId);
+  }
+
+  // Registers how operation.continue resumes a requires_attention operation of `method`, which
+  // otherwise only continues worktree preparations and abandons. The continue is accepted under
+  // the same rules (the processes the target recorded must have ended) and `resume` runs on its
+  // actor's seat.
+  resumeWith(method: WriteRpcMethod, resume: (key: OperationReceiptKey) => Promise<void>): void {
+    this.resumers.set(method, resume);
+  }
+
+  // Drives the operation `key` with `work` on `seat` (reserved for it before it was accepted),
+  // unless another actor has it; for the binding operations.
+  runOperation(seat: Seat, key: OperationReceiptKey, work: () => Promise<void>): void {
+    this.claim(seat, key, work);
   }
 
   // Drives `key` with `work` on `seat`, unless another actor has the operation.
@@ -1295,7 +1329,8 @@ export class WorktreeService {
     // A continue also resumes an abandon that stopped; an abandon is never abandoned itself.
     const actionable =
       WORKTREE_METHODS.has(record.method) ||
-      (method === "operation.continue" && record.method === "operation.abandon");
+      (method === "operation.continue" &&
+        (record.method === "operation.abandon" || this.resumers.has(record.method)));
     if (!actionable || record.state !== "requires_attention")
       return refuse(domainError("OPERATION_NOT_RESUMABLE"));
     // While a process the target recorded may still run, it is neither continued nor
@@ -1354,10 +1389,16 @@ export class WorktreeService {
       );
       committed = written.committed;
       // The target is running again; its actor goes on from its recorded ledger.
-      if (committed)
+      if (committed) {
+        const resume = this.resumers.get(record.method);
         this.claim(seat, key, () =>
-          record.method === "operation.abandon" ? this.finishAbandon(key) : this.drive(key),
+          resume
+            ? resume(key)
+            : record.method === "operation.abandon"
+              ? this.finishAbandon(key)
+              : this.drive(key),
         );
+      }
       return written.outcome;
     } finally {
       if (!committed) seat.release();
