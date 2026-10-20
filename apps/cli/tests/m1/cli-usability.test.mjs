@@ -81,9 +81,19 @@ test("a group without a subcommand is a usage error that prints only that group'
     expect({ args, code: result.code }).toEqual({ args, code: 2 });
     for (const line of FULL) expect(result.stderr).toContain(line);
   }
-  const unknownGroup = await fixture.cove(["help", "nope"]);
-  expect(unknownGroup.code).toBe(2);
-  expect(unknownGroup.stderr).toContain("cove: Unknown command group nope");
+  // `cove help` checks its group count and name, with or without --help (before or after).
+  for (const [args, message] of [
+    [["help", "nope"], "cove: Unknown command group nope"],
+    [["help", "nope", "--help"], "cove: Unknown command group nope"],
+    [["--help", "help", "nope"], "cove: Unknown command group nope"],
+    [["help", "repo", "task", "--help"], "cove: help takes at most one command group"],
+    [["--help", "help", "repo", "task"], "cove: help takes at most one command group"],
+  ]) {
+    const result = await fixture.cove(args);
+    expect({ args, code: result.code }).toEqual({ args, code: 2 });
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(message);
+  }
 });
 
 // A registered clone under the isolated HOME (so `~/...` reaches it) with one linked worktree that
