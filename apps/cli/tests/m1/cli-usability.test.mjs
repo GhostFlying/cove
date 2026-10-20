@@ -1,4 +1,5 @@
-import { lstat, mkdir, readFile, symlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, lstat, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
@@ -144,18 +145,36 @@ test("--checkout PATH outside every registered repo fails before anything is sen
   const plain = join(fixture.root, "plain");
   await mkdir(plain);
   const { task } = await fixture.coveJson(["task", "create", "Nothing"], { home });
-  for (const [path, why] of [
-    [other.path, ""],
-    [plain, " (Git finds no working tree there)"],
+  const attempt = (path) =>
+    fixture.cove(["mount", "add", task.taskId, "--checkout", path, "--operation-id", "unmatched"], {
+      home,
+    });
+  for (const [path, message] of [
+    [other.path, `--checkout ${other.path} is not in a registered repo; nothing was sent`],
+    [plain, `--checkout ${plain} is not a repository: Git finds no working tree there`],
+    [
+      join(plain, "gone"),
+      `--checkout ${join(plain, "gone")} is not a repository: it does not exist`,
+    ],
   ]) {
-    const result = await fixture.cove(
-      ["mount", "add", task.taskId, "--checkout", path, "--operation-id", "unmatched"],
-      { home },
-    );
+    const result = await attempt(path);
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain(`--checkout ${path} is not in a registered repo${why}`);
+    expect(result.stderr).toContain(message);
     expect(result.stderr).toContain("nothing was sent");
+  }
+  // A Git environment inherited from a hook or another tool does not redirect the lookups: with
+  // GIT_DIR naming the registered clone, the unregistered repository is still unregistered.
+  const registered = join(fixture.root, "user-home", "alpha");
+  fixture.env.GIT_DIR = join(registered, ".git");
+  fixture.env.GIT_WORK_TREE = registered;
+  try {
+    const redirected = await attempt(other.path);
+    expect(redirected.code).toBe(1);
+    expect(redirected.stderr).toContain(`--checkout ${other.path} is not in a registered repo`);
+  } finally {
+    delete fixture.env.GIT_DIR;
+    delete fixture.env.GIT_WORK_TREE;
   }
   // No request was saved, and the task is unchanged.
   await expect(savedRequest(home, "unmatched")).rejects.toThrow("ENOENT");
@@ -183,6 +202,97 @@ test("--checkout ~/LINK/.. follows the symlink before `..`, as the shell would",
     { source: "checkout", repoId, name: "up" },
   ]);
   expect(created.task.workspace.mounts[0]).toMatchObject({ name: "up", path: clone });
+});
+
+// The real git, for wrappers placed before it on the CLI's PATH.
+function realGit() {
+  return new Promise((done, fail) =>
+    execFile("/bin/sh", ["-c", "command -v git"], { env: fixture.env }, (error, stdout) =>
+      error ? fail(error) : done(stdout.trim()),
+    ),
+  );
+}
+
+// Runs `cove` with `script` as the only `git` on its PATH (the server keeps its own PATH).
+async function withGit(script, action) {
+  const bin = join(fixture.root, `git-bin-${Math.random().toString(36).slice(2)}`);
+  await mkdir(bin);
+  if (script !== null) {
+    await writeFile(join(bin, "git"), `#!/bin/sh\n${script}`);
+    await chmod(join(bin, "git"), 0o755);
+  }
+  const saved = fixture.env.PATH;
+  fixture.env.PATH = script === null ? bin : `${bin}:/usr/bin:/bin`;
+  try {
+    return await action();
+  } finally {
+    fixture.env.PATH = saved;
+  }
+}
+
+test("--checkout PATH tells a missing, too old or failing git apart from an unregistered path", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { clone } = await registeredClone(home);
+  const git = await realGit();
+  const { task } = await fixture.coveJson(["task", "create", "Git"], { home });
+  const attempt = () =>
+    fixture.cove(["mount", "add", task.taskId, "--checkout", clone, "--operation-id", "git"], {
+      home,
+    });
+  for (const [script, message] of [
+    [null, "git was not found on PATH; --checkout PATH needs it"],
+    ['echo "git version 2.30.9"\n', "git 2.30 is too old for --checkout PATH"],
+    [`case "$*" in *rev-parse*) kill -9 $$ ;; esac\nexec "${git}" "$@"\n`, "git rev-parse in "],
+  ]) {
+    const result = await withGit(script, attempt);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(message);
+    expect(result.stderr).toContain("nothing was sent");
+    expect(result.stderr).not.toContain("is not in a registered repo");
+  }
+  await expect(savedRequest(home, "git")).rejects.toThrow("ENOENT");
+  const after = await fixture.coveJson(["task", "get", task.taskId], { home });
+  expect(after.workspace.mounts).toEqual([]);
+});
+
+test("--checkout PATH inspects the registered clones a few at a time", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { repoId } = await registeredClone(home);
+  for (let index = 0; index < 12; index++) {
+    const extra = await fixture.gitRepo(`extra-${index}`);
+    await fixture.coveJson(["repo", "register", extra.path], { home });
+  }
+  // A git that records how many rev-parse calls run at once.
+  const control = join(fixture.root, "git-concurrency");
+  await mkdir(control);
+  const git = await realGit();
+  const script = `case "$*" in *rev-parse*)
+  touch "${control}/run.$$"
+  ls "${control}" | grep -c '^run\\.' >> "${control}/counts"
+  sleep 0.3
+  "${git}" "$@"; status=$?
+  rm -f "${control}/run.$$"
+  exit $status ;;
+esac
+exec "${git}" "$@"
+`;
+  const result = await withGit(script, () =>
+    fixture.cove(
+      ["task", "create", "Many", "--checkout", join(fixture.root, "user-home", "alpha")],
+      {
+        home,
+      },
+    ),
+  );
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout).task.workspace.mounts[0]).toMatchObject({ repoId });
+  const counts = (await readFile(join(control, "counts"), "utf8")).trim().split("\n").map(Number);
+  // The target and 13 clones were inspected, never more than 8 at once.
+  expect(counts).toHaveLength(14);
+  expect(Math.max(...counts)).toBeLessThanOrEqual(8);
+  expect(Math.max(...counts)).toBeGreaterThan(1);
 });
 
 test("mount convert without a mount id converts the task's only checkout mount", async () => {
