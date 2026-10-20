@@ -9,7 +9,8 @@
   （[M1](milestones/m1.md)）。
 - **M1 实施已完成**，等待用户的真实使用试用与 M1 阶段 review。M1 退出与 M2 进入都需要用户明确许可；
   完成 M1 不授权开始 M2。
-- 合入规则：所需 CI 全绿且独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
+- 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
+  所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
 - 威胁模型：单用户，经认证的用户是受信任的所有者；不防范其自我攻击，判据是不丢数据
   （AGENTS.md「Trust the authenticated owner」）。每个 review 提示都写明这一点。
 
