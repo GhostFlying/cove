@@ -14,6 +14,7 @@ import {
 } from "../operations/database-operations.js";
 import type { OperationReceipts, ReceiptVerifier } from "../operations/operation-receipts.js";
 import type { Store } from "../store/database.js";
+import { refusedStoreCall, retryRefused } from "../store/store-errors.js";
 import { ProcessLedger } from "../store/processes.js";
 import type { bindingOperations, DeletionRow } from "../store/sql/bindings.js";
 import { attentionRecord, type Attempt, type Progress } from "../store/sql/worktrees.js";
@@ -26,7 +27,7 @@ import {
 } from "../git/worktree.js";
 import type { LocalRuntime } from "../terminal/local-runtime.js";
 import { liveRunsUsing } from "./tabs.js";
-import type { WorktreeService } from "./worktrees.js";
+import { STORE_HANDOFF, STORE_RETRY, type WorktreeService } from "./worktrees.js";
 
 // Binding changes and managed worktree deletion (docs/milestones/m1.md T5, S6; D3, D10;
 // relay-protocol §11.4, §11.5). The store side is store/sql/bindings.ts.
@@ -357,9 +358,14 @@ export class BindingService {
     const { store } = this.options;
     let conversion;
     try {
-      conversion = await store.call("bindings.conversion", { attemptId: attempt.attemptId });
-    } catch {
-      // Left running; the next start verifies it.
+      conversion = await retryRefused(
+        () => store.call("bindings.conversion", { attemptId: attempt.attemptId }),
+        STORE_RETRY,
+      );
+    } catch (error) {
+      // Still refused after the retries: handed off (domain/worktrees.ts STORE_RETRY). Otherwise
+      // the store failed; left running, and the next start verifies it.
+      if (refusedStoreCall(error)) return this.switchAttention(key);
       return;
     }
     if (!conversion) return this.switchAttention(key);
@@ -371,17 +377,20 @@ export class BindingService {
     }
     if (runs.live.length) return this.switchAttention(key, domainError("LIVE_RUNS_PRESENT"));
     let switched;
+    const change = {
+      attemptId: attempt.attemptId,
+      actor: key,
+      exited: runs.exited,
+      responseBytes: this.options.responseBytes,
+      limits: this.limits,
+      at: this.now(),
+    };
     try {
-      switched = await store.call("bindings.switch", {
-        attemptId: attempt.attemptId,
-        actor: key,
-        exited: runs.exited,
-        responseBytes: this.options.responseBytes,
-        limits: this.limits,
-        at: this.now(),
-      });
-    } catch {
-      // Whether it committed is unknown; the next start or a continue verifies it.
+      switched = await retryRefused(() => store.call("bindings.switch", change), STORE_RETRY);
+    } catch (error) {
+      // A refusal changed nothing: handed off. Otherwise whether it committed is unknown; the
+      // next start verifies it.
+      if (refusedStoreCall(error)) return this.switchAttention(key);
       return;
     }
     if (!switched) return this.switchAttention(key);
@@ -392,16 +401,21 @@ export class BindingService {
   // A prepared target whose switch was refused (or could not be checked) leaves the operation
   // requires_attention with the reason when known: continue switches once the reason is gone (a
   // run ended), abandon removes the target as T3b does for any unbound preparation. The checkout
-  // stays bound either way. A store failure leaves it running; the next start verifies it.
+  // stays bound either way. The record is repeated for as long as the store refuses it
+  // (STORE_HANDOFF); a closed or failed store leaves it running, and the next start verifies it.
   private async switchAttention(key: OperationReceiptKey, error?: DomainError): Promise<void> {
+    const record = {
+      operation: key,
+      progress: SWITCH_PROGRESS,
+      ...(error ? { error } : {}),
+      limits: this.limits,
+      at: this.now(),
+    };
     try {
-      await this.options.store.call("worktrees.attention", {
-        operation: key,
-        progress: SWITCH_PROGRESS,
-        ...(error ? { error } : {}),
-        limits: this.limits,
-        at: this.now(),
-      });
+      await retryRefused(
+        () => this.options.store.call("worktrees.attention", record),
+        STORE_HANDOFF,
+      );
     } catch {
       // See above.
     }
@@ -487,9 +501,13 @@ export class BindingService {
   private async finishDeletion(key: OperationReceiptKey): Promise<void> {
     let deletion: DeletionRow | null;
     try {
-      deletion = await this.options.store.call("bindings.deletion", { operation: key });
-    } catch {
-      // Left running; the next start verifies it.
+      deletion = await retryRefused(
+        () => this.options.store.call("bindings.deletion", { operation: key }),
+        STORE_RETRY,
+      );
+    } catch (error) {
+      // As in switchConversion.
+      if (refusedStoreCall(error)) return this.attention(key);
       return;
     }
     if (!deletion || deletion.outcome !== "pending") return;
@@ -543,32 +561,40 @@ export class BindingService {
     error?: DomainError,
   ): Promise<void> {
     let done;
+    const finish = {
+      operation: key,
+      outcome,
+      ...(error ? { error } : {}),
+      limits: this.limits,
+      at: this.now(),
+    };
     try {
-      done = await this.options.store.call("bindings.finishDelete", {
-        operation: key,
-        outcome,
-        ...(error ? { error } : {}),
-        limits: this.limits,
-        at: this.now(),
-      });
-    } catch {
-      // Whether it committed is unknown; the next start or a continue verifies it.
+      done = await retryRefused(
+        () => this.options.store.call("bindings.finishDelete", finish),
+        STORE_RETRY,
+      );
+    } catch (failure) {
+      // As in switchConversion.
+      if (refusedStoreCall(failure)) return this.attention(key);
       return;
     }
     if (done) await this.options.worktrees.materialize(done.workspaceId).catch(() => "pending");
   }
 
-  // Records the deletion as requires_attention; a store failure leaves it running, and the next
-  // start verifies it.
+  // Records the deletion as requires_attention, as in switchAttention.
   private async attention(key: OperationReceiptKey): Promise<void> {
     try {
       const active = await this.processActive(key);
-      await this.options.store.call("worktrees.attention", {
+      const record = {
         operation: key,
         progress: deletionProgress(active),
         limits: this.limits,
         at: this.now(),
-      });
+      };
+      await retryRefused(
+        () => this.options.store.call("worktrees.attention", record),
+        STORE_HANDOFF,
+      );
     } catch {
       // See above.
     }

@@ -13,6 +13,7 @@ import {
 } from "../operations/database-operations.js";
 import type { OperationReceipts, ReceiptVerifier } from "../operations/operation-receipts.js";
 import type { Store } from "../store/database.js";
+import { refusedStoreCall, retryRefused, type RetrySchedule } from "../store/store-errors.js";
 import { ProcessLedger } from "../store/processes.js";
 import type { NewMount } from "../store/sql/workspaces.js";
 import {
@@ -240,6 +241,15 @@ const FS_DEADLINE_MS = 20_000;
 // How many default branch names are tried (`cove/<slug>`, then `-2` ... `-100`), as in Orca.
 const DEFAULT_BRANCH_CANDIDATES = 100;
 const REQUEST_STEP_MS = 20_000;
+// The actors' store calls (#126 item 9). A refused call (store-errors.ts refusedStoreCall: a full
+// queue, or a transaction that rolled back) changed nothing, so it is repeated: a ledger read or
+// write a few times over about a second and a half, after which the operation is handed to
+// requires_attention; that hand-off is repeated for as long as it is refused, so an operation is
+// never left running without an actor. Only a closed or failed store, or a call whose outcome is
+// unknown, ends an actor without a record: the server stops serving then, and the next start
+// verifies the operation (createWorktreeVerifier).
+export const STORE_RETRY: RetrySchedule = { tries: 6, delayMs: 50, capMs: 800 };
+export const STORE_HANDOFF: RetrySchedule = { tries: Infinity, delayMs: 50, capMs: 5_000 };
 
 const UNKNOWN = Symbol("unknown");
 type Unknown = typeof UNKNOWN;
@@ -726,8 +736,13 @@ export class WorktreeService {
     const run: Run = { group: {}, actor: key };
     let attempts: Attempt[];
     try {
-      attempts = await this.options.store.call("worktrees.attempts", { operation: key });
-    } catch {
+      attempts = await this.stored(() =>
+        this.options.store.call("worktrees.attempts", { operation: key }),
+      );
+    } catch (error) {
+      // Still refused after the retries: handed off (see STORE_RETRY). Otherwise the store failed
+      // and the next start verifies the operation.
+      if (refusedStoreCall(error)) return this.attention(key);
       return;
     }
     for (const attempt of attempts) {
@@ -746,17 +761,21 @@ export class WorktreeService {
         continue;
       }
       let settled;
+      const settle = {
+        attemptId: attempt.attemptId,
+        actor: key,
+        outcome: outcome.kind,
+        ...(outcome.kind === "failed" ? { error: domainError(outcome.error) } : {}),
+        limits: this.limits,
+        at: this.now(),
+      };
       try {
-        settled = await this.options.store.call("worktrees.settle", {
-          attemptId: attempt.attemptId,
-          actor: key,
-          outcome: outcome.kind,
-          ...(outcome.kind === "failed" ? { error: domainError(outcome.error) } : {}),
-          limits: this.limits,
-          at: this.now(),
-        });
-      } catch {
-        // Whether it committed is unknown; the next start or a continue verifies it.
+        settled = await this.stored(() => this.options.store.call("worktrees.settle", settle));
+      } catch (error) {
+        // A refusal changed nothing: the attempt is still pending with its ledger, and the
+        // operation is handed off. Otherwise whether it committed is unknown; the next start
+        // verifies it.
+        if (refusedStoreCall(error)) return this.attention(key);
         return;
       }
       if (!settled) return this.attention(key);
@@ -765,18 +784,31 @@ export class WorktreeService {
     }
   }
 
-  // Records the operation as requires_attention with what its ledger shows. A store failure
-  // leaves it running; the next start verifies it.
+  // A store call of an actor, repeated while it is refused (see STORE_RETRY).
+  private stored<T>(call: () => Promise<T>, schedule = STORE_RETRY): Promise<T> {
+    return retryRefused(call, schedule);
+  }
+
+  // Records the operation as requires_attention with what its ledger shows, repeated for as long
+  // as the store refuses it (STORE_HANDOFF). A closed or failed store leaves it running; the next
+  // start verifies it.
   private async attention(key: OperationReceiptKey): Promise<void> {
     try {
-      const attempts = await this.options.store.call("worktrees.attempts", { operation: key });
+      const attempts = await this.stored(
+        () => this.options.store.call("worktrees.attempts", { operation: key }),
+        STORE_HANDOFF,
+      );
       const active = await this.processActive([key]);
-      await this.options.store.call("worktrees.attention", {
+      const record = {
         operation: key,
         progress: progressOf(attempts, active),
         limits: this.limits,
         at: this.now(),
-      });
+      };
+      await this.stored(
+        () => this.options.store.call("worktrees.attention", record),
+        STORE_HANDOFF,
+      );
     } catch {
       // See above.
     }
@@ -809,14 +841,11 @@ export class WorktreeService {
     },
   ): Promise<void> {
     let recorded: boolean;
+    const advance = { attemptId: attempt.attemptId, actor: run.actor, ...patch, at: this.now() };
     try {
-      recorded = await this.options.store.call("worktrees.advance", {
-        attemptId: attempt.attemptId,
-        actor: run.actor,
-        ...patch,
-        at: this.now(),
-      });
+      recorded = await this.stored(() => this.options.store.call("worktrees.advance", advance));
     } catch {
+      // Still refused, or the store failed: the actor stops, handing the operation off.
       recorded = false;
     }
     if (!recorded) throw new Stopped();
@@ -1540,12 +1569,14 @@ export class WorktreeService {
     let attempts: Attempt[];
     let target: OperationReceiptKey;
     try {
-      const record = await this.options.receipts.get(abandon);
+      const record = await this.stored(() => this.options.receipts.get(abandon));
       const targetId = record?.result?.targetOperationId;
       if (!targetId) return;
       target = { ...abandon, operationId: targetId };
-      attempts = await this.options.store.call("worktrees.claimed", { abandon });
-    } catch {
+      attempts = await this.stored(() => this.options.store.call("worktrees.claimed", { abandon }));
+    } catch (error) {
+      // As in drive.
+      if (refusedStoreCall(error)) return this.abandonAttention(abandon);
       return;
     }
     const workspaces = new Set<string>();
@@ -1572,15 +1603,15 @@ export class WorktreeService {
       }
       if (done === "attention") return this.abandonAttention(abandon);
     }
+    const finish = { abandon, target, limits: this.limits, at: this.now() };
     try {
-      const finished = await this.options.store.call("worktrees.finishAbandon", {
-        abandon,
-        target,
-        limits: this.limits,
-        at: this.now(),
-      });
+      const finished = await this.stored(() =>
+        this.options.store.call("worktrees.finishAbandon", finish),
+      );
       if (!finished) return this.abandonAttention(abandon);
-    } catch {
+    } catch (error) {
+      // As in drive.
+      if (refusedStoreCall(error)) return this.abandonAttention(abandon);
       return;
     }
     for (const workspaceId of workspaces)
@@ -1589,16 +1620,23 @@ export class WorktreeService {
 
   private async abandonAttention(abandon: OperationReceiptKey): Promise<void> {
     try {
-      const attempts = await this.options.store.call("worktrees.claimed", { abandon });
+      const attempts = await this.stored(
+        () => this.options.store.call("worktrees.claimed", { abandon }),
+        STORE_HANDOFF,
+      );
       const active = await this.processActive([abandon]);
-      await this.options.store.call("worktrees.attention", {
+      const record = {
         operation: abandon,
         progress: abandonProgress(attempts, active),
         limits: this.limits,
         at: this.now(),
-      });
+      };
+      await this.stored(
+        () => this.options.store.call("worktrees.attention", record),
+        STORE_HANDOFF,
+      );
     } catch {
-      // Left running; the next start verifies it.
+      // As in attention: left running only when the store failed; the next start verifies it.
     }
   }
 }

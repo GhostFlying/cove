@@ -61,6 +61,37 @@ export function uncertainStoreOutcome(error: unknown): boolean {
   return error instanceof StoreUnavailableError && error.outcome === "unknown";
 }
 
+// Whether a call is known to have changed nothing, so that repeating it is safe: refused before it
+// was sent because the queue was full, or run and rolled back. A closed or failed store is not
+// retried (the server stops serving, entry/main.ts), and a call whose outcome is unknown is never
+// repeated.
+export function refusedStoreCall(error: unknown): boolean {
+  return (
+    error instanceof StoreOperationError ||
+    (error instanceof StoreUnavailableError &&
+      error.reason === "busy" &&
+      error.outcome === "not-sent")
+  );
+}
+
+// How often, and after which delays, a refused call is repeated: up to `tries` calls in all, the
+// delay doubling from `delayMs` up to `capMs`.
+export type RetrySchedule = { tries: number; delayMs: number; capMs: number };
+
+// Runs `call`, repeating it after each refusal (refusedStoreCall) by `schedule`. The last refusal,
+// and any other failure at once, is thrown.
+export async function retryRefused<T>(call: () => Promise<T>, schedule: RetrySchedule): Promise<T> {
+  for (let tried = 1; ; tried++) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!refusedStoreCall(error) || tried >= schedule.tries) throw error;
+      const delay = Math.min(schedule.delayMs * 2 ** (tried - 1), schedule.capMs);
+      await new Promise((done) => setTimeout(done, delay).unref());
+    }
+  }
+}
+
 // The structured-clone-safe form of an error thrown where the database runs. Only the kind, the
 // fixed message and the SQLite code cross; stacks and arbitrary properties do not.
 export type SerializedStoreError =
