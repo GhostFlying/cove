@@ -1,75 +1,84 @@
-# Cove current handoff
+# Cove 当前交接
 
-Updated: 2026-10-15. Current state only (at most 150 lines). Recheck GitHub and checkouts
-before resuming; history lives in Git, Issues and PRs (the long pre-takeover handoff is
-`git show 3d7349a:docs/handoff.md`).
+更新：2026-10-20。只记录当前状态（不超过 150 行）。恢复工作前先核对 GitHub 与各 checkout；
+历史在 Git、Issue 与 PR 中（接管前的长版交接见 `git show 3d7349a:docs/handoff.md`）。
 
-## Authorized stage
+## 授权阶段
 
-- M0 implementation approved 2026-09-26. M0 exit and M1 entry need explicit user review;
-  neither is authorized.
-- 2026-10-09 the user narrowed M0 to the eight scenarios in [M0](milestones/m0.md) plus one
-  focused real-agent trial session (checklist in M0), and moved coordination to Claude Code
-  ([engineering 6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)).
-- Autonomous rebase & merge is allowed after green CI and an independent review with no
-  open findings.
+- M0 实施于 2026-09-26 获批；2026-10-15 用户批准 M0 退出与 M1 进入，并对 M1 的 D1–D10 作出决定
+  （[M1](milestones/m1.md)）。
+- **M1 实施已完成**，等待用户的真实使用试用与 M1 阶段 review。M1 退出与 M2 进入都需要用户明确许可；
+  完成 M1 不授权开始 M2。
+- 合入规则：所需 CI 全绿且独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
+- 威胁模型：单用户，经认证的用户是受信任的所有者；不防范其自我攻击，判据是不丢数据
+  （AGENTS.md「Trust the authenticated owner」）。每个 review 提示都写明这一点。
 
 ## Main
 
-- Main is `7940733` (PR #89); Engineering checks run 38077319185 succeeded on it.
-- All eight scenarios S1–S8 are compiled-artifact tests in
-  `apps/cli/tests/scenarios.test.mjs` and run in the macOS and Ubuntu CI jobs on main.
-- Server runs as `cove-server` (`apps/server/dist/entry/main.js`) with HTTP RPC and the
-  terminal WebSocket; `apps/cli` (`cove`) and the M0 test harness page (`apps/m0-harness`,
-  `cove server start --harness`) are on main.
-- Merged since the 2026-10-09 handoff:
-  - #78 S3 and S7 compiled tests; #79 client per-connection lifetime caps;
-  - #80 resize recovery and deferred focus; #81 worker accepts the route-control window;
-  - #82 WebGL2 renderer with DOM fallback and fit inside the visible area;
-  - #85 W2C-C03 flake fix; #86 unified callback re-entry rule and input hold during
-    recovery (#84, #83); #89 per-lifetime fatal coalescing and the wait-for-fact rule for
-    unknown harness control results (#88).
-- Review waivers (explicit user decisions):
-  - #80 and #82 were merged under a user waiver; their findings went into #84, which #86
-    resolved.
-  - #86 was merged under a user waiver on 2026-10-11; its findings went into #88, which
-    #89 fixed. #89 was merged with no open review findings.
+- M1 的最后一个实现 PR 是 #131（T5），main 为 `ea4fe84`；T6（本文档更新）随后合入。
+- 已实现的范围（[M1 交付范围](milestones/m1.md#交付范围)）：
+  - 持久 server 身份与 SQLite 存储（数据库在专用 worker thread 中执行，D5/D6），操作记录跨重启去重；
+  - repo 注册；task/workspace（入口目录与挂载清单 `cove-workspace.json`）；checkout 与托管 worktree 挂载、
+    逐仓结果、`mount retry`、`operation continue/abandon`；
+  - checkout 转到独立 worktree（D3）与托管 worktree 删除（D10）、绑定历史；
+  - tab/run（注入 `COVE_TASK_ID`/`COVE_TAB_ID`），重启后旧 run 显示为会话中断，不自动重跑；
+  - 以上全部经 `cove` CLI 操作，JSON 输出。
+- 场景 S1–S10 是启动编译产物的测试（`apps/cli/tests/m1/`），M0 的 S1–S8 在 `apps/cli/tests/scenarios.test.mjs`，
+  都在 macOS 与 Ubuntu CI 上运行。
+- 用法：[开发说明 · M1 本机试用与 CLI 用法](development.md#m1-本机试用与-cli-用法)；
+  tend 可用的接口：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)（PENDING 为空）。
 
-## Kept user decisions
+## 如何试用 M1
 
-- Input typed during a recovery is held and sent once the view is ready (#83).
-- Prefix closure for control ([relay-protocol §9.1](relay-protocol.md#91-focus控制权与自动-resize)).
-- The harness never auto-retries a control command that may have been applied and never
-  retakes control without a user gesture.
-- Future idea from the user, not scheduled: idempotent control requests with request keys.
+1. 在一个单独的 checkout（不是正在开发的 worktree，D7）中按开发说明构建：冻结安装、`pnpm native:prepare`、
+   `pnpm build`；用 `node apps/cli/dist/main.js` 作为 `cove`。
+2. `cove server init`（可选 `--workspace-root DIR`），再 `cove server start --harness` 前台运行；
+   数据目录默认 `~/.cove`，一次性试用可用 `--home DIR`，其他命令带同一个 `--home`。
+3. 按 [M1 试用清单](milestones/m1.md#验收场景)（场景表之后的五项）操作：
+   - 注册两个真实仓库；调查 task 挂载已有 checkout，在入口启动 Claude Code、Codex 或 TraeX，只读地搜索、
+     读取、`git status`；
+   - 两仓 task 各建新 worktree，在 agent 中修改并提交，确认分支与提交只在对应 worktree；
+   - 调查 task 转到独立 worktree（先结束使用该 checkout 的 run），旧 run 仍指向原位置，新 run 在新 worktree；
+   - 有 agent 运行时重启 server：显示为会话中断而非存活；`tab reopen` 后用 agent 自己的 resume 继续（只作观察）；
+   - 在 harness 中接入 tab 的 run，确认 M0 终端链路照常。
+4. 试用发现的问题修复后，再提交 M1 阶段 review。
 
-## Real-agent trial
+## 保留的用户决定
 
-- The user ran the focused trial on the harness, with trial servers built from main
-  `e85da0a` and `7940733`. On 2026-10-15 the user reported no remaining problems. This is
-  the user's report; no individual checklist item was measured separately.
+- 恢复期间输入的内容先暂存，视图就绪后发送一次（#83）；控制采用前缀封闭
+  （[relay-protocol §9.1](relay-protocol.md#91-focus控制权与自动-resize)）。
+- harness 从不自动重试可能已生效的控制命令，也不在没有用户手势时重新取得控制权。
+- 协议首个正式版本（含 alpha）之前不提升协议版本、不承诺兼容。
+- tend 集成方向已接受但未排期（[设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)）：
+  经 CLI，worker 是 Cove tab，需要 `tab send`；位置在 M1 之后，具体 milestone 另行批准。
 
-## Known follow-ups (do not block M0)
+## 未关闭的后续 issue（不阻塞 M1）
 
-- #87 test flakes: `untilTurn` turn budget; partial JSON read at `pipe-harness.mjs:423`,
-  seen in worker-query-observation and pipe-main-real.
-- A harness click outside the xterm screen leaves keyboard focus off the terminal.
-- The arbiter returns BUSY after 128 controlled runs.
-- A fifth simultaneous ack gets BUSY.
+- #87 测试 flake：依赖计时的 `untilTurn` 等待，以及 worker-query-observation 读到截断的 JSON。
+- #97 持久操作记录没有保存期限，需要在不破坏去重语义的前提下决定过期规则与重发窗口。
+- #100 T1 测试夹具在失败路径上的清理缺口（只涉及测试，用户已豁免为非阻塞）。
+- #101 CI：tend 可见接口变化时要求同时修改 Shepherd/tend 集成说明。
+- #107 D6 残留：20 RPC/s 时主线程请求路径使回显增加约 0.3–0.6 ms（与数据库无关）。
+- #110 repo 注册测试 “escaped descendant closed its output” 偶发找不到 descendant.pid。
+- #125 T4 后续：`tab stop --run` 的实例分类、reopen 的 revision 溢出、跨重启停止的覆盖。
+- #126 T3b 后续（P2）：远端已删除的主分支可能从陈旧的跟踪 ref 选中、受理时的记录大小上限等。
+- #127 run 退役与 run 编号上限的后续（PR #121 第二轮 review 的 P2/P3）。
+- #129 macOS 上忽略 SIGTERM 的 git 可能超过期限仍在运行（进程组 KILL 漏掉组长）。
+- #132 T5 后续：删除恢复分支、被 lock 的 worktree、`sourceChanges` 解析的独立测试覆盖。
+- #23、#24、#25、#28 已移出 M0（兼容参考、混合版本、有界队列与调度、兼容演进），留待后续阶段。
 
-## Next actions
+## 未建 issue 的 M0 已知问题
 
-1. M0 stage review (Issue #26) by the user. Do not start M0 exit or M1 work without the
-   user's explicit permission.
+- 在 harness 中点击 xterm 屏幕之外会让键盘焦点离开终端。
+- 128 个受控 run 之后 arbiter 返回 BUSY。
 
-## Environment
+## 下一步
 
-- Pinned toolchain (Node 26.10.0, pnpm 12.6.0): `~/.cache/cove-toolchain`; prepend
-  `pnpm/bin` and `node-v26.10.0-darwin-arm64/bin` to `PATH`.
-- The Codex automation `cove-m0-practical-recovery` is PAUSED and must stay paused; only one
-  coordinator may be active.
-- `~/WORKSPACE/cove-evidence` (~29 GB) is pre-takeover history; no new entries.
-- `~/WORKSPACE/cove-worktrees/m0-probes-verify` (PR #66 branch, merged) only holds an
-  uncommitted pre-takeover pause note; it can be removed only with the user's consent.
-- Trial servers trial3–trial6 may still be running from `~/WORKSPACE/cove-worktrees/trial-*`;
-  stopping them needs the user's consent.
+1. 用户试用 M1（见上文），协调者跟进试用中发现的问题。
+2. 用户 review M1 阶段；在用户明确许可前不开始 M1 退出或 M2 的任何工作。
+
+## 环境
+
+- 固定工具链：Node 26.10.0、pnpm 12.6.0（见[开发说明](development.md#固定工具版本)），使用前放在 `PATH` 最前面。
+- 只能有一个活跃的协调者；接管前的 Codex 自动化保持暂停。
+- 接管前的证据目录、M0 试用 server 与其构建目录不在仓库中；清理或停止它们需要用户同意。
