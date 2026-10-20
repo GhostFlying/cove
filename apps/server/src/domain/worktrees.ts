@@ -16,6 +16,7 @@ import type { Store } from "../store/database.js";
 import { ProcessLedger } from "../store/processes.js";
 import type { NewMount } from "../store/sql/workspaces.js";
 import {
+  appendStep,
   attentionRecord,
   credited,
   lastRun,
@@ -793,16 +794,7 @@ export class WorktreeService {
       recorded = false;
     }
     if (!recorded) throw new Stopped();
-    if (patch.step) {
-      const last = attempt.steps.at(-1);
-      if (
-        patch.step.outcome !== "started" &&
-        last?.step === patch.step.step &&
-        (last.outcome === "started" || last.outcome === "uncertain")
-      )
-        attempt.steps[attempt.steps.length - 1] = patch.step;
-      else attempt.steps.push(patch.step);
-    }
+    if (patch.step) attempt.steps = appendStep(attempt.steps, patch.step);
     if (patch.phase && PHASE_ORDER.indexOf(patch.phase) > PHASE_ORDER.indexOf(attempt.phase))
       attempt.phase = patch.phase;
     if (patch.baseCommit) attempt.baseCommit = patch.baseCommit;
