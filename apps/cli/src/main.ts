@@ -84,17 +84,18 @@ async function run(argv: readonly string[]): Promise<number> {
   const help = helpRequest(argv);
   if (help) {
     const [first, ...rest] = help.words;
-    if (help.flag) {
-      // With --help the rest of the command is not checked: the group it names (after `help`,
-      // if the command is `help`) gets its usage, anything else the full usage.
-      const group = first === "help" ? rest[0] : first;
-      process.stdout.write(`${await usage((await isGroup(group)) ? group : undefined)}\n`);
+    if (first === "help") {
+      // `cove help [GROUP]` names its group itself, so a wrong group count or name stays a usage
+      // error even with --help; only option values are not checked.
+      if (rest.length > 1) throw new UsageError("help takes at most one command group");
+      if (rest[0] !== undefined && !(await isGroup(rest[0])))
+        throw new UsageError(`Unknown command group ${rest[0]}`);
+      process.stdout.write(`${await usage(rest[0])}\n`);
       return 0;
     }
-    if (rest.length > 1) throw new UsageError("help takes at most one command group");
-    if (rest[0] !== undefined && !(await isGroup(rest[0])))
-      throw new UsageError(`Unknown command group ${rest[0]}`);
-    process.stdout.write(`${await usage(rest[0])}\n`);
+    // A --help elsewhere does not check the rest of the command: the group it names gets its
+    // usage, anything else the full usage.
+    process.stdout.write(`${await usage((await isGroup(first)) ? first : undefined)}\n`);
     return 0;
   }
   const args = parseArguments(argv);
