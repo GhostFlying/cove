@@ -144,8 +144,31 @@ export type StepOutcome =
 
 export type StepEntry = { step: StepName; outcome: StepOutcome };
 
-// The ledger never grows past this many entries: each repeated run needs an explicit continue.
-const MAX_STEP_ENTRIES = 64;
+// Records `entry` in a ledger, for worktrees.advance and the domain's mirror of the ledger
+// (domain/worktrees.ts record). An entry that is not `started` replaces the last entry when that
+// one is the same step, started or uncertain: it is what became of that run. Otherwise the entry
+// is appended.
+//
+// Then only the last entry of each step is kept. Every reader decides from a step's last run
+// (lastRun, credited, remainingArtifacts) or from the ledger's last entry (a started or uncertain
+// step is always last: uncertainty is resolved before anything else is recorded), and the last
+// entry of each step, in their order, keeps both. A step runs again only after a run that did not
+// take effect (void; a removal also after preserved), so what is dropped never credited an
+// effect. The ledger therefore holds at most one entry per step name, and an abandon or a cleanup
+// can always record its removals: earlier, a ledger filled by repeated uncertain runs (64 entries)
+// refused them, and the abandon could never finish (#126 item 10).
+export function appendStep(steps: readonly StepEntry[], entry: StepEntry): StepEntry[] {
+  const last = steps.at(-1);
+  const next =
+    entry.outcome !== "started" &&
+    last?.step === entry.step &&
+    (last.outcome === "started" || last.outcome === "uncertain")
+      ? [...steps.slice(0, -1), entry]
+      : [...steps, entry];
+  return next.filter(
+    (item, index) => !next.slice(index + 1).some((later) => later.step === item.step),
+  );
+}
 
 export type AttemptPhase = "planned" | "fetched" | "resolved" | "intent";
 const PHASES: readonly AttemptPhase[] = ["planned", "fetched", "resolved", "intent"];
@@ -786,10 +809,8 @@ export const worktreeOperations = {
 
   // Records what an actor did or is about to do for one attempt (see migration 003), in one
   // statement: a step entry, the next phase (never backwards), the resolved base commit, the
-  // entry identity. A step entry that is not `started` replaces the step's last entry when that
-  // one is started or uncertain (it is what became of that run); otherwise it is appended. False,
-  // with nothing written, when `actor` may not act on the attempt (it settled, or an abandon
-  // claimed it).
+  // entry identity. A step entry goes in by appendStep. False, with nothing written, when `actor`
+  // may not act on the attempt (it settled, or an abandon claimed it).
   "worktrees.advance": (
     db: Connection,
     args: {
@@ -804,20 +825,8 @@ export const worktreeOperations = {
   ): boolean => {
     const row = actable(db, args.attemptId, args.actor);
     if (!row) return false;
-    const steps = JSON.parse(row.steps_json) as StepEntry[];
-    if (args.step) {
-      const last = steps.at(-1);
-      if (
-        args.step.outcome !== "started" &&
-        last?.step === args.step.step &&
-        (last.outcome === "started" || last.outcome === "uncertain")
-      )
-        steps[steps.length - 1] = args.step;
-      else {
-        if (steps.length >= MAX_STEP_ENTRIES) return false;
-        steps.push(args.step);
-      }
-    }
+    let steps = JSON.parse(row.steps_json) as StepEntry[];
+    if (args.step) steps = appendStep(steps, args.step);
     const phase =
       args.phase && PHASES.indexOf(args.phase) > PHASES.indexOf(row.phase) ? args.phase : row.phase;
     statement(

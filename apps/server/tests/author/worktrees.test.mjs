@@ -1241,6 +1241,41 @@ describe("restart, continue and abandon (S8)", () => {
     expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
   });
 
+  it("finishes an abandon whose ledger repeated uncertain runs had filled (#126 item 10)", async () => {
+    const { env, alpha, path } = await frozenTask(beforeStartOf("checkout"));
+    await frozenAt(env, (steps) => credits(steps, "worktree"));
+    // As after 62 fetches that were never seen to end, each made void by a continue: the ledger
+    // of an earlier build held 64 entries, its cap, and refused every removal step after that.
+    const [row] = await env.rows("SELECT steps_json FROM worktree_attempts");
+    const filled = [
+      ...Array.from({ length: 62 }, () => ({ step: "fetch", outcome: "void" })),
+      ...JSON.parse(row.steps_json),
+    ];
+    expect(filled).toHaveLength(64);
+    await env.store.call("test.run", {
+      sql: "UPDATE worktree_attempts SET steps_json = ?",
+      params: [JSON.stringify(filled)],
+    });
+    const next = await env.restart();
+    await next.tasks.worktrees.abandonOperation("p", { operationId: "a", targetOperationId: "c" });
+    expect(await idleRecord(next.tasks, next.receipts, "a")).toMatchObject({ state: "succeeded" });
+    expect(await next.receipts.get(key("c"))).toMatchObject({
+      state: "cancelled",
+      progress: { completedSteps: ["branch", "worktree"], remainingEffects: [] },
+    });
+    expect(await exists(path)).toBe(false);
+    expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
+    // The ledger keeps one entry per step: the last run of each.
+    const [after] = await env.rows("SELECT steps_json FROM worktree_attempts");
+    expect(JSON.parse(after.steps_json)).toEqual([
+      { step: "fetch", outcome: "void" },
+      { step: "branch", outcome: "succeeded" },
+      { step: "worktree", outcome: "succeeded" },
+      { step: "remove-worktree", outcome: "removed" },
+      { step: "delete-branch", outcome: "removed" },
+    ]);
+  });
+
   it("removes a clean checked-out worktree and its branch when abandoning after a crash", async () => {
     // Every step done, the attempt never settled: the worktree was never reported ready.
     const { env, alpha, path } = await frozenTask(beforeSettle());
