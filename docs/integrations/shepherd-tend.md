@@ -1,6 +1,6 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `92e24e9`（2026-10-20；`ea4fe84` 即 PR #131 合入之后只有文档提交）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `9638501`（2026-10-21，PR #136 合入）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
@@ -202,11 +202,7 @@ T5（PR #131，合入于 `ea4fe84`；绑定变更与托管 worktree 删除，见
   按时间先后，当前绑定 `unboundAtMs` 为 null；挂载移除或 worktree 删除后仍可查询；task 不存在 `TASK_NOT_FOUND`，
   挂载从未存在 `MOUNT_NOT_FOUND`。
 
-## 3. 进行中（PENDING）与计划中（PLANNED）
-
-PENDING：
-
-#134（CLI 试用可用性，未合入）：只改 CLI，协议与 server 不变；新写法发送的请求与原写法相同，stdout 的 JSON 形状不变。
+CLI 试用可用性（PR #134，合入于 `fe0fc13`；只改 CLI，协议与 server 不变；新写法发送的请求与原写法相同，stdout 的 JSON 形状不变。按组的帮助 `ff67ee5`、`7c0f721`；`--checkout PATH` `6138f38`、`3216929`、`d57a5b1`；`mount convert` 省略 mountId `fffa407`；`mount delete-worktree` 省略 mountId 与 PATH `be97856`、`3b6625a`；`LIVE_RUNS_PRESENT` 的 run 提示 `9db122f`、`2562057`）：
 
 - 帮助：`cove help`、`cove --help` 打印完整 usage，`cove help <组>`、`cove <组> --help`（`--` 之前任意位置）只打印
   该组；显式请求的帮助写到 stdout 并以 0 退出（此前 `--help` 是用法错误），命令其余部分不完整（如选项缺值）时也是如此。`cove <组>` 不带子命令与组内的用法错误
@@ -231,7 +227,7 @@ PENDING：
   通用提示。停在 `requires_attention` 的转换记录不带 run，改为列出该 task 中按 server 相同规则（启动 cwd 或启动时的
   挂载映射在该 checkout 内）使用它的存活 tab run。仍只供人读。
 
-#136（task 命名、默认分支与转换的重试提示，未合入）：请求与 stdout 的 JSON 形状不变；协议中 `slug` 的取值范围放宽。
+task 命名、默认分支与转换的重试提示（PR #136，合入于 `9638501`；请求与 stdout 的 JSON 形状不变，协议中 `slug` 的取值范围放宽。命名与默认分支 `3fcf3bd`（server）；转换的提示 `6293756`（CLI））：
 
 - 新 task 的 `slug` 保留标题的文字与大小写（如“转换测试”为 `转换测试`，“Fix bug”为 `Fix-bug`；此前为小写 ASCII，
   没有 ASCII 时为 `task`），至多 48 个码位，为空时为 `task`；入口目录为 `<slug>-<短 ID>`。已有 task 不迁移。
@@ -242,6 +238,31 @@ PENDING：
   `cove mount convert <taskId> <mountId>` 并附 `--branch NEW`、`--no-fetch` 或 `--base REF`（其余选项需重新给出）；
   此前提示的 `cove mount retry` 对仍是 checkout 的挂载返回 `INVALID_ARGUMENT`。`operation continue` 不知道 task ID 时，
   提示中以 `<taskId>` 占位（此前为不带 ID 的 `cove mount retry`）。仍只供人读。
+
+## 3. 进行中（PENDING）与计划中（PLANNED）
+
+PENDING：
+
+#141（托管 worktree 稳健性，#126、#132、#138，未合入）：请求不变；操作结果的挂载结果新增可选字段 `branch`。
+
+- 挂载结果（`operation.result.mounts[]`）在 `left` 为 `branch` 或 `both` 时，单挂载结果（`mount retry`、`mount convert`、
+  单挂载的 `task create`/`mount add`）另带 `branch`：留在原处的分支名。`leftovers[].branch` 取它，所以失败的
+  `mount convert` 的 `leftovers` 不再是 `branch: null`，stderr 的人工命令也不再带 `<branch>` 占位。
+- 上次失败的尝试因 Git 拒绝删除而留下 worktree 或分支、路径仍被占时，同一挂载的 `mount retry` 与同名的再次
+  `mount convert` **不再在受理前以 `MOUNT_NAME_CONFLICT` 拒绝**（此前 stdout 为空）：照常受理，新尝试先以普通的
+  `git worktree remove`（不加 `--force`）与 `branch -d` 规则删除遗留，再照常创建。Git 仍拒绝时操作为 failed，
+  挂载结果 `errorKind: "MOUNT_NAME_CONFLICT"`，`left` 与 `branch` 给出仍在的遗留，输出带 `leftovers` 并以 1 退出；
+  stderr 提示在其中没有会丢失的内容后重新执行同一命令，worktree 挂载另提示可用 `cove mount delete-worktree`
+  连同改动丢弃（该命令也移除挂载）。遗留的分支在选默认分支时仍算占用，所以这次的分支取下一个后缀。
+  曾作用于遗留的操作的 Git 进程可能仍在运行时，操作为 `requires_attention`。
+- 默认分支的后缀判断：`cove/` 下的本地与远端跟踪分支由 server 在 Unicode 规范化与大小写折叠后比较，
+  因此 `cove/école` 已存在时 `École` 取 `cove/École-2`；位于候选名之下、大小写不同的分支（如 `cove/FIX/topic`
+  之于 `cove/Fix`）也算占用；名字含 `/` 的远端（如 `team/upstream`）的远端跟踪分支按完整前缀识别。
+- 设置了 `worktree.useRelativePaths=true` 的 clone 中，`--worktree` 创建与 `mount convert` 能正常 ready（此前停在
+  `requires_attention`）。
+- 存储一时拒绝（队列满或事务回滚）时，准备、abandon、转换与删除先有界重试，仍被拒绝则操作转为
+  `requires_attention`；不再无执行者地停在 `running` 直到重启。
+- 多次未确认的 fetch 填满步骤记录后，abandon 仍能完成（此前停在 `requires_attention`）。
 
 PLANNED：
 
@@ -305,3 +326,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-20 | main `ea4fe84`（PR #131）                       | 基准改为 main `ea4fe84`；T5 合入，#131 的 PENDING 项改为 AVAILABLE（§2 T5）：`mount convert`、`mount delete-worktree`、`mount history` 由 `1a4bfe2`、`c986851`（protocol）、`18d15be`、`90a5c9f`、`87f0257`、`2b470b7`、`f9b68a0`、`cd18f13`（server）与 `e1699fd`、`8d7c59f`（CLI）引入；接口与此前 PENDING 的说明相同；PENDING 现为空                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 2026-10-20 | main `92e24e9`；#134（未合入）                  | 基准改为 main `92e24e9`（`ea4fe84` 之后只有文档提交，本文所列接口不变）；新增 PENDING #134（CLI 试用可用性）：按组的帮助与显式帮助以 0 退出、`--checkout PATH`、`mount convert` 与 `mount delete-worktree` 省略 mountId、`mount delete-worktree <PATH>`、`LIVE_RUNS_PRESENT` 提示给出 tab 与停止命令；请求与 JSON 输出不变。（同一 PR 后续）PATH 必须能解析才会删除；`~` 不再提前折叠 `..`；CLI 的 Git 查询使用环境白名单、有界并发，并区分 Git 缺失/过旧/执行失败；转换停下时只列出使用该 checkout 的 run；缺值选项不再阻止 `--help`                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 2026-10-21 | main `fe0fc13`；#136（未合入）                  | 新增 PENDING #136：`slug` 保留标题的文字与大小写（至多 48 个码位，为空时为 `task`），入口目录 `<slug>-<短 ID>`；默认分支 `cove/<slug>` 因此可能不是 ASCII，已存在（本地或远端跟踪，不区分大小写）时加 `-2`…`-100` 后缀，显式 `--branch` 不加；已有 task 不迁移；`mount convert` 失败时的 stderr 提示改为重新执行 `cove mount convert <taskId> <mountId>`（此前的 `cove mount retry` 对 checkout 返回 `INVALID_ARGUMENT`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| 2026-10-21 | main `9638501`（PR #134、#136）；#141（未合入） | 基准改为 main `9638501`；#134 与 #136 的 PENDING 项改为 AVAILABLE（§2），注明各项引入的提交，接口与此前 PENDING 的说明相同；新增 PENDING #141：挂载结果的 `branch` 与 `leftovers[].branch`、遗留占住路径时 `mount retry`/`mount convert` 改为受理并先删除遗留（Git 仍拒绝时为 `MOUNT_NAME_CONFLICT` 并给出遗留）、默认分支后缀按 Unicode 大小写折叠、子分支与含 `/` 的远端判断、相对路径 worktree 能 ready、存储拒绝时转为 `requires_attention`、步骤记录填满后 abandon 仍能完成                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
