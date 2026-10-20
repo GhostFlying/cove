@@ -1268,15 +1268,18 @@ describe("restart, continue and abandon (S8)", () => {
     expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
   });
 
-  it("a retry interrupted while removing an earlier attempt's leftover finishes it on a continue (#126 item 4)", async () => {
-    // The retry's actor freezes right after the leftover's worktree was removed, before that is
-    // recorded: the leftover's ledger says the removal started.
+  // A retry interrupted while it removes what the failed creation `c` left (a worktree holding
+  // someone's README.md, and its branch): its actor freezes at the leftover's ledger record of
+  // `outcome` for remove-worktree, and the next instance finds the retry requires_attention.
+  // `clear`: the file is removed before the retry, so the removal can succeed (and has, once the
+  // record after it is reached); otherwise Git refuses it, and the freeze comes before it ran.
+  async function interruptedClearing({ clear }) {
     const wrap = freezeAt(
       (name, args) =>
         name === "worktrees.advance" &&
         args.prior === true &&
         args.step?.step === "remove-worktree" &&
-        args.step.outcome !== "started",
+        (clear ? args.step.outcome !== "started" : args.step.outcome === "started"),
     );
     const env = await setup({ wrapStore: wrap });
     const alpha = await env.register("alpha");
@@ -1298,7 +1301,7 @@ describe("restart, continue and abandon (S8)", () => {
       result: { mounts: [{ left: "both", branch: "cove/Leftover" }] },
     });
     const { path, mountId } = await worktreeMount(env.tasks, taskId, "alpha");
-    await rm(join(path, "README.md"));
+    if (clear) await rm(join(path, "README.md"));
     const retried = await env.tasks.worktrees.retry("p", {
       operationId: "r",
       taskId,
@@ -1307,9 +1310,20 @@ describe("restart, continue and abandon (S8)", () => {
     });
     expect(retried.operation).toMatchObject({ state: "running" });
     await wrap.reached;
-    expect(await exists(path)).toBe(false);
+    expect(await exists(path)).toBe(!clear);
     const next = await env.restart();
     expect(await next.receipts.get(key("r"))).toMatchObject({ state: "requires_attention" });
+    const leftover = async () => {
+      const rows = await env.rows("SELECT operation_id, steps_json FROM worktree_attempts");
+      return JSON.parse(rows.find((row) => row.operation_id === "c").steps_json).slice(-2);
+    };
+    const branches = () =>
+      git(alpha.clone, "for-each-ref", "--format=%(refname:short)", "refs/heads/cove/");
+    return { env, next, taskId, path, leftover, branches };
+  }
+
+  it("a retry interrupted while removing an earlier attempt's leftover finishes it on a continue (#126 item 4)", async () => {
+    const { env, next, taskId, leftover, branches } = await interruptedClearing({ clear: true });
     // The continue proves the removal from the state, deletes the leftover's branch, then
     // creates the retry's own worktree.
     await next.tasks.worktrees.continueOperation("p", { operationId: "k", targetOperationId: "r" });
@@ -1318,21 +1332,56 @@ describe("restart, continue and abandon (S8)", () => {
       state: "ready",
       branch: "cove/Leftover-2",
     });
-    expect(
-      await git(alpha.clone, "for-each-ref", "--format=%(refname:short)", "refs/heads/cove/"),
-    ).toBe("cove/Leftover-2");
-    const ledgers = await env.rows(
-      "SELECT operation_id, steps_json FROM worktree_attempts ORDER BY created_at_ms, operation_id",
-    );
-    expect(
-      JSON.parse(ledgers.find((row) => row.operation_id === "c").steps_json).slice(-2),
-    ).toEqual([
+    expect(await branches()).toBe("cove/Leftover-2");
+    expect(await leftover()).toEqual([
       { step: "remove-worktree", outcome: "removed" },
       { step: "delete-branch", outcome: "removed" },
     ]);
     expect(await env.rows("SELECT state FROM managed_worktrees ORDER BY state")).toEqual([
       { state: "ready" },
     ]);
+  });
+
+  it("an abandon of such a retry resolves the leftover's removal before it ends (#141 review)", async () => {
+    const { env, next, taskId, path, leftover, branches } = await interruptedClearing({
+      clear: true,
+    });
+    await next.tasks.worktrees.abandonOperation("p", { operationId: "a", targetOperationId: "r" });
+    expect(await idleRecord(next.tasks, next.receipts, "a")).toMatchObject({ state: "succeeded" });
+    // The removal is proven from the state and the branch deleted: nothing is left, the path is
+    // free again.
+    const cancelled = await next.receipts.get(key("r"));
+    expect(cancelled).toMatchObject({ state: "cancelled", progress: { remainingEffects: [] } });
+    expect(cancelled.result.mounts[0]).not.toHaveProperty("left");
+    expect(await leftover()).toEqual([
+      { step: "remove-worktree", outcome: "removed" },
+      { step: "delete-branch", outcome: "removed" },
+    ]);
+    expect(await exists(path)).toBe(false);
+    expect(await branches()).toBe("");
+    expect(await env.rows("SELECT state FROM managed_worktrees")).toEqual([{ state: "abandoned" }]);
+    expect(await worktreeMount(next.tasks, taskId, "alpha")).toMatchObject({ state: "failed" });
+  });
+
+  it("an abandon of such a retry keeps and lists a leftover Git still refuses to remove (#141 review)", async () => {
+    const { env, next, path, leftover, branches } = await interruptedClearing({ clear: false });
+    await next.tasks.worktrees.abandonOperation("p", { operationId: "a", targetOperationId: "r" });
+    expect(await idleRecord(next.tasks, next.receipts, "a")).toMatchObject({ state: "succeeded" });
+    // The unfinished removal is observed void and tried again; Git refuses, so the worktree,
+    // with the file, and its branch stay, and the cancelled retry lists them.
+    const cancelled = await next.receipts.get(key("r"));
+    expect(cancelled).toMatchObject({
+      state: "cancelled",
+      progress: { remainingEffects: ["worktree", "branch"] },
+      result: { mounts: [{ left: "both", branch: "cove/Leftover" }] },
+    });
+    expect(await leftover()).toEqual([
+      { step: "remove-worktree", outcome: "preserved" },
+      { step: "delete-branch", outcome: "preserved" },
+    ]);
+    expect(await readFile(join(path, "README.md"), "utf8")).toBe("mine\n");
+    expect(await branches()).toBe("cove/Leftover");
+    expect(await env.rows("SELECT state FROM managed_worktrees")).toEqual([{ state: "intent" }]);
   });
 
   // A store facade that refuses the calls matching `when` before they are sent, as a full store

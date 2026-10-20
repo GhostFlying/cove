@@ -1013,9 +1013,30 @@ export class WorktreeService {
   // refuses, the outcome naming what is left (resultWith); attention while a process that acted on
   // it may still run, or a removal cannot be established.
   private async clearPrior(run: Run, attempt: Attempt, clone: string): Promise<Outcome | null> {
+    if ((await this.removePrior(run, attempt, clone, [run.actor])) === "attention")
+      return ATTENTION;
+    if (remainingArtifacts(attempt.prior!.steps).length) return failed("MOUNT_NAME_CONFLICT");
+    attempt.prior = null;
+    return null;
+  }
+
+  // The removal of an attempt's prior leftover, for clearPrior and for an abandon of the attempt
+  // (finishAbandon), which must not end the operation while a removal it started is unresolved
+  // (#141 review): any process that acted on it must have ended (`keys` and the prior's actors),
+  // a removal not seen to end is verified from the state first, then what is left is removed by
+  // the cleanup rules or kept. The prior's steps are updated in place. Without the entry identity
+  // (an abandon of an attempt that never verified its entry, so never acted on the leftover) only
+  // the verification runs: nothing establishes the path still leads into Cove's entry, and the
+  // leftover stays as it was, listed in the outcome.
+  private async removePrior(
+    run: Run,
+    attempt: Attempt,
+    clone: string,
+    keys: readonly OperationReceiptKey[],
+  ): Promise<"done" | "attention"> {
     const prior = attempt.prior!;
-    const keys = [run.actor, ...prior.actors];
-    if (await this.processActive(keys)) return ATTENTION;
+    const all = [...keys, ...prior.actors];
+    if (await this.processActive(all)) return "attention";
     const view: Attempt = {
       ...attempt,
       attemptId: prior.attemptId,
@@ -1025,13 +1046,12 @@ export class WorktreeService {
       prior: null,
     };
     this.priorViews.set(view, attempt);
-    const uncertain = await this.verifyUncertain(run, view, clone, keys, true);
-    if (uncertain) return uncertain;
-    if ((await this.cleanup(run, view, clone)) === "attention") return ATTENTION;
+    const uncertain = await this.verifyUncertain(run, view, clone, all, true);
+    let done: "done" | "attention" = uncertain ? "attention" : "done";
+    if (done === "done" && attempt.entryIdentity !== null)
+      done = await this.cleanup(run, view, clone);
     prior.steps = view.steps;
-    if (remainingArtifacts(view.steps).length) return failed("MOUNT_NAME_CONFLICT");
-    attempt.prior = null;
-    return null;
+    return done;
   }
 
   // The three Git steps of an attempt with its intent recorded.
@@ -1646,6 +1666,13 @@ export class WorktreeService {
             true,
           );
           done = uncertain ? "attention" : await this.cleanup(run, attempt, attempt.repo.path);
+          // An earlier attempt's leftover the attempt was removing (clearPrior): its removal is
+          // resolved too, and what stays of it is listed (store worktrees.finishAbandon).
+          if (done === "done" && attempt.prior)
+            done = await this.removePrior(run, attempt, attempt.repo.path, [
+              abandon,
+              attempt.operation,
+            ]);
         }
       } catch {
         done = "attention";

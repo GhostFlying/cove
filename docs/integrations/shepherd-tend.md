@@ -255,6 +255,8 @@ PENDING：
   stderr 提示在其中没有会丢失的内容后重新执行同一命令，worktree 挂载另提示可用 `cove mount delete-worktree`
   连同改动丢弃（该命令也移除挂载）。遗留的分支在选默认分支时仍算占用，所以这次的分支取下一个后缀。
   曾作用于遗留的操作的 Git 进程可能仍在运行时，操作为 `requires_attention`。
+  对这样的重试或转换 `operation abandon` 时，也先核实并按同样规则删除或保留遗留，仍在的遗留列入目标的
+  `progress.remainingEffects` 与 `left`。
 - 默认分支的后缀判断：`cove/` 下的本地与远端跟踪分支由 server 在 Unicode 规范化与大小写折叠后比较，
   因此 `cove/école` 已存在时 `École` 取 `cove/École-2`；位于候选名之下、大小写不同的分支（如 `cove/FIX/topic`
   之于 `cove/Fix`）也算占用；名字含 `/` 的远端（如 `team/upstream`）的远端跟踪分支按完整前缀识别。
