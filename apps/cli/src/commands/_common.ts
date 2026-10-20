@@ -29,8 +29,8 @@ export interface Arguments {
 // Options every command accepts: where the data directory and the server rendezvous are.
 export const GLOBAL_FLAGS = ["--home", "--rendezvous"] as const;
 
-// Flags that take no value.
-const SWITCHES = new Set(["--harness", "--reset", "--no-fetch", "--yes"]);
+// Flags that take no value. main.ts answers --help before a command runs.
+const SWITCHES = new Set(["--harness", "--reset", "--no-fetch", "--yes", "--help"]);
 
 export function parseArguments(argv: readonly string[]): Arguments {
   const words: string[] = [];

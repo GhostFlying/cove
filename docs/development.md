@@ -82,7 +82,8 @@ pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默
 
 ## M1 本机试用与 CLI 用法
 
-范围、场景与决定见 [M1](milestones/m1.md)。完整用法以 `cove` 不带参数时打印的 usage 为准；
+范围、场景与决定见 [M1](milestones/m1.md)。完整用法以 `cove help`（或 `cove --help`）打印的 usage 为准，
+`cove help <组>`、`cove <组> --help` 只打印该组（如 `cove help mount`）；
 tend 等脚本依赖的 JSON 输出、错误 kind 与退出码见 [Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 首个正式发布前，命令、参数与输出都可能变化。
 
@@ -114,6 +115,8 @@ cove server start --harness               # 前台运行；打印 harness 页面
 所有写命令都接受 `--operation-id ID`：请求在发送前保存在 `<home>/cli`，`cove operation resend ID` 原样重发到同一 server。
 带 `--expected-revision N` 的命令在 revision 不符时拒绝；`mount` 的 revision 是 workspace revision。
 每个命令向 stdout 输出 JSON，0 为成功，2 为用法错误，1 为其他错误；提示写到 stderr。
+显式请求的帮助（`help`、`--help`）把 usage 写到 stdout 并以 0 退出；`cove` 不带参数或 `cove <组>` 不带子命令
+仍是用法错误（2），在 stderr 打印 usage，组内的用法错误只打印该组的 usage。
 
 | 领域       | 命令                                                                                                                                                                                                                                                                                                                                     |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -1,6 +1,7 @@
 import { print, takeFlags, unwrap, UsageError, withSession, type Arguments } from "./_common.js";
 
 export const usage = `  status`;
+export const standalone = true;
 
 export async function run(args: Arguments): Promise<number> {
   takeFlags(args, []);
