@@ -1,6 +1,6 @@
 # Shepherd/tend 集成说明
 
-面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `66048d7`（2026-10-18，PR #124 合入；`64de013` 之后只有 `9a89968`（只改 AGENTS.md 与工程计划）与 #124 的提交）。
+面向 [tend](https://github.com/GhostFlying/tend) 开发者，只记录当前状态。核对基准：Cove main `ea4fe84`（2026-10-20，PR #131 合入；`66048d7` 之后只有 #131 的提交）。
 设计与决策见 [设计 §7.1](../design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)；
 本文只说明 tend 现在能用什么、计划提供什么。任何改变下文所列接口的 Cove PR 都必须同时更新本文及其变更记录。
 
@@ -35,6 +35,7 @@
 | Tab 与 run               | `cove tab create/list/get/runs/reopen/stop/close`                                       | `c63d7cd`（server）、`d6f495a`（CLI），T4                                                                        | 见下文 T4                                                                                                                                                                                                                                     |
 | Checkout 挂载            | `cove mount add <taskId> --checkout SPEC`、`cove mount remove <taskId> <mountId>`       | `3d65dc4`、`fc41992`，T3a                                                                                        | 见下文 T3a；托管 worktree 挂载见下一行                                                                                                                                                                                                        |
 | 托管 worktree 挂载       | `--worktree SPEC`、`cove mount retry`、`cove operation continue/abandon`                | `79106c0`（protocol）、`4df69ac`（server）、`b2f71b2`（CLI），T3b                                                | 见下文 T3b                                                                                                                                                                                                                                    |
+| 绑定变更与 worktree 删除 | `cove mount convert`、`cove mount delete-worktree`、`cove mount history`                | `1a4bfe2`（protocol）、`18d15be`（server）、`e1699fd`（CLI），T5                                                 | 见下文 T5                                                                                                                                                                                                                                     |
 | 重启后的 run 与操作记录  | server 停止与启动时处理，无单独命令                                                     | `d99ef5d`（存储原语：`299514d`）                                                                                 | 正常停止时当前实例存活的 run 记为 stopped-with-server；启动时，旧实例中仍为 starting/running（没有结束记录）的 run 记为 interrupted/unverifiable，已有的结束记录不变；不探测旧 PID、不重跑。无法证明结果的操作为 requires_attention           |
 | 输出                     | 每个命令向 stdout 输出 JSON                                                             | `8b06fe4`                                                                                                        | 尚无版本号与稳定性承诺（见 §6）                                                                                                                                                                                                               |
 | 退出码与错误             | 0 成功，2 用法错误，1 其他错误                                                          | `8b06fe4`                                                                                                        | CLI 自身的错误以 `cove: <消息>` 写到 stderr，尚无结构化错误输出                                                                                                                                                                               |
@@ -164,11 +165,9 @@ T3b（PR #124，合入于 `66048d7`；protocol `79106c0`，server `4df69ac`，CL
   `repo set <repoId> mainBranch`；`BRANCH_EXISTS` 提示 `--branch NEW`；每个遗留提示人工检查后可执行的命令
   `git -C <repo> worktree remove <path>`、`git -C <repo> branch -d <branch>`（Cove 不执行）。
 
-## 3. 进行中（PENDING）与计划中（PLANNED）
-
-PENDING：
-
-T5（PR #131，未合入；绑定变更与托管 worktree 删除，见 [M1](../milestones/m1.md) D3/D10）：
+T5（PR #131，合入于 `ea4fe84`；绑定变更与托管 worktree 删除，见 [M1](../milestones/m1.md) D3/D10。protocol `1a4bfe2`、
+失败删除记录中的阻塞 run `c986851`；server `18d15be`，删除期间拒绝 run `90a5c9f`、`f9b68a0`，核实后才切换绑定 `87f0257`，
+`terminal create` 的 cwd 按真实路径记录与判断 `2b470b7`、`cd18f13`；CLI `e1699fd`；受理后失败的删除列出阻塞 run `8d7c59f`（server 与 CLI））：
 
 - `cove mount convert <taskId> <mountId> [--branch B] [--base REF] [--no-fetch] [--expected-revision N] [--operation-id ID]`：
   把 ready 的 checkout 挂载换成同仓库的新托管 worktree（`<entry>/<name>`，基准规则与 `--worktree` 创建相同），
@@ -202,6 +201,10 @@ T5（PR #131，未合入；绑定变更与托管 worktree 删除，见 [M1](../m
 - `cove mount history <taskId> <mountId>`：输出 `{bindings: [{workspaceRevision, mountId, source, path, branch, boundAtMs, unboundAtMs}]}`，
   按时间先后，当前绑定 `unboundAtMs` 为 null；挂载移除或 worktree 删除后仍可查询；task 不存在 `TASK_NOT_FOUND`，
   挂载从未存在 `MOUNT_NOT_FOUND`。
+
+## 3. 进行中（PENDING）与计划中（PLANNED）
+
+PENDING：无。
 
 PLANNED：
 
@@ -262,3 +265,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `66048d7`（PR #124）                       | 基准改为 main `66048d7`；T3b 合入，#124 的 PENDING 项改为 AVAILABLE（§2 T3b）：`--worktree` 创建、`BUSY` 上限、逐仓结果与 `left`、`mount retry`、`operation continue/abandon` 及其 `leftovers` 输出与 stderr 提示由 `79106c0`（protocol）、`4df69ac`（server）与 `b2f71b2`（CLI）引入；删除 T3a 中“合入之前以 `CAPABILITY_UNAVAILABLE` 拒绝”的说明；PLANNED 补列此前遗漏的 M1 T5（`mount convert`、`mount delete-worktree`、`mount history`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 新增 PENDING #131：`mount convert`（`sourceChanges`、绑定在接受时切换）、`mount delete-worktree`（脚本须 `--yes`，无终端时以 2 退出且不发送；分支保留；不能 abandon）、`mount history`，以及 `LIVE_RUNS_PRESENT` 时逐 run 的 stderr 提示；PLANNED 中 M1 T5 一项移除                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 更正 PENDING #131：`mount convert` 改为目标核实后才切换绑定（准备期间挂载、清单、revision 与新 run 仍是 checkout；失败或放弃时 checkout 保持绑定；切换被拒为 `requires_attention` 且 `remainingEffects` 为 `switch-binding`；转换期间 `mount remove` 为 `OPERATION_EFFECTS_ACTIVE`）；删除期间使用该 worktree 的 `tab create/reopen`（含入口 tab）与 `terminal create` 以 `OPERATION_EFFECTS_ACTIVE` 拒绝；受理后失败的删除记录保留至多 4 个阻塞 run，CLI 一并打印。（同一 PR 后续）`terminal create` 的 cwd 按真实路径判断：经已有别名给出的 cwd 在删除期间同样被拒绝，这样启动的存活 run 同样阻止删除（转换只考虑该 task 自己的 run，`terminal create` 的 run 不阻止转换）；cwd 无法解析时不受理（`INVALID_ARGUMENT`/`BUSY`）                                                                                                                                                                                                                                             |
+| 2026-10-20 | main `ea4fe84`（PR #131）                       | 基准改为 main `ea4fe84`；T5 合入，#131 的 PENDING 项改为 AVAILABLE（§2 T5）：`mount convert`、`mount delete-worktree`、`mount history` 由 `1a4bfe2`、`c986851`（protocol）、`18d15be`、`90a5c9f`、`87f0257`、`2b470b7`、`f9b68a0`、`cd18f13`（server）与 `e1699fd`、`8d7c59f`（CLI）引入；接口与此前 PENDING 的说明相同；PENDING 现为空                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
