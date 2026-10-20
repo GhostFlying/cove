@@ -320,25 +320,33 @@ export async function branchCommit(
   return id && OBJECT_ID.test(id) ? id : "unavailable";
 }
 
-// The branches named `branch` or `branch-<anything>`, local (refs/heads) or remote-tracking under
-// any remote (refs/remotes/<remote>), together with any branch below them (`branch/...`, which
-// would keep `branch` from being created), returned without their refs/heads/ or
-// refs/remotes/<remote>/ prefix; "unavailable" when Git gave no answer. Matching ignores case
-// (`--ignore-case`): on a case-insensitive file system, as macOS uses by default, `cove/Fix` and
-// `cove/fix` are the same loose ref file. Used to choose a default branch that is free (D1); the
-// caller passes a `branch` without glob characters.
-export async function branchesLike(
-  clone: string,
-  branch: string,
-): Promise<string[] | "unavailable"> {
-  // A pattern without a wildcard also matches the refs below it; one with a wildcard does not,
-  // hence the `/**` forms. `*` does not match `/`, so a remote name is one component.
-  const patterns = [`refs/heads/${branch}`, `refs/heads/${branch}-*`];
-  for (const name of [branch, `${branch}-*`])
-    patterns.push(`refs/remotes/*/${name}`, `refs/remotes/*/${name}/**`);
-  patterns.push(`refs/heads/${branch}-*/**`);
+// The local branches (refs/heads) and remote-tracking branches whose first component is `top`,
+// ignoring ASCII case, without their refs/heads/ or remote prefix; "unavailable" when Git gave no
+// answer. Used to choose a default branch that is free (D1): the caller compares the names itself
+// (#138), because Git's `--ignore-case` folds only ASCII, while a case-insensitive file system, as
+// macOS uses by default, also takes `cove/école` and `cove/École` for one loose ref file, and a
+// branch below a name (`cove/FIX/topic`) keeps a case variant of it (`cove/Fix`) from being created
+// there. The `**` patterns match case-insensitively at every level; a literal prefix would not.
+// A remote-tracking ref is named under its remote's full prefix, `refs/remotes/<remote>/`, for each
+// configured remote whose prefix it has, remote names with `/` included; one under no configured
+// remote is named by every tail after one of its slashes, so that no possible name is missed. A
+// few extra names only make the caller skip a suffix. The caller passes a `top` without glob
+// characters.
+export async function branchesUnder(clone: string, top: string): Promise<string[] | "unavailable"> {
+  const remotes = await runGit(["remote"], { cwd: clone });
+  if (remotes.kind !== "exited" || remotes.code !== 0) return "unavailable";
+  const prefixes = remotes.stdout
+    .split("\n")
+    .filter((name) => name !== "")
+    .map((name) => `refs/remotes/${name}/`);
   const result = await runGit(
-    ["for-each-ref", "--ignore-case", "--format=%(refname)", ...patterns],
+    [
+      "for-each-ref",
+      "--ignore-case",
+      "--format=%(refname)",
+      `refs/heads/${top}/**`,
+      `refs/remotes/**/${top}/**`,
+    ],
     { cwd: clone },
   );
   if (result.kind !== "exited" || result.code !== 0) return "unavailable";
@@ -346,9 +354,13 @@ export async function branchesLike(
   for (const ref of result.stdout.split("\n")) {
     if (ref.startsWith("refs/heads/")) found.push(ref.slice("refs/heads/".length));
     else if (ref.startsWith("refs/remotes/")) {
-      const rest = ref.slice("refs/remotes/".length);
-      const slash = rest.indexOf("/");
-      if (slash > 0) found.push(rest.slice(slash + 1));
+      const under = prefixes.filter((prefix) => ref.startsWith(prefix));
+      if (under.length) for (const prefix of under) found.push(ref.slice(prefix.length));
+      else {
+        const rest = ref.slice("refs/remotes/".length);
+        for (let slash = rest.indexOf("/"); slash >= 0; slash = rest.indexOf("/", slash + 1))
+          found.push(rest.slice(slash + 1));
+      }
     }
   }
   return found;
