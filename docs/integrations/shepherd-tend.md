@@ -231,6 +231,18 @@ PENDING：
   通用提示。停在 `requires_attention` 的转换记录不带 run，改为列出该 task 中按 server 相同规则（启动 cwd 或启动时的
   挂载映射在该 checkout 内）使用它的存活 tab run。仍只供人读。
 
+#136（task 命名、默认分支与转换的重试提示，未合入）：请求与 stdout 的 JSON 形状不变；协议中 `slug` 的取值范围放宽。
+
+- 新 task 的 `slug` 保留标题的文字与大小写（如“转换测试”为 `转换测试`，“Fix bug”为 `Fix-bug`；此前为小写 ASCII，
+  没有 ASCII 时为 `task`），至多 48 个码位，为空时为 `task`；入口目录为 `<slug>-<短 ID>`。已有 task 不迁移。
+- `--worktree` 与 `mount convert` 未给 `--branch` 时，默认分支为 `cove/<slug>`，因此**分支名可能不是 ASCII**；
+  该分支已在本地或任一远端的远端跟踪分支中存在（不区分大小写）时依次改为 `cove/<slug>-2` 至 `-100`，**分支名
+  可能带后缀**，实际分支以 task JSON 中挂载的 `branch` 为准。都被占用、或显式 `--branch` 已存在时以 `BRANCH_EXISTS` 失败。
+- `mount convert` 失败（`BRANCH_EXISTS`、`FETCH_FAILED`、`MAIN_BRANCH_UNRESOLVED`）时，stderr 提示改为重新执行
+  `cove mount convert <taskId> <mountId>` 并附 `--branch NEW`、`--no-fetch` 或 `--base REF`（其余选项需重新给出）；
+  此前提示的 `cove mount retry` 对仍是 checkout 的挂载返回 `INVALID_ARGUMENT`。`operation continue` 不知道 task ID 时，
+  提示中以 `<taskId>` 占位（此前为不带 ID 的 `cove mount retry`）。仍只供人读。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -292,3 +304,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 更正 PENDING #131：`mount convert` 改为目标核实后才切换绑定（准备期间挂载、清单、revision 与新 run 仍是 checkout；失败或放弃时 checkout 保持绑定；切换被拒为 `requires_attention` 且 `remainingEffects` 为 `switch-binding`；转换期间 `mount remove` 为 `OPERATION_EFFECTS_ACTIVE`）；删除期间使用该 worktree 的 `tab create/reopen`（含入口 tab）与 `terminal create` 以 `OPERATION_EFFECTS_ACTIVE` 拒绝；受理后失败的删除记录保留至多 4 个阻塞 run，CLI 一并打印。（同一 PR 后续）`terminal create` 的 cwd 按真实路径判断：经已有别名给出的 cwd 在删除期间同样被拒绝，这样启动的存活 run 同样阻止删除（转换只考虑该 task 自己的 run，`terminal create` 的 run 不阻止转换）；cwd 无法解析时不受理（`INVALID_ARGUMENT`/`BUSY`）                                                                                                                                                                                                                                             |
 | 2026-10-20 | main `ea4fe84`（PR #131）                       | 基准改为 main `ea4fe84`；T5 合入，#131 的 PENDING 项改为 AVAILABLE（§2 T5）：`mount convert`、`mount delete-worktree`、`mount history` 由 `1a4bfe2`、`c986851`（protocol）、`18d15be`、`90a5c9f`、`87f0257`、`2b470b7`、`f9b68a0`、`cd18f13`（server）与 `e1699fd`、`8d7c59f`（CLI）引入；接口与此前 PENDING 的说明相同；PENDING 现为空                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 2026-10-20 | main `92e24e9`；#134（未合入）                  | 基准改为 main `92e24e9`（`ea4fe84` 之后只有文档提交，本文所列接口不变）；新增 PENDING #134（CLI 试用可用性）：按组的帮助与显式帮助以 0 退出、`--checkout PATH`、`mount convert` 与 `mount delete-worktree` 省略 mountId、`mount delete-worktree <PATH>`、`LIVE_RUNS_PRESENT` 提示给出 tab 与停止命令；请求与 JSON 输出不变。（同一 PR 后续）PATH 必须能解析才会删除；`~` 不再提前折叠 `..`；CLI 的 Git 查询使用环境白名单、有界并发，并区分 Git 缺失/过旧/执行失败；转换停下时只列出使用该 checkout 的 run；缺值选项不再阻止 `--help`                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-10-21 | main `fe0fc13`；#136（未合入）                  | 新增 PENDING #136：`slug` 保留标题的文字与大小写（至多 48 个码位，为空时为 `task`），入口目录 `<slug>-<短 ID>`；默认分支 `cove/<slug>` 因此可能不是 ASCII，已存在（本地或远端跟踪，不区分大小写）时加 `-2`…`-100` 后缀，显式 `--branch` 不加；已有 task 不迁移；`mount convert` 失败时的 stderr 提示改为重新执行 `cove mount convert <taskId> <mountId>`（此前的 `cove mount retry` 对 checkout 返回 `INVALID_ARGUMENT`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
