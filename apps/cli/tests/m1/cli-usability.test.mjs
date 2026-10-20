@@ -33,6 +33,9 @@ test("an explicit help request prints the full usage, or one group's, on stdout 
     ["help", "repo"],
     ["repo", "--help"],
     ["repo", "register", "--help"],
+    // A --help before or after an option that lacks its value is still a help request.
+    ["--help", "repo", "register", "--name"],
+    ["--home", fixture.home("home"), "repo", "register", "--name", "--help"],
   ]) {
     const result = await fixture.cove(args);
     expect({ args, code: result.code }).toEqual({ args, code: 0 });
