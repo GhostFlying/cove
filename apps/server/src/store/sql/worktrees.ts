@@ -549,6 +549,8 @@ export function resultWith(
 ): OperationResultData {
   const result: OperationResultData = { ...current.result };
   const byMount = new Map(attempts.map((attempt) => [attempt.mountId, attempt]));
+  // Branch names only in a single-mount result (OperationResultDataSchema, the record budget).
+  const single = result.mounts?.length === 1;
   if (result.mounts)
     result.mounts = result.mounts.map((outcome) => {
       const attempt = byMount.get(outcome.mountId);
@@ -559,7 +561,9 @@ export function resultWith(
         ...(attempt.outcome === "failed" && attempt.errorKind
           ? { errorKind: attempt.errorKind }
           : {}),
-        ...(attempt.outcome === "failed" ? leftOf(attempt.steps) : {}),
+        ...(attempt.outcome === "failed"
+          ? leftOf(attempt.steps, single ? attempt.branch : null)
+          : {}),
       };
     });
   if (revision !== null && result.workspaceRevision !== undefined)
@@ -567,15 +571,19 @@ export function resultWith(
   return result;
 }
 
-// What an ended attempt left in place (the mount outcome's `left`). Only a failed attempt has
-// leftovers: a ready one keeps its worktree and branch as the mount's, and a pending one may still
-// remove them. The result never carries targetOperationId (it belongs to continue/abandon), and
-// sourceChanges only for a binding conversion, which prepares exactly one mount (m1 T5), so the
-// schema's exclusion holds.
-function leftOf(steps: readonly StepEntry[]): { left?: "worktree" | "branch" | "both" } {
+// What an ended attempt left in place (the mount outcome's `left`), with the name of a branch
+// left in place when `branch` is given. Only a failed attempt has leftovers: a ready one keeps its
+// worktree and branch as the mount's, and a pending one may still remove them. The result never
+// carries targetOperationId (it belongs to continue/abandon), and sourceChanges only for a binding
+// conversion, which prepares exactly one mount (m1 T5), so the schema's exclusion holds.
+function leftOf(
+  steps: readonly StepEntry[],
+  branch: string | null,
+): { left?: "worktree" | "branch" | "both"; branch?: string } {
   const remaining = remainingArtifacts(steps);
-  if (remaining.length === 2) return { left: "both" };
-  return remaining.length ? { left: remaining[0]! } : {};
+  if (!remaining.length) return {};
+  const left = remaining.length === 2 ? "both" : remaining[0]!;
+  return { left, ...(branch !== null && left !== "worktree" ? { branch } : {}) };
 }
 
 // The outcome of an operation whose attempts all ended: succeeded only when every one was recorded

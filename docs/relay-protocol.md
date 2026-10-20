@@ -542,8 +542,10 @@ failed/cancelled 可以保留部分副作用，记录 completedSteps、remaining
 准备托管 worktree 的写（task.create、mount.add、mount.retry、binding.convert）在结果的逐挂载结果中以可选的
 `left`（`worktree`、`branch` 或 `both`）标出失败或被放弃的尝试留在原处的产物：删除它们可能丢失工作，
 因此不删除（m1 D1 T3b）。它只是引用，路径与分支名在挂载记录（task.get）中，仓库路径在 repo 记录中。
-带 `left` 的结果不带 `targetOperationId`，只在恰有一个挂载时才可带 `sourceChanges`（binding.convert 只准备一个挂载，m1 T5；
-schema 约束），以保证最坏情况的操作记录仍在记录预算内。
+例外是留下的分支：`left` 为 `branch` 或 `both` 时，单挂载结果另带 `branch` 给出留下的分支名（#132），因为转换的挂载
+仍是 checkout，重试也可能已选了另一个分支，挂载记录里的分支不是留下的那个。
+带 `left` 的结果不带 `targetOperationId`，只在恰有一个挂载时才可带 `sourceChanges` 或挂载的 `branch`（mount.retry 与
+binding.convert 各只准备一个挂载，m1 T5；schema 约束），以保证最坏情况的操作记录仍在记录预算内。
 requires_attention 保留已有进度；后续显式恢复处理器可以继续同一操作，不能用普通重复提交绕过暂停核实。
 
 - HTTP 超时/断开只代表客户端不再等待；已持久接受的写操作继续，不随请求 AbortSignal 被隐式撤销。

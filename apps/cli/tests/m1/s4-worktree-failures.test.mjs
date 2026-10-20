@@ -1,4 +1,5 @@
-import { stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
@@ -25,6 +26,38 @@ const absent = (path) =>
     () => false,
     (error) => error.code === "ENOENT",
   );
+
+// A `git` on the server's PATH that, once armed, writes an untracked README.md into the worktree
+// right before Cove's checkout (`read-tree -m -u HEAD`, run in the worktree): the checkout refuses
+// to overwrite it and plain `git worktree remove` refuses to remove it, so the failed attempt
+// leaves its worktree and branch in place, as when someone's work got there first. Installed
+// before the server starts.
+async function plantingGit() {
+  const real = await new Promise((done, fail) =>
+    execFile("/bin/sh", ["-c", "command -v git"], { env: fixture.env }, (error, stdout) =>
+      error ? fail(error) : done(stdout.trim()),
+    ),
+  );
+  const bin = join(fixture.root, "planting-git");
+  const armed = join(fixture.root, "plant-armed");
+  await mkdir(bin, { recursive: true });
+  await writeFile(
+    join(bin, "git"),
+    `#!/bin/sh
+case "$*" in
+  *"read-tree -m -u HEAD"*)
+    if [ -e "${armed}" ]; then rm -f "${armed}"; echo planted > README.md; fi ;;
+esac
+exec "${real}" "$@"
+`,
+  );
+  await chmod(join(bin, "git"), 0o755);
+  fixture.env.PATH = `${bin}:${fixture.env.PATH}`;
+  return { arm: () => writeFile(armed, "") };
+}
+
+// The commands the hints name, in order.
+const hinted = (stderr) => [...stderr.matchAll(/`([^`]*)`/g)].map((match) => match[1]);
 
 test("an existing branch fails one repo, the other keeps its worktree, a resend returns the record and a retry finishes it", async () => {
   const home = fixture.home("home");
@@ -142,4 +175,56 @@ test("an unresolvable main branch fails with MAIN_BRANCH_UNRESOLVED and is retri
     state: "ready",
     baseCommit: await alpha.git("rev-parse", "refs/remotes/origin/work"),
   });
+});
+
+test("a conversion whose target Git does not remove names the branch it left in place (#132)", async () => {
+  const planting = await plantingGit();
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const { task } = await fixture.coveJson(
+    ["task", "create", "Leftover", "--checkout", alpha.repoId],
+    { home },
+  );
+  const [checkout] = task.workspace.mounts;
+  const target = join(task.workspace.entryPath, checkout.name);
+  await planting.arm();
+  const failed = await fixture.cove(["mount", "convert", task.taskId], { home });
+  expect(failed.code).toBe(1);
+  const printed = JSON.parse(failed.stdout);
+  expect(printed.operation).toMatchObject({
+    method: "binding.convert",
+    state: "failed",
+    result: {
+      mounts: [
+        {
+          mountId: checkout.mountId,
+          state: "failed",
+          errorKind: "GIT_UNAVAILABLE",
+          left: "both",
+          branch: "cove/Leftover",
+        },
+      ],
+    },
+  });
+  expect(printed.leftovers).toEqual([
+    {
+      mountId: checkout.mountId,
+      path: target,
+      branch: "cove/Leftover",
+      repoPath: expect.any(String),
+      effects: ["worktree", "branch"],
+    },
+  ]);
+  const repo = printed.leftovers[0].repoPath;
+  expect(hinted(failed.stderr)).toEqual(
+    expect.arrayContaining([
+      `git -C ${repo} worktree remove ${target}`,
+      `git -C ${repo} branch -d cove/Leftover`,
+    ]),
+  );
+  expect(failed.stderr).not.toContain("<branch>");
+  // Nothing of the planted work was removed, and the checkout stays mounted.
+  expect(await readFile(join(target, "README.md"), "utf8")).toBe("planted\n");
+  expect(printed.task.workspace.mounts[0]).toMatchObject({ source: "checkout", state: "ready" });
 });
