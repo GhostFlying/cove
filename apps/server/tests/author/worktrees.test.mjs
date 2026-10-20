@@ -22,6 +22,7 @@ import { networkEnvironment, resolveBase, runGitStep } from "../../dist/git/work
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { createRecoveryVerifiers } from "../../dist/operations/recovery-verifiers.js";
 import { Store } from "../../dist/store/database.js";
+import { StoreUnavailableError } from "../../dist/store/store-errors.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { recordInstanceStart } from "../../dist/store/identity.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
@@ -1265,6 +1266,63 @@ describe("restart, continue and abandon (S8)", () => {
     });
     expect(await exists(path)).toBe(false);
     expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
+  });
+
+  // A store facade that refuses the calls matching `when` before they are sent, as a full store
+  // queue does; `refusals` counts them.
+  const refusing = (when) => {
+    const wrap = (store) => ({
+      call: async (name, args) => {
+        if (when(name, args)) {
+          wrap.refusals++;
+          throw new StoreUnavailableError("busy", "not-sent");
+        }
+        return store.call(name, args);
+      },
+    });
+    wrap.refusals = 0;
+    return wrap;
+  };
+
+  it("repeats a ledger read or write the store refused, and the operation still ends (#126 item 9)", async () => {
+    let reads = 0;
+    let writes = 0;
+    const wrap = refusing(
+      (name) =>
+        (name === "worktrees.attempts" && ++reads <= 2) ||
+        (name === "worktrees.advance" && ++writes <= 3),
+    );
+    const env = await setup({ wrapStore: wrap });
+    const alpha = await env.register("alpha");
+    await env.tasks.create("p", {
+      operationId: "c",
+      title: "Refused",
+      mounts: [{ source: "worktree", repoId: alpha.repoId, noFetch: true }],
+    });
+    expect(await idleRecord(env.tasks, env.receipts, "c")).toMatchObject({ state: "succeeded" });
+    expect(wrap.refusals).toBe(5);
+  });
+
+  it("hands an operation whose settle the store keeps refusing to requires_attention (#126 item 9)", async () => {
+    const wrap = refusing((name) => name === "worktrees.settle");
+    const env = await setup({ wrapStore: wrap });
+    const alpha = await env.register("alpha");
+    await env.tasks.create("p", {
+      operationId: "c",
+      title: "Unsettled",
+      mounts: [{ source: "worktree", repoId: alpha.repoId, noFetch: true }],
+    });
+    // Never left running without an actor, and nothing reported as success: a continue settles
+    // the verified attempt once the store takes the write.
+    const record = await idleRecord(env.tasks, env.receipts, "c");
+    expect(record).toMatchObject({ state: "requires_attention" });
+    expect(record.progress.completedSteps).toEqual(
+      expect.arrayContaining(["branch", "worktree", "checkout"]),
+    );
+    expect(wrap.refusals).toBeGreaterThan(1);
+    const next = await env.restart();
+    await next.tasks.worktrees.continueOperation("p", { operationId: "k", targetOperationId: "c" });
+    expect(await idleRecord(next.tasks, next.receipts, "c")).toMatchObject({ state: "succeeded" });
   });
 
   it("finishes an abandon whose ledger repeated uncertain runs had filled (#126 item 10)", async () => {
