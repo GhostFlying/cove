@@ -526,21 +526,31 @@ export function operationHints(operation: OperationRecord, taskId?: string): str
   }
   const failedMounts = (operation.result?.mounts ?? []).filter((mount) => mount.state === "failed");
   for (const mount of failedMounts) {
-    const retry = taskId ? `cove mount retry ${taskId} ${mount.mountId}` : "cove mount retry";
+    // A failed conversion never changed the mount: it is still the ready checkout, which
+    // `mount retry` (only for a failed worktree mount) refuses with INVALID_ARGUMENT. It is tried
+    // again by converting again, a new request that reuses nothing of the failed one, so any
+    // other flag given then is repeated. operation.continue prints these without the task ID,
+    // which a conversion's record (resource: the mount) does not give.
+    const task = taskId ?? "<taskId>";
+    const convert = operation.method === "binding.convert";
+    const retry = convert
+      ? `cove mount convert ${task} ${mount.mountId}`
+      : `cove mount retry ${task} ${mount.mountId}`;
+    const repeat = convert ? " (the checkout stays mounted; repeat any other flag you gave)" : "";
     if (mount.errorKind === "FETCH_FAILED")
       hints.push(
         `mount ${mount.mountId}: fetching origin failed and nothing was created; fix the remote ` +
           `and run \`${retry}\`, or create it from the commits already fetched with ` +
-          `\`${retry} --no-fetch\``,
+          `\`${retry} --no-fetch\`${repeat}`,
       );
     else if (mount.errorKind === "MAIN_BRANCH_UNRESOLVED")
       hints.push(
         `mount ${mount.mountId}: no main branch was found on origin; run \`${retry} --base REF\`, ` +
-          `or set it with \`cove repo set <repoId> mainBranch BRANCH\` and run \`${retry}\``,
+          `or set it with \`cove repo set <repoId> mainBranch BRANCH\` and run \`${retry}\`${repeat}`,
       );
     else if (mount.errorKind === "BRANCH_EXISTS")
       hints.push(
-        `mount ${mount.mountId}: the branch already exists; run \`${retry} --branch NEW\``,
+        `mount ${mount.mountId}: the branch already exists; run \`${retry} --branch NEW\`${repeat}`,
       );
   }
   return hints;

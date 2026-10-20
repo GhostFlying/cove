@@ -655,6 +655,16 @@ test("a conversion whose preparation fails leaves the checkout bound and the rev
     { home },
   );
   expect(tab.operation.state).toBe("succeeded");
+  // The hints convert again (the mount is still the checkout, so `mount retry` would refuse it);
+  // the --no-fetch one works from the commits the clone already has.
+  const convert = `cove mount convert ${task.taskId} ${mount.mountId}`;
+  expect(result.stderr).toContain(`run \`${convert}\`, or create it from the commits already`);
+  expect(result.stderr).not.toContain("mount retry");
+  const again = await fixture.cove([...convert.split(" ").slice(1), "--no-fetch"], { home });
+  expect({ code: again.code, stderr: again.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(JSON.parse(again.stdout).task.workspace.mounts).toEqual([
+    expect.objectContaining({ mountId: mount.mountId, source: "worktree", state: "ready" }),
+  ]);
 });
 
 test("no run is accepted in a worktree while its deletion waits to remove it", async () => {
