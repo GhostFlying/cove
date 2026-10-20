@@ -1170,6 +1170,9 @@ export const worktreeOperations = {
       if (attempt.outcome !== "pending") continue;
       const remaining = remainingArtifacts(attempt.steps);
       add(left, remaining);
+      // What stays of an earlier attempt's leftover the attempt was removing (PriorAttempt); the
+      // target's result lists it as the mount's `left` (resultWith).
+      if (attempt.prior) add(left, remainingArtifacts(attempt.prior.steps));
       for (const step of ["branch", "worktree", "checkout"] as const)
         if (credited(attempt.steps, step)) add(completed, [step]);
       if (
