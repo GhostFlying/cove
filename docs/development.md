@@ -140,7 +140,9 @@ cove server start --harness               # 前台运行；打印 harness 页面
   这一查找需要本机 Git 2.31 及以上，且不受继承的 `GIT_DIR` 等环境变量影响；Git 缺失、版本过旧或执行失败时
   各有提示，同样不发送。
 - `--worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]`：在 `<入口>/<NAME>` 新建托管 worktree，
-  分支默认 `cove/<slug>`；先 fetch `origin`，基准默认远端主分支，从不回退到本地 HEAD（D1）。
+  分支默认 `cove/<slug>`，slug 保留标题的文字与大小写（如 `cove/转换测试`、`cove/Fix-bug`）；该分支已在本地或远端
+  跟踪分支中存在时依次改用 `-2`、`-3`…（至多 `-100`），显式 `branch=` 不加后缀。先 fetch `origin`，基准默认
+  远端主分支，从不回退到本地 HEAD（D1）。
 - `NAME` 默认取 repo 显示名。入口目录中的 `cove-workspace.json` 列出每个挂载的真实路径，checkout 经它访问（D2）。
 
 ### 一次典型试用

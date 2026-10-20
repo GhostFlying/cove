@@ -205,8 +205,14 @@ export const TaskRecordSchema = z.object({
   taskId: ResourceIdSchema,
   revision: SequenceSchema,
   title: TitleSchema,
-  // Fixed at creation; renaming the task never moves its directory (D1).
-  slug: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+  // Fixed at creation; renaming the task never moves its directory (D1). One ref component and
+  // file name in the title's own script (domain/workspaces.ts taskSlug): Unicode letters and
+  // digits, `.`, `_` and `-`, neither starting nor ending with `.` or `-`, without `..` or a
+  // trailing `.lock`, at most 64 code points (the derivation keeps 48). Slugs of earlier
+  // releases (lower-case ASCII) match too.
+  slug: z
+    .string()
+    .regex(/^(?!.*\.\.)(?!.*\.lock$)[\p{L}\p{N}_](?:[\p{L}\p{N}._-]{0,62}[\p{L}\p{N}_])?$/iu),
   archived: z.boolean(),
   createdAtMs: TimestampMsSchema,
   workspace: WorkspaceRecordSchema,

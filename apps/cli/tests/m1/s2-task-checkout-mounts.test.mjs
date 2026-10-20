@@ -115,13 +115,13 @@ test("an investigation task mounts a checkout without creating a branch or workt
   });
   expect(task).toMatchObject({
     title: "Investigate flaky reconnect",
-    slug: "investigate-flaky-reconnect",
+    slug: "Investigate-flaky-reconnect",
     archived: false,
     notice: expect.stringContaining("read-only"),
     workspace: { revision: 0, entryState: "ready" },
   });
   const { entryPath } = task.workspace;
-  expect(entryPath.startsWith(join(workspaceRoot, "investigate-flaky-reconnect-"))).toBe(true);
+  expect(entryPath.startsWith(join(workspaceRoot, "Investigate-flaky-reconnect-"))).toBe(true);
   expect(task.workspace.mounts).toEqual([
     {
       mountId: expect.any(String),
@@ -354,7 +354,7 @@ test("tasks, mounts and their entries survive a server restart, and a resent cre
   // Renaming never moves the entry: the slug is fixed at creation.
   expect(await fixture.coveJson(["task", "get", task.taskId], { home })).toMatchObject({
     title: "Renamed",
-    slug: "survive-restart",
+    slug: "Survive-restart",
     workspace: { entryPath: task.workspace.entryPath, entryState: "ready" },
   });
 });

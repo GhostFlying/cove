@@ -26,6 +26,7 @@ import {
   Slots,
   WorkspaceService,
   defaultMountName,
+  TASK_SLUG_CODE_POINTS,
   taskSlug,
 } from "../../dist/domain/workspaces.js";
 import { discoverRepository } from "../../dist/git/repository.js";
@@ -213,12 +214,54 @@ async function recordManaged(env, { path, repoId, taskId, state = "ready" }) {
   );
 }
 
+// Whether Git accepts `name` as a branch name (`git check-ref-format --branch`).
+function validBranch(name) {
+  return new Promise((done) =>
+    execFile("git", ["check-ref-format", "--branch", name], { cwd: tmpdir() }, (error) =>
+      done(!error),
+    ),
+  );
+}
+
 describe("task naming", () => {
-  it("derives a fixed slug and a default mount name that are single safe segments", () => {
-    expect(taskSlug("Fix the Reconnect bug!")).toBe("fix-the-reconnect-bug");
-    expect(taskSlug("  --Ünïcödé  ")).toBe("unicode");
-    expect(taskSlug("调查")).toBe("task");
-    expect(taskSlug("a".repeat(80))).toHaveLength(48);
+  it("derives a fixed slug in the title's own script that is one valid ref component", async () => {
+    const cases = [
+      ["转换测试", "转换测试"],
+      ["Fix the Reconnect bug!", "Fix-the-Reconnect-bug"],
+      ["  --Ünïcödé  ", "Ünïcödé"],
+      // NFC: a decomposed é becomes one code point.
+      ["Cafe\u0301", "Café"],
+      ["修复 login 页面 v2", "修复-login-页面-v2"],
+      ["a b\tc\nd", "a-b-c-d"],
+      ["../../etc/passwd", "etc-passwd"],
+      ["a..b...c", "a.b.c"],
+      ["x~y^z:w?v*u[t\\s", "x-y-z-w-v-u-t-s"],
+      ["ref@{1}", "ref-1"],
+      ["@{", "task"],
+      ["release.lock", "release"],
+      ["a.lock.lock", "a"],
+      ["v1.LOCK", "v1"],
+      ["🚀 部署 ✨", "部署"],
+      ["🚀✨", "task"],
+      ["", "task"],
+      ["...---", "task"],
+      ["under_score.dot-dash", "under_score.dot-dash"],
+    ];
+    for (const [title, slug] of cases) {
+      expect({ title, slug: taskSlug(title) }).toEqual({ title, slug });
+      expect({ title, valid: await validBranch(`cove/${taskSlug(title)}`) }).toEqual({
+        title,
+        valid: true,
+      });
+    }
+    // At most 48 code points, counted as code points rather than UTF-16 units or bytes, and
+    // never ending in a separator after the cut.
+    expect(Array.from(taskSlug("转".repeat(80)))).toHaveLength(TASK_SLUG_CODE_POINTS);
+    expect(Array.from(taskSlug("𠀀".repeat(80)))).toHaveLength(TASK_SLUG_CODE_POINTS);
+    expect(taskSlug(`${"a".repeat(47)}-b`)).toBe("a".repeat(47));
+    expect(taskSlug(`${"a".repeat(43)}.lock-b`)).toBe("a".repeat(43));
+    for (const title of ["转".repeat(80), `${"a".repeat(43)}.lock-b`, `${"a".repeat(47)}..b`])
+      expect(await validBranch(`cove/${taskSlug(title)}`)).toBe(true);
     expect(defaultMountName("My App")).toBe("My-App");
     expect(defaultMountName("..hidden")).toBe("hidden");
     expect(defaultMountName("调查")).toBeNull();
@@ -235,7 +278,7 @@ describe("tasks and checkout mounts", () => {
     expect(operation).toMatchObject({ method: "task.create", state: "succeeded", revision: 1 });
     const { task } = await env.tasks.get(taskId);
     expect(task.workspace.entryState).toBe("ready");
-    expect(task.workspace.entryPath.startsWith(`${env.workspaceRoot}/investigate-`)).toBe(true);
+    expect(task.workspace.entryPath.startsWith(`${env.workspaceRoot}/Investigate-`)).toBe(true);
     expect(task.workspace.mounts).toEqual([
       expect.objectContaining({
         name: "alpha",
@@ -463,7 +506,7 @@ describe("tasks and checkout mounts", () => {
         .resource,
     ).toMatchObject({ kind: "task", revision: 1 });
     const task = (await env.tasks.get(taskId)).task;
-    expect(task).toMatchObject({ title: "Renamed", slug: "t", revision: 1 });
+    expect(task).toMatchObject({ title: "Renamed", slug: "T", revision: 1 });
     expect(task.workspace).toMatchObject({ revision: 1, entryState: "ready" });
     await env.tasks.setArchived("p", { operationId: "ar1", taskId }, true);
     expect(kind(await env.tasks.setArchived("p", { operationId: "ar2", taskId }, true))).toBe(
@@ -1871,7 +1914,7 @@ describe("workspace entry", () => {
 
   it("refuses a task whose entry path is already taken and leaves the occupant as it is", async () => {
     const env = await setup({ newId: counter() });
-    const occupant = join(env.workspaceRoot, "t-id0001");
+    const occupant = join(env.workspaceRoot, "T-id0001");
     await mkdir(occupant, { recursive: true });
     await writeFile(join(occupant, "notes.txt"), "mine\n");
     expect(

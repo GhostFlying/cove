@@ -207,6 +207,12 @@ test("a task record states its workspace entry and gives a checkout no entry pat
     },
   };
   expect(TaskRecordSchema.safeParse(task).success).toBe(true);
+  // A slug keeps the title's script and case; it is one ref component of at most 64 code points.
+  const slug = (value) => TaskRecordSchema.safeParse({ ...task, slug: value }).success;
+  for (const value of ["转换测试", "Fix-bug", "v1.2_x", "task", "a", "转".repeat(64)])
+    expect({ value, ok: slug(value) }).toEqual({ value, ok: true });
+  for (const value of ["", "-a", "a-", ".a", "a.", "a..b", "a.lock", "a b", "a/b", "转".repeat(65)])
+    expect({ value, ok: slug(value) }).toEqual({ value, ok: false });
   const { entryState, ...withoutState } = task.workspace;
   expect(entryState).toBe("pending");
   expect(TaskRecordSchema.safeParse({ ...task, workspace: withoutState }).success).toBe(false);
