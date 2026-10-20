@@ -1191,6 +1191,32 @@ describe("restart, continue and abandon (S8)", () => {
     expect(await idleRecord(next.tasks, next.receipts, "r")).toMatchObject({ state: "succeeded" });
   });
 
+  it("abandons a worktree never checked out whose links are relative (#126 item 8)", async () => {
+    const frozen = beforeStartOf("checkout");
+    const env = await setup({ wrapStore: frozen });
+    const alpha = await env.register("alpha");
+    await git(alpha.clone, "config", "worktree.useRelativePaths", "true");
+    const outcome = await env.tasks.create("p", {
+      operationId: "c",
+      title: "Relative",
+      mounts: [{ source: "worktree", repoId: alpha.repoId, noFetch: true }],
+    });
+    await frozen.reached;
+    const path = (await worktreeMount(env.tasks, outcome.operation.result.resource.id, "alpha"))
+      .path;
+    expect(await readFile(join(path, ".git"), "utf8")).toMatch(/^gitdir: \.\.\//);
+    const next = await env.restart();
+    await next.tasks.worktrees.abandonOperation("p", { operationId: "a", targetOperationId: "c" });
+    expect(await idleRecord(next.tasks, next.receipts, "a")).toMatchObject({ state: "succeeded" });
+    // Proven to hold nothing but its own `.git` file, it is removed with its branch.
+    expect(await next.receipts.get(key("c"))).toMatchObject({
+      state: "cancelled",
+      progress: { remainingEffects: [] },
+    });
+    expect(await exists(path)).toBe(false);
+    expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
+  });
+
   it("accepts an abandon before removing anything and resumes it after a restart", async () => {
     const { env, alpha, path } = await frozenTask(beforeStartOf("checkout"));
     await until(async () =>

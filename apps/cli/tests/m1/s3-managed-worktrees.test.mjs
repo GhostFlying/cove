@@ -187,3 +187,23 @@ test("a managed worktree cannot be mounted as a checkout, also after its task is
   const current = await fixture.coveJson(["task", "get", other.taskId], { home });
   expect(current.workspace.mounts).toEqual([]);
 });
+
+test("a clone that links its worktrees by relative paths gets a ready worktree (#126 item 8)", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  // Git 2.48+ then writes the worktree's `.git` file and its administrative backlink relative to
+  // their own directories.
+  await alpha.git("config", "worktree.useRelativePaths", "true");
+  const created = await fixture.cove(
+    ["task", "create", "Relative links", "--worktree", alpha.repoId],
+    { home },
+  );
+  const { operation, task } = JSON.parse(created.stdout);
+  const [mount] = worktreeMounts(task);
+  expect((await readFile(join(mount.path, ".git"), "utf8")).startsWith("gitdir: ../")).toBe(true);
+  expect({ code: created.code, stderr: created.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(operation).toMatchObject({ state: "succeeded", result: { mounts: [{ state: "ready" }] } });
+  expect(mount.state).toBe("ready");
+  expect(await readFile(join(mount.path, "README.md"), "utf8")).toBe("alpha\n");
+});

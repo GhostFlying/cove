@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readdir, readFile, rm, rmdir, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, readdir, readFile, realpath, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { domainError, type DomainError, type DomainErrorKind } from "@cove/protocol/errors";
 import type { OperationReceiptKey, OperationRecord, WriteRpcMethod } from "@cove/protocol/rpc";
 import { HostPathSchema, type MountSpec, type WorkspaceRecord } from "@cove/protocol/workspace";
@@ -397,6 +397,32 @@ async function pathState(path: string): Promise<PathState> {
       ? { kind: "absent" }
       : { kind: "unknown" };
   }
+}
+
+// The administrative directory a worktree's `.git` file names, when it is one of the clone's
+// (`<common>/worktrees/<id>`) and its `gitdir` file points back at that `.git` file. Git writes both
+// links as absolute paths, or, with `worktree.useRelativePaths` (Git 2.48+), relative to the
+// file's own directory: the `.git` link to the worktree, the `gitdir` backlink to the
+// administrative directory. Each is resolved from its own location and compared by real path
+// (#126 item 8: compared as raw text, a relative link never matched, so such a worktree never
+// finished preparing and an abandon kept one it could have removed). `dotGit` is the `.git`
+// file's content, `admin` the administrative directory's real path and `backlink` the backlink
+// resolved as written; null when the links do not match. Filesystem only; rejects when a file
+// cannot be read.
+async function linkedAdmin(
+  worktree: string,
+  common: string,
+): Promise<{ dotGit: string; admin: string; backlink: string } | null> {
+  const dotGitPath = join(worktree, ".git");
+  if (!(await lstat(dotGitPath)).isFile()) return null;
+  const dotGit = await readFile(dotGitPath, "utf8");
+  const link = /^gitdir: (.+)\n?$/.exec(dotGit)?.[1];
+  if (!link) return null;
+  const admin = await realpath(resolve(worktree, link));
+  if (dirname(admin) !== (await realpath(join(common, "worktrees")))) return null;
+  const backlink = resolve(admin, (await readFile(join(admin, "gitdir"), "utf8")).trim());
+  const target = await realpath(backlink).catch(() => null);
+  return target === (await realpath(dotGitPath)) ? { dotGit, admin, backlink } : null;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -1036,15 +1062,11 @@ export class WorktreeService {
   private async checkedOut(run: Run, attempt: Attempt): Promise<boolean> {
     const common = attempt.repo?.commonDir;
     if (!common) return false;
-    const dotGitPath = join(attempt.path, ".git");
     const found = await this.fs(run, async () => {
       try {
         if (!(await lstat(attempt.path)).isDirectory()) return false;
-        if (!(await lstat(dotGitPath)).isFile()) return false;
-        const admin = /^gitdir: (.+)\n?$/.exec(await readFile(dotGitPath, "utf8"))?.[1];
-        if (!admin || dirname(admin) !== join(common, "worktrees")) return false;
-        if ((await readFile(join(admin, "gitdir"), "utf8")).trim() !== dotGitPath) return false;
-        return (await lstat(join(admin, "index"))).isFile();
+        const linked = await linkedAdmin(attempt.path, common);
+        return linked !== null && (await lstat(join(linked.admin, "index"))).isFile();
       } catch {
         return false;
       }
@@ -1159,27 +1181,20 @@ export class WorktreeService {
 
   // The proof that a worktree was never checked out and is this attempt's: the directory holds
   // only its `.git` file, which names an administrative directory of the clone whose `gitdir`
-  // points back at it. Returns that file's content and the administrative directory, or null.
+  // points back at it (linkedAdmin). Returns that file's content, the administrative directory and
+  // its backlink, or null.
   private async unchecked(
     run: Run,
     attempt: Attempt,
     clone: string,
-  ): Promise<{ dotGit: string; admin: string } | null> {
+  ): Promise<{ dotGit: string; admin: string; backlink: string } | null> {
     const common = attempt.repo?.commonDir;
     if (!common) return null;
-    const dotGitPath = join(attempt.path, ".git");
     const found = await this.fs(run, async () => {
       try {
         const names = await readdir(attempt.path);
         if (names.length !== 1 || names[0] !== ".git") return null;
-        const stats = await lstat(dotGitPath);
-        if (!stats.isFile()) return null;
-        const dotGit = await readFile(dotGitPath, "utf8");
-        const match = /^gitdir: (.+)\n?$/.exec(dotGit);
-        const admin = match?.[1];
-        if (!admin || dirname(admin) !== join(common, "worktrees")) return null;
-        const back = await readFile(join(admin, "gitdir"), "utf8");
-        return back.trim() === dotGitPath ? { dotGit, admin } : null;
+        return await linkedAdmin(attempt.path, common);
       } catch {
         return null;
       }
@@ -1266,8 +1281,10 @@ export class WorktreeService {
           ? ("preserved" as const)
           : ("unknown" as const);
       }
-      const back = await readFile(join(proof.admin, "gitdir"), "utf8");
-      if (back.trim() === dotGitPath) await rm(proof.admin, { recursive: true });
+      // Its `gitdir` still names the `.git` file just deleted (absolute, or relative to the
+      // administrative directory): nothing else took the administrative directory meanwhile.
+      const back = (await readFile(join(proof.admin, "gitdir"), "utf8")).trim();
+      if (resolve(proof.admin, back) === proof.backlink) await rm(proof.admin, { recursive: true });
       return "removed" as const;
     });
     if (result === UNKNOWN || result === "unknown") return "attention";
