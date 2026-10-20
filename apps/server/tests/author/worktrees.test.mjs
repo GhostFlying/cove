@@ -1268,6 +1268,73 @@ describe("restart, continue and abandon (S8)", () => {
     expect(await git(alpha.clone, "branch", "--list", "cove/*")).toBe("");
   });
 
+  it("a retry interrupted while removing an earlier attempt's leftover finishes it on a continue (#126 item 4)", async () => {
+    // The retry's actor freezes right after the leftover's worktree was removed, before that is
+    // recorded: the leftover's ledger says the removal started.
+    const wrap = freezeAt(
+      (name, args) =>
+        name === "worktrees.advance" &&
+        args.prior === true &&
+        args.step?.step === "remove-worktree" &&
+        args.step.outcome !== "started",
+    );
+    const env = await setup({ wrapStore: wrap });
+    const alpha = await env.register("alpha");
+    const armed = join(env.root, "armed");
+    await writeFile(armed, "");
+    // Someone's file in the worktree before the checkout: it refuses to overwrite it, and plain
+    // `worktree remove` keeps the worktree, and with it the branch.
+    await hookGit(
+      `case "$*" in *" read-tree -m -u HEAD"*) [ -e '${armed}' ] && rm '${armed}' && echo mine > README.md ;; esac`,
+    );
+    const created = await env.tasks.create("p", {
+      operationId: "c",
+      title: "Leftover",
+      mounts: [{ source: "worktree", repoId: alpha.repoId, noFetch: true }],
+    });
+    const taskId = created.operation.result.resource.id;
+    expect(await idleRecord(env.tasks, env.receipts, "c")).toMatchObject({
+      state: "failed",
+      result: { mounts: [{ left: "both", branch: "cove/Leftover" }] },
+    });
+    const { path, mountId } = await worktreeMount(env.tasks, taskId, "alpha");
+    await rm(join(path, "README.md"));
+    const retried = await env.tasks.worktrees.retry("p", {
+      operationId: "r",
+      taskId,
+      mountId,
+      noFetch: true,
+    });
+    expect(retried.operation).toMatchObject({ state: "running" });
+    await wrap.reached;
+    expect(await exists(path)).toBe(false);
+    const next = await env.restart();
+    expect(await next.receipts.get(key("r"))).toMatchObject({ state: "requires_attention" });
+    // The continue proves the removal from the state, deletes the leftover's branch, then
+    // creates the retry's own worktree.
+    await next.tasks.worktrees.continueOperation("p", { operationId: "k", targetOperationId: "r" });
+    expect(await idleRecord(next.tasks, next.receipts, "r")).toMatchObject({ state: "succeeded" });
+    expect(await worktreeMount(next.tasks, taskId, "alpha")).toMatchObject({
+      state: "ready",
+      branch: "cove/Leftover-2",
+    });
+    expect(
+      await git(alpha.clone, "for-each-ref", "--format=%(refname:short)", "refs/heads/cove/"),
+    ).toBe("cove/Leftover-2");
+    const ledgers = await env.rows(
+      "SELECT operation_id, steps_json FROM worktree_attempts ORDER BY created_at_ms, operation_id",
+    );
+    expect(
+      JSON.parse(ledgers.find((row) => row.operation_id === "c").steps_json).slice(-2),
+    ).toEqual([
+      { step: "remove-worktree", outcome: "removed" },
+      { step: "delete-branch", outcome: "removed" },
+    ]);
+    expect(await env.rows("SELECT state FROM managed_worktrees ORDER BY state")).toEqual([
+      { state: "ready" },
+    ]);
+  });
+
   // A store facade that refuses the calls matching `when` before they are sent, as a full store
   // queue does; `refusals` counts them.
   const refusing = (when) => {

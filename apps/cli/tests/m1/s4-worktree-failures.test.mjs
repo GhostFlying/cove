@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
@@ -175,6 +175,68 @@ test("an unresolvable main branch fails with MAIN_BRANCH_UNRESOLVED and is retri
     state: "ready",
     baseCommit: await alpha.git("rev-parse", "refs/remotes/origin/work"),
   });
+});
+
+test("a retry removes what a failed attempt left at the path once Git can, and says how until then (#126 item 4)", async () => {
+  const planting = await plantingGit();
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  await planting.arm();
+  const created = await fixture.cove(["task", "create", "Stranded", "--worktree", alpha.repoId], {
+    home,
+  });
+  expect(created.code).toBe(1);
+  const { task } = JSON.parse(created.stdout);
+  const [mount] = worktreeMounts(task);
+  expect(JSON.parse(created.stdout).operation.result.mounts).toEqual([
+    {
+      mountId: mount.mountId,
+      state: "failed",
+      errorKind: "GIT_UNAVAILABLE",
+      left: "both",
+      branch: "cove/Stranded",
+    },
+  ]);
+  // Git still refuses to remove the worktree: the retry is accepted, tries, and fails naming what
+  // holds the path and the ways out. The leftover's branch makes the retry choose the next name.
+  const held = await fixture.cove(["mount", "retry", task.taskId, mount.mountId], { home });
+  expect(held.code).toBe(1);
+  const printed = JSON.parse(held.stdout);
+  expect(printed.operation).toMatchObject({
+    method: "mount.retry",
+    state: "failed",
+    result: {
+      mounts: [
+        {
+          mountId: mount.mountId,
+          state: "failed",
+          errorKind: "MOUNT_NAME_CONFLICT",
+          left: "both",
+          branch: "cove/Stranded",
+        },
+      ],
+    },
+  });
+  const repo = printed.leftovers[0].repoPath;
+  expect(hinted(held.stderr)).toEqual([
+    `cove mount retry ${task.taskId} ${mount.mountId}`,
+    `cove mount delete-worktree ${task.taskId} ${mount.mountId}`,
+    `git -C ${repo} worktree remove ${mount.path}`,
+    `git -C ${repo} branch -d cove/Stranded`,
+  ]);
+  expect(await readFile(join(mount.path, "README.md"), "utf8")).toBe("planted\n");
+  // Once nothing in it would be lost, the retry the hint names removes the leftover and finishes.
+  await rm(join(mount.path, "README.md"));
+  const retried = await fixture.cove(hinted(held.stderr)[0].split(" ").slice(1), { home });
+  expect({ code: retried.code, stderr: retried.stderr }).toEqual({ code: 0, stderr: "" });
+  const fixed = worktreeMounts(JSON.parse(retried.stdout).task)[0];
+  expect(fixed).toMatchObject({ state: "ready", path: mount.path, branch: "cove/Stranded-2" });
+  expect(await readFile(join(mount.path, "README.md"), "utf8")).toBe("alpha\n");
+  // The leftover's branch went with it.
+  expect(await alpha.git("for-each-ref", "--format=%(refname:short)", "refs/heads/cove/")).toBe(
+    "cove/Stranded-2",
+  );
 });
 
 test("a conversion whose target Git does not remove names the branch it left in place (#132)", async () => {

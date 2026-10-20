@@ -555,6 +555,20 @@ export function operationHints(operation: OperationRecord, taskId?: string): str
       hints.push(
         `mount ${mount.mountId}: the branch already exists; run \`${retry} --branch NEW\`${repeat}`,
       );
+    // What an earlier attempt left in place still holds the path (the leftover hints name it):
+    // Cove removes it itself, first, once Git can without --force (#126 item 4). A worktree mount
+    // may also discard it, changes included, by deleting its managed worktree, which removes the
+    // mount (m1 T5); a conversion's mount is still the checkout, which that never deletes.
+    else if (mount.errorKind === "MOUNT_NAME_CONFLICT" && mount.left !== undefined)
+      hints.push(
+        `mount ${mount.mountId}: what an earlier attempt left in place still holds its path; ` +
+          `once nothing in it would be lost (no changes or untracked files), run \`${retry}\` ` +
+          `and Cove removes it first${repeat}` +
+          (convert
+            ? ""
+            : `; or discard it, changes included, with ` +
+              `\`cove mount delete-worktree ${task} ${mount.mountId}\`, which also removes the mount`),
+      );
   }
   return hints;
 }
