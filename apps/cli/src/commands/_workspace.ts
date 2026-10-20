@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import type { Client } from "@cove/client";
@@ -175,60 +175,181 @@ export async function listTabs(client: Client, taskId: string): Promise<TabRecor
   return tabs;
 }
 
-// The real Git common directory and top level of the working tree containing `path`, or null when
-// Git finds none there. The common directory identifies a clone together with its worktrees.
-function workingTree(path: string): Promise<{ commonDir: string; topLevel: string } | null> {
-  return new Promise((done) =>
+// The CLI's own Git queries (`--checkout PATH` only). Like the server's (apps/server/src/git/
+// run.ts), the environment is rebuilt from an allowlist: a GIT_DIR, GIT_WORK_TREE,
+// GIT_COMMON_DIR, GIT_INDEX_FILE, GIT_CEILING_DIRECTORIES or GIT_CONFIG_* inherited from a Git
+// hook or another tool would redirect the query to some other repository, and the CLI would then
+// name the wrong registered repo. The user's global and system configuration is still read.
+const GIT_INHERITED = [
+  "PATH",
+  "HOME",
+  "XDG_CONFIG_HOME",
+  "TMPDIR",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_SYSTEM",
+] as const;
+
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of GIT_INHERITED)
+    if (process.env[name] !== undefined) env[name] = process.env[name];
+  return {
+    ...env,
+    LC_ALL: "C",
+    LANG: "C",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_NO_LAZY_FETCH: "1",
+  };
+}
+
+// `--path-format=absolute` (rev-parse) first appeared in Git 2.31.
+const GIT_MINIMUM: readonly [number, number] = [2, 31];
+// Registered clones inspected at once: a lookup must not start one process per registration.
+const GIT_CONCURRENCY = 8;
+
+const nothingSent = "nothing was sent";
+
+// One Git command in `cwd`, an existing directory. Resolves with its exit status and output when
+// Git ran to completion. Rejects when there is no answer (Git could not be started, was killed,
+// timed out, or a resource limit was hit): that proves nothing about the path, so it is never read
+// as "not a repository" or "not registered".
+function runGit(
+  args: readonly string[],
+  cwd: string,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((done, fail) =>
     execFile(
       "git",
-      ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
-      { cwd: path, timeout: 10_000 },
-      (error, stdout) => {
-        const lines = stdout.split("\n");
-        if (error || lines.length !== 3 || lines[2] !== "") return done(null);
-        Promise.all([realpath(lines[0]!), realpath(lines[1]!)]).then(
-          ([commonDir, topLevel]) => done({ commonDir, topLevel }),
-          () => done(null),
-        );
+      args,
+      { cwd, env: gitEnvironment(), timeout: 10_000, maxBuffer: 1024 * 1024 },
+      (error, stdout, stderr) => {
+        if (!error) return done({ code: 0, stdout, stderr });
+        if (typeof error.code === "number" && !error.killed && error.signal === null)
+          return done({ code: error.code, stdout, stderr });
+        if (error.code === "ENOENT")
+          return fail(
+            new Error(
+              `git was not found on PATH; --checkout PATH needs it to find the registered ` +
+                `repo (--checkout REPO_ID does not); ${nothingSent}`,
+            ),
+          );
+        const why = error.killed ? "timed out" : (error.signal ?? error.code ?? error.message);
+        fail(new Error(`git ${args[0]} in ${cwd} did not complete (${why}); ${nothingSent}`));
       },
     ),
   );
+}
+
+// Fails with a diagnostic of its own when Git is missing or older than GIT_MINIMUM, rather than
+// letting the lookups below misread its output.
+async function requireGit(): Promise<void> {
+  const { code, stdout } = await runGit(["--version"], "/");
+  const version = /^git version (\d+)\.(\d+)/.exec(stdout);
+  if (code !== 0 || !version)
+    throw new Error(`git --version gave no version (${stdout.trim()}); ${nothingSent}`);
+  const [major, minor] = [Number(version[1]), Number(version[2])];
+  if (major < GIT_MINIMUM[0] || (major === GIT_MINIMUM[0] && minor < GIT_MINIMUM[1]))
+    throw new Error(
+      `git ${major}.${minor} is too old for --checkout PATH, which needs Git ` +
+        `${GIT_MINIMUM.join(".")} or later (--checkout REPO_ID does not); ${nothingSent}`,
+    );
+}
+
+// The working tree containing `path`: its real Git common directory (which identifies a clone
+// together with its worktrees) and real top level. `none` says why there is none: the path is not
+// a directory, or Git, having run, says it is not in a working tree. Anything else rejects.
+async function workingTree(
+  path: string,
+): Promise<{ commonDir: string; topLevel: string } | { none: string }> {
+  try {
+    if (!(await stat(path)).isDirectory()) return { none: "it is not a directory" };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { none: "it does not exist" };
+    throw error;
+  }
+  const { code, stdout, stderr } = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+    path,
+  );
+  if (code !== 0) {
+    if (/not a git repository|must be run in a work tree/.test(stderr))
+      return { none: "Git finds no working tree there" };
+    throw new Error(
+      `git rev-parse in ${path} failed (${code}): ${stderr.trim().split("\n")[0]}; ${nothingSent}`,
+    );
+  }
+  const lines = stdout.split("\n");
+  if (lines.length !== 3 || lines[2] !== "")
+    throw new Error(`git rev-parse in ${path} gave unexpected output; ${nothingSent}`);
+  const [commonDir, topLevel] = await Promise.all([realpath(lines[0]!), realpath(lines[1]!)]);
+  return { commonDir, topLevel };
+}
+
+// fn over `items`, at most `limit` at a time, results in order. The first rejection rejects.
+async function mapLimited<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 // Turns each `--checkout PATH` into the request the REPO_ID form sends: `{repoId}` for the
 // registered clone itself, `{repoId, path}` for another working tree of it. The CLI only picks the
 // repo, by the Git common directory the path shares with a registered clone (repo.list); the
 // server still decides whether the path is admitted (D2), exactly as for `REPO_ID,path=PATH`.
+// Every failure here happens before the request is saved or sent.
 export async function resolveMountSpecs(
   client: Client,
   specs: readonly ParsedMountSpec[],
 ): Promise<MountSpec[]> {
   if (!specs.some((spec) => "lookup" in spec)) return specs as MountSpec[];
+  await requireGit();
+  const targets = new Map<string, { commonDir: string; topLevel: string }>();
+  for (const spec of specs) {
+    if (!("lookup" in spec) || targets.has(spec.lookup)) continue;
+    const found = await workingTree(spec.lookup);
+    if ("none" in found)
+      throw new Error(
+        `--checkout ${spec.lookup} is not a repository: ${found.none}; ${nothingSent}`,
+      );
+    targets.set(spec.lookup, found);
+  }
   const repos = await listRepos(client);
-  const commonDirs = await Promise.all(
-    repos.map(async (repo) => (await workingTree(repo.path))?.commonDir ?? null),
-  );
-  return Promise.all(
-    specs.map(async (spec): Promise<MountSpec> => {
-      if (!("lookup" in spec)) return spec;
-      const found = await workingTree(spec.lookup);
-      const index = found ? commonDirs.indexOf(found.commonDir) : -1;
-      if (!found || index < 0)
-        throw new Error(
-          `--checkout ${spec.lookup} is not in a registered repo` +
-            (found ? "" : " (Git finds no working tree there)") +
-            "; nothing was sent. `cove repo list` shows the registered clones, and " +
-            "`cove repo register <clone>` adds one",
-        );
-      const repo = repos[index]!;
-      return {
-        source: "checkout",
-        repoId: repo.repoId,
-        ...(spec.name === undefined ? {} : { name: spec.name }),
-        ...(found.topLevel === repo.path ? {} : { path: spec.lookup }),
-      };
-    }),
-  );
+  // A registered clone whose directory is gone or no longer a working tree matches nothing.
+  const commonDirs = await mapLimited(repos, GIT_CONCURRENCY, async (repo) => {
+    const found = await workingTree(repo.path);
+    return "none" in found ? null : found.commonDir;
+  });
+  return specs.map((spec): MountSpec => {
+    if (!("lookup" in spec)) return spec;
+    const found = targets.get(spec.lookup)!;
+    const index = commonDirs.indexOf(found.commonDir);
+    if (index < 0)
+      throw new Error(
+        `--checkout ${spec.lookup} is not in a registered repo; ${nothingSent}. ` +
+          "`cove repo list` shows the registered clones, and `cove repo register <clone>` adds one",
+      );
+    const repo = repos[index]!;
+    return {
+      source: "checkout",
+      repoId: repo.repoId,
+      ...(spec.name === undefined ? {} : { name: spec.name }),
+      ...(found.topLevel === repo.path ? {} : { path: spec.lookup }),
+    };
+  });
 }
 
 // A task as the CLI prints it: the server's record, with each mount marked for its intended use
