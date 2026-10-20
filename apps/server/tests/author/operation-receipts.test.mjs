@@ -33,7 +33,7 @@ const create = (operationId = "create") => ({
 // like the store) before they send a command to the worker.
 const settled = () => new Promise((resolve) => setImmediate(resolve));
 
-function fixture(changes = {}) {
+function fixture(changes = {}, operationOptions = {}) {
   const budgets = { ...M0_LIMITS, ...changes };
   const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
   const composition = new RuntimeComposition("server", "instance", budgets, bytes);
@@ -83,6 +83,7 @@ function fixture(changes = {}) {
     runtime,
     receipts,
     encodeUtf8: codec.encode,
+    ...operationOptions,
   });
   const reply = (index = 0, extra = {}) => {
     const command = commands[index];
@@ -659,6 +660,61 @@ describe("instance-bound operation receipts", () => {
     expect(f.commands).toHaveLength(0);
     expect(f.registry.count).toBe(0);
     expect(f.bytes.snapshot()).toEqual(before);
+    f.close();
+  });
+});
+
+describe("terminal run cwd resolution (m1 T5)", () => {
+  // A run is recorded with its cwd's real path so that aliases of a worktree being deleted match.
+  // When the path cannot be resolved, nothing may be accepted under the client's spelling.
+  it("refuses a run whose cwd cannot be resolved before its record, receipt or spawn", async () => {
+    const recorded = [];
+    const runs = {
+      started: async (run, cwd) => {
+        recorded.push(cwd);
+        return "recorded";
+      },
+      spawned: async () => {},
+      notStarted: async () => {},
+    };
+    let failure = "EIO";
+    const resolvePath = async (path) => {
+      if (failure) throw Object.assign(new Error("injected"), { code: failure });
+      return `/resolved${path}`;
+    };
+    const f = fixture({}, { runs, resolvePath });
+    const before = f.bytes.snapshot();
+    // An observation failure of a valid directory: retryable, nothing accepted.
+    // Raced with a pause rather than awaited: an accepted run would wait for the worker's reply.
+    const observed = await Promise.race([
+      f.operations.create("principal", create()),
+      new Promise((resolve) => setTimeout(() => resolve("pending"), 1000)),
+    ]);
+    expect(recorded).toEqual([]);
+    expect(f.commands).toHaveLength(0);
+    expect(observed.error.kind).toBe("BUSY");
+    // A missing path is the caller's error.
+    failure = "ENOENT";
+    expect((await f.operations.create("principal", create())).error.kind).toBe("INVALID_ARGUMENT");
+    expect(recorded).toEqual([]);
+    expect(f.commands).toHaveLength(0);
+    expect(f.receipts.count).toBe(0);
+    expect(await f.operations.get("principal", "create")).toMatchObject({
+      error: { kind: "OPERATION_NOT_FOUND" },
+    });
+    expect(f.registry.count).toBe(0);
+    expect(f.bytes.snapshot()).toEqual(before);
+
+    // The reservation was released: the same operation is accepted once the cwd resolves, and the
+    // run is recorded with the resolved path. (S6 starts runs through an alias, which covers the
+    // spawn in the client's spelling.)
+    failure = null;
+    const accepted = f.operations.create("principal", create());
+    await settled();
+    expect(recorded).toEqual(["/resolved/synthetic-owned"]);
+    expect(f.commands).toHaveLength(1);
+    f.reply();
+    expect((await accepted).operation.state).toBe("succeeded");
     f.close();
   });
 });

@@ -27,15 +27,27 @@ export type OperationOutcome = { operation: OperationRecord } | { error: DomainE
 // compares runs against is recorded real (workspace entries and managed worktrees under the
 // resolved workspace root, checkouts by their registration), so a run started through an alias of
 // a directory (macOS /tmp for /private/tmp, a symlink that already exists) is matched like any
-// other: it is refused while that directory's worktree is being deleted, and it blocks a deletion
-// or a conversion while it lives (m1 T5, store/sql/deletions.ts, tabs.liveRunsUsing). The PTY
-// still starts in the directory as the client spelled it, which is the same directory. A path
-// that cannot be resolved is recorded as given; the worker refuses to start in it.
-export async function recordedCwd(cwd: string): Promise<string> {
+// other (m1 T5, store/sql/deletions.ts, tabs.liveRunsUsing): it is refused while that directory's
+// worktree is being deleted, and while it lives it blocks the deletion. (A conversion considers
+// only its own task's runs, so a terminal run never blocks one, alias or not.) The PTY still
+// starts in the directory as the client spelled it, which is the same directory.
+//
+// A cwd that cannot be resolved refuses the run before anything is recorded. Recording the
+// client's spelling instead would let a failed observation of a valid directory (an I/O error, say)
+// reintroduce the alias mismatch. A missing path or a non-directory component is the caller's
+// error (INVALID_ARGUMENT); any other failure is an observation that may succeed later (BUSY).
+export async function recordedCwd(
+  cwd: string,
+  resolve: (path: string) => Promise<string> = realpath,
+): Promise<{ path: string } | { error: "INVALID_ARGUMENT" | "BUSY" }> {
   try {
-    return await realpath(cwd);
-  } catch {
-    return cwd;
+    return { path: await resolve(cwd) };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    return {
+      error:
+        code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP" ? "INVALID_ARGUMENT" : "BUSY",
+    };
   }
 }
 
@@ -126,6 +138,9 @@ export class TerminalOperations {
       receipts: OperationReceipts;
       encodeUtf8: (text: string) => Uint8Array;
       runs?: RunRecorder;
+      // Resolves a terminal run's cwd to the path it is recorded with; realpath unless a test
+      // injects a failure.
+      resolvePath?: (path: string) => Promise<string>;
     },
   ) {
     if (
@@ -202,8 +217,14 @@ export class TerminalOperations {
       // could not confirm.
       accept: async (run, preparation) => {
         let started;
+        // Only a recorded run is compared with other paths; without a recorder there is nothing to
+        // resolve. A refusal here comes before the run record and the receipt, and `launch`
+        // releases the reservation.
+        const cwd = runs ? await recordedCwd(params.cwd, this.options.resolvePath) : null;
+        if (cwd && "error" in cwd)
+          return { kind: "not-accepted", outcome: this.failure(cwd.error), runRecorded: false };
         try {
-          started = await runs?.started(run, await recordedCwd(params.cwd), params.operationId);
+          if (runs && cwd) started = await runs.started(run, cwd.path, params.operationId);
         } catch {
           // No receipt was written: the operation was not accepted. When the store failed with
           // the record in flight, the record may exist as `starting`; the next start marks it
