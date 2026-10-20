@@ -492,12 +492,21 @@ export const ResourceRefSchema = z.object({
 // branch, or both. A reference like the rest: the path and the branch name are in the mount
 // record, the clone in the repo record.
 export const MountLeftoverSchema = z.enum(["worktree", "branch", "both"]);
-export const MountOutcomeSchema = z.object({
-  mountId: ResourceIdSchema,
-  state: MountStateSchema,
-  errorKind: z.enum(DOMAIN_ERROR_KINDS).optional(),
-  left: MountLeftoverSchema.optional(),
-});
+// `branch` names a branch left in place (with `left` of branch or both), which the mount record
+// does not: a conversion's mount is still the checkout, and a retry may have chosen another
+// branch than the attempt that left it (#132).
+export const MountOutcomeSchema = z
+  .object({
+    mountId: ResourceIdSchema,
+    state: MountStateSchema,
+    errorKind: z.enum(DOMAIN_ERROR_KINDS).optional(),
+    left: MountLeftoverSchema.optional(),
+    branch: GitRefSchema.optional(),
+  })
+  .refine(
+    (outcome) =>
+      outcome.branch === undefined || outcome.left === "branch" || outcome.left === "both",
+  );
 
 // Compact result policy. Every schema-valid operation record must fit operationRecordBytes
 // (4 KiB): a result that cannot be stored would leave an executed operation without its receipt.
@@ -505,11 +514,13 @@ export const MountOutcomeSchema = z.object({
 // - terminal writes use `run`, `exitCode` and `signal`;
 // - every other write uses the domain fields below and never these three (its run, if any, is
 //   the record-level `run`);
-// - a result with any mount's `left` carries no `targetOperationId`, and `sourceChanges` only when
-//   it has exactly one mount: `left` is only ever on a worktree-preparing write (task.create,
-//   mount.add, mount.retry, binding.convert), `targetOperationId` belongs to continue/abandon, and
-//   `sourceChanges` to binding conversion, which prepares exactly one mount (m1 T5). The budget
-//   needs it: sixteen mounts with `left` and the source counts would not fit.
+// - a result with any mount's `left` carries no `targetOperationId`, and `sourceChanges` or a
+//   mount's `branch` only when it has exactly one mount: `left` is only ever on a
+//   worktree-preparing write (task.create, mount.add, mount.retry, binding.convert),
+//   `targetOperationId` belongs to continue/abandon, `sourceChanges` to binding conversion, which
+//   prepares exactly one mount (m1 T5), and `branch` matters only to mount.retry and
+//   binding.convert, which prepare one mount each. The budget needs it: sixteen mounts with `left`
+//   and the source counts, or sixteen branch names, would not fit.
 // workspace-contract.test.mjs builds the largest record this schema admits and checks the budget.
 export const TERMINAL_RESULT_KEYS = ["run", "exitCode", "signal"] as const;
 export const OperationResultDataSchema = z
@@ -534,5 +545,7 @@ export const OperationResultDataSchema = z
     (result) =>
       !result.mounts?.some((mount) => mount.left !== undefined) ||
       (result.targetOperationId === undefined &&
-        (result.sourceChanges === undefined || result.mounts.length === 1)),
+        ((result.sourceChanges === undefined &&
+          result.mounts.every((mount) => mount.branch === undefined)) ||
+          result.mounts.length === 1)),
   );

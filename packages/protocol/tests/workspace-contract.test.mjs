@@ -444,6 +444,38 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
     M0_LIMITS.operationRecordBytes,
   );
   expect(validateOperationRecord(converted, encoder)).toEqual(converted);
+  // The same with the longest branch name left in place, each code unit three UTF-8 bytes; a
+  // branch goes with `left` that includes one, and on a single mount only.
+  const branched = {
+    ...converted,
+    result: {
+      ...converted.result,
+      mounts: [
+        {
+          ...converted.result.mounts[0],
+          left: "both",
+          branch: "\u20ac".repeat(M1_LIMITS.refChars),
+        },
+      ],
+    },
+  };
+  expect(encoder(JSON.stringify(branched)).byteLength).toBeLessThanOrEqual(
+    M0_LIMITS.operationRecordBytes,
+  );
+  expect(validateOperationRecord(branched, encoder)).toEqual(branched);
+  const [branchedMount] = branched.result.mounts;
+  const { left: _left, ...withoutLeft } = branchedMount;
+  for (const mounts of [
+    [{ ...branchedMount, left: "worktree" }],
+    [withoutLeft],
+    [branchedMount, { ...branchedMount, mountId: id(39) }],
+  ])
+    expect(
+      validateOperationRecord(
+        { ...branched, result: { ...branched.result, sourceChanges: undefined, mounts } },
+        encoder,
+      ),
+    ).toBeNull();
   expect(
     validateOperationRecord(
       { ...converted, result: { ...converted.result, mounts: leftOver.result.mounts.slice(0, 2) } },

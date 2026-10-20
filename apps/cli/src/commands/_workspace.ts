@@ -443,11 +443,13 @@ export async function leftoversOf(
       repoPath = repos.get(mount.repoId) ?? null;
     }
     // A conversion whose target was left in place did not switch: the mount is still the checkout,
-    // and the target is `<entry>/<name>` (m1 T5). Its branch is not in any record.
+    // and the target is `<entry>/<name>` (m1 T5). The branch left in place is the outcome's when
+    // it names one (a single-mount result, #132): a conversion's mount still names the checkout's
+    // branch, and a retry's may name another than the attempt that left it.
     const target =
       operation.method === "binding.convert" && mount?.source === "checkout"
-        ? { path: join(entries.get(mount.mountId)!, mount.name), branch: null }
-        : { path: mount?.path ?? null, branch: mount?.branch ?? null };
+        ? { path: join(entries.get(mount.mountId)!, mount.name), branch: outcome.branch ?? null }
+        : { path: mount?.path ?? null, branch: outcome.branch ?? mount?.branch ?? null };
     leftovers.push({
       mountId: outcome.mountId,
       ...target,
