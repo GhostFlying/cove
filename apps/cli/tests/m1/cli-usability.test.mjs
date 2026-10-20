@@ -447,6 +447,32 @@ test("equal ASCII titles keep their case and skip branches taken locally or on a
   });
 });
 
+test("a default branch skips Unicode case variants, case-different descendants and branches of remotes named with a slash (#138)", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const create = async (title) => {
+    const result = await fixture.cove(
+      ["task", "create", title, "--worktree", `${alpha.repoId},name=wt`],
+      { home },
+    );
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    return JSON.parse(result.stdout).task.workspace.mounts[0].branch;
+  };
+  // Git's --ignore-case folds only ASCII; a case-insensitive file system also takes these for one
+  // name.
+  await alpha.git("branch", "cove/école");
+  expect(await create("École")).toBe("cove/École-2");
+  // A branch below a case variant of the name keeps the name from being created.
+  await alpha.git("branch", "cove/FIX/topic");
+  expect(await create("Fix")).toBe("cove/Fix-2");
+  // A remote whose name has a slash: its tracking branches are named after its full prefix.
+  const head = await alpha.git("rev-parse", "HEAD");
+  await alpha.git("remote", "add", "team/upstream", alpha.remote);
+  await alpha.git("update-ref", "refs/remotes/team/upstream/cove/Fix-3", head);
+  expect(await create("Fix")).toBe("cove/Fix-4");
+});
+
 test("a conversion that fails on an existing branch prints a convert command that succeeds", async () => {
   const home = fixture.home("home");
   await fixture.startServer(home);

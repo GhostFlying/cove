@@ -33,7 +33,7 @@ import { isValidBranchName } from "../git/repository.js";
 import {
   addWorktree,
   branchCommit,
-  branchesLike,
+  branchesUnder,
   checkOut,
   createBranch,
   deleteBranch,
@@ -692,9 +692,11 @@ export class WorktreeService {
   // window, m1.md D1): a local branch of that name created meanwhile, also by another preparation
   // of Cove's own that chose the same name, fails the attempt with BRANCH_EXISTS at the executor's
   // check before it creates the branch, as for any branch; a remote-tracking branch that only the
-  // attempt's own fetch brings does not stop it, as Git allows both. Names are
-  // compared ignoring case (git/worktree.ts branchesLike). `cove/<slug>` is checked by Git's
-  // rules; appending `-N` to its last component cannot make it invalid.
+  // attempt's own fetch brings does not stop it, as Git allows both. Names are compared here, in
+  // a Unicode case fold (foldName), against every local and remote-tracking branch under `cove/`
+  // (git/worktree.ts branchesUnder): a candidate is taken by a name equal to it or below it.
+  // `cove/<slug>` is checked by Git's rules; appending `-N` to its last component cannot make it
+  // invalid.
   private async defaultBranch(
     group: object,
     deadline: number,
@@ -708,16 +710,16 @@ export class WorktreeService {
     const found = await this.options.budgets.git<string[] | "unavailable" | Unknown>(
       group,
       deadline,
-      () => branchesLike(commonDir, base),
+      () => branchesUnder(commonDir, "cove"),
       UNKNOWN,
     );
     if (found === UNKNOWN) return domainError("BUSY");
     if (found === "unavailable") return domainError("GIT_UNAVAILABLE");
-    const taken = [...found, ...planned].map((name) => name.toLowerCase());
+    const taken = [...found, ...planned].map(foldName);
     for (let suffix = 1; suffix <= DEFAULT_BRANCH_CANDIDATES; suffix++) {
       const candidate = suffix === 1 ? base : `${base}-${suffix}`;
-      const lower = candidate.toLowerCase();
-      if (!taken.some((name) => name === lower || name.startsWith(`${lower}/`))) return candidate;
+      const folded = foldName(candidate);
+      if (!taken.some((name) => name === folded || name.startsWith(`${folded}/`))) return candidate;
     }
     return domainError("BRANCH_EXISTS");
   }
@@ -1639,6 +1641,14 @@ export class WorktreeService {
       // As in attention: left running only when the store failed; the next start verifies it.
     }
   }
+}
+
+// A branch name as a case-insensitive file system compares it (#138): Unicode case folded and
+// normalized, so that `cove/École`, `cove/école` and their decomposed forms are one name. JavaScript
+// has no case fold; upper- then lower-casing also folds what lower-casing alone keeps apart (`ß`
+// and `SS`, `ſ` and `s`). Folding more than a file system does only makes a candidate skipped.
+function foldName(name: string): string {
+  return name.normalize("NFC").toUpperCase().toLowerCase().normalize("NFC");
 }
 
 // ---------------------------------------------------------------------------------------------
