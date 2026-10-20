@@ -15,6 +15,7 @@ import {
   type Arguments,
 } from "./_common.js";
 import { operationIdFor, printSucceeded, submitWrite } from "./_pending.js";
+import { listTabs } from "./_workspace.js";
 
 export const usage = `  tab create <taskId> [--name NAME] [--cwd entry|mount:MOUNT_ID] [--start yes|no] [--cols N --rows N] [--operation-id ID] [-- <executable> [args...]]
   tab list <taskId>
@@ -65,24 +66,6 @@ async function getTab(
   tabId: string,
 ): Promise<{ tab: TabRecord; latestRun: RunHistoryRecord | null }> {
   return unwrap("tab.get", await client.call("tab.get", { tabId }));
-}
-
-async function listTabs(client: Client, taskId: string): Promise<TabRecord[]> {
-  const tabs: TabRecord[] = [];
-  let afterTabId: string | undefined;
-  do {
-    const page = unwrap(
-      "tab.list",
-      await client.call("tab.list", {
-        taskId,
-        limit: M1_LIMITS.listPage,
-        ...(afterTabId ? { afterTabId } : {}),
-      }),
-    );
-    tabs.push(...page.tabs);
-    afterTabId = page.nextAfterTabId;
-  } while (afterTabId);
-  return tabs;
 }
 
 async function listRuns(client: Client, tabId: string): Promise<RunHistoryRecord[]> {
