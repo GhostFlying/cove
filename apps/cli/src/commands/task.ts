@@ -1,5 +1,3 @@
-import type { Client } from "@cove/client";
-import { M1_LIMITS, type TaskRecord } from "@cove/protocol/workspace";
 import {
   flag,
   flagValues,
@@ -7,7 +5,6 @@ import {
   optionalIntegerFlag,
   print,
   takeFlags,
-  unwrap,
   UsageError,
   withSession,
   type Arguments,
@@ -16,6 +13,7 @@ import { operationIdFor, printSucceeded, submitWrite } from "./_pending.js";
 import {
   describeTask,
   getTask,
+  listTasks,
   MOUNT_SPEC_HELP,
   parseMountSpec,
   printTaskOperation,
@@ -35,24 +33,6 @@ A task has one workspace: an entry directory under workspaceRoot holding the mou
 first, then worktrees, each in the order given); see \`cove mount\` for later changes.
 ${MOUNT_SPEC_HELP}
 Archiving changes visibility only: nothing is stopped, unmounted or deleted.`;
-
-async function listTasks(client: Client, archived: string | undefined): Promise<TaskRecord[]> {
-  const tasks: TaskRecord[] = [];
-  let afterTaskId: string | undefined;
-  do {
-    const page = unwrap(
-      "task.list",
-      await client.call("task.list", {
-        limit: M1_LIMITS.listPage,
-        ...(afterTaskId ? { afterTaskId } : {}),
-        ...(archived ? { archived: archived as "exclude" | "include" | "only" } : {}),
-      }),
-    );
-    tasks.push(...page.tasks);
-    afterTaskId = page.nextAfterTaskId;
-  } while (afterTaskId);
-  return tasks;
-}
 
 function expectedRevision(args: Arguments): { expectedRevision?: number } {
   const value = optionalIntegerFlag(args, "--expected-revision");
