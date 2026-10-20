@@ -202,6 +202,23 @@ export type Attempt = {
   // checkout it will replace, so settling it never touches the mount, and a ready target is
   // switched to by the binding module instead (WorktreeService.convertWith).
   conversion: boolean;
+  // What an earlier failed attempt of the same mount left at this attempt's path (priorOf).
+  prior: PriorAttempt | null;
+};
+
+// An earlier attempt of the same mount that failed and left its worktree or branch in place, so
+// that its intent still holds the path (#126 item 4, #132). A new attempt of the mount (mount.retry,
+// or binding.convert again) is accepted all the same, and removes that leftover first, with the
+// rules of any cleanup, recorded in the earlier attempt's ledger (worktrees.advance `prior`):
+// plain `git worktree remove` and Git's refusal as the only safeguard, as for an abandon. `actors`
+// are the operations that may have recorded processes acting on it: those of every other attempt
+// of the mount and their abandons.
+export type PriorAttempt = {
+  attemptId: string;
+  branch: string;
+  baseCommit: string | null;
+  steps: StepEntry[];
+  actors: OperationReceiptKey[];
 };
 
 // The last recorded run of `step`, or null when it never ran.
@@ -306,6 +323,68 @@ function toAttempt(db: Connection, row: AttemptRow): Attempt {
         : null,
     managed: managedAt(db, row.path),
     conversion: isConversion(db, row.attempt_id),
+    prior: priorOf(db, row),
+  };
+}
+
+// The failed attempt whose intent holds `managed` for the mount `mountId` (PriorAttempt), or
+// undefined: only an intent of the same mount whose attempt ended failed is such a leftover; a
+// ready worktree, another mount's intent, or one whose attempt has not ended holds its path.
+export function leftoverHolder(
+  db: Connection,
+  managed: ManagedWorktree | null,
+  mountId: string,
+): AttemptRow | undefined {
+  if (!managed || managed.state !== "intent" || managed.mountId !== mountId) return undefined;
+  const holder = statement(db, `${ATTEMPT_SELECT} WHERE a.worktree_id = ?`).get(
+    managed.worktreeId,
+  ) as AttemptRow | undefined;
+  return holder?.outcome === "failed" && holder.mount_id === mountId ? holder : undefined;
+}
+
+// The leftover at the attempt's path that is not its own (PriorAttempt), or null.
+function priorOf(db: Connection, row: AttemptRow): PriorAttempt | null {
+  const managed = managedAt(db, row.path);
+  if (managed && managed.worktreeId === row.worktree_id) return null;
+  const holder = leftoverHolder(db, managed, row.mount_id);
+  if (!holder || holder.attempt_id === row.attempt_id) return null;
+  const actors: OperationReceiptKey[] = [];
+  const others = statement(
+    db,
+    `SELECT operation_server_id, operation_principal_id, operation_id, abandon_server_id,
+       abandon_principal_id, abandon_operation_id
+     FROM worktree_attempts WHERE mount_id = ? AND attempt_id <> ?`,
+  ).all(row.mount_id, row.attempt_id) as Pick<
+    AttemptRow,
+    | "operation_server_id"
+    | "operation_principal_id"
+    | "operation_id"
+    | "abandon_server_id"
+    | "abandon_principal_id"
+    | "abandon_operation_id"
+  >[];
+  const add = (key: OperationReceiptKey) => {
+    if (!actors.some((known) => sameOperation(known, key))) actors.push(key);
+  };
+  for (const other of others) {
+    add({
+      serverId: other.operation_server_id,
+      principalId: other.operation_principal_id,
+      operationId: other.operation_id,
+    });
+    if (other.abandon_operation_id !== null)
+      add({
+        serverId: other.abandon_server_id!,
+        principalId: other.abandon_principal_id!,
+        operationId: other.abandon_operation_id,
+      });
+  }
+  return {
+    attemptId: holder.attempt_id,
+    branch: holder.branch,
+    baseCommit: holder.base_commit,
+    steps: JSON.parse(holder.steps_json) as StepEntry[],
+    actors,
   };
 }
 
@@ -561,8 +640,13 @@ export function resultWith(
         ...(attempt.outcome === "failed" && attempt.errorKind
           ? { errorKind: attempt.errorKind }
           : {}),
+        // What holds the mount's path: the attempt's own leftovers, or an earlier attempt's that
+        // it could not remove (PriorAttempt).
         ...(attempt.outcome === "failed"
-          ? leftOf(attempt.steps, single ? attempt.branch : null)
+          ? leftOf(
+              (attempt.prior ?? attempt).steps,
+              single ? (attempt.prior ?? attempt).branch : null,
+            )
           : {}),
       };
     });
@@ -819,6 +903,10 @@ export const worktreeOperations = {
   // statement: a step entry, the next phase (never backwards), the resolved base commit, the
   // entry identity. A step entry goes in by appendStep. False, with nothing written, when `actor`
   // may not act on the attempt (it settled, or an abandon claimed it).
+  // With `prior`, the step goes into the ledger of the leftover the attempt removes first
+  // (PriorAttempt), and once none of that leftover's artifacts remain, its intent becomes
+  // abandoned in the same transaction, as a failed attempt's does when it settles, which frees the
+  // path; nothing else may be recorded then.
   "worktrees.advance": (
     db: Connection,
     args: {
@@ -828,11 +916,28 @@ export const worktreeOperations = {
       phase?: AttemptPhase;
       baseCommit?: string;
       entryIdentity?: string;
+      prior?: true;
       at: number;
     },
   ): boolean => {
     const row = actable(db, args.attemptId, args.actor);
     if (!row) return false;
+    if (args.prior) {
+      const prior = priorOf(db, row);
+      if (!prior || !args.step || args.phase || args.baseCommit || args.entryIdentity) return false;
+      const steps = appendStep(prior.steps, args.step);
+      statement(
+        db,
+        "UPDATE worktree_attempts SET steps_json = ?, updated_at_ms = ? WHERE attempt_id = ?",
+      ).run(JSON.stringify(steps), args.at, prior.attemptId);
+      if (remainingArtifacts(steps).length === 0)
+        statement(
+          db,
+          `UPDATE managed_worktrees SET state = 'abandoned', updated_at_ms = ?
+           WHERE path = ? AND state = 'intent'`,
+        ).run(args.at, row.path);
+      return true;
+    }
     let steps = JSON.parse(row.steps_json) as StepEntry[];
     if (args.step) steps = appendStep(steps, args.step);
     const phase =
@@ -1175,8 +1280,14 @@ export const worktreeWrites = {
     );
     if (!prepared) return refuse("INVALID_ARGUMENT");
     if (attemptOperationOpen(db, args.mountId)) return refuse("OPERATION_EFFECTS_ACTIVE");
+    // A leftover of the mount's own failed attempt does not refuse it: the new attempt removes it
+    // first, or fails with MOUNT_NAME_CONFLICT when Git still refuses (PriorAttempt).
     const managed = managedAt(db, row.path);
-    if (managed && !REUSABLE_MANAGED_STATES.has(managed.state))
+    if (
+      managed &&
+      !REUSABLE_MANAGED_STATES.has(managed.state) &&
+      !leftoverHolder(db, managed, args.mountId)
+    )
       return refuse("MOUNT_NAME_CONFLICT");
     statement(
       db,

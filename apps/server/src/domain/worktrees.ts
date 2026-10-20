@@ -451,6 +451,9 @@ export class WorktreeService {
   // Mutating filesystem work that outlived its deadline, by the operation it ran for (see the
   // header, removal): until it settles, nothing may continue or finish that operation.
   private readonly outstanding = new Map<string, Set<Promise<unknown>>>();
+  // The views of earlier attempts' leftovers being removed (clearPrior), each with the attempt
+  // that removes it: their steps go into the leftover's ledger under that attempt.
+  private readonly priorViews = new WeakMap<Attempt, Attempt>();
   // Other methods whose requires_attention operations operation.continue resumes, with the work
   // that resumes one (binding.delete, domain/bindings.ts). They are never abandoned.
   // How a verified conversion target is switched to (binding.convert, domain/bindings.ts): a
@@ -843,7 +846,15 @@ export class WorktreeService {
     },
   ): Promise<void> {
     let recorded: boolean;
-    const advance = { attemptId: attempt.attemptId, actor: run.actor, ...patch, at: this.now() };
+    const remover = this.priorViews.get(attempt);
+    // A leftover's view records into the leftover's ledger, as the attempt removing it.
+    const advance = {
+      attemptId: (remover ?? attempt).attemptId,
+      actor: run.actor,
+      ...patch,
+      ...(remover ? { prior: true as const } : {}),
+      at: this.now(),
+    };
     try {
       recorded = await this.stored(() => this.options.store.call("worktrees.advance", advance));
     } catch {
@@ -959,6 +970,10 @@ export class WorktreeService {
     }
     if (attempt.phase === "resolved") {
       if ((await this.entry(run, attempt)) !== "ok") return ATTENTION;
+      if (attempt.prior) {
+        const held = await this.clearPrior(run, attempt, repo.path);
+        if (held) return held;
+      }
       const existing = await this.git(run, () => branchCommit(repo.path, attempt.branch));
       if (existing === UNKNOWN) return ATTENTION;
       if (existing === "unavailable") return failed("GIT_UNAVAILABLE");
@@ -985,6 +1000,38 @@ export class WorktreeService {
     }
     if (failedStep(attempt)) return this.failWith(run, attempt, repo.path);
     return this.create(run, attempt, repo.path);
+  }
+
+  // Removes what an earlier failed attempt of the mount left at the path (store/sql/worktrees.ts
+  // PriorAttempt; #126 item 4, #132) before the attempt checks that its branch and path are free.
+  // The leftover is removed as the cleanup of a failed attempt or an abandon removes its own
+  // artifacts (see the header, removal): Cove's own never-ready worktree by plain `git worktree
+  // remove`, Git's refusal as the only safeguard, then its branch; an unproven effect stays. Each
+  // step is recorded in the leftover's ledger through a view of it: the earlier attempt's branch,
+  // base and steps with this attempt's entry, path and registration. Null once nothing of it is
+  // left (the store freed the path with the last removal); MOUNT_NAME_CONFLICT when Git still
+  // refuses, the outcome naming what is left (resultWith); attention while a process that acted on
+  // it may still run, or a removal cannot be established.
+  private async clearPrior(run: Run, attempt: Attempt, clone: string): Promise<Outcome | null> {
+    const prior = attempt.prior!;
+    const keys = [run.actor, ...prior.actors];
+    if (await this.processActive(keys)) return ATTENTION;
+    const view: Attempt = {
+      ...attempt,
+      attemptId: prior.attemptId,
+      branch: prior.branch,
+      baseCommit: prior.baseCommit,
+      steps: prior.steps,
+      prior: null,
+    };
+    this.priorViews.set(view, attempt);
+    const uncertain = await this.verifyUncertain(run, view, clone, keys, true);
+    if (uncertain) return uncertain;
+    if ((await this.cleanup(run, view, clone)) === "attention") return ATTENTION;
+    prior.steps = view.steps;
+    if (remainingArtifacts(view.steps).length) return failed("MOUNT_NAME_CONFLICT");
+    attempt.prior = null;
+    return null;
   }
 
   // The three Git steps of an attempt with its intent recorded.
