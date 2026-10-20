@@ -95,7 +95,9 @@ decisions without concrete evidence or a user request.
   linear: only GitHub rebase & merge, never squash, merge commits, direct pushes,
   force pushes or deletion. The empty-repository bootstrap is already complete.
 - The coordinator may merge without per-PR user confirmation after all required
-  CI checks succeed and an independent review has no open findings.
+  CI checks succeed and its one full independent review has no open P0/P1
+  findings (user decision 2026-10-17). Open P2/P3 findings become follow-up
+  issues; dependent work need not wait for them.
   Missing, skipped, cancelled or pending evidence does not satisfy this gate.
   This authority does not grant deployments, releases or milestone transitions.
 - Review findings go back to the implementer. If a reviewer implements a fix,
