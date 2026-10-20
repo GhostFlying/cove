@@ -60,40 +60,45 @@ class GroupUsageError extends UsageError {
   }
 }
 
-// The command group a `--help` before `--` asks about, or null when there is no such --help. It is
-// recognized before parseArguments, so that a help request is answered even when the rest of the
-// command is incomplete (`cove mount convert --branch --help`: --branch has no value). The words
-// are read leniently: an option other than a switch is taken to consume the next item unless that
-// is itself an option. Everything after `--` is the spawned command's and is never read here.
-function helpTarget(argv: readonly string[]): { group: string | undefined } | null {
+// An explicit help request, `cove help [GROUP]` or a --help before `--`, or null when there is
+// none. It is recognized before parseArguments, so that a help request is answered even when the
+// rest of the command is incomplete (`cove mount convert --branch --help`, `cove help repo --home`:
+// the option has no value). The command words are read leniently: an option other than a switch
+// is taken to consume the next item unless that is itself an option. Everything after `--` is the
+// spawned command's and is never read here, so a --help there is not a help request.
+function helpRequest(argv: readonly string[]): { flag: boolean; words: string[] } | null {
   const end = argv.indexOf("--");
   const own = end < 0 ? argv : argv.slice(0, end);
-  if (!own.includes("--help")) return null;
+  const words: string[] = [];
   for (let i = 0; i < own.length; i++) {
     const item = own[i]!;
-    if (!item.startsWith("--")) return { group: item };
-    if (!SWITCHES.has(item) && own[i + 1] !== undefined && !own[i + 1]!.startsWith("--")) i++;
+    if (!item.startsWith("--")) words.push(item);
+    else if (!SWITCHES.has(item) && own[i + 1] !== undefined && !own[i + 1]!.startsWith("--")) i++;
   }
-  return { group: undefined };
+  const flag = own.includes("--help");
+  return flag || words[0] === "help" ? { flag, words } : null;
 }
 
 async function run(argv: readonly string[]): Promise<number> {
-  // A help request asked for explicitly (`cove help [GROUP]`, or --help anywhere before `--`)
-  // prints the usage on stdout and succeeds. A --help after `--` belongs to the spawned command.
-  const help = helpTarget(argv);
-  if (help && help.group !== "help") {
-    process.stdout.write(`${await usage((await isGroup(help.group)) ? help.group : undefined)}\n`);
-    return 0;
-  }
-  const args = parseArguments(argv);
-  const [group, ...rest] = args.words;
-  if (group === "help") {
+  // An explicit help request prints the usage on stdout and succeeds.
+  const help = helpRequest(argv);
+  if (help) {
+    const [first, ...rest] = help.words;
+    if (help.flag) {
+      // With --help the rest of the command is not checked: the group it names (after `help`,
+      // if the command is `help`) gets its usage, anything else the full usage.
+      const group = first === "help" ? rest[0] : first;
+      process.stdout.write(`${await usage((await isGroup(group)) ? group : undefined)}\n`);
+      return 0;
+    }
     if (rest.length > 1) throw new UsageError("help takes at most one command group");
     if (rest[0] !== undefined && !(await isGroup(rest[0])))
       throw new UsageError(`Unknown command group ${rest[0]}`);
     process.stdout.write(`${await usage(rest[0])}\n`);
     return 0;
   }
+  const args = parseArguments(argv);
+  const [group, ...rest] = args.words;
   if (!group) throw new UsageError("missing command");
   if (!(await isGroup(group))) throw new UsageError(`Unknown command ${args.words.join(" ")}`);
   const module = await load(group);
