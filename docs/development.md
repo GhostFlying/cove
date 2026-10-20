@@ -1,6 +1,7 @@
 # 开发环境与工程检查
 
-根工程已初始化，业务应用尚未完整实现。当前构建编译工具配置、两个实验环境探针和私有 server 控制模块；仍没有可启动的完整 Cove server、CLI、Desktop 或 Mobile。
+当前可构建并启动本机的 Cove server（`cove-server`）与 `cove` CLI：M0 的终端链路与测试 harness，加上 M1 的本机
+task/workspace 闭环（见[下文](#m1-本机试用与-cli-用法)）。还没有远程接入、配对、Desktop 或 Mobile。
 
 ## 固定工具版本
 
@@ -56,11 +57,12 @@ pnpm check
 | `pnpm test` / `pnpm test:watch`     | 运行有 inventory gate 的 Vitest / 交互式持续运行 |
 | `pnpm check`                        | 顺序执行格式、lint、构建、测试与 inventory gate  |
 
-当前注册 `protocol`、`client`、`server`、`tooling`、`terminal-engine`、
-`terminal-engine-probes`、`terminal-worker`、`terminal-web-probes` 和
-`terminal-web` 九个 Vitest project。`scripts/ci-test-gate.mjs` 的 required suite
-inventory 精确列出已有测试文件及最低用例数；`pnpm test` 先比较 Vitest project
-发现结果与它拥有的 `apps/server/tests`、`packages/client/tests`、
+当前注册 `protocol`、`client`、`server`、`cli`、`tooling`、`terminal-engine`、
+`terminal-engine-probes`、`terminal-worker`、`terminal-web-probes`、`terminal-web-unit` 和
+`terminal-web` 十一个 Vitest project（以 `vitest.config.ts` 为准）。`scripts/ci-test-gate.mjs` 的 required suite
+inventory 精确列出已有测试文件及最低用例数；`apps/cli/tests/m1/` 例外，每个测试文件旁放同名 `.suite.json`
+声明最少测试数，门禁核对两者一一对应。`pnpm test` 先比较 Vitest project
+发现结果与它拥有的 `apps/server/tests`、`apps/cli/tests`、`packages/client/tests`、
 `packages/protocol/tests`、`tests/tooling`、`packages/terminal-engine/tests`、
 `packages/terminal-engine/probes`、`packages/terminal-worker/tests`、
 `tests/integration/terminal-worker`、`packages/terminal-web/probes` 和
@@ -77,6 +79,81 @@ Vitest projects 和 inventory，
 依赖变更由当轮指定写入者执行非冻结安装并提交 manifest 与 lockfile。
 pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默认未授权，原生包引入时显式配置所需 allowBuilds。
 已有 `docs/benchmarks/` 是独立实验，保留其 lockfile 和原始文件，不进入 workspace 或自动格式化/lint。
+
+## M1 本机试用与 CLI 用法
+
+范围、场景与决定见 [M1](milestones/m1.md)。完整用法以 `cove` 不带参数时打印的 usage 为准；
+tend 等脚本依赖的 JSON 输出、错误 kind 与退出码见 [Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
+首个正式发布前，命令、参数与输出都可能变化。
+
+### 构建与启动
+
+按 [D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)，server 从仓库构建产物前台运行；
+试用时用一个单独的 checkout 构建，不在正在开发的 worktree 中运行。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm native:prepare
+pnpm build
+alias cove="node $PWD/apps/cli/dist/main.js"
+cove server init [--workspace-root DIR]   # 可省略：start 在未初始化时按默认值初始化
+cove server start --harness               # 前台运行；打印 harness 页面地址
+```
+
+- 数据目录依次取 `--home DIR`、`$COVE_HOME`、`~/.cove`；数据库为 `<home>/server/cove.db`，
+  默认 `workspaceRoot` 为 `~/.cove/workspace`（[D1](milestones/m1.md#d1-workspace-布局fetch-与基准选-a基准规则按用户要求修改)、
+  [D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)）。同一数据目录只允许一个 server。
+  一次性试用可另给 `--home`，其他命令使用同一个 `--home` 连接它。
+- 其他命令在另一个 shell 中执行，经 `<home>/server/run/rendezvous.json`（或 `--rendezvous`、`$COVE_RENDEZVOUS`）找到 server。
+- 停止 server（Ctrl-C）时先打印将受影响的存活 run；再次启动后记录都在，旧 run 显示为会话中断，
+  不自动重开或重跑（[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）。
+- harness 页面列出全部终端 run（tab 的 run 也在其中），点击即可接入；它是 M0 的测试载体，不是 GUI 客户端。
+
+### 命令
+
+所有写命令都接受 `--operation-id ID`：请求在发送前保存在 `<home>/cli`，`cove operation resend ID` 原样重发到同一 server。
+带 `--expected-revision N` 的命令在 revision 不符时拒绝；`mount` 的 revision 是 workspace revision。
+每个命令向 stdout 输出 JSON，0 为成功，2 为用法错误，1 为其他错误；提示写到 stderr。
+
+| 领域       | 命令                                                                                                                                                                                                                                                                                                                                     |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 服务       | `server init [--workspace-root DIR]`、`server start [--port N] [--origin URL]... [--harness [--harness-port N]]`、`status`                                                                                                                                                                                                               |
+| 设置       | `config get`、`config set workspaceRoot <DIR>`、`config reset workspaceRoot`（只影响之后新建的 workspace）                                                                                                                                                                                                                               |
+| Repo       | `repo register <PATH> [--name NAME]`、`repo list`、`repo get <repoId>`、`repo set <repoId> mainBranch <BRANCH>`、`repo set <repoId> displayName <NAME>`、`repo reset <repoId> mainBranch`、`repo remove <repoId>`                                                                                                                        |
+| Task       | `task create <TITLE> [--checkout SPEC]... [--worktree SPEC]...`、`task list [--archived exclude\|include\|only]`、`task get <taskId>`、`task rename <taskId> <TITLE>`、`task archive <taskId>`、`task unarchive <taskId>`                                                                                                                |
+| 挂载       | `mount add <taskId> (--checkout SPEC \| --worktree SPEC)`、`mount remove <taskId> <mountId>`、`mount retry <taskId> <mountId> [--branch B] [--base REF] [--no-fetch]`、`mount convert <taskId> <mountId> [--branch B] [--base REF] [--no-fetch]`、`mount delete-worktree <taskId> <mountId> [--yes]`、`mount history <taskId> <mountId>` |
+| 操作       | `operation get <operationId>`、`operation resend <operationId>`、`operation continue <operationId>`、`operation abandon <operationId>`                                                                                                                                                                                                   |
+| Tab 与 run | `tab create <taskId> [--name NAME] [--cwd entry\|mount:MOUNT_ID] [--start yes\|no] [--cols N --rows N] [-- <可执行文件> [参数...]]`、`tab list <taskId>`、`tab get <tabId>`、`tab runs <tabId>`、`tab reopen <tabId> [--cols N --rows N]`、`tab stop <tabId> [--run RUN_ID]`、`tab close <tabId>`                                        |
+| 终端       | `terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`、`terminal list`、`terminal get <runId>`、`terminal stop <runId>`                                                                                                                                                                                          |
+
+挂载规格：
+
+- `--checkout REPO_ID[,name=NAME][,path=PATH]`：已注册 clone 本身，或用 `path=` 指定它已有、且不由 Cove 管理的
+  worktree（`path=` 放在最后）。Cove 不写入 checkout，按约定只用于只读任务，不强制（[D4](milestones/m1.md#d4-共享-checkout选-a不加锁)）。
+- `--worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]`：在 `<入口>/<NAME>` 新建托管 worktree，
+  分支默认 `cove/<slug>`；先 fetch `origin`，基准默认远端主分支，从不回退到本地 HEAD（D1）。
+- `NAME` 默认取 repo 显示名。入口目录中的 `cove-workspace.json` 列出每个挂载的真实路径，checkout 经它访问（D2）。
+
+### 一次典型试用
+
+```sh
+cove repo register /path/to/clone                        # 输出中的 repoId
+cove task create "调查" --checkout <repoId>               # 只读调查，直接用已有 checkout
+cove tab create <taskId> -- <agent 命令>                   # cwd 为 workspace 入口；在 harness 中接入
+cove tab stop <tabId>                                    # 转换前结束使用该 checkout 的 run
+cove mount convert <taskId> <mountId>                    # 需要改代码时转到独立 worktree（D3）
+cove tab reopen <tabId>                                  # 新 run 看到新的 worktree
+cove tab stop <tabId>
+cove mount delete-worktree <taskId> <mountId> --yes      # 删除托管 worktree，分支保留（D10）
+```
+
+- `mount convert` 只从提交开始：来源 checkout 的改动计入结果的 `sourceChanges` 并原样留在来源；本 task 有使用该
+  checkout 的存活 run（入口 tab 的 run 也算，其挂载映射包含全部挂载）时拒绝（`LIVE_RUNS_PRESENT`）。
+  目标核实 ready 之前挂载仍是 checkout。
+- 准备失败的 worktree 挂载用 `mount retry` 重试；结果不确定的操作为 `requires_attention`，用
+  `operation continue` 继续或 `operation abandon` 放弃，Cove 不盲目重做已生效的步骤。
+- `mount delete-worktree` 连同未提交与未跟踪的改动一起删除，终端上 y/N 确认，脚本中必须传 `--yes`；
+  有存活 run 使用该 worktree 时拒绝。`mount remove` 只改 workspace，从不删除目录。
 
 ## B0 实验环境
 
