@@ -8,6 +8,7 @@ import {
   M1_LIMITS,
   type MountSpec,
   type RepoRecord,
+  type TabRecord,
   type TaskRecord,
 } from "@cove/protocol/workspace";
 import { hostPath, print, unwrap, UsageError } from "./_common.js";
@@ -128,6 +129,24 @@ export async function listRepos(client: Client): Promise<RepoRecord[]> {
     afterRepoId = page.nextAfterRepoId;
   } while (afterRepoId);
   return repos;
+}
+
+export async function listTabs(client: Client, taskId: string): Promise<TabRecord[]> {
+  const tabs: TabRecord[] = [];
+  let afterTabId: string | undefined;
+  do {
+    const page = unwrap(
+      "tab.list",
+      await client.call("tab.list", {
+        taskId,
+        limit: M1_LIMITS.listPage,
+        ...(afterTabId ? { afterTabId } : {}),
+      }),
+    );
+    tabs.push(...page.tabs);
+    afterTabId = page.nextAfterTabId;
+  } while (afterTabId);
+  return tabs;
 }
 
 // The real Git common directory and top level of the working tree containing `path`, or null when

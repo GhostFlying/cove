@@ -1,7 +1,10 @@
 import { createInterface } from "node:readline/promises";
-import type { CallOutcome } from "@cove/client";
+import type { Client } from "@cove/client";
 import type { DomainError } from "@cove/protocol/errors";
+import type { RunRef } from "@cove/protocol/identity";
 import type { OperationRecord } from "@cove/protocol/rpc";
+import type { TabRecord } from "@cove/protocol/workspace";
+import type { Session } from "../session.js";
 import {
   flag,
   optionalIntegerFlag,
@@ -14,7 +17,7 @@ import {
   type Arguments,
 } from "./_common.js";
 import { operationIdFor, submitWrite } from "./_pending.js";
-import { getTask, printTaskOperation } from "./_workspace.js";
+import { getTask, listTabs, printTaskOperation } from "./_workspace.js";
 
 // The binding commands of the mount group (M1 T5; RPC_METHODS routes them as `mount convert`,
 // `mount delete-worktree` and `mount history`): binding.convert, binding.delete and binding.list.
@@ -51,19 +54,81 @@ function mountIds(args: Arguments, command: string): [string, string] {
   return [taskId, mountId];
 }
 
-// Lists the runs a LIVE_RUNS_PRESENT error names: they are what the operator has to end first. A
-// refusal carries them in the RPC error response; a deletion that was accepted and then found a
-// run keeps a few in its final record (the only other place they are known).
-function printLiveRuns(error: DomainError | undefined): void {
+// Lists the runs a LIVE_RUNS_PRESENT error names, each with the command that stops it: they are
+// what the operator has to end first. A refusal carries them in the RPC error response; a deletion
+// that was accepted and then found a run keeps a few in its final record. A conversion that
+// stopped before switching (requires_attention) keeps none, so its task's live tab runs are listed
+// instead: those are the runs that can hold the checkout (m1 T5).
+//
+// A run's tab is found through tab.list of the task: a tab's latestRun is the only run of it that
+// can be live (reopen is refused while one is). A run of none of the task's tabs is a run of
+// `cove terminal create`, stopped with `cove terminal stop`. These are reads after the fact, only
+// for the hint; when they fail the runs are still listed with a generic hint.
+async function printLiveRuns(
+  client: Client,
+  taskId: string,
+  error: DomainError | undefined,
+): Promise<void> {
   if (error?.kind !== "LIVE_RUNS_PRESENT") return;
-  for (const run of error.details?.runs ?? [])
-    process.stderr.write(
-      `cove: live run ${run.runId} uses the path; end it first (\`cove tab list <taskId>\` shows its tab)\n`,
+  let tabs: TabRecord[] | null = null;
+  try {
+    tabs = await listTabs(client, taskId);
+  } catch {
+    // Reported without the tabs.
+  }
+  let runs: readonly RunRef[] = error.details?.runs ?? [];
+  if (!error.details && tabs) runs = await liveTabRuns(client, tabs);
+  for (const run of runs) {
+    const tab = tabs?.find(
+      (item) =>
+        item.latestRun?.runId === run.runId &&
+        item.latestRun.relayInstanceId === run.relayInstanceId,
     );
+    const hint = tab
+      ? `of tab ${tab.tabId} (${JSON.stringify(tab.name)}) uses the path; stop it with ` +
+        `\`cove tab stop ${tab.tabId}\``
+      : tabs
+        ? `(a terminal run, in no tab of the task) uses the path; stop it with ` +
+          `\`cove terminal stop ${run.runId}\``
+        : `uses the path; end it first (\`cove tab list ${taskId}\` shows its tab, otherwise ` +
+          `\`cove terminal stop ${run.runId}\`)`;
+    process.stderr.write(`cove: live run ${run.runId} ${hint}\n`);
+  }
 }
 
-function reportLiveRuns(outcome: Exclude<CallOutcome<unknown>, { ok: true }>): void {
-  if (outcome.kind === "rpc-error" && "kind" in outcome.error) printLiveRuns(outcome.error);
+// The latest runs of `tabs` that have not ended (starting or running), read with tab.get.
+async function liveTabRuns(client: Client, tabs: readonly TabRecord[]): Promise<RunRef[]> {
+  const runs: RunRef[] = [];
+  for (const tab of tabs) {
+    if (!tab.latestRun) continue;
+    try {
+      const { latestRun } = unwrap("tab.get", await client.call("tab.get", { tabId: tab.tabId }));
+      if (latestRun && ["starting", "running"].includes(latestRun.lifecycle))
+        runs.push(latestRun.run);
+    } catch {
+      // A tab that cannot be read is left out of the hint.
+    }
+  }
+  return runs;
+}
+
+// submitWrite for a binding write, listing the blocking runs of a refusal before it fails.
+async function submitBinding(
+  args: Arguments,
+  session: Session,
+  method: "binding.convert" | "binding.delete",
+  taskId: string,
+  params: Record<string, unknown> & { operationId: string },
+): Promise<OperationRecord> {
+  let refusal: DomainError | undefined;
+  try {
+    return await submitWrite(args, session, method, params, (outcome) => {
+      if (outcome.kind === "rpc-error" && "kind" in outcome.error) refusal = outcome.error;
+    });
+  } catch (error) {
+    await printLiveRuns(session.client, taskId, refusal);
+    throw error;
+  }
 }
 
 // Asks on the terminal; anything but y or yes declines.
@@ -85,22 +150,17 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
     const base = flag(args, "--base");
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
-      const operation = await submitWrite(
-        args,
-        session,
-        "binding.convert",
-        {
-          operationId,
-          taskId,
-          mountId,
-          ...(branch === undefined ? {} : { branch }),
-          ...(base === undefined ? {} : { base }),
-          ...(args.flags.has("--no-fetch") ? { noFetch: true } : {}),
-          ...expectedWorkspaceRevision(args),
-        },
-        reportLiveRuns,
-      );
+      const operation = await submitBinding(args, session, "binding.convert", taskId, {
+        operationId,
+        taskId,
+        mountId,
+        ...(branch === undefined ? {} : { branch }),
+        ...(base === undefined ? {} : { base }),
+        ...(args.flags.has("--no-fetch") ? { noFetch: true } : {}),
+        ...expectedWorkspaceRevision(args),
+      });
       reportSourceChanges(operation);
+      await printLiveRuns(session.client, taskId, operation.error);
       return printTaskOperation(session.client, operation, taskId);
     });
   }
@@ -132,14 +192,14 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
           return 1;
         }
       }
-      const operation = await submitWrite(
-        args,
-        session,
-        "binding.delete",
-        { operationId, taskId, mountId, confirmed: true, ...expectedWorkspaceRevision(args) },
-        reportLiveRuns,
-      );
-      printLiveRuns(operation.error);
+      const operation = await submitBinding(args, session, "binding.delete", taskId, {
+        operationId,
+        taskId,
+        mountId,
+        confirmed: true,
+        ...expectedWorkspaceRevision(args),
+      });
+      await printLiveRuns(session.client, taskId, operation.error);
       return printTaskOperation(session.client, operation, taskId);
     });
   }

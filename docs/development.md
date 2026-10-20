@@ -161,6 +161,8 @@ cove mount delete-worktree <taskId> <mountId> --yes      # 删除托管 worktree
   `operation continue` 继续或 `operation abandon` 放弃，Cove 不盲目重做已生效的步骤。
 - `mount delete-worktree` 连同未提交与未跟踪的改动一起删除，终端上 y/N 确认，脚本中必须传 `--yes`；
   有存活 run 使用该 worktree 时拒绝。`mount remove` 只改 workspace，从不删除目录。
+- 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
+  `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
 
 ## B0 实验环境
 

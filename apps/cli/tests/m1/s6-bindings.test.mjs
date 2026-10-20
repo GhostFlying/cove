@@ -90,7 +90,10 @@ test("a checkout with changes and a live run is converted only after the run end
   const refused = await fixture.cove(["mount", "convert", task.taskId, mount.mountId], { home });
   expect(refused.code).toBe(1);
   expect(refused.stderr).toContain("LIVE_RUNS_PRESENT");
-  expect(refused.stderr).toContain(`live run ${run.runId} uses the path`);
+  expect(refused.stderr).toContain(
+    `cove: live run ${run.runId} of tab ${tabId} ("old") uses the path; stop it with ` +
+      `\`cove tab stop ${tabId}\``,
+  );
   const unchanged = await fixture.coveJson(["task", "get", task.taskId], { home });
   expect(unchanged.workspace).toMatchObject({ revision: task.workspace.revision });
   expect(unchanged.workspace.mounts[0]).toMatchObject({ source: "checkout" });
@@ -225,7 +228,10 @@ test("a worktree is deleted only when confirmed and no run uses it, with its cha
   );
   expect(busy.code).toBe(1);
   expect(busy.stderr).toContain("LIVE_RUNS_PRESENT");
-  expect(busy.stderr).toContain(`live run ${run.runId} uses the path`);
+  expect(busy.stderr).toContain(
+    `cove: live run ${run.runId} of tab ${tabId} ("busy") uses the path; stop it with ` +
+      `\`cove tab stop ${tabId}\``,
+  );
   expect(await exists(join(mount.path, "untracked.txt"))).toBe(true);
 
   await stopped(home, tabId);
@@ -497,9 +503,10 @@ test("while a conversion prepares its target the checkout stays bound, and the s
 
   // The preparation is held in its checkout step.
   await wrapper.block("checkout");
-  fixture.spawnCove(["mount", "convert", task.taskId, mount.mountId, "--operation-id", "s6-held"], {
-    home,
-  });
+  const command = fixture.spawnCove(
+    ["mount", "convert", task.taskId, mount.mountId, "--operation-id", "s6-held"],
+    { home },
+  );
   await wrapper.blocked("checkout");
   // Nothing about the mount changed yet: same binding, same revision, same manifest.
   const during = await fixture.coveJson(["task", "get", task.taskId], { home });
@@ -523,7 +530,7 @@ test("while a conversion prepares its target the checkout stays bound, and the s
     expect.objectContaining({ source: "checkout", path: alpha.clone, unboundAtMs: null }),
   ]);
   // A run started from the entry now sees the checkout, not the unready target.
-  const { tabId } = await liveTab(home, task.taskId, "during");
+  const { tabId, run } = await liveTab(home, task.taskId, "during");
   const started = await fixture.coveJson(["tab", "get", tabId], { home });
   expect(started.latestRun.mounts).toEqual([
     { name: mount.name, source: "checkout", path: alpha.clone },
@@ -544,6 +551,13 @@ test("while a conversion prepares its target the checkout stays bound, and the s
     error: { kind: "LIVE_RUNS_PRESENT" },
     progress: { remainingEffects: ["switch-binding"], recoveryActions: ["continue", "abandon"] },
   });
+  // The stopped record names no runs; the command lists the task's live tab runs instead.
+  const reported = await command.done;
+  expect(reported.code).toBe(1);
+  expect(reported.stderr).toContain(
+    `cove: live run ${run.runId} of tab ${tabId} ("during") uses the path; stop it with ` +
+      `\`cove tab stop ${tabId}\``,
+  );
   const unswitched = await fixture.coveJson(["task", "get", task.taskId], { home });
   expect(unswitched.workspace.revision).toBe(task.workspace.revision);
   expect(unswitched.workspace.mounts[0]).toMatchObject({ source: "checkout", path: alpha.clone });
@@ -730,7 +744,11 @@ test("a terminal run started through a path alias of the worktree blocks its del
   );
   expect(busy.code).toBe(1);
   expect(busy.stderr).toContain("LIVE_RUNS_PRESENT");
-  expect(busy.stderr).toContain(`live run ${run.runId} uses the path`);
+  // A run of `terminal create` belongs to no tab.
+  expect(busy.stderr).toContain(
+    `cove: live run ${run.runId} (a terminal run, in no tab of the task) uses the path; stop ` +
+      `it with \`cove terminal stop ${run.runId}\``,
+  );
   expect(await exists(mount.path)).toBe(true);
   await fixture.coveJson(["terminal", "stop", run.runId], { home });
 });
