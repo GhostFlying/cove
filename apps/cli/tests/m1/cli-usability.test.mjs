@@ -2,9 +2,11 @@ import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
+import { registeredRemote } from "./s3-worktree-remotes.mjs";
 
 // CLI usability from the M1 trial (PR #134), through the compiled `cove` CLI and server: per-group
-// help and `--checkout PATH`. Every repository lives in the fixture's temporary root.
+// help, `--checkout PATH` and mount commands without a mount ID. Every repository and remote lives
+// in the fixture's temporary root.
 
 let fixture;
 
@@ -160,4 +162,75 @@ test("--checkout PATH outside every registered repo fails before anything is sen
   const asId = await fixture.cove(["task", "create", "As id", "--checkout", "plain"], { home });
   expect(asId.code).toBe(1);
   expect(asId.stderr).toContain("REPO_NOT_FOUND");
+});
+
+test("mount convert without a mount id converts the task's only checkout mount", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  // A worktree mount beside the checkout is not a candidate.
+  const { task } = await fixture.coveJson(
+    [
+      "task",
+      "create",
+      "Convert one",
+      "--checkout",
+      alpha.repoId,
+      "--worktree",
+      `${alpha.repoId},name=wt`,
+    ],
+    { home },
+  );
+  const checkout = task.workspace.mounts.find((mount) => mount.source === "checkout");
+  const converted = await fixture.cove(
+    ["mount", "convert", task.taskId, "--branch", "converted", "--operation-id", "convert-one"],
+    { home },
+  );
+  expect(converted.stderr).toBe("");
+  expect(converted.code).toBe(0);
+  expect((await savedRequest(home, "convert-one")).params).toEqual({
+    operationId: "convert-one",
+    taskId: task.taskId,
+    mountId: checkout.mountId,
+    branch: "converted",
+  });
+  const printed = JSON.parse(converted.stdout);
+  expect(printed.operation).toMatchObject({
+    method: "binding.convert",
+    state: "succeeded",
+    result: { resource: { kind: "mount", id: checkout.mountId } },
+  });
+  expect(printed.task.workspace.mounts.map((mount) => mount.source)).toEqual([
+    "worktree",
+    "worktree",
+  ]);
+  // Now the task has no checkout mount: nothing is sent.
+  const none = await fixture.cove(["mount", "convert", task.taskId], { home });
+  expect(none.code).toBe(2);
+  expect(none.stdout).toBe("");
+  expect(none.stderr).toContain(`task ${task.taskId} has no checkout mount; nothing was sent`);
+});
+
+test("mount convert without a mount id lists the checkout mounts when there are several", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { repoId, clone, linked } = await registeredClone(home);
+  const { task } = await fixture.coveJson(
+    ["task", "create", "Two", "--checkout", `${repoId},name=a`, "--checkout", `${linked},name=b`],
+    { home },
+  );
+  const [a, b] = task.workspace.mounts;
+  const result = await fixture.cove(
+    ["mount", "convert", task.taskId, "--operation-id", "convert-two"],
+    { home },
+  );
+  expect(result.code).toBe(2);
+  expect(result.stdout).toBe("");
+  expect(result.stderr).toContain(
+    `task ${task.taskId} has 2 checkout mounts; name one: ` +
+      `\`cove mount convert ${task.taskId} <mountId>\` (nothing was sent)`,
+  );
+  expect(result.stderr).toContain(`  ${a.mountId}\ta\t${clone}\n`);
+  expect(result.stderr).toContain(`  ${b.mountId}\tb\t${linked}\n`);
+  await expect(savedRequest(home, "convert-two")).rejects.toThrow("ENOENT");
 });

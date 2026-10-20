@@ -3,7 +3,7 @@ import type { Client } from "@cove/client";
 import type { DomainError } from "@cove/protocol/errors";
 import type { RunRef } from "@cove/protocol/identity";
 import type { OperationRecord } from "@cove/protocol/rpc";
-import type { TabRecord } from "@cove/protocol/workspace";
+import type { TabRecord, TaskRecord } from "@cove/protocol/workspace";
 import type { Session } from "../session.js";
 import {
   flag,
@@ -24,7 +24,7 @@ import { getTask, listTabs, printTaskOperation } from "./_workspace.js";
 // They live in this helper module so that they stay under `cove mount` rather than forming a
 // `cove binding` group of their own (main.ts discovers groups from the non-`_` modules).
 
-export const commands = `  mount convert <taskId> <mountId> [--branch BRANCH] [--base REF] [--no-fetch] [--expected-revision N] [--operation-id ID]
+export const commands = `  mount convert <taskId> [mountId] [--branch BRANCH] [--base REF] [--no-fetch] [--expected-revision N] [--operation-id ID]
   mount delete-worktree <taskId> <mountId> [--yes] [--expected-revision N] [--operation-id ID]
   mount history <taskId> <mountId>`;
 
@@ -34,7 +34,8 @@ are counted in the result (sourceChanges) and never stashed, reset or carried ov
 while a run of this task uses the checkout (LIVE_RUNS_PRESENT, with the runs). The mount stays the
 checkout until the worktree is ready and verified; if preparing it fails the checkout stays bound.
 A run of the task that started using the checkout meanwhile stops the switch (requires_attention):
-end it and run \`cove operation continue\`, or abandon to remove the worktree.
+end it and run \`cove operation continue\`, or abandon to remove the worktree. Without a mountId
+it converts the task's only checkout mount; with none or several it lists them and exits 2.
 mount delete-worktree deletes the managed worktree of a mount, including its uncommitted and
 untracked changes, and removes the mount; the branch is kept. It also deletes a worktree that a
 failed or abandoned preparation left in place. A checkout is never deleted. It asks for
@@ -52,6 +53,33 @@ function mountIds(args: Arguments, command: string): [string, string] {
   if (!taskId || !mountId || args.words.length !== 4 || args.command)
     throw new UsageError(`mount ${command} needs a task id and a mount id`);
   return [taskId, mountId];
+}
+
+type MountRecord = TaskRecord["workspace"]["mounts"][number];
+
+// `<taskId> [mountId]`: the task and, when given, the mount.
+function taskAndMaybeMount(args: Arguments, command: string): [string, string | undefined] {
+  const [, , taskId, mountId] = args.words;
+  if (!taskId || args.words.length > 4 || args.command)
+    throw new UsageError(`mount ${command} needs a task id and optionally a mount id`);
+  return [taskId, mountId];
+}
+
+// The mount a command without a mount ID acts on: the task's only mount of `source`. With none or
+// several nothing is sent, and the candidates are listed for the operator to choose (exit 2, as a
+// command that needs one more argument).
+function onlyMount(task: TaskRecord, source: MountRecord["source"], command: string): MountRecord {
+  const candidates = task.workspace.mounts.filter((mount) => mount.source === source);
+  if (candidates.length === 1) return candidates[0]!;
+  const kind = source === "checkout" ? "checkout mount" : "managed worktree mount";
+  throw new StatusError(
+    candidates.length === 0
+      ? `task ${task.taskId} has no ${kind}; nothing was sent`
+      : `task ${task.taskId} has ${candidates.length} ${kind}s; name one: ` +
+          `\`cove mount ${command} ${task.taskId} <mountId>\` (nothing was sent)\n` +
+          candidates.map((mount) => `  ${mount.mountId}\t${mount.name}\t${mount.path}`).join("\n"),
+    2,
+  );
 }
 
 // Lists the runs a LIVE_RUNS_PRESENT error names, each with the command that stops it: they are
@@ -145,11 +173,14 @@ async function confirm(question: string): Promise<boolean> {
 export async function runBinding(args: Arguments, sub: string): Promise<number | null> {
   if (sub === "convert") {
     takeFlags(args, ["--branch", "--base", "--no-fetch", "--expected-revision", "--operation-id"]);
-    const [taskId, mountId] = mountIds(args, "convert");
+    const [taskId, givenMountId] = taskAndMaybeMount(args, "convert");
     const branch = flag(args, "--branch");
     const base = flag(args, "--base");
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
+      const mountId =
+        givenMountId ??
+        onlyMount(await getTask(session.client, taskId), "checkout", "convert").mountId;
       const operation = await submitBinding(args, session, "binding.convert", taskId, {
         operationId,
         taskId,

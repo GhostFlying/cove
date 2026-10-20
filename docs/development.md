@@ -124,7 +124,7 @@ cove server start --harness               # 前台运行；打印 harness 页面
 | 设置       | `config get`、`config set workspaceRoot <DIR>`、`config reset workspaceRoot`（只影响之后新建的 workspace）                                                                                                                                                                                                                               |
 | Repo       | `repo register <PATH> [--name NAME]`、`repo list`、`repo get <repoId>`、`repo set <repoId> mainBranch <BRANCH>`、`repo set <repoId> displayName <NAME>`、`repo reset <repoId> mainBranch`、`repo remove <repoId>`                                                                                                                        |
 | Task       | `task create <TITLE> [--checkout SPEC]... [--worktree SPEC]...`、`task list [--archived exclude\|include\|only]`、`task get <taskId>`、`task rename <taskId> <TITLE>`、`task archive <taskId>`、`task unarchive <taskId>`                                                                                                                |
-| 挂载       | `mount add <taskId> (--checkout SPEC \| --worktree SPEC)`、`mount remove <taskId> <mountId>`、`mount retry <taskId> <mountId> [--branch B] [--base REF] [--no-fetch]`、`mount convert <taskId> <mountId> [--branch B] [--base REF] [--no-fetch]`、`mount delete-worktree <taskId> <mountId> [--yes]`、`mount history <taskId> <mountId>` |
+| 挂载       | `mount add <taskId> (--checkout SPEC \| --worktree SPEC)`、`mount remove <taskId> <mountId>`、`mount retry <taskId> <mountId> [--branch B] [--base REF] [--no-fetch]`、`mount convert <taskId> [mountId] [--branch B] [--base REF] [--no-fetch]`、`mount delete-worktree <taskId> <mountId> [--yes]`、`mount history <taskId> <mountId>` |
 | 操作       | `operation get <operationId>`、`operation resend <operationId>`、`operation continue <operationId>`、`operation abandon <operationId>`                                                                                                                                                                                                   |
 | Tab 与 run | `tab create <taskId> [--name NAME] [--cwd entry\|mount:MOUNT_ID] [--start yes\|no] [--cols N --rows N] [-- <可执行文件> [参数...]]`、`tab list <taskId>`、`tab get <tabId>`、`tab runs <tabId>`、`tab reopen <tabId> [--cols N --rows N]`、`tab stop <tabId> [--run RUN_ID]`、`tab close <tabId>`                                        |
 | 终端       | `terminal create [--cwd DIR] [--cols N] [--rows N] -- <可执行文件> [参数...]`、`terminal list`、`terminal get <runId>`、`terminal stop <runId>`                                                                                                                                                                                          |
@@ -156,7 +156,8 @@ cove mount delete-worktree <taskId> <mountId> --yes      # 删除托管 worktree
 
 - `mount convert` 只从提交开始：来源 checkout 的改动计入结果的 `sourceChanges` 并原样留在来源；本 task 有使用该
   checkout 的存活 run（入口 tab 的 run 也算，其挂载映射包含全部挂载）时拒绝（`LIVE_RUNS_PRESENT`）。
-  目标核实 ready 之前挂载仍是 checkout。
+  目标核实 ready 之前挂载仍是 checkout。省略 mountId 时转换该 task 唯一的 checkout 挂载；没有或有多个时不发送，
+  列出候选（mountId、名称、路径）并以 2 退出。
 - 准备失败的 worktree 挂载用 `mount retry` 重试；结果不确定的操作为 `requires_attention`，用
   `operation continue` 继续或 `operation abandon` 放弃，Cove 不盲目重做已生效的步骤。
 - `mount delete-worktree` 连同未提交与未跟踪的改动一起删除，终端上 y/N 确认，脚本中必须传 `--yes`；
