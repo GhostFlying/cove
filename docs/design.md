@@ -1,6 +1,7 @@
 # Cove 设计草案
 
 状态：讨论中。本文区分用户已确认的需求与建议方案，不代表功能已实现。
+本机 task/workspace 闭环已由 M1 实现，其中落实的决定见 [M1 已决策](milestones/m1.md#已决策)。
 
 ## 1. 已确认的产品边界
 
@@ -164,6 +165,8 @@ Server 的列表 API 和各客户端统一遵循此规则，不能只在 UI 隐�
 
 - 来源干净：可直接从所选提交准备目标。
 - 来源存在改动：先区分“从提交开始，不带改动”和“携带选定改动”。
+  同机转到独立 worktree 时 M1 只提供前者，展示来源改动并原样留在来源（[D3](milestones/m1.md#d3-转到独立-worktree选-b)）；
+  下面关于携带改动的约束适用于跨主机迁移。
 - 来源是共享 checkout 时，不能默认所有未提交内容都属于当前 task。
 - 不通过自动 stash、reset、切换来源分支或删除来源文件来实现迁移。
 - 携带改动必须考虑已暂存、未暂存、未跟踪、二进制文件以及文件权限；
@@ -224,33 +227,34 @@ worktree 是独立仓库的工作目录，不因为加入 workspace 就成为 Gi
 ### 4.2 统一 workspace 根目录
 
 已确认：repo 注册路径不受限制；每个 server 设置统一 workspace 根目录并允许配置。
-建议默认 `~/.cove/workspace`，使用 Cove 独立目录，不与 Orca 共用状态。
+默认 `~/.cove/workspace`（M1 已定），使用 Cove 独立目录，不与 Orca 共用状态。
 这里的 `~` 指执行 server 所属用户的 home，不是发起客户端的 home。
 
-候选布局：
+布局已由 M1 确定，见 [M1 D1](milestones/m1.md#d1-workspace-布局fetch-与基准选-a基准规则按用户要求修改) 与
+[D2](milestones/m1.md#d2-checkout-挂载的访问方式选-c由-p0-结果于-2026-10-15-决定见-92)：
 
 ```text
-<workspaceRoot>/<workspaceId>/
-  server/         # 托管 worktree
-  client/         # 托管 worktree
-  docs/           # 既有 checkout 的入口，具体实现待验证
+<workspaceRoot>/<slug>-<短 ID>/
+  cove-workspace.json  # 挂载清单：每个挂载的名称、真实路径、来源、只读标记与状态
+  server/              # 托管 worktree
+  client/              # 托管 worktree
 ```
 
 根目录规则约束 Cove 创建的工作位置，不自动移动用户选择的已有 checkout 或普通目录。
-这些外部挂载保留真实绝对路径，通过 workspace 内入口访问；调查任务同样从 workspace root 启动。
+这些外部挂载保留真实绝对路径，不在入口中建链接或目录，经挂载清单中的真实路径访问；调查任务同样从 workspace root 启动。
 Workspace 身份和挂载清单保存在 server 状态中，不从目录名反推所有权。
 每个 workspace 都创建这一层入口目录；创建入口不要求创建 Git worktree，也不把入口初始化为 Git 仓库。
 
-默认 cwd 已确定；外部目录入口可研究符号链接，但实际 agent 遍历、额外目录授权和 Git 行为仍需验证。
-不能把符号链接当作透明授权，也不能因用户选择已有 checkout 而省略 workspace root。
+默认 cwd 已确定。M1 的 P0 探针（#92）检查了 agent 的搜索、读取与 Git 输出，结论是不用符号链接（D2 选 C）；
+agent 的附加目录授权规则记在 D2，文件监听未探测。不能因用户选择已有 checkout 而省略 workspace root。
 不同仓库分别拥有 Git 状态，不创建伪 monorepo，也不自动移动注册 clone。
 
 挂载切换不能仅靠原地重指 root 下的入口，否则旧会话即使 cwd 不变，后续访问也可能进入新仓库。
-实现需保留活跃会话所绑定 revision 的目录映射；版本化入口是候选，不能安全保留时需用户结束旧会话后再切换。
-具体目录布局仍待原型确定，不改变 workspace 身份和默认在 workspace root 启动的规则。
+M1 未选版本化入口：每个 run 记录启动时的 revision 与挂载映射（[D8](milestones/m1.md#d8-tabrun选-a)），
+本 task 仍有使用该 checkout 的存活 run 时拒绝转换，需用户先结束（[D3](milestones/m1.md#d3-转到独立-worktree选-b)）。
 
-建议修改 workspaceRoot 只影响后续新建的 workspace；已有 workspace 保留记录中的原始路径，
-后续往已有 workspace 加 repo 默认沿用它自己的根目录。迁移已有目录是独立操作，不由设置变更隐式触发。
+修改 workspaceRoot 只影响后续新建的 workspace（M1 已实现）；已有 workspace 保留记录中的原始路径，
+后续往已有 workspace 加 repo 沿用它自己的入口目录。迁移已有目录是独立操作，不由设置变更隐式触发。
 
 ## 5. 跨设备迁移
 
@@ -314,7 +318,8 @@ Cove 不为达到后两者而改写远端 agent 的索引库或 session 数据�
 - 归档 task：改变任务的可见性，不自动停止进程或删除目录。
 - 停止 session：由执行主机确认具体进程实例的停止结果。
 - 移除 mount：更新 workspace 的挂载关系，不等同于删目录。
-- 删除托管 worktree：检查运行中的 session、未提交改动、未推送提交和共享引用后处理。
+- 删除托管 worktree：M1 只在有存活 run 使用它时拒绝；带明确的风险确认后连同未提交与未跟踪的改动一起删除，
+  分支始终保留（[D10](milestones/m1.md#d10-托管-worktree-的删除选-b加风险确认)）。
 
 已有 checkout 和普通目录默认是外部资源；归档、删除 task、移除挂载都不能自动删除它们。
 托管 worktree 记录创建来源和资源 ID；路径名符合某个前缀不是资源所有权证明。
@@ -484,8 +489,9 @@ Esc 中断等补充（`codex-transcript-poll.ts`），终端标题仅作后备�
 
 - 跨设备 workspace 文件迁移的具体范围，以及是否提供可选 rollout 复制。
 - 支持哪些 agent 的识别与启动适配，以及各平台最低系统版本；chat 操作范围留待二期。
-- Workspace root 已是统一默认入口；外部挂载实现、revision 映射和 agent 授权方式仍需验证。
-- 同一共享 checkout 上多个可写 task 的限制策略。
+- Workspace root 已是统一默认入口；外部挂载（挂载清单与真实路径）、run 的 revision 映射和 agent 附加目录规则已由
+  M1 D2、D8 确定，文件监听行为仍未验证。
+- 同一共享 checkout 上多个可写 task：M1 D4 已定只展示共享、不加锁，checkout 挂载按约定只用于只读任务，Cove 不强制。
 - 各 host 的 server 持有本机执行和业务状态；跨 host 迁移交接和客户端离线可操作范围待细化。
 - 桌面 Electron 与 host 的 Node 技术栈已定；mobile 的 RN + WebView 与首个终端后端 xterm.js 已定，Expo 工程方案和具体版本仍需确定。
 
@@ -551,7 +557,7 @@ Server 负责本机 task/workspace、仓库注册、操作结果及终端事实�
 已选择 Node 控制进程与有界终端子进程池隔离的结构，Go 组件负责内置 Tailscale。
 runtime/worker 统一使用 pipe 帧协议承载控制和数据；进程数量及帧编码尚未冻结。
 runtime 定期刷新全部终端的状态和最近快照，含不活动/无人订阅终端；严重落后的客户端订阅可由 server 主动终止，要求全量恢复后重新订阅。
-业务持久化已选择每 host 本地 SQLite，驱动使用 better-sqlite3；终端原始输出不逐 chunk 写入业务数据库，执行线程尚未确定。
+业务持久化已选择每 host 本地 SQLite，驱动使用 better-sqlite3；终端原始输出不逐 chunk 写入业务数据库；数据库在 server 进程内的专用 worker thread 中执行（[M1 D6](milestones/m1.md#d6-数据库执行位置选-b由探针结果于-2026-10-16-决定)）。
 通信已选择 HTTP + WebSocket：HTTP 业务请求及文件传输，WebSocket 业务事件，独立终端 WebSocket 通道承载 VT 与终端控制。
 网络框架已选择 Fastify + @fastify/websocket，HTTP 业务接口已选择 JSON-RPC 2.0，schema 工具已选择 Zod；领域服务与终端协议保持独立。
 同步方案及持久边界见 [Server 架构](server-architecture.md)，其中具体机制仍标明为建议。
@@ -592,10 +598,10 @@ Schedule 保存触发规则、时区、执行 host、工作位置或创建模板
 | 顺序 | 具体设计内容                                               | 应形成的结果                                                                                                  |
 | ---- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | 1    | 已选 TS/Node Server + CLI、终端子进程池、Go Tailscale 组件 | PTY/headless/serialize 已选；IPC 已选统一 pipe；继续细化帧格式、流控、部署升级；不引入独立 PTY keeper         |
-| 2    | 领域模型、CLI 命令契约与持久化                             | task/workspace/mount/tab/run 身份与状态、领域命令及结构化输出、配置与操作记录存储                             |
+| 2    | 领域模型、CLI 命令契约与持久化                             | task/workspace/mount/tab/run 身份与状态、领域命令及结构化输出、配置与操作记录存储（本机部分已由 M1 落实）     |
 | 3    | Relay 协议与恢复                                           | Bootstrap、认证/配对、命令与事件、focus、输出/resize 顺序、快照与背压、文件传输调度                           |
 | 4    | Desktop 工程与 RN/WebView 接入、首个终端后端               | Electron 与 Web UI 的共享边界、移动工程方案、已选 xterm 的接入、数据路径与前后台恢复；共享接口不绑定 renderer |
-| 5    | Workspace 物理布局与迁移状态机                             | Root 入口、外部 checkout、revision 映射、停止写入、暂存验证与交接失败处理                                     |
+| 5    | Workspace 物理布局与迁移状态机                             | 停止写入、暂存验证与交接失败处理；root 入口、外部 checkout 与 revision 映射已由 M1 D1、D2、D8 确定            |
 
 上述是依赖顺序，不要求文档全部完成后才能验证风险：headless 恢复能力会反过来影响 server runtime，
 原型应优先验证这类决定性约束。优先复用已有设计文档，具体选型写明已定、建议和待验证的区别。
@@ -607,14 +613,14 @@ Schedule 保存触发规则、时区、执行 host、工作位置或创建模板
 | 决策                     | 建议起点                                                                                                                                                                                           | 为什么影响实现                                                              |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | 平台最低版本与客户端工程 | Electron 与 mobile 的 RN + WebView 已定，Web App 经 Tailscale 已纳入二期；确定最低系统/浏览器版本与 Expo 工程方案；Lynx + WebGL / WebGPU 后续评估                                                  | 决定安装、PTY、构建与发布成本                                               |
-| 多仓 agent 入口          | 单仓/多仓均从 workspace root 启动；验证外部挂载、revision 映射与授权                                                                                                                               | agent 要能实际访问多个 repo，不能只在 UI 显示挂载                           |
+| 多仓 agent 入口          | 单仓/多仓均从 workspace root 启动；外部挂载、revision 映射与附加目录规则已由 M1 D2、D8 确定，文件监听未验证                                                                                        | agent 要能实际访问多个 repo，不能只在 UI 显示挂载                           |
 | Host 间 task 权威交接    | 一个 workspace 同时只有一个活动 host；来源持久冻结写入后授权目标接收，失联不自动接管                                                                                                               | 稳定 task ID 不足以防止两个 server 都认为自己可写                           |
 | 配对实现                 | 固定 serverId、一次性邀请与可撤销设备凭据已定；server CLI 开放配对端口，已配对 desktop 可申请新邀请供 mobile 使用；SSH/Tailscale 通道安全 + Cove 设备 token 已选；细化邀请兑换、凭据存储和撤销传播 | 首次连接、换入口和 server-to-server 传输都依赖它，详见 server 架构 §9.3–9.4 |
 | 终端状态与技术栈         | 已选 xterm.js 与 node-pty/headless/serialize；以常用 TUI 验证快照、查询回复及尺寸事件                                                                                                              | 可靠重连不能依赖某个 UI 库的私有状态                                        |
 | 首批 agent 的识别与启动  | 初版只支持 TUI；普通 CLI 均可运行，列出需要专门识别/启动的 agent                                                                                                                                   | 识别状态不等于 managed agent；chat 适配留到二期                             |
 
-目录建议需要用实际 CLI 的目录权限、Git、路径解析和文件监听验证；不把符号链接当成透明挂载。
-共享 checkout 建议显示共享警示、不自动独占加锁；Cove 锁也不能约束外部编辑器。
+目录方案已由 M1 的 P0 探针以实际 agent 的搜索、读取与 Git 行为验证（D2，#92），不用符号链接；文件监听仍未验证。
+共享 checkout 只显示共享关系、不加锁（M1 D4）；Cove 锁也不能约束外部编辑器。
 迁移允许传输的改动种类必须形成明确清单，包括本地提交、暂存状态、未跟踪文件和选择的目录；
 不支持的项目在迁移前报告，不能悄悄丢弃。相关机制见 [Server 数据传输](server-architecture.md#61-relay-承载数据传输)。
 
@@ -632,7 +638,9 @@ Agent 与脚本通过 CLI 使用同样的操作；不要求用户维护配置文
 
 ### 14.1 领域命令与统一操作接口
 
-以下命令域是建议，名称与语法尚未实现或冻结：
+以下命令域是建议。M0/M1 已实现本机的 `server`、`status`、`config`、`repo`、`task`、`mount`、`tab`、`terminal`
+与 `operation` 子命令（用法见[开发说明](development.md#m1-本机试用与-cli-用法)）；`auth`、`transfer`、`client`
+等仍是建议。首个正式发布前，已实现命令的名称、参数与 JSON 输出也不冻结：
 
 | 命令域                   | 能力范围                                                                 |
 | ------------------------ | ------------------------------------------------------------------------ |
@@ -677,5 +685,6 @@ CLI 提交语义化操作，由配置所属组件持久化；server 业务配置
 
 Server 提供 schema、校验、revision、desired/effective 值和应用结果；CLI 与 GUI 使用同一套接口。
 需要重启的变更报告 pending-restart，不因配置命令自动结束 PTY。
-首次初始化/启动也提供 CLI 入口；服务尚未运行时使用明确的本机初始化流程，避免必须先运行服务才能设置启动参数。
+首次初始化/启动也提供 CLI 入口；服务尚未运行时使用明确的本机初始化流程，避免必须先运行服务才能设置启动参数
+（M1 为 `cove server init`，见 [D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)）。
 具体一致性和远程修改语义见 [Server 配置](server-architecture.md#9-配置与设备授权)。

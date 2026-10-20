@@ -1,6 +1,8 @@
 # 独立 Server、接入与同步
 
-状态：设计草案，尚无实现。独立持久服务、多客户端直连、内置 Tailscale/host 网络、
+状态：设计草案。M0 实现了本机 server、terminal worker 与 CLI 的终端链路，M1 实现了本机持久存储、
+repo/task/workspace/tab 领域与操作记录（[M1](milestones/m1.md)）；远程接入、配对、迁移等仍未实现。
+独立持久服务、多客户端直连、内置 Tailscale/host 网络、
 断开客户端后终端继续存活是已确认需求。数据同步与模块划分是建议方案。
 首期 server 支持 macOS/Linux；单用户多设备、可撤销设备凭据、统一网络入口授权已确认。
 远程连接已选择 SSH/Tailscale 安全通道，Cove 保留设备授权；首期不实现应用层 E2EE 或自建证书体系；二期 Web 入口建议委托 Tailscale 管理 HTTPS 证书。
@@ -54,7 +56,8 @@ Git 枚举仅用于必要校验/诊断。显式引用外部 checkout 不改变�
 需要处理的边界：
 
 - 事件 cursor 与数据快照必须对应，避免取快照和订阅之间漏事件。
-- 持久化与发布之间失败时可以重放已确认变化；具体使用持久事件表或 outbox 待实现决定。
+- 持久化与发布之间失败时可以重放已确认变化；具体使用持久事件表或 outbox 待实现决定
+  （M1 不提供业务事件订阅，资源带 revision、CLI 按需读取；事件订阅随 M3 的 GUI 再加）。
 - 并发修改挂载、归档或迁移时，使用资源 revision 检测冲突，拒绝陈旧写入。
 - 创建 worktree、启动终端等非幂等动作有操作 ID；响应丢失时查询已有操作，不能重复执行。
 - 长操作发布 pending/成功/失败及逐步结果，不伪装成一次原子数据库提交。
@@ -64,6 +67,9 @@ Git 枚举仅用于必要校验/诊断。显式引用外部 checkout 不改变�
 请求/操作 ID、去重、长操作、取消与结果未知的具体候选语义见
 [HTTP RPC 草案](relay-protocol.md#11-http-rpc-请求操作与重试)。
 该草案区分数据库事务与 Git/文件系统/PTY 外部副作用，不承诺通用 exactly-once 执行。
+M1 已落实持久的操作身份：记录以 `(serverId, principalId, operationId)` 为键跨重启去重，未决操作在重启后
+核实或标为 requires_attention，继续与放弃是显式命令（[M1 操作身份跨重启](milestones/m1.md#操作身份跨重启)）；
+操作记录的保存期限仍未决定（#97）。
 
 一期建议离线允许查看带离线标记的缓存；不自动排队并重放执行性操作。
 终端输入不套用普通元数据命令重试，需要遵守终端协议自身的去重和不确定输入规则。
@@ -109,6 +115,8 @@ Server 内部由 runtime 处理业务与连接，有界 terminal worker 子进�
 一期不再增加可跨 runtime 重启存活并被重新接管的 PTY daemon；worker 的进程隔离不等于 keeper 承诺。
 Desktop 退出、崩溃或更新不能隐式重启 server。服务入口与运行文件需要稳定存放，不能依赖
 Desktop 更新时会被替换的临时路径或开发 checkout；具体安装和服务管理方式后续选型。
+M1 仍从仓库构建产物前台运行（`cove server start`），稳定安装目录与服务管理留给 M2
+（[M1 D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)）。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。
 
 Server 独立启动，可按目标 OS 集成为后台服务。即使没有客户端或没有 PTY，也不因空闲退出。
@@ -136,6 +144,9 @@ Server 服务需要脱离启动 SSH 会话和 UI 生命周期；服务管理器�
 已认可在计划重启前导出带时间和版本的 tab 清单，供事后查看与手动重开；不要求自动恢复。
 导出范围覆盖所有存活会话，包括长期闲置的 shell，而不是只筛 active 展示标签；不可验证的条目单独标明。
 逻辑 tab 记录应日常持久化，不只依靠关闭前导出，否则崩溃时会丢失恢复线索。
+M1 的做法（[D8](milestones/m1.md#d8-tabrun选-a)、[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）：tab 与 run 记录日常存入数据库；
+`cove server start` 收到停止信号时先打印将受影响的存活 run 清单（来自库），不另写导出文件；
+启动时把旧实例中没有结束记录的 run 标为会话中断（interrupted、unverifiable），不探测旧 PID、不自动重开。
 清单与重开语义见 [Tab 状态与重开](terminal-architecture.md#12-tab-状态与-server-重启后的重开)。
 异常退出留下的子进程需要单独核实；没有可接入 PTY 不等于已证明所有派生进程退出，不能据此自动重放任务命令。
 
@@ -215,6 +226,9 @@ Schedule/Run 持久化，操作记录用于重启后核实；具体补跑、并�
 已确认：CLI 是完整 operator，按领域提供全部操作与配置；agent 可通过 CLI 操作，初期无通用配置 GUI。
 不依赖用户维护配置文件；支持 CLI/client 远程更改 server 设置，配对/授权等必要交互可保留 GUI。
 命令名与内部存储尚未冻结，下面是候选契约而非已实现的 CLI。
+M1 只实现了其中一小部分：server 配置存入本机 SQLite（[D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)），
+`cove config get/set/reset workspaceRoot` 带 `--expected-revision` 与 `--operation-id`，服务未运行时用
+`cove server init` 初始化（D7）；schema/validate/status、desired/effective 与远程修改仍是候选。
 
 ### 9.1 按作用域保存配置
 
@@ -557,6 +571,9 @@ WS upgrade 可复用认证 hooks，建连后的消息校验、设备凭据撤销
 首期需要覆盖主机/协议发现与设备配对、repo 注册、task/workspace/mount、tab/run、
 设置、状态同步/操作查询，以及迁移/传输领域。定时任务按交付期次加入，chat 与 Shepherd 不进入首期。
 这些领域有数十个潜在业务方法，但不要求数十条独立 HTTP 路由；确切方法表仍需设计。
+M1 的本机方法（repo、task、mount、binding、tab、config、operation、terminal、server）已定义在
+`packages/protocol/src/rpc-methods.ts` 的方法表中，server 按领域模块（`apps/server/src/rpc/`）分派；
+配对、迁移与传输的方法仍未设计。
 输入、输出、focus、resize、流控与终端恢复走终端 WS，不为每种操作重复创建 HTTP API。
 
 候选入口：稳定 bootstrap、配对入口、已认证 HTTP RPC、业务事件 WS、终端 WS、
