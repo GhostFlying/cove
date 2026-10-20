@@ -209,22 +209,27 @@ PENDING：
 #134（CLI 试用可用性，未合入）：只改 CLI，协议与 server 不变；新写法发送的请求与原写法相同，stdout 的 JSON 形状不变。
 
 - 帮助：`cove help`、`cove --help` 打印完整 usage，`cove help <组>`、`cove <组> --help`（`--` 之前任意位置）只打印
-  该组；显式请求的帮助写到 stdout 并以 0 退出（此前 `--help` 是用法错误）。`cove <组>` 不带子命令与组内的用法错误
+  该组；显式请求的帮助写到 stdout 并以 0 退出（此前 `--help` 是用法错误），命令其余部分不完整（如选项缺值）时也是如此。`cove <组>` 不带子命令与组内的用法错误
   仍以 2 退出，stderr 只附该组的 usage（此前附完整 usage）。`cove` 不带参数与未知命令不变。
 - `--checkout PATH[,name=N]`（`task create`、`mount add`）：第一个逗号之前的部分以 `/`、`.`、`~` 开头或含 `/` 时为路径，
   否则仍是 repo ID。CLI 经 `repo.list` 与 PATH 的 Git 公共目录找出所属的已注册 repo，再发送
   `{repoId}`（PATH 在 clone 本身中）或 `{repoId, path}`（其他 worktree），与 `REPO_ID[,path=]` 相同；
-  不属于任何已注册 repo 时不保存、不发送，以 1 退出。CLI 需要本机 `git`（2.31 及以上）。
+  不属于任何已注册 repo 时不保存、不发送，以 1 退出。CLI 需要本机 `git`（2.31 及以上），以与 server 相同的环境白名单运行
+  （继承的 `GIT_DIR`、`GIT_WORK_TREE` 等不生效），已注册 clone 至多 8 个同时检查；`git` 缺失、版本过旧、执行失败
+  （含资源不足）与“不是仓库”“未注册”各有不同的 stderr 提示，都以 1 退出且不发送。`~` 只替换家目录前缀，
+  `..` 在跟随符号链接之后生效。
 - `mount convert <taskId> [mountId]`：省略时取该 task 唯一的 checkout 挂载；没有或有多个时不发送，stderr 列出候选
   （mountId、名称、路径），以 2 退出。
 - `mount delete-worktree <taskId> [mountId]`：省略规则同上，只看托管 worktree 挂载。`mount delete-worktree <PATH>`：
   CLI 按真实路径在全部 task（含已归档，`task.list`）中找出该托管 worktree 挂载并发送同一 `binding.delete`；
-  不是托管 worktree（checkout、非 Cove 的 worktree、不存在）时不发送并以 1 退出。`--yes` 规则不变：无终端且无
+  PATH 必须能解析为真实路径，不能解析（如目录已不存在）时不发送并以 1 退出，提示改用 task ID 与 mountId；
+  不是托管 worktree（checkout、非 Cove 的 worktree）时同样不发送并以 1 退出。`--yes` 规则不变：无终端且无
   `--yes` 时在任何读取之前以 2 退出。
 - `LIVE_RUNS_PRESENT`（`mount convert`、`mount delete-worktree` 的受理前拒绝与停下或失败的记录）：stderr 每个阻塞 run
   一行，仍以 `cove: live run <runId>` 开头，改为写明其 tab ID 与名称和可复制的停止命令 `cove tab stop <tabId>`；
   不属于该 task 任何 tab 的 run 给出 `cove terminal stop <runId>`。tab 经 `tab.list` 查得，查询失败时退回原来的
-  通用提示。停在 `requires_attention` 的转换记录不带 run，改为列出该 task 存活的 tab run。仍只供人读。
+  通用提示。停在 `requires_attention` 的转换记录不带 run，改为列出该 task 中按 server 相同规则（启动 cwd 或启动时的
+  挂载映射在该 checkout 内）使用它的存活 tab run。仍只供人读。
 
 PLANNED：
 
@@ -286,4 +291,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 新增 PENDING #131：`mount convert`（`sourceChanges`、绑定在接受时切换）、`mount delete-worktree`（脚本须 `--yes`，无终端时以 2 退出且不发送；分支保留；不能 abandon）、`mount history`，以及 `LIVE_RUNS_PRESENT` 时逐 run 的 stderr 提示；PLANNED 中 M1 T5 一项移除                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-18 | main `66048d7`；#131（T5，未合入）              | 更正 PENDING #131：`mount convert` 改为目标核实后才切换绑定（准备期间挂载、清单、revision 与新 run 仍是 checkout；失败或放弃时 checkout 保持绑定；切换被拒为 `requires_attention` 且 `remainingEffects` 为 `switch-binding`；转换期间 `mount remove` 为 `OPERATION_EFFECTS_ACTIVE`）；删除期间使用该 worktree 的 `tab create/reopen`（含入口 tab）与 `terminal create` 以 `OPERATION_EFFECTS_ACTIVE` 拒绝；受理后失败的删除记录保留至多 4 个阻塞 run，CLI 一并打印。（同一 PR 后续）`terminal create` 的 cwd 按真实路径判断：经已有别名给出的 cwd 在删除期间同样被拒绝，这样启动的存活 run 同样阻止删除（转换只考虑该 task 自己的 run，`terminal create` 的 run 不阻止转换）；cwd 无法解析时不受理（`INVALID_ARGUMENT`/`BUSY`）                                                                                                                                                                                                                                             |
 | 2026-10-20 | main `ea4fe84`（PR #131）                       | 基准改为 main `ea4fe84`；T5 合入，#131 的 PENDING 项改为 AVAILABLE（§2 T5）：`mount convert`、`mount delete-worktree`、`mount history` 由 `1a4bfe2`、`c986851`（protocol）、`18d15be`、`90a5c9f`、`87f0257`、`2b470b7`、`f9b68a0`、`cd18f13`（server）与 `e1699fd`、`8d7c59f`（CLI）引入；接口与此前 PENDING 的说明相同；PENDING 现为空                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| 2026-10-20 | main `92e24e9`；#134（未合入）                  | 基准改为 main `92e24e9`（`ea4fe84` 之后只有文档提交，本文所列接口不变）；新增 PENDING #134（CLI 试用可用性）：按组的帮助与显式帮助以 0 退出、`--checkout PATH`、`mount convert` 与 `mount delete-worktree` 省略 mountId、`mount delete-worktree <PATH>`、`LIVE_RUNS_PRESENT` 提示给出 tab 与停止命令；请求与 JSON 输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| 2026-10-20 | main `92e24e9`；#134（未合入）                  | 基准改为 main `92e24e9`（`ea4fe84` 之后只有文档提交，本文所列接口不变）；新增 PENDING #134（CLI 试用可用性）：按组的帮助与显式帮助以 0 退出、`--checkout PATH`、`mount convert` 与 `mount delete-worktree` 省略 mountId、`mount delete-worktree <PATH>`、`LIVE_RUNS_PRESENT` 提示给出 tab 与停止命令；请求与 JSON 输出不变。（同一 PR 后续）PATH 必须能解析才会删除；`~` 不再提前折叠 `..`；CLI 的 Git 查询使用环境白名单、有界并发，并区分 Git 缺失/过旧/执行失败；转换停下时只列出使用该 checkout 的 run；缺值选项不再阻止 `--help`                                                                                                                                                                                                                                                                                                                                                                                                                                       |
