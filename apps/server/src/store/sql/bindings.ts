@@ -12,6 +12,7 @@ import {
   attemptsOf,
   bumpWorkspace,
   insertConversionAttempt,
+  leftoverHolder,
   managedAt,
   replaceReceipt,
   REUSABLE_MANAGED_STATES,
@@ -518,8 +519,14 @@ export const bindingWrites = {
     if (!repo || repo.common_dir !== args.commonDir) return refuse("REPO_NOT_FOUND");
     const live = liveRuns(db, mount.path, args.exited, args.taskId);
     if (live.length) return liveRunsRefusal(live);
+    // The target an earlier conversion of this mount failed to remove does not refuse it: the new
+    // attempt removes it first, as a retry does (store/sql/worktrees.ts PriorAttempt; #132).
     const earlier = managedAt(db, args.path);
-    if (earlier && !REUSABLE_MANAGED_STATES.has(earlier.state))
+    if (
+      earlier &&
+      !REUSABLE_MANAGED_STATES.has(earlier.state) &&
+      !leftoverHolder(db, earlier, args.mountId)
+    )
       return refuse("MOUNT_NAME_CONFLICT");
     const attemptId = insertConversionAttempt(
       db,

@@ -239,7 +239,7 @@ test("a retry removes what a failed attempt left at the path once Git can, and s
   );
 });
 
-test("a conversion whose target Git does not remove names the branch it left in place (#132)", async () => {
+test("a conversion whose target Git does not remove names its branch, and converting again removes it once Git can (#132)", async () => {
   const planting = await plantingGit();
   const home = fixture.home("home");
   await fixture.startServer(home);
@@ -289,4 +289,43 @@ test("a conversion whose target Git does not remove names the branch it left in 
   // Nothing of the planted work was removed, and the checkout stays mounted.
   expect(await readFile(join(target, "README.md"), "utf8")).toBe("planted\n");
   expect(printed.task.workspace.mounts[0]).toMatchObject({ source: "checkout", state: "ready" });
+  // Converting again is accepted under the same name; while Git still refuses, it fails naming
+  // what holds the target path, and how to go on.
+  const held = await fixture.cove(["mount", "convert", task.taskId], { home });
+  expect(held.code).toBe(1);
+  expect(JSON.parse(held.stdout).operation).toMatchObject({
+    method: "binding.convert",
+    state: "failed",
+    result: {
+      mounts: [
+        {
+          mountId: checkout.mountId,
+          state: "failed",
+          errorKind: "MOUNT_NAME_CONFLICT",
+          left: "both",
+          branch: "cove/Leftover",
+        },
+      ],
+    },
+  });
+  expect(hinted(held.stderr)).toEqual([
+    `cove mount convert ${task.taskId} ${checkout.mountId}`,
+    `git -C ${repo} worktree remove ${target}`,
+    `git -C ${repo} branch -d cove/Leftover`,
+  ]);
+  expect(held.stderr).not.toContain("delete-worktree");
+  // Once nothing in it would be lost, converting again removes it and switches to a new target.
+  await rm(join(target, "README.md"));
+  const converted = await fixture.cove(hinted(held.stderr)[0].split(" ").slice(1), { home });
+  expect({ code: converted.code, stderr: converted.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(JSON.parse(converted.stdout).task.workspace.mounts[0]).toMatchObject({
+    mountId: checkout.mountId,
+    source: "worktree",
+    state: "ready",
+    path: target,
+    branch: "cove/Leftover-2",
+  });
+  expect(await alpha.git("for-each-ref", "--format=%(refname:short)", "refs/heads/cove/")).toBe(
+    "cove/Leftover-2",
+  );
 });
