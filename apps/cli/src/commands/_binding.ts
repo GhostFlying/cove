@@ -5,7 +5,7 @@ import type { Client } from "@cove/client";
 import type { DomainError } from "@cove/protocol/errors";
 import type { RunRef } from "@cove/protocol/identity";
 import type { OperationRecord } from "@cove/protocol/rpc";
-import type { TabRecord, TaskRecord } from "@cove/protocol/workspace";
+import type { RunHistoryRecord, TabRecord, TaskRecord } from "@cove/protocol/workspace";
 import type { Session } from "../session.js";
 import {
   flag,
@@ -130,8 +130,8 @@ async function managedWorktreeAt(
 // Lists the runs a LIVE_RUNS_PRESENT error names, each with the command that stops it: they are
 // what the operator has to end first. A refusal carries them in the RPC error response; a deletion
 // that was accepted and then found a run keeps a few in its final record. A conversion that
-// stopped before switching (requires_attention) keeps none, so its task's live tab runs are listed
-// instead: those are the runs that can hold the checkout (m1 T5).
+// stopped before switching (requires_attention) keeps none, so the live runs of its task's tabs
+// that use the checkout of `convertedMountId` are listed instead (usesPath, the server's rule).
 //
 // A run's tab is found through tab.list of the task: a tab's latestRun is the only run of it that
 // can be live (reopen is refused while one is). A run of none of the task's tabs is a run of
@@ -141,6 +141,7 @@ async function printLiveRuns(
   client: Client,
   taskId: string,
   error: DomainError | undefined,
+  convertedMountId?: string,
 ): Promise<void> {
   if (error?.kind !== "LIVE_RUNS_PRESENT") return;
   let tabs: TabRecord[] | null = null;
@@ -150,7 +151,23 @@ async function printLiveRuns(
     // Reported without the tabs.
   }
   let runs: readonly RunRef[] = error.details?.runs ?? [];
-  if (!error.details && tabs) runs = await liveTabRuns(client, tabs);
+  if (!error.details) {
+    let checkout: string | undefined;
+    try {
+      const task = await getTask(client, taskId);
+      checkout = task.workspace.mounts.find((mount) => mount.mountId === convertedMountId)?.path;
+    } catch {
+      // As below.
+    }
+    if (!tabs || checkout === undefined) {
+      process.stderr.write(
+        `cove: a live run of the task uses the checkout; \`cove tab list ${taskId}\` shows ` +
+          `the task's tabs, and \`cove tab stop <tabId>\` ends a tab's run\n`,
+      );
+      return;
+    }
+    runs = await liveTabRuns(client, tabs, checkout);
+  }
   for (const run of runs) {
     const tab = tabs?.find(
       (item) =>
@@ -169,14 +186,31 @@ async function printLiveRuns(
   }
 }
 
-// The latest runs of `tabs` that have not ended (starting or running), read with tab.get.
-async function liveTabRuns(client: Client, tabs: readonly TabRecord[]): Promise<RunRef[]> {
+// Whether a run uses `path` by the server's rule (domain/tabs.ts liveRunsUsing): its start cwd or a
+// mount of the mapping recorded at its start is `path` or lies below it. Both are real paths.
+function usesPath(run: RunHistoryRecord, path: string): boolean {
+  const within = (candidate: string) =>
+    candidate === path || candidate.startsWith(path.endsWith("/") ? path : `${path}/`);
+  return within(run.cwd) || run.mounts.some((mount) => within(mount.path));
+}
+
+// The latest runs of `tabs` that have not ended (starting or running) and use `path`, read with
+// tab.get. A run that started before the checkout was mounted does not map it and is left out.
+async function liveTabRuns(
+  client: Client,
+  tabs: readonly TabRecord[],
+  path: string,
+): Promise<RunRef[]> {
   const runs: RunRef[] = [];
   for (const tab of tabs) {
     if (!tab.latestRun) continue;
     try {
       const { latestRun } = unwrap("tab.get", await client.call("tab.get", { tabId: tab.tabId }));
-      if (latestRun && ["starting", "running"].includes(latestRun.lifecycle))
+      if (
+        latestRun &&
+        ["starting", "running"].includes(latestRun.lifecycle) &&
+        usesPath(latestRun, path)
+      )
         runs.push(latestRun.run);
     } catch {
       // A tab that cannot be read is left out of the hint.
@@ -236,7 +270,7 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
         ...expectedWorkspaceRevision(args),
       });
       reportSourceChanges(operation);
-      await printLiveRuns(session.client, taskId, operation.error);
+      await printLiveRuns(session.client, taskId, operation.error, mountId);
       return printTaskOperation(session.client, operation, taskId);
     });
   }
