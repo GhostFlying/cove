@@ -227,7 +227,7 @@ worktree 是独立仓库的工作目录，不因为加入 workspace 就成为 Gi
 ### 4.2 统一 workspace 根目录
 
 已确认：repo 注册路径不受限制；每个 server 设置统一 workspace 根目录并允许配置。
-默认 `~/.cove/workspace`（M1 已定），使用 Cove 独立目录，不与 Orca 共用状态。
+默认为数据目录下的 `workspace`，即 `~/.cove/workspace`（M1 已定），使用 Cove 独立目录，不与 Orca 共用状态。
 这里的 `~` 指执行 server 所属用户的 home，不是发起客户端的 home。
 
 布局已由 M1 确定，见 [M1 D1](milestones/m1.md#d1-workspace-布局fetch-与基准选-a基准规则按用户要求修改) 与
