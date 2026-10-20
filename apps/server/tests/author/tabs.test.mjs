@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -621,8 +621,10 @@ describe("run history and identity", () => {
         env.tabs.create("p", create("c2", { cwd: { kind: "mount", mountId: "m-beta" } })),
       )
     ).outcome.operation.run;
-    // A terminal.create run outside the workspace.
+    // A terminal.create run outside the workspace. Its cwd exists: a run is recorded with the
+    // cwd's real path, and one that cannot be resolved is refused.
     const outside = join(env.root, "clones", "alphabet");
+    await mkdir(outside, { recursive: true });
     const plain = env.operations.create("p", {
       operationId: "t1",
       expectedRelayInstanceId: "instance",
