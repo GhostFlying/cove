@@ -101,7 +101,7 @@ cove server start --harness               # 前台运行；打印 harness 页面
 ```
 
 - 数据目录依次取 `--home DIR`、`$COVE_HOME`、`~/.cove`；数据库为 `<home>/server/cove.db`，
-  默认 `workspaceRoot` 为 `~/.cove/workspace`（[D1](milestones/m1.md#d1-workspace-布局fetch-与基准选-a基准规则按用户要求修改)、
+  默认 `workspaceRoot` 为 `<home>/workspace`，随 `--home` / `COVE_HOME` 变化，默认数据目录下即 `~/.cove/workspace`（[D1](milestones/m1.md#d1-workspace-布局fetch-与基准选-a基准规则按用户要求修改)、
   [D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)）。同一数据目录只允许一个 server。
   一次性试用可另给 `--home`，其他命令使用同一个 `--home` 连接它。
 - 其他命令在另一个 shell 中执行，经 `<home>/server/run/rendezvous.json`（或 `--rendezvous`、`$COVE_RENDEZVOUS`）找到 server。
