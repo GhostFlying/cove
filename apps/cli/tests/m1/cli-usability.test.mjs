@@ -366,6 +366,48 @@ test("mount convert without a mount id lists the checkout mounts when there are 
   await expect(savedRequest(home, "convert-two")).rejects.toThrow("ENOENT");
 });
 
+test("a conversion that fails on an existing branch prints a convert command that succeeds", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  await alpha.git("branch", "taken");
+  const { task } = await fixture.coveJson(
+    ["task", "create", "Retry me", "--checkout", alpha.repoId],
+    { home },
+  );
+  const [checkout] = task.workspace.mounts;
+  const failed = await fixture.cove(["mount", "convert", task.taskId, "--branch", "taken"], {
+    home,
+  });
+  expect(failed.code).toBe(1);
+  expect(JSON.parse(failed.stdout).operation).toMatchObject({
+    method: "binding.convert",
+    state: "failed",
+    result: {
+      mounts: [{ mountId: checkout.mountId, state: "failed", errorKind: "BRANCH_EXISTS" }],
+    },
+  });
+  // The hint names the task and the mount, still its checkout; never `mount retry`.
+  expect(failed.stderr).not.toContain("mount retry");
+  const hinted = [...failed.stderr.matchAll(/`(cove [^`]*)`/g)].map((match) => match[1]);
+  expect(hinted).toEqual([`cove mount convert ${task.taskId} ${checkout.mountId} --branch NEW`]);
+  const retried = await fixture.cove(
+    hinted[0]
+      .split(" ")
+      .slice(1)
+      .map((word) => (word === "NEW" ? "converted" : word)),
+    { home },
+  );
+  expect({ code: retried.code, stderr: retried.stderr }).toEqual({ code: 0, stderr: "" });
+  const [worktree] = JSON.parse(retried.stdout).task.workspace.mounts;
+  expect(worktree).toMatchObject({
+    mountId: checkout.mountId,
+    source: "worktree",
+    state: "ready",
+    branch: "converted",
+  });
+});
+
 const exists = (path) =>
   lstat(path).then(
     () => true,

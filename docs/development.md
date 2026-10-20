@@ -164,7 +164,9 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
   checkout 的存活 run（入口 tab 的 run 也算，其挂载映射包含全部挂载）时拒绝（`LIVE_RUNS_PRESENT`）。
   目标核实 ready 之前挂载仍是 checkout。省略 mountId 时转换该 task 唯一的 checkout 挂载；没有或有多个时不发送，
   列出候选（mountId、名称、路径）并以 2 退出。
-- 准备失败的 worktree 挂载用 `mount retry` 重试；结果不确定的操作为 `requires_attention`，用
+- 准备失败的 worktree 挂载用 `mount retry` 重试。转换失败时挂载仍是 checkout，`mount retry` 不适用：按 stderr 的提示
+  重新执行 `mount convert <taskId> <mountId>` 并加 `--branch NEW`、`--no-fetch` 或 `--base REF`（其余选项重新给出）。
+  结果不确定的操作为 `requires_attention`，用
   `operation continue` 继续或 `operation abandon` 放弃，Cove 不盲目重做已生效的步骤。
 - `mount delete-worktree` 连同未提交与未跟踪的改动一起删除，终端上 y/N 确认，脚本中必须传 `--yes`；
   有存活 run 使用该 worktree 时拒绝。省略 mountId 时删除该 task 唯一的托管 worktree 挂载，规则同 `mount convert`。
