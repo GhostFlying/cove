@@ -588,6 +588,36 @@ test("while a conversion prepares its target the checkout stays bound, and the s
   });
 });
 
+test("a stopped conversion names only the live runs that use the checkout", async () => {
+  const home = fixture.home("home");
+  const wrapper = await installWrapper();
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const { task } = await fixture.coveJson(["task", "create", "Later checkout"], { home });
+  // This run started before the checkout was mounted: its mapping does not include it, so it
+  // neither blocks the switch nor belongs in the hint.
+  const before = await liveTab(home, task.taskId, "before");
+  const added = await fixture.coveJson(["mount", "add", task.taskId, "--checkout", alpha.repoId], {
+    home,
+  });
+  const [mount] = added.task.workspace.mounts;
+  await wrapper.block("checkout");
+  const command = fixture.spawnCove(
+    ["mount", "convert", task.taskId, mount.mountId, "--operation-id", "s6-filter"],
+    { home },
+  );
+  await wrapper.blocked("checkout");
+  const during = await liveTab(home, task.taskId, "during");
+  await wrapper.release("checkout");
+  const reported = await command.done;
+  expect(reported.code).toBe(1);
+  expect(reported.stderr).toContain("LIVE_RUNS_PRESENT");
+  expect(reported.stderr).toContain(
+    `cove: live run ${during.run.runId} of tab ${during.tabId} ("during") uses the path`,
+  );
+  expect(reported.stderr).not.toContain(`live run ${before.run.runId} `);
+});
+
 test("a conversion whose preparation fails leaves the checkout bound and the revision unchanged", async () => {
   const home = fixture.home("home");
   await fixture.startServer(home);
