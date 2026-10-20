@@ -78,6 +78,20 @@ export type GitRunResult =
   | { kind: "exited"; code: number; stdout: string; stderr: string }
   | { kind: "failed"; reason: "spawn" | "timeout" | "overflow" | "signal" };
 
+// Shell text for a supervisor's watcher subshell: send `signal` to the supervisor's process group
+// and to its leader by PID (`$$` in a subshell is the supervisor shell, which `exec`s git and
+// keeps that PID). The leader comes first. On macOS a group signal (`kill 0`) sent by a member of
+// the group does not reliably reach the group leader, which is also the session leader here: a
+// git stand-in waiting for its child saw the child die of the group's SIGKILL, then ran on past
+// its deadline and exited 0 (#129: several of every hundred runs that reach their deadlines
+// together; the same was seen in git/worktree.ts). A SIGKILL sent to the leader's PID has not been
+// seen to miss. Naming the PID is safe: a PID is not reused while a process group with that ID
+// exists, and the sender is a live member of that group. Both supervisors use this so that their
+// kill paths cannot drift apart.
+export function signalGroupAndLeader(signal: "TERM" | "KILL"): string {
+  return `kill -s ${signal} $$ 0`;
+}
+
 // The supervisor script run by /bin/sh as the leader of the run's process group (see runGit).
 // fd 3 becomes the watcher's pipe; git gets /dev/null as stdin and does not inherit fd 3. The
 // watcher's output goes to /dev/null so that it never holds git's stdout or stderr open.
@@ -92,7 +106,8 @@ export type GitRunResult =
 const SUPERVISOR = [
   "exec 3<&0 0</dev/null",
   "(n=0; until /bin/cat <&3 >/dev/null; do n=$((n + 1)); " +
-    '[ "$n" -ge 50 ] && break; /bin/sleep 0.1; done; kill -s KILL 0) </dev/null >/dev/null 2>&1 &',
+    `[ "$n" -ge 50 ] && break; /bin/sleep 0.1; done; ${signalGroupAndLeader("KILL")}) ` +
+    "</dev/null >/dev/null 2>&1 &",
   'exec git "$@" 3<&-',
 ].join("\n");
 
@@ -111,8 +126,9 @@ const SUPERVISOR = [
 // starts a watcher in the background and then `exec`s git, which keeps the PID, so Node still
 // receives git's own exit status. The watcher stays in the group and blocks reading a pipe
 // whose only writer is this process. When this process closes it (git exited, timeout,
-// overflow) or dies, the watcher runs `kill -s KILL 0`: a signal to its own group sent by a
-// live member of it, so the group ID is pinned by the sender itself and cannot have been reused.
+// overflow) or dies, the watcher sends SIGKILL to its own group (and to the leader by PID, see
+// signalGroupAndLeader): signals sent by a live member of the group, so the group ID is pinned by
+// the sender itself and cannot have been reused.
 //
 // Guarantee, and its limit. Completion is always bounded by the deadline. Descendants that remain
 // in the created group are killed once git exits or the run is abandoned. A descendant that
