@@ -167,6 +167,24 @@ test("--checkout PATH outside every registered repo fails before anything is sen
   expect(asId.stderr).toContain("REPO_NOT_FOUND");
 });
 
+test("--checkout ~/LINK/.. follows the symlink before `..`, as the shell would", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { repoId, clone } = await registeredClone(home);
+  await mkdir(join(clone, "sub"));
+  // ~/active is the clone's subdirectory, so ~/active/.. is the clone. Read lexically it would be
+  // ~ itself, which is no repository.
+  await symlink(join(clone, "sub"), join(fixture.root, "user-home", "active"));
+  const created = await fixture.coveJson(
+    ["task", "create", "Up", "--checkout", "~/active/..,name=up", "--operation-id", "up"],
+    { home },
+  );
+  expect((await savedRequest(home, "up")).params.mounts).toEqual([
+    { source: "checkout", repoId, name: "up" },
+  ]);
+  expect(created.task.workspace.mounts[0]).toMatchObject({ name: "up", path: clone });
+});
+
 test("mount convert without a mount id converts the task's only checkout mount", async () => {
   const home = fixture.home("home");
   await fixture.startServer(home);

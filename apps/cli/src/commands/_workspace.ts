@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import {
@@ -61,7 +61,12 @@ export function isPathArgument(value: string): boolean {
 // the user's home directory, and a relative path is made absolute (hostPath).
 export function argumentPath(value: string): string {
   if (value === "~") return homedir();
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  // Only the prefix is replaced. join() would normalize the rest lexically, and `..` after a
+  // symlink means something else than that (`~/link/../x` is the parent of the link's target).
+  if (value.startsWith("~/")) {
+    const home = homedir();
+    return `${home.endsWith(sep) ? home.slice(0, -1) : home}${sep}${value.slice(2)}`;
+  }
   if (value.startsWith("~")) throw new UsageError(`only ~ and ~/ are expanded in ${value}`);
   return hostPath(value);
 }
