@@ -169,7 +169,8 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
 - `mount delete-worktree` 连同未提交与未跟踪的改动一起删除，终端上 y/N 确认，脚本中必须传 `--yes`；
   有存活 run 使用该 worktree 时拒绝。省略 mountId 时删除该 task 唯一的托管 worktree 挂载，规则同 `mount convert`。
   给出路径（规则同 `--checkout PATH`）时，CLI 按真实路径在全部 task（含已归档）中找出该托管 worktree 所属的 task 与挂载，
-  再发送同一请求；不是 Cove 托管的 worktree 时不发送并以 1 退出：checkout 或非 Cove 的 worktree 用 `mount remove`
+  再发送同一请求；路径无法解析（例如目录已不存在）时不发送并以 1 退出，已消失的 worktree 仍用 task ID 与 mountId 删除；
+  不是 Cove 托管的 worktree 时同样不发送并以 1 退出：checkout 或非 Cove 的 worktree 用 `mount remove`
   卸下（不删除目录），或自己用 git 删除。`mount remove` 只改 workspace，从不删除目录。
 - 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
   `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
