@@ -203,6 +203,57 @@ describe("Git runner", () => {
     });
   });
 
+  // #129. A git that ignores SIGTERM and waits for a child in its group: only the deadline's
+  // SIGKILL ends it. On macOS a group signal sent by a member of the group (the watcher's
+  // `kill 0`) does not reliably reach the group leader: the child dies, the leader's `wait`
+  // returns and it runs on (and may exit 0) after its deadline. The miss is a race, seen in about
+  // 5-15% of runs on macOS when many runs reach their deadline together, so up to four batches of
+  // 64 runs go at once. On Linux the group signal reaches every member before the sender returns,
+  // so this passes there with or without the fix. A leader that runs past the kill records it.
+  it(
+    "kills a git that ignores SIGTERM at its deadline, leader included",
+    { timeout: 90_000 },
+    async () => {
+      // Its output goes to /dev/null: the shell reports the killed child on stderr, and the run's
+      // stderr is closed at the deadline, so a leader that ran on would die of SIGPIPE there and
+      // hide the miss.
+      const script = [
+        "exec >/dev/null 2>&1",
+        'trap "" TERM',
+        'echo $$ > "$PWD/git.pid"',
+        "/bin/sleep 30 &",
+        "wait",
+        "wait",
+        'echo ran-on > "$PWD/ran-on"',
+      ].join("\n");
+      process.env.PATH = `${await fakeGit(script)}:${savedEnv.PATH}`;
+      const outcome = async (cwd) => {
+        let pid;
+        try {
+          pid = Number(await readFile(join(cwd, "git.pid"), "utf8"));
+        } catch (error) {
+          // Killed before it recorded its PID: nothing of it ran on.
+          if (error.code === "ENOENT") return "killed";
+          throw error;
+        }
+        if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("no git PID recorded");
+        // The watcher's own start may be delayed under load; give the kill time to land.
+        const gone = (await ended(pid, 10_000)) ? "killed" : "alive";
+        if (gone === "alive") process.kill(pid, "SIGKILL");
+        return (await exists(join(cwd, "ran-on"))) ? "ran on" : gone;
+      };
+      for (let batch = 0; batch < 4; batch++) {
+        const cwds = await Promise.all(Array.from({ length: 64 }, () => temporary()));
+        const results = await Promise.all(
+          cwds.map((cwd) => runGit(["status"], { cwd, timeoutMs: 1_000 })),
+        );
+        expect(results.filter((result) => result.reason !== "timeout")).toEqual([]);
+        const outcomes = await Promise.all(cwds.map(outcome));
+        expect(outcomes.filter((result) => result !== "killed")).toEqual([]);
+      }
+    },
+  );
+
   it("ends the process group and settles promptly after an output overflow", async () => {
     expect(await forkingRun("yes &\necho $! > PIDFILE\nwait", { maxOutputBytes: 4096 })).toEqual({
       result: { kind: "failed", reason: "overflow" },
@@ -279,9 +330,9 @@ async function snapshot(root) {
   return entries;
 }
 
-// Whether `pid` stops existing within a few seconds (an orphaned descendant is reaped by init).
-async function ended(pid) {
-  const deadline = Date.now() + 3_000;
+// Whether `pid` stops existing within `withinMs` (an orphaned descendant is reaped by init).
+async function ended(pid, withinMs = 3_000) {
+  const deadline = Date.now() + withinMs;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
