@@ -1,7 +1,15 @@
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
-import type { MountSpec, TaskRecord } from "@cove/protocol/workspace";
+import {
+  M1_LIMITS,
+  type MountSpec,
+  type RepoRecord,
+  type TaskRecord,
+} from "@cove/protocol/workspace";
 import { hostPath, print, unwrap, UsageError } from "./_common.js";
 
 // Helpers shared by `cove task` and `cove mount` (M1 T3a).
@@ -18,6 +26,11 @@ does not enforce read-only use:
     the registered clone itself, or with path= an existing worktree of it that Cove does not
     manage; path= comes last and takes the rest of the value. A path Cove manages as a worktree
     is refused (MANAGED_WORKTREE_NOT_MOUNTABLE).
+  --checkout PATH[,name=NAME]
+    the same, named by its directory: the CLI finds the registered repo whose clone or worktree
+    PATH is (\`cove repo list\`) and sends the request above. The value is a PATH when the part
+    before its first comma starts with /, . or ~ or contains a /, which a repo ID never does
+    (write ./NAME for a directory NAME).
 A worktree mount is a new Git worktree Cove creates and manages at <entry>/NAME:
   --worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]
     BRANCH (default cove/<task slug>) is a new branch; an existing one fails the mount
@@ -30,10 +43,43 @@ A worktree mount is a new Git worktree Cove creates and manages at <entry>/NAME:
 NAME defaults to the repo's display name. The workspace entry directory holds cove-workspace.json,
 the manifest of every mount with its real path; a checkout is reached by that real path.`;
 
+// A `--checkout PATH[,name=NAME]` value: the directory still to be resolved to its registered
+// repo (resolveMountSpecs) before the request is built.
+export type CheckoutPathSpec = { source: "checkout"; lookup: string; name?: string };
+export type ParsedMountSpec = MountSpec | CheckoutPathSpec;
+
+// Whether a command argument names a directory rather than a resource ID. A resource ID (repo,
+// task, mount) is 1-40 of [A-Za-z0-9._-] starting with a letter or digit, so it never starts with
+// `/`, `.` or `~` and never contains `/`: the two cannot be confused, and the rule does not
+// depend on what exists on disk. A directory named like an ID is written `./NAME`.
+export function isPathArgument(value: string): boolean {
+  return /^[/.~]/.test(value) || value.includes("/");
+}
+
+// A path argument as the server should see it: `~` and `~/...` (left unexpanded when quoted) are
+// the user's home directory, and a relative path is made absolute (hostPath).
+export function argumentPath(value: string): string {
+  if (value === "~") return homedir();
+  if (value.startsWith("~/")) return join(homedir(), value.slice(2));
+  if (value.startsWith("~")) throw new UsageError(`only ~ and ~/ are expanded in ${value}`);
+  return hostPath(value);
+}
+
 // One --checkout or --worktree value. Options are comma-separated `key=value` pairs after the
-// repo ID; a checkout's path= is last and may itself contain commas.
-export function parseMountSpec(source: "checkout" | "worktree", value: string): MountSpec {
+// repo ID; a checkout's path= is last and may itself contain commas. A checkout value whose part
+// before the first comma is a path (isPathArgument) is `PATH[,name=NAME]`: the path may contain
+// commas, and only a final `,name=NAME` is an option.
+export function parseMountSpec(source: "checkout" | "worktree", value: string): ParsedMountSpec {
   const flagName = `--${source}`;
+  if (source === "checkout" && isPathArgument(value.split(",")[0]!)) {
+    const named = /^(.+),name=([^,/]*)$/.exec(value);
+    if (named && !named[2]) throw new UsageError(`${flagName} name= needs a value`);
+    return {
+      source,
+      lookup: argumentPath(named ? named[1]! : value),
+      ...(named ? { name: named[2]! } : {}),
+    };
+  }
   let rest = value;
   let path: string | undefined;
   if (source === "checkout") {
@@ -65,6 +111,79 @@ export function parseMountSpec(source: "checkout" | "worktree", value: string): 
   }
   if (path !== undefined) spec.path = hostPath(path);
   return spec as MountSpec;
+}
+
+export async function listRepos(client: Client): Promise<RepoRecord[]> {
+  const repos: RepoRecord[] = [];
+  let afterRepoId: string | undefined;
+  do {
+    const page = unwrap(
+      "repo.list",
+      await client.call("repo.list", {
+        limit: M1_LIMITS.listPage,
+        ...(afterRepoId ? { afterRepoId } : {}),
+      }),
+    );
+    repos.push(...page.repos);
+    afterRepoId = page.nextAfterRepoId;
+  } while (afterRepoId);
+  return repos;
+}
+
+// The real Git common directory and top level of the working tree containing `path`, or null when
+// Git finds none there. The common directory identifies a clone together with its worktrees.
+function workingTree(path: string): Promise<{ commonDir: string; topLevel: string } | null> {
+  return new Promise((done) =>
+    execFile(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"],
+      { cwd: path, timeout: 10_000 },
+      (error, stdout) => {
+        const lines = stdout.split("\n");
+        if (error || lines.length !== 3 || lines[2] !== "") return done(null);
+        Promise.all([realpath(lines[0]!), realpath(lines[1]!)]).then(
+          ([commonDir, topLevel]) => done({ commonDir, topLevel }),
+          () => done(null),
+        );
+      },
+    ),
+  );
+}
+
+// Turns each `--checkout PATH` into the request the REPO_ID form sends: `{repoId}` for the
+// registered clone itself, `{repoId, path}` for another working tree of it. The CLI only picks the
+// repo, by the Git common directory the path shares with a registered clone (repo.list); the
+// server still decides whether the path is admitted (D2), exactly as for `REPO_ID,path=PATH`.
+export async function resolveMountSpecs(
+  client: Client,
+  specs: readonly ParsedMountSpec[],
+): Promise<MountSpec[]> {
+  if (!specs.some((spec) => "lookup" in spec)) return specs as MountSpec[];
+  const repos = await listRepos(client);
+  const commonDirs = await Promise.all(
+    repos.map(async (repo) => (await workingTree(repo.path))?.commonDir ?? null),
+  );
+  return Promise.all(
+    specs.map(async (spec): Promise<MountSpec> => {
+      if (!("lookup" in spec)) return spec;
+      const found = await workingTree(spec.lookup);
+      const index = found ? commonDirs.indexOf(found.commonDir) : -1;
+      if (!found || index < 0)
+        throw new Error(
+          `--checkout ${spec.lookup} is not in a registered repo` +
+            (found ? "" : " (Git finds no working tree there)") +
+            "; nothing was sent. `cove repo list` shows the registered clones, and " +
+            "`cove repo register <clone>` adds one",
+        );
+      const repo = repos[index]!;
+      return {
+        source: "checkout",
+        repoId: repo.repoId,
+        ...(spec.name === undefined ? {} : { name: spec.name }),
+        ...(found.topLevel === repo.path ? {} : { path: spec.lookup }),
+      };
+    }),
+  );
 }
 
 // A task as the CLI prints it: the server's record, with each mount marked for its intended use

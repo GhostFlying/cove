@@ -1,5 +1,5 @@
 import type { Client } from "@cove/client";
-import { M1_LIMITS, type MountSpec, type TaskRecord } from "@cove/protocol/workspace";
+import { M1_LIMITS, type TaskRecord } from "@cove/protocol/workspace";
 import {
   flag,
   flagValues,
@@ -19,6 +19,8 @@ import {
   MOUNT_SPEC_HELP,
   parseMountSpec,
   printTaskOperation,
+  resolveMountSpecs,
+  type ParsedMountSpec,
 } from "./_workspace.js";
 
 export const usage = `  task create <TITLE> [--checkout SPEC]... [--worktree SPEC]... [--operation-id ID]
@@ -62,12 +64,13 @@ export async function run(args: Arguments): Promise<number> {
   if (sub === "create") {
     takeFlags(args, ["--checkout", "--worktree", "--operation-id"], ["--checkout", "--worktree"]);
     const title = one(args, "task title");
-    const mounts: MountSpec[] = [
+    const specs: ParsedMountSpec[] = [
       ...flagValues(args, "--checkout").map((value) => parseMountSpec("checkout", value)),
       ...flagValues(args, "--worktree").map((value) => parseMountSpec("worktree", value)),
     ];
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
+      const mounts = await resolveMountSpecs(session.client, specs);
       const operation = await submitWrite(args, session, "task.create", {
         operationId,
         title,
