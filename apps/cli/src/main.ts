@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { readdir } from "node:fs/promises";
-import { parseArguments, StatusError, UsageError, type Arguments } from "./commands/_common.js";
+import {
+  parseArguments,
+  StatusError,
+  SWITCHES,
+  UsageError,
+  type Arguments,
+} from "./commands/_common.js";
 
 // Each command group is a module in ./commands named after it (`cove repo ...` is
 // commands/repo.ts). Modules are discovered at run time, so a domain adds its commands without
@@ -54,20 +60,38 @@ class GroupUsageError extends UsageError {
   }
 }
 
+// The command group a `--help` before `--` asks about, or null when there is no such --help. It is
+// recognized before parseArguments, so that a help request is answered even when the rest of the
+// command is incomplete (`cove mount convert --branch --help`: --branch has no value). The words
+// are read leniently: an option other than a switch is taken to consume the next item unless that
+// is itself an option. Everything after `--` is the spawned command's and is never read here.
+function helpTarget(argv: readonly string[]): { group: string | undefined } | null {
+  const end = argv.indexOf("--");
+  const own = end < 0 ? argv : argv.slice(0, end);
+  if (!own.includes("--help")) return null;
+  for (let i = 0; i < own.length; i++) {
+    const item = own[i]!;
+    if (!item.startsWith("--")) return { group: item };
+    if (!SWITCHES.has(item) && own[i + 1] !== undefined && !own[i + 1]!.startsWith("--")) i++;
+  }
+  return { group: undefined };
+}
+
 async function run(argv: readonly string[]): Promise<number> {
-  const args = parseArguments(argv);
-  const [group, ...rest] = args.words;
   // A help request asked for explicitly (`cove help [GROUP]`, or --help anywhere before `--`)
   // prints the usage on stdout and succeeds. A --help after `--` belongs to the spawned command.
+  const help = helpTarget(argv);
+  if (help && help.group !== "help") {
+    process.stdout.write(`${await usage((await isGroup(help.group)) ? help.group : undefined)}\n`);
+    return 0;
+  }
+  const args = parseArguments(argv);
+  const [group, ...rest] = args.words;
   if (group === "help") {
     if (rest.length > 1) throw new UsageError("help takes at most one command group");
     if (rest[0] !== undefined && !(await isGroup(rest[0])))
       throw new UsageError(`Unknown command group ${rest[0]}`);
     process.stdout.write(`${await usage(rest[0])}\n`);
-    return 0;
-  }
-  if (args.flags.has("--help")) {
-    process.stdout.write(`${await usage((await isGroup(group)) ? group : undefined)}\n`);
     return 0;
   }
   if (!group) throw new UsageError("missing command");

@@ -30,7 +30,13 @@ export interface Arguments {
 export const GLOBAL_FLAGS = ["--home", "--rendezvous"] as const;
 
 // Flags that take no value. main.ts answers --help before a command runs.
-const SWITCHES = new Set(["--harness", "--reset", "--no-fetch", "--yes", "--help"]);
+export const SWITCHES: ReadonlySet<string> = new Set([
+  "--harness",
+  "--reset",
+  "--no-fetch",
+  "--yes",
+  "--help",
+]);
 
 export function parseArguments(argv: readonly string[]): Arguments {
   const words: string[] = [];
