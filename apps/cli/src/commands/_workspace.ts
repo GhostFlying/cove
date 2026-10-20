@@ -114,6 +114,27 @@ export function parseMountSpec(source: "checkout" | "worktree", value: string): 
   return spec as MountSpec;
 }
 
+export async function listTasks(
+  client: Client,
+  archived: string | undefined,
+): Promise<TaskRecord[]> {
+  const tasks: TaskRecord[] = [];
+  let afterTaskId: string | undefined;
+  do {
+    const page = unwrap(
+      "task.list",
+      await client.call("task.list", {
+        limit: M1_LIMITS.listPage,
+        ...(afterTaskId ? { afterTaskId } : {}),
+        ...(archived ? { archived: archived as "exclude" | "include" | "only" } : {}),
+      }),
+    );
+    tasks.push(...page.tasks);
+    afterTaskId = page.nextAfterTaskId;
+  } while (afterTaskId);
+  return tasks;
+}
+
 export async function listRepos(client: Client): Promise<RepoRecord[]> {
   const repos: RepoRecord[] = [];
   let afterRepoId: string | undefined;

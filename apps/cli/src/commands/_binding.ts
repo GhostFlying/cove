@@ -1,3 +1,5 @@
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Client } from "@cove/client";
 import type { DomainError } from "@cove/protocol/errors";
@@ -17,7 +19,14 @@ import {
   type Arguments,
 } from "./_common.js";
 import { operationIdFor, submitWrite } from "./_pending.js";
-import { getTask, listTabs, printTaskOperation } from "./_workspace.js";
+import {
+  argumentPath,
+  getTask,
+  isPathArgument,
+  listTabs,
+  listTasks,
+  printTaskOperation,
+} from "./_workspace.js";
 
 // The binding commands of the mount group (M1 T5; RPC_METHODS routes them as `mount convert`,
 // `mount delete-worktree` and `mount history`): binding.convert, binding.delete and binding.list.
@@ -25,7 +34,7 @@ import { getTask, listTabs, printTaskOperation } from "./_workspace.js";
 // `cove binding` group of their own (main.ts discovers groups from the non-`_` modules).
 
 export const commands = `  mount convert <taskId> [mountId] [--branch BRANCH] [--base REF] [--no-fetch] [--expected-revision N] [--operation-id ID]
-  mount delete-worktree <taskId> <mountId> [--yes] [--expected-revision N] [--operation-id ID]
+  mount delete-worktree (<taskId> [mountId] | <PATH>) [--yes] [--expected-revision N] [--operation-id ID]
   mount history <taskId> <mountId>`;
 
 export const notes = `mount convert switches a checkout mount to a new managed worktree of the same repository, created
@@ -41,6 +50,10 @@ untracked changes, and removes the mount; the branch is kept. It also deletes a 
 failed or abandoned preparation left in place. A checkout is never deleted. It asks for
 confirmation on a terminal; --yes confirms it without asking, and without a terminal it is
 required. It is refused while any run uses the worktree (LIVE_RUNS_PRESENT, with the runs).
+Without a mountId it deletes the task's only managed worktree mount, listing them (exit 2) when
+there are none or several. Given a PATH (starting with /, . or ~, or containing a /) it finds the
+task and mount whose managed worktree is at that real path, archived tasks included; a checkout
+or a worktree Cove does not manage is not deleted (\`cove mount remove\` unmounts it).
 mount history lists the bindings a mount has had, oldest first.`;
 
 function expectedWorkspaceRevision(args: Arguments): { expectedWorkspaceRevision?: number } {
@@ -78,6 +91,38 @@ function onlyMount(task: TaskRecord, source: MountRecord["source"], command: str
       : `task ${task.taskId} has ${candidates.length} ${kind}s; name one: ` +
           `\`cove mount ${command} ${task.taskId} <mountId>\` (nothing was sent)\n` +
           candidates.map((mount) => `  ${mount.mountId}\t${mount.name}\t${mount.path}`).join("\n"),
+    2,
+  );
+}
+
+// The task and managed worktree mount whose worktree is at `path`, for `mount delete-worktree
+// PATH`. Both sides are compared by real path, so the worktree may be named through a symlink or
+// an alias such as macOS /tmp; a path that no longer resolves is compared as given. Every task is
+// searched, archived ones included (a deletion is allowed there). Only managed worktree mounts
+// match: a checkout, or a worktree Cove does not manage, is never deleted by this command.
+async function managedWorktreeAt(
+  client: Client,
+  path: string,
+): Promise<{ taskId: string; mount: MountRecord }> {
+  const real = (value: string) => realpath(value).catch(() => resolve(value));
+  const target = await real(path);
+  const matches: { taskId: string; mount: MountRecord }[] = [];
+  for (const task of await listTasks(client, "include"))
+    for (const mount of task.workspace.mounts)
+      if (mount.source === "worktree" && (await real(mount.path)) === target)
+        matches.push({ taskId: task.taskId, mount });
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length === 0)
+    throw new Error(
+      `no Cove-managed worktree mount is at ${target} (tasks were searched, archived ones ` +
+        `included); nothing was sent. A checkout or a worktree Cove does not manage is never ` +
+        `deleted by Cove: \`cove mount remove <taskId> <mountId>\` unmounts it without deleting ` +
+        `anything, and \`git worktree remove\` deletes a worktree yourself`,
+    );
+  throw new StatusError(
+    `${matches.length} managed worktree mounts are at ${target}; name one: ` +
+      `\`cove mount delete-worktree <taskId> <mountId>\` (nothing was sent)\n` +
+      matches.map(({ taskId, mount }) => `  ${taskId}\t${mount.mountId}\t${mount.name}`).join("\n"),
     2,
   );
 }
@@ -197,7 +242,15 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
   }
   if (sub === "delete-worktree") {
     takeFlags(args, ["--yes", "--expected-revision", "--operation-id"]);
-    const [taskId, mountId] = mountIds(args, "delete-worktree");
+    // `<PATH>` or `<taskId> [mountId]` (a task ID never looks like a path, see isPathArgument).
+    const first = args.words[2];
+    const byPath = first !== undefined && isPathArgument(first);
+    if (byPath && (args.words.length !== 3 || args.command))
+      throw new UsageError("mount delete-worktree PATH takes no mount id");
+    const [givenTaskId, givenMountId] = byPath
+      ? [undefined, undefined]
+      : taskAndMaybeMount(args, "delete-worktree");
+    const path = byPath ? argumentPath(first) : undefined;
     const operationId = operationIdFor(args);
     const interactive = process.stdin.isTTY === true && process.stderr.isTTY === true;
     // Without a terminal nobody can answer the question: --yes is the confirmation, and without
@@ -209,9 +262,22 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
         2,
       );
     return withSession(args, async (session) => {
+      // The mount record when the command had to look it up; with both IDs given nothing is read
+      // unless the question needs the path and branch.
+      let found: { taskId: string; mount: MountRecord } | undefined;
+      if (path !== undefined) found = await managedWorktreeAt(session.client, path);
+      else if (givenMountId === undefined) {
+        const task = await getTask(session.client, givenTaskId!);
+        found = { taskId: task.taskId, mount: onlyMount(task, "worktree", "delete-worktree") };
+      }
+      const taskId = found?.taskId ?? givenTaskId!;
+      const mountId = found?.mount.mountId ?? givenMountId!;
       if (!args.flags.has("--yes")) {
-        const task = await getTask(session.client, taskId);
-        const mount = task.workspace.mounts.find((item) => item.mountId === mountId);
+        const mount =
+          found?.mount ??
+          (await getTask(session.client, taskId)).workspace.mounts.find(
+            (item) => item.mountId === mountId,
+          );
         if (!mount) throw new Error(`task ${taskId} has no mount ${mountId}`);
         const confirmed = await confirm(
           `Delete the worktree at ${mount.path}, including its uncommitted and untracked ` +

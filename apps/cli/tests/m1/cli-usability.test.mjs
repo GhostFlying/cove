@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
@@ -233,4 +233,143 @@ test("mount convert without a mount id lists the checkout mounts when there are 
   expect(result.stderr).toContain(`  ${a.mountId}\ta\t${clone}\n`);
   expect(result.stderr).toContain(`  ${b.mountId}\tb\t${linked}\n`);
   await expect(savedRequest(home, "convert-two")).rejects.toThrow("ENOENT");
+});
+
+const exists = (path) =>
+  lstat(path).then(
+    () => true,
+    () => false,
+  );
+
+test("mount delete-worktree without a mount id deletes the task's only managed worktree", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  // A checkout beside the worktree is not a candidate.
+  const { task } = await fixture.coveJson(
+    ["task", "create", "One", "--checkout", alpha.repoId, "--worktree", `${alpha.repoId},name=wt`],
+    { home },
+  );
+  const worktree = task.workspace.mounts.find((mount) => mount.source === "worktree");
+  const deleted = await fixture.cove(
+    ["mount", "delete-worktree", task.taskId, "--yes", "--operation-id", "delete-one"],
+    { home },
+  );
+  expect(deleted.code).toBe(0);
+  expect((await savedRequest(home, "delete-one")).params).toEqual({
+    operationId: "delete-one",
+    taskId: task.taskId,
+    mountId: worktree.mountId,
+    confirmed: true,
+  });
+  const printed = JSON.parse(deleted.stdout);
+  expect(printed.operation).toMatchObject({ method: "binding.delete", state: "succeeded" });
+  expect(printed.task.workspace.mounts).toEqual([
+    expect.objectContaining({ source: "checkout", path: alpha.clone }),
+  ]);
+  expect(await exists(worktree.path)).toBe(false);
+  // No managed worktree is left: nothing is sent.
+  const none = await fixture.cove(["mount", "delete-worktree", task.taskId, "--yes"], { home });
+  expect(none.code).toBe(2);
+  expect(none.stderr).toContain(
+    `task ${task.taskId} has no managed worktree mount; nothing was sent`,
+  );
+  // Several: they are listed, and nothing is deleted.
+  const two = await fixture.coveJson(
+    [
+      "task",
+      "create",
+      "Two",
+      "--worktree",
+      `${alpha.repoId},name=a,branch=two-a`,
+      "--worktree",
+      `${alpha.repoId},name=b,branch=two-b`,
+    ],
+    { home },
+  );
+  const [a, b] = two.task.workspace.mounts;
+  const ambiguous = await fixture.cove(["mount", "delete-worktree", two.task.taskId, "--yes"], {
+    home,
+  });
+  expect(ambiguous.code).toBe(2);
+  expect(ambiguous.stdout).toBe("");
+  expect(ambiguous.stderr).toContain(
+    `task ${two.task.taskId} has 2 managed worktree mounts; name one: ` +
+      `\`cove mount delete-worktree ${two.task.taskId} <mountId>\` (nothing was sent)`,
+  );
+  expect(ambiguous.stderr).toContain(`  ${a.mountId}\ta\t${a.path}\n`);
+  expect(ambiguous.stderr).toContain(`  ${b.mountId}\tb\t${b.path}\n`);
+  expect(await exists(a.path)).toBe(true);
+  expect(await exists(b.path)).toBe(true);
+});
+
+test("mount delete-worktree PATH finds the managed worktree by its real path, in archived tasks too", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const { task } = await fixture.coveJson(
+    [
+      "task",
+      "create",
+      "By path",
+      "--worktree",
+      `${alpha.repoId},name=a,branch=path-a`,
+      "--worktree",
+      `${alpha.repoId},name=b,branch=path-b`,
+    ],
+    { home },
+  );
+  const [, b] = task.workspace.mounts;
+  await fixture.coveJson(["task", "archive", task.taskId], { home });
+  // Without a terminal and without --yes nothing is looked up or sent, as before.
+  const unconfirmed = await fixture.cove(["mount", "delete-worktree", b.path], { home });
+  expect(unconfirmed.code).toBe(2);
+  expect(unconfirmed.stderr).toContain("confirm with --yes (nothing was sent)");
+  // Named through a symlink to the workspace entry.
+  const alias = join(fixture.root, "alias");
+  await symlink(task.workspace.entryPath, alias);
+  const deleted = await fixture.cove(
+    ["mount", "delete-worktree", join(alias, "b"), "--yes", "--operation-id", "delete-path"],
+    { home },
+  );
+  expect(deleted.code).toBe(0);
+  expect((await savedRequest(home, "delete-path")).params).toEqual({
+    operationId: "delete-path",
+    taskId: task.taskId,
+    mountId: b.mountId,
+    confirmed: true,
+  });
+  const printed = JSON.parse(deleted.stdout);
+  expect(printed.operation).toMatchObject({ method: "binding.delete", state: "succeeded" });
+  expect(printed.task.workspace.mounts.map((mount) => mount.mountId)).not.toContain(b.mountId);
+  expect(await exists(b.path)).toBe(false);
+  // The branch is kept.
+  expect(await alpha.git("branch", "--list", "path-b")).toContain("path-b");
+
+  // A path that is not a managed worktree mount: nothing is sent, and the hint names the
+  // commands for a checkout or an unmanaged worktree.
+  const { task: reader } = await fixture.coveJson(
+    ["task", "create", "Reader", "--checkout", alpha.clone],
+    { home },
+  );
+  for (const path of [alpha.clone, b.path, join(fixture.root, "nowhere")]) {
+    const result = await fixture.cove(
+      ["mount", "delete-worktree", path, "--yes", "--operation-id", "delete-none"],
+      { home },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(`no Cove-managed worktree mount is at ${path}`);
+    expect(result.stderr).toContain("`cove mount remove <taskId> <mountId>` unmounts it");
+  }
+  await expect(savedRequest(home, "delete-none")).rejects.toThrow("ENOENT");
+  expect(await exists(join(alpha.clone, "README.md"))).toBe(true);
+  const unchanged = await fixture.coveJson(["task", "get", reader.taskId], { home });
+  expect(unchanged.workspace.mounts).toHaveLength(1);
+  // The PATH form takes no mount id.
+  const extra = await fixture.cove(["mount", "delete-worktree", alpha.clone, "m1", "--yes"], {
+    home,
+  });
+  expect(extra.code).toBe(2);
+  expect(extra.stderr).toContain("mount delete-worktree PATH takes no mount id");
 });
