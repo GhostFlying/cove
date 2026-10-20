@@ -133,6 +133,10 @@ cove server start --harness               # 前台运行；打印 harness 页面
 
 - `--checkout REPO_ID[,name=NAME][,path=PATH]`：已注册 clone 本身，或用 `path=` 指定它已有、且不由 Cove 管理的
   worktree（`path=` 放在最后）。Cove 不写入 checkout，按约定只用于只读任务，不强制（[D4](milestones/m1.md#d4-共享-checkout选-a不加锁)）。
+- `--checkout PATH[,name=NAME]`：同上，直接给目录。CLI 用 `repo list` 与 Git 公共目录找出 PATH 所属的已注册 repo，
+  再发送与 `REPO_ID` 写法相同的请求（clone 本身不带 `path=`，其他 worktree 带 `path=`）；不属于任何已注册 repo 时
+  不发送并以 1 退出。第一个逗号之前的部分以 `/`、`.`、`~` 开头或含 `/` 时是路径，否则是 repo ID（ID 从不如此），
+  因此当前目录写 `.`，名为 `foo` 的子目录写 `./foo`。
 - `--worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]`：在 `<入口>/<NAME>` 新建托管 worktree，
   分支默认 `cove/<slug>`；先 fetch `origin`，基准默认远端主分支，从不回退到本地 HEAD（D1）。
 - `NAME` 默认取 repo 显示名。入口目录中的 `cove-workspace.json` 列出每个挂载的真实路径，checkout 经它访问（D2）。

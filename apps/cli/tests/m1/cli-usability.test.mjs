@@ -1,7 +1,10 @@
+import { mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "./fixtures.mjs";
 
-// CLI usability from the M1 trial, through the compiled `cove` CLI: per-group help.
+// CLI usability from the M1 trial (PR #134), through the compiled `cove` CLI and server: per-group
+// help and `--checkout PATH`. Every repository lives in the fixture's temporary root.
 
 let fixture;
 
@@ -71,4 +74,90 @@ test("a group without a subcommand is a usage error that prints only that group'
   const unknownGroup = await fixture.cove(["help", "nope"]);
   expect(unknownGroup.code).toBe(2);
   expect(unknownGroup.stderr).toContain("cove: Unknown command group nope");
+});
+
+// A registered clone under the isolated HOME (so `~/...` reaches it) with one linked worktree that
+// Cove does not manage.
+async function registeredClone(home) {
+  const clone = await fixture.gitRepo("user-home/alpha");
+  const registered = await fixture.coveJson(["repo", "register", clone.path], { home });
+  const linked = join(fixture.root, "user-home", "alpha-linked");
+  await clone.git("worktree", "add", "--quiet", "-b", "linked", linked);
+  return { repoId: registered.result.resource.id, clone: clone.path, linked };
+}
+
+const savedRequest = async (home, operationId) =>
+  JSON.parse(await readFile(join(home, "cli", "operations", `${operationId}.json`), "utf8"));
+
+test("--checkout PATH names the registered clone or its worktree and sends the REPO_ID request", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const { repoId, clone, linked } = await registeredClone(home);
+  // The clone by a subdirectory of it, with a name; the worktree through `~`, which a quoted
+  // argument leaves to the CLI.
+  await mkdir(join(clone, "sub"));
+  const created = await fixture.coveJson(
+    [
+      "task",
+      "create",
+      "By path",
+      "--checkout",
+      `${join(clone, "sub")},name=main-co`,
+      "--checkout",
+      "~/alpha-linked",
+      "--operation-id",
+      "by-path",
+    ],
+    { home },
+  );
+  expect((await savedRequest(home, "by-path")).params.mounts).toEqual([
+    { source: "checkout", repoId, name: "main-co" },
+    { source: "checkout", repoId, path: linked },
+  ]);
+  expect(created.task.workspace.mounts).toEqual([
+    expect.objectContaining({ source: "checkout", repoId, name: "main-co", path: clone }),
+    expect.objectContaining({ source: "checkout", repoId, path: linked }),
+  ]);
+  // mount add takes the same form; the REPO_ID form still works beside it.
+  const added = await fixture.coveJson(
+    ["mount", "add", created.task.taskId, "--checkout", `${clone},name=again`],
+    { home },
+  );
+  expect(added.task.workspace.mounts.at(-1)).toMatchObject({ name: "again", path: clone });
+  const byId = await fixture.coveJson(
+    ["mount", "add", created.task.taskId, "--checkout", `${repoId},name=by-id`],
+    { home },
+  );
+  expect(byId.task.workspace.mounts.at(-1)).toMatchObject({ name: "by-id", path: clone });
+});
+
+test("--checkout PATH outside every registered repo fails before anything is sent", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  await registeredClone(home);
+  const other = await fixture.gitRepo("unregistered");
+  const plain = join(fixture.root, "plain");
+  await mkdir(plain);
+  const { task } = await fixture.coveJson(["task", "create", "Nothing"], { home });
+  for (const [path, why] of [
+    [other.path, ""],
+    [plain, " (Git finds no working tree there)"],
+  ]) {
+    const result = await fixture.cove(
+      ["mount", "add", task.taskId, "--checkout", path, "--operation-id", "unmatched"],
+      { home },
+    );
+    expect(result.code).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(`--checkout ${path} is not in a registered repo${why}`);
+    expect(result.stderr).toContain("nothing was sent");
+  }
+  // No request was saved, and the task is unchanged.
+  await expect(savedRequest(home, "unmatched")).rejects.toThrow("ENOENT");
+  const after = await fixture.coveJson(["task", "get", task.taskId], { home });
+  expect(after.workspace.mounts).toEqual([]);
+  // A value without a slash that names a directory is still a repo ID, refused as such.
+  const asId = await fixture.cove(["task", "create", "As id", "--checkout", "plain"], { home });
+  expect(asId.code).toBe(1);
+  expect(asId.stderr).toContain("REPO_NOT_FOUND");
 });

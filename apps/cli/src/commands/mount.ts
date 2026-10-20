@@ -9,7 +9,12 @@ import {
 } from "./_common.js";
 import { commands as bindingCommands, notes as bindingNotes, runBinding } from "./_binding.js";
 import { operationIdFor, submitWrite } from "./_pending.js";
-import { MOUNT_SPEC_HELP, parseMountSpec, printTaskOperation } from "./_workspace.js";
+import {
+  MOUNT_SPEC_HELP,
+  parseMountSpec,
+  printTaskOperation,
+  resolveMountSpecs,
+} from "./_workspace.js";
 
 export const usage = `  mount add <taskId> (--checkout SPEC | --worktree SPEC) [--expected-revision N] [--operation-id ID]
   mount remove <taskId> <mountId> [--expected-revision N] [--operation-id ID]
@@ -42,11 +47,12 @@ export async function run(args: Arguments): Promise<number> {
     const worktree = flagValues(args, "--worktree");
     if (checkout.length + worktree.length !== 1)
       throw new UsageError("mount add needs exactly one --checkout or --worktree");
-    const mount = checkout[0]
+    const spec = checkout[0]
       ? parseMountSpec("checkout", checkout[0])
       : parseMountSpec("worktree", worktree[0]!);
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
+      const [mount] = await resolveMountSpecs(session.client, [spec]);
       const operation = await submitWrite(args, session, "mount.add", {
         operationId,
         taskId,

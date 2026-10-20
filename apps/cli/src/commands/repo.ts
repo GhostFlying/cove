@@ -1,5 +1,3 @@
-import type { Client } from "@cove/client";
-import { M1_LIMITS, type RepoRecord } from "@cove/protocol/workspace";
 import {
   flag,
   hostPath,
@@ -13,6 +11,7 @@ import {
   type Arguments,
 } from "./_common.js";
 import { operationIdFor, printSucceeded, submitWrite } from "./_pending.js";
+import { listRepos } from "./_workspace.js";
 
 export const usage = `  repo register <PATH> [--name NAME] [--operation-id ID]
   repo list
@@ -27,23 +26,6 @@ mainBranch is only stored here; unset, worktree creation resolves it from the re
 repo remove deletes the registration only and never touches the clone directory. It is refused
 (REPO_IN_USE) while a mount of any task, archived ones included, uses the repo; remove those
 mounts first with \`cove mount remove\`.`;
-
-async function listRepos(client: Client): Promise<RepoRecord[]> {
-  const repos: RepoRecord[] = [];
-  let afterRepoId: string | undefined;
-  do {
-    const page = unwrap(
-      "repo.list",
-      await client.call("repo.list", {
-        limit: M1_LIMITS.listPage,
-        ...(afterRepoId ? { afterRepoId } : {}),
-      }),
-    );
-    repos.push(...page.repos);
-    afterRepoId = page.nextAfterRepoId;
-  } while (afterRepoId);
-  return repos;
-}
 
 function expectedRevision(args: Arguments): { expectedRevision?: number } {
   const value = optionalIntegerFlag(args, "--expected-revision");
