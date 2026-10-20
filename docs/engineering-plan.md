@@ -110,11 +110,12 @@ M0 即开始采集输入延迟和队列内存；移动端输入等后续风险�
 
 1. 单仓库与多 agent 工作流已确认；按 milestone 审阅任务依赖图，目录名与包数量保持可调整。
 2. pnpm workspace 与构建/test 方向已选；固定版本与 lint/格式化已落地，继续收敛 RN/Expo 与发布工具。
-3. Workspace 实际目录与引用现有 checkout 的方式，形成真实 agent/Git 验收。
-4. 数据库执行位置、schema migration 与 CLI bootstrap；执行库已选 better-sqlite3，不重开驱动选型。
-5. 平台构建、服务安装发现与升级策略；独立本地 server 的稳定安装目录是必要条件。
+3. ~~Workspace 实际目录与引用现有 checkout 的方式~~ 已由 M1 D1、D2 决定（P0 探针，#92）。
+4. ~~数据库执行位置、schema migration 与 CLI bootstrap~~ 已由 M1 D5–D7 决定；执行库为 better-sqlite3。
+5. 平台构建、服务安装发现与升级策略；独立本地 server 的稳定安装目录是必要条件（M1 D7 留给 M2）。
 
-已确定的工具链选择不等于已完成集成：当前仅初始化并验证根工具链；未实现应用，也未运行应用或远端测试。
+已确定的工具链选择不等于已完成集成：M0/M1 的本机 server 与 CLI 已实现并在 macOS/Ubuntu CI 上运行，
+Desktop、Mobile、远程接入与远端测试尚未实现。
 
 ## 6. 多 agent 并行开发
 
