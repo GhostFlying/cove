@@ -1,5 +1,4 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Client } from "@cove/client";
 import type { DomainError } from "@cove/protocol/errors";
@@ -97,15 +96,28 @@ function onlyMount(task: TaskRecord, source: MountRecord["source"], command: str
 
 // The task and managed worktree mount whose worktree is at `path`, for `mount delete-worktree
 // PATH`. Both sides are compared by real path, so the worktree may be named through a symlink or
-// an alias such as macOS /tmp; a path that no longer resolves is compared as given. Every task is
+// an alias such as macOS /tmp; a path that does not resolve is refused. Every task is
 // searched, archived ones included (a deletion is allowed there). Only managed worktree mounts
 // match: a checkout, or a worktree Cove does not manage, is never deleted by this command.
 async function managedWorktreeAt(
   client: Client,
   path: string,
 ): Promise<{ taskId: string; mount: MountRecord }> {
-  const real = (value: string) => realpath(value).catch(() => resolve(value));
-  const target = await real(path);
+  // The target must resolve: a lexical fallback could name another directory (`gone/../wt` is
+  // not `wt` when `gone` is missing or a symlink), and this command deletes what it names.
+  let target: string;
+  try {
+    target = await realpath(path);
+  } catch (error) {
+    throw new Error(
+      `cannot resolve ${path} (${(error as NodeJS.ErrnoException).code ?? String(error)}); ` +
+        `nothing was sent. A managed worktree whose directory is gone is still deleted by its ` +
+        `IDs: \`cove mount delete-worktree <taskId> <mountId>\``,
+    );
+  }
+  // A recorded mount path is already the real path it had; one that no longer resolves cannot
+  // equal the existing target and is compared as recorded.
+  const real = (value: string) => realpath(value).catch(() => value);
   const matches: { taskId: string; mount: MountRecord }[] = [];
   for (const task of await listTasks(client, "include"))
     for (const mount of task.workspace.mounts)

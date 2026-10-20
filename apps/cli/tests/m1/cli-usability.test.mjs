@@ -450,12 +450,38 @@ test("mount delete-worktree PATH finds the managed worktree by its real path, in
     ],
     { home },
   );
-  const [, b] = task.workspace.mounts;
+  const [a, b] = task.workspace.mounts;
+  const entry = task.workspace.entryPath;
   await fixture.coveJson(["task", "archive", task.taskId], { home });
   // Without a terminal and without --yes nothing is looked up or sent, as before.
   const unconfirmed = await fixture.cove(["mount", "delete-worktree", b.path], { home });
   expect(unconfirmed.code).toBe(2);
   expect(unconfirmed.stderr).toContain("confirm with --yes (nothing was sent)");
+
+  // A path that does not resolve names nothing, even when its lexical normalization (here
+  // `<entry>/a`) is a managed worktree: nothing is sent.
+  const unresolved = await fixture.cove(
+    ["mount", "delete-worktree", `${entry}/removed/../a`, "--yes", "--operation-id", "unresolved"],
+    { home },
+  );
+  expect(unresolved.code).toBe(1);
+  expect(unresolved.stderr).toContain(`cannot resolve ${entry}/removed/../a (ENOENT)`);
+  expect(unresolved.stderr).toContain("`cove mount delete-worktree <taskId> <mountId>`");
+  await expect(savedRequest(home, "unresolved")).rejects.toThrow("ENOENT");
+  expect(await exists(a.path)).toBe(true);
+
+  // `..` after `~/LINK` applies to the link's target: ~/active/../a is <entry>/a, while read
+  // lexically it would be ~/a, here a link to the other worktree b.
+  await symlink(b.path, join(fixture.root, "user-home", "active"));
+  await symlink(b.path, join(fixture.root, "user-home", "a"));
+  const tilde = await fixture.cove(
+    ["mount", "delete-worktree", "~/active/../a", "--yes", "--operation-id", "delete-tilde"],
+    { home },
+  );
+  expect(tilde.code).toBe(0);
+  expect((await savedRequest(home, "delete-tilde")).params.mountId).toBe(a.mountId);
+  expect(await exists(a.path)).toBe(false);
+  expect(await exists(b.path)).toBe(true);
   // Named through a symlink to the workspace entry.
   const alias = join(fixture.root, "alias");
   await symlink(task.workspace.entryPath, alias);
@@ -483,15 +509,23 @@ test("mount delete-worktree PATH finds the managed worktree by its real path, in
     ["task", "create", "Reader", "--checkout", alpha.clone],
     { home },
   );
-  for (const path of [alpha.clone, b.path, join(fixture.root, "nowhere")]) {
+  const none = await fixture.cove(
+    ["mount", "delete-worktree", alpha.clone, "--yes", "--operation-id", "delete-none"],
+    { home },
+  );
+  expect(none.code).toBe(1);
+  expect(none.stdout).toBe("");
+  expect(none.stderr).toContain(`no Cove-managed worktree mount is at ${alpha.clone}`);
+  expect(none.stderr).toContain("`cove mount remove <taskId> <mountId>` unmounts it");
+  // A deleted worktree, or no directory at all, does not resolve.
+  for (const path of [b.path, join(fixture.root, "nowhere")]) {
     const result = await fixture.cove(
       ["mount", "delete-worktree", path, "--yes", "--operation-id", "delete-none"],
       { home },
     );
     expect(result.code).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toContain(`no Cove-managed worktree mount is at ${path}`);
-    expect(result.stderr).toContain("`cove mount remove <taskId> <mountId>` unmounts it");
+    expect(result.stderr).toContain(`cannot resolve ${path} (ENOENT); nothing was sent`);
   }
   await expect(savedRequest(home, "delete-none")).rejects.toThrow("ENOENT");
   expect(await exists(join(alpha.clone, "README.md"))).toBe(true);
