@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { processStartIdentity } from "../store/processes.js";
-import { gitEnvironment, runGit, type GitRunResult } from "./run.js";
+import { gitEnvironment, runGit, signalGroupAndLeader, type GitRunResult } from "./run.js";
 
 // The Git side of managed worktree creation (docs/milestones/m1.md T3b, D1): fetching the source
 // remote, resolving the base, the creation and removal steps and the queries a continue or an
@@ -88,10 +88,9 @@ export type StepResult =
 //    file ends the watcher and leaves the group running: that is what happens when the server dies.
 //    The watcher ignores SIGTERM itself: the SIGTERM it sends reaches its own group, and a watcher
 //    ended by it could no longer send the SIGKILL that a git ignoring SIGTERM needs.
-//    Each signal also names the leader (the shell that becomes git; `$$` in the subshell) by PID:
-//    on macOS a group signal (`kill 0`) sent by a member does not reliably reach the session
-//    leader, so a git ignoring SIGTERM survived its deadline. Naming the PID is safe because a PID
-//    is never reused while a process group with that ID exists, and the sender is a member of it.
+//    Each signal also names the leader (the shell that becomes git) by PID, because on macOS a
+//    group signal sent by a member does not reliably reach the session leader (see
+//    signalGroupAndLeader in git/run.ts).
 // 3. `exec git` keeps the PID, so the recorded identity stays the process's, and Node receives
 //    git's own exit status.
 // Bytes are read with dd, one byte per read(2), so a byte meant for the watcher is never consumed
@@ -105,7 +104,8 @@ const SUPERVISOR = [
   `[ "$g" = g ] || exit ${NOT_STARTED_STATUS}`,
   "(trap '' TERM; while :; do n=0; until c=$(/bin/dd bs=1 count=1 <&3 2>/dev/null); do n=$((n + 1)); " +
     '[ "$n" -ge 50 ] && exit 0; /bin/sleep 0.1; done; ' +
-    'case "$c" in t) kill -s TERM $$ 0 ;; k) kill -s KILL $$ 0 ;; "") exit 0 ;; esac; done) ' +
+    `case "$c" in t) ${signalGroupAndLeader("TERM")} ;; k) ${signalGroupAndLeader("KILL")} ;; ` +
+    '"") exit 0 ;; esac; done) ' +
     "</dev/null >/dev/null 2>&1 &",
   'exec git "$@" 3<&-',
 ].join("\n");
