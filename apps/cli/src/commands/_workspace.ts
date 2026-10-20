@@ -34,13 +34,14 @@ does not enforce read-only use:
     (write ./NAME for a directory NAME).
 A worktree mount is a new Git worktree Cove creates and manages at <entry>/NAME:
   --worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]
-    BRANCH (default cove/<task slug>) is a new branch; an existing one fails the mount
-    (BRANCH_EXISTS). Cove first fetches origin; a failed fetch fails the mount and creates
-    nothing (FETCH_FAILED), and only no-fetch skips it. The base is REF, otherwise the remote
-    branch of the repo's mainBranch, origin/HEAD, the remote's HEAD, then origin/main, master,
-    trunk or develop; never the local HEAD (MAIN_BRANCH_UNRESOLVED). The command waits while the
-    mounts are prepared one after another; a failed mount leaves the others and can be retried
-    with cove mount retry.
+    BRANCH is a new branch; an existing one fails the mount (BRANCH_EXISTS). Without it the
+    branch is cove/<task slug>, the slug keeping the title's script and case, or when that
+    exists locally or on a remote, the first free of cove/<task slug>-2 to -100. Cove first
+    fetches origin; a failed fetch fails the mount and creates nothing (FETCH_FAILED), and only
+    no-fetch skips it. The base is REF, otherwise the remote branch of the repo's mainBranch,
+    origin/HEAD, the remote's HEAD, then origin/main, master, trunk or develop; never the local
+    HEAD (MAIN_BRANCH_UNRESOLVED). The command waits while the mounts are prepared one after
+    another; a failed mount leaves the others and can be retried with cove mount retry.
 NAME defaults to the repo's display name. The workspace entry directory holds cove-workspace.json,
 the manifest of every mount with its real path; a checkout is reached by that real path.`;
 

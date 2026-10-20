@@ -584,18 +584,34 @@ export type WorkspaceServiceOptions = {
   };
 };
 
-// The slug fixed at creation (D1): lower-case ASCII letters and digits of the title joined by
-// single dashes, at most 48 characters; `task` when nothing is left (a title in another script).
+// The slug fixed at creation (D1, user decision of 2026-10-21, aligned with Orca's
+// sanitizeWorktreeName): it names the entry directory `<slug>-<short id>` and the default branch
+// `cove/<slug>`. The title keeps its own script and case, so "转换测试" gives `转换测试`: NFC, trimmed;
+// every run of characters other than Unicode letters, digits, `.`, `_` and `-` becomes one `-`;
+// repeated `-` collapse; a run of dots becomes one (`..` is not allowed in a ref); leading and
+// trailing `.` and `-` go. At most TASK_SLUG_CODE_POINTS code points (a CJK slug of 48 is 144 bytes,
+// within a 255-byte file name together with the short id). A trailing `.lock` is dropped, as Git
+// refuses a ref component ending with it. What is left is one ref component that `git
+// check-ref-format --branch cove/<slug>` accepts: no control or space characters, none of
+// `~^:?*[\` or `@{`, no `/`, no `..`, no leading `.` and no trailing `.` or `.lock`. Nothing left
+// (for example a title of only emoji or punctuation) gives `task`; Orca instead spells known emoji
+// as shortcodes, which Cove does not carry.
+export const TASK_SLUG_CODE_POINTS = 48;
+
 export function taskSlug(title: string): string {
-  const slug = title
-    .normalize("NFKD")
-    .replace(/\p{M}+/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+/, "")
-    .slice(0, 48)
-    .replace(/-+$/, "");
+  let slug = title
+    .normalize("NFC")
+    .trim()
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/-+/g, "-")
+    .replace(/\.{2,}/g, ".");
+  slug = trimSlug(Array.from(trimSlug(slug)).slice(0, TASK_SLUG_CODE_POINTS).join(""));
+  while (/\.lock$/i.test(slug)) slug = trimSlug(slug.slice(0, -".lock".length));
   return slug || "task";
+}
+
+function trimSlug(slug: string): string {
+  return slug.replace(/^[.-]+|[.-]+$/g, "");
 }
 
 // The default mount name is the repo's display name (D1) made into one path segment; null when
@@ -1201,6 +1217,8 @@ export class WorkspaceService {
     slug: string,
     entryPath: string,
     group: object,
+    // The mounts this request planned before this one; a default branch avoids theirs.
+    earlier: readonly NewMount[] = [],
   ): Promise<{ mount: NewMount } | { error: DomainError }> {
     let repo;
     try {
@@ -1219,6 +1237,9 @@ export class WorkspaceService {
       entryPath,
       group,
       deadline: this.writeDeadline(),
+      planned: earlier.flatMap((mount) =>
+        mount.source === "worktree" && mount.commonDir === repo.commonDir ? [mount.branch] : [],
+      ),
     });
   }
 
@@ -1250,12 +1271,12 @@ export class WorkspaceService {
     if (!root.value) return refuse(domainError("WORKSPACE_ENTRY_UNAVAILABLE"));
     const taskId = this.newId();
     const workspaceId = this.newId();
-    const slug = taskSlug(params.title);
     const shortId =
       taskId
         .replace(/[^A-Za-z0-9]/g, "")
         .slice(0, 8)
         .toLowerCase() || "0";
+    const slug = taskSlug(params.title);
     const entryPath = join(root.value, `${slug}-${shortId}`);
     if (!HostPathSchema.safeParse(entryPath).success)
       return refuse(domainError("INVALID_ARGUMENT"));
@@ -1277,7 +1298,7 @@ export class WorkspaceService {
         const found =
           spec.source === "checkout"
             ? await this.resolve(spec, group)
-            : await this.resolveWorktree(spec, slug, entryPath, group);
+            : await this.resolveWorktree(spec, slug, entryPath, group, mounts);
         if ("error" in found) return refuse(found.error);
         if (mounts.some((other) => other.name === found.mount.name))
           return refuse(domainError("MOUNT_NAME_CONFLICT"));

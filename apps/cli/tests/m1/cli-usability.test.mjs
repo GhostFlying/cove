@@ -366,6 +366,73 @@ test("mount convert without a mount id lists the checkout mounts when there are 
   await expect(savedRequest(home, "convert-two")).rejects.toThrow("ENOENT");
 });
 
+const shortIdOf = (taskId) =>
+  taskId
+    .replace(/[^A-Za-z0-9]/g, "")
+    .slice(0, 8)
+    .toLowerCase();
+
+test("two tasks with the same Chinese title convert one clone onto suffixed default branches", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const branches = [];
+  for (const _ of [1, 2]) {
+    const { task } = await fixture.coveJson(
+      ["task", "create", "转换测试", "--checkout", alpha.repoId],
+      { home },
+    );
+    // The slug keeps the title's script; the entry directory is created under that name.
+    expect(task.slug).toBe("转换测试");
+    expect(task.workspace.entryPath.endsWith(`/转换测试-${shortIdOf(task.taskId)}`)).toBe(true);
+    expect((await lstat(task.workspace.entryPath)).isDirectory()).toBe(true);
+    const result = await fixture.cove(["mount", "convert", task.taskId], { home });
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    const [worktree] = JSON.parse(result.stdout).task.workspace.mounts;
+    expect(worktree).toMatchObject({ source: "worktree", state: "ready" });
+    expect(await alpha.git("-C", worktree.path, "symbolic-ref", "--short", "HEAD")).toBe(
+      worktree.branch,
+    );
+    branches.push(worktree.branch);
+  }
+  expect(branches).toEqual(["cove/转换测试", "cove/转换测试-2"]);
+});
+
+test("equal ASCII titles keep their case and skip branches taken locally or on a remote", async () => {
+  const home = fixture.home("home");
+  await fixture.startServer(home);
+  const alpha = await registeredRemote(fixture, home, "alpha");
+  const create = async () => {
+    const result = await fixture.cove(
+      ["task", "create", "Fix bug", "--worktree", `${alpha.repoId},name=wt`],
+      { home },
+    );
+    expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+    const { task } = JSON.parse(result.stdout);
+    expect(task.slug).toBe("Fix-bug");
+    expect(task.workspace.entryPath.endsWith(`/Fix-bug-${shortIdOf(task.taskId)}`)).toBe(true);
+    return task.workspace.mounts[0].branch;
+  };
+  expect(await create()).toBe("cove/Fix-bug");
+  expect(await create()).toBe("cove/Fix-bug-2");
+  // A remote-tracking branch takes a name as a local one does, and names are compared ignoring
+  // case (one loose ref file on a case-insensitive file system).
+  const head = await alpha.git("rev-parse", "HEAD");
+  await alpha.git("update-ref", "refs/remotes/origin/cove/Fix-bug-3", head);
+  await alpha.git("branch", "cove/FIX-BUG-4");
+  expect(await create()).toBe("cove/Fix-bug-5");
+  // An explicit --branch is never suffixed: an existing one still fails the mount.
+  const explicit = await fixture.cove(
+    ["task", "create", "Fix bug", "--worktree", `${alpha.repoId},name=wt,branch=cove/Fix-bug`],
+    { home },
+  );
+  expect(explicit.code).toBe(1);
+  expect(JSON.parse(explicit.stdout).operation).toMatchObject({
+    state: "failed",
+    result: { mounts: [{ state: "failed", errorKind: "BRANCH_EXISTS" }] },
+  });
+});
+
 test("a conversion that fails on an existing branch prints a convert command that succeeds", async () => {
   const home = fixture.home("home");
   await fixture.startServer(home);

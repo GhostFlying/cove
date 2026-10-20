@@ -320,6 +320,40 @@ export async function branchCommit(
   return id && OBJECT_ID.test(id) ? id : "unavailable";
 }
 
+// The branches named `branch` or `branch-<anything>`, local (refs/heads) or remote-tracking under
+// any remote (refs/remotes/<remote>), together with any branch below them (`branch/...`, which
+// would keep `branch` from being created), returned without their refs/heads/ or
+// refs/remotes/<remote>/ prefix; "unavailable" when Git gave no answer. Matching ignores case
+// (`--ignore-case`): on a case-insensitive file system, as macOS uses by default, `cove/Fix` and
+// `cove/fix` are the same loose ref file. Used to choose a default branch that is free (D1); the
+// caller passes a `branch` without glob characters.
+export async function branchesLike(
+  clone: string,
+  branch: string,
+): Promise<string[] | "unavailable"> {
+  // A pattern without a wildcard also matches the refs below it; one with a wildcard does not,
+  // hence the `/**` forms. `*` does not match `/`, so a remote name is one component.
+  const patterns = [`refs/heads/${branch}`, `refs/heads/${branch}-*`];
+  for (const name of [branch, `${branch}-*`])
+    patterns.push(`refs/remotes/*/${name}`, `refs/remotes/*/${name}/**`);
+  patterns.push(`refs/heads/${branch}-*/**`);
+  const result = await runGit(
+    ["for-each-ref", "--ignore-case", "--format=%(refname)", ...patterns],
+    { cwd: clone },
+  );
+  if (result.kind !== "exited" || result.code !== 0) return "unavailable";
+  const found: string[] = [];
+  for (const ref of result.stdout.split("\n")) {
+    if (ref.startsWith("refs/heads/")) found.push(ref.slice("refs/heads/".length));
+    else if (ref.startsWith("refs/remotes/")) {
+      const rest = ref.slice("refs/remotes/".length);
+      const slash = rest.indexOf("/");
+      if (slash > 0) found.push(rest.slice(slash + 1));
+    }
+  }
+  return found;
+}
+
 // Whether refs/heads/<branch> is a symbolic ref (`symbolic-ref -q` exits 0 for one, 1 for a plain
 // ref or none); null when Git gave no answer. A symbolic ref is never Cove's branch: Cove creates
 // plain refs, and deleting through one would delete what it points at.

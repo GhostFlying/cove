@@ -692,6 +692,9 @@ export type RetrySource = {
   state: StoredMountState;
   path: string;
   repoId: string;
+  // The registration's Git common directory, where the retry chooses a default branch; null when
+  // the repo is no longer registered.
+  commonDir: string | null;
   spec: WorktreeSpec | null;
   // The operations of the mount's current attempt: its own and the abandon that claimed it.
   prior: OperationReceiptKey[];
@@ -715,10 +718,11 @@ export const worktreeOperations = {
       `SELECT t.task_id, t.archived, w.workspace_id, m.mount_id, m.source, m.state, m.path,
          m.repo_id, p.spec_branch, p.spec_base_ref, p.spec_no_fetch, a.operation_server_id,
          a.operation_principal_id, a.operation_id, a.abandon_server_id, a.abandon_principal_id,
-         a.abandon_operation_id
+         a.abandon_operation_id, r.common_dir
        FROM mounts m
          JOIN workspaces w ON w.workspace_id = m.workspace_id
          JOIN tasks t ON t.task_id = w.task_id
+         LEFT JOIN repos r ON r.repo_id = m.repo_id
          LEFT JOIN worktree_preparations p ON p.mount_id = m.mount_id
          LEFT JOIN worktree_attempts a ON a.attempt_id = p.attempt_id
        WHERE m.mount_id = ? AND t.task_id = ?`,
@@ -741,6 +745,7 @@ export const worktreeOperations = {
           abandon_server_id: string | null;
           abandon_principal_id: string | null;
           abandon_operation_id: string | null;
+          common_dir: string | null;
         }
       | undefined;
     if (!row) return null;
@@ -766,6 +771,7 @@ export const worktreeOperations = {
       state: row.state,
       path: row.path,
       repoId: row.repo_id,
+      commonDir: row.common_dir,
       spec:
         row.spec_no_fetch === null
           ? null

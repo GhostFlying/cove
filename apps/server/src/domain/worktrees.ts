@@ -31,6 +31,7 @@ import { isValidBranchName } from "../git/repository.js";
 import {
   addWorktree,
   branchCommit,
+  branchesLike,
   checkOut,
   createBranch,
   deleteBranch,
@@ -235,6 +236,8 @@ export type WorktreeServiceOptions = {
 // a filesystem operation may take, from its permit.
 const GIT_SLOT_WAIT_MS = 60_000;
 const FS_DEADLINE_MS = 20_000;
+// How many default branch names are tried (`cove/<slug>`, then `-2` ... `-100`), as in Orca.
+const DEFAULT_BRANCH_CANDIDATES = 100;
 const REQUEST_STEP_MS = 20_000;
 
 const UNKNOWN = Symbol("unknown");
@@ -570,8 +573,9 @@ export class WorktreeService {
   // ---------------------------------------------------------------------------------------------
   // Planning (before the write that records the mount).
 
-  // A worktree spec resolved for the write: its branch (`cove/<slug>` unless given, D1) checked by
-  // Git's own rules, and its path `<entry>/<name>`. `repo` and `name` were resolved by the caller.
+  // A worktree spec resolved for the write: its branch (the given one checked by Git's own rules,
+  // or the default chosen by defaultBranch, D1) and its path `<entry>/<name>`. `repo` and `name`
+  // were resolved by the caller.
   async plan(input: {
     spec: Extract<MountSpec, { source: "worktree" }>;
     repo: { repoId: string; commonDir: string };
@@ -581,11 +585,26 @@ export class WorktreeService {
     // The request's turn group for the shared Git slots, and its deadline for this check.
     group: object;
     deadline: number;
+    // Branches already planned for other mounts of the same repository in this request.
+    planned?: readonly string[];
   }): Promise<{ mount: NewMount } | { error: DomainError }> {
     const { spec } = input;
-    const branch = spec.branch ?? `cove/${input.slug}`;
-    const invalid = await this.checkBranchName(input.group, input.deadline, branch);
-    if (invalid) return { error: invalid };
+    let branch: string;
+    if (spec.branch !== undefined) {
+      branch = spec.branch;
+      const invalid = await this.checkBranchName(input.group, input.deadline, branch);
+      if (invalid) return { error: invalid };
+    } else {
+      const chosen = await this.defaultBranch(
+        input.group,
+        input.deadline,
+        input.repo.commonDir,
+        input.slug,
+        input.planned,
+      );
+      if (typeof chosen !== "string") return { error: chosen };
+      branch = chosen;
+    }
     const path = join(input.entryPath, input.name);
     if (!HostPathSchema.safeParse(path).success) return { error: domainError("INVALID_ARGUMENT") };
     return {
@@ -623,6 +642,47 @@ export class WorktreeService {
     if (valid === UNKNOWN) return domainError("BUSY");
     if (valid === null) return domainError("GIT_UNAVAILABLE");
     return valid ? null : domainError("INVALID_ARGUMENT");
+  }
+
+  // The default branch of a worktree mount (D1, user decision of 2026-10-21): `cove/<slug>`, or,
+  // when a branch of that name already exists locally or as a remote-tracking branch of any
+  // remote, the first free one of `cove/<slug>-2` ... `cove/<slug>-100`; BRANCH_EXISTS when all
+  // are taken. Only the generated default is suffixed: an explicit --branch that exists still
+  // fails with BRANCH_EXISTS. The choice is made here, before the write, in the request's Git
+  // slot; the write records it as the attempt's branch (and the mount's) before any effect, so a
+  // restart, its verification or a continue goes on with the same name, and only a new attempt
+  // (mount retry) chooses again. Refs that appear after the choice are not seen here (a residual
+  // window, m1.md D1): a local branch of that name created meanwhile, also by another preparation
+  // of Cove's own that chose the same name, fails the attempt with BRANCH_EXISTS at the executor's
+  // check before it creates the branch, as for any branch; a remote-tracking branch that only the
+  // attempt's own fetch brings does not stop it, as Git allows both. Names are
+  // compared ignoring case (git/worktree.ts branchesLike). `cove/<slug>` is checked by Git's
+  // rules; appending `-N` to its last component cannot make it invalid.
+  private async defaultBranch(
+    group: object,
+    deadline: number,
+    commonDir: string,
+    slug: string,
+    planned: readonly string[] = [],
+  ): Promise<string | DomainError> {
+    const base = `cove/${slug}`;
+    const invalid = await this.checkBranchName(group, deadline, base);
+    if (invalid) return invalid;
+    const found = await this.options.budgets.git<string[] | "unavailable" | Unknown>(
+      group,
+      deadline,
+      () => branchesLike(commonDir, base),
+      UNKNOWN,
+    );
+    if (found === UNKNOWN) return domainError("BUSY");
+    if (found === "unavailable") return domainError("GIT_UNAVAILABLE");
+    const taken = [...found, ...planned].map((name) => name.toLowerCase());
+    for (let suffix = 1; suffix <= DEFAULT_BRANCH_CANDIDATES; suffix++) {
+      const candidate = suffix === 1 ? base : `${base}-${suffix}`;
+      const lower = candidate.toLowerCase();
+      if (!taken.some((name) => name === lower || name.startsWith(`${lower}/`))) return candidate;
+    }
+    return domainError("BRANCH_EXISTS");
   }
 
   // Starts preparing the attempts of an operation that was just committed running, on the seat
@@ -1275,19 +1335,28 @@ export class WorktreeService {
       return refuse(storeReadError(error));
     }
     if (!task) return refuse(domainError("TASK_NOT_FOUND"));
-    // The overrides apply to this attempt only; otherwise the original request is repeated.
-    const branch = params.branch ?? source.spec.branch ?? `cove/${task.record.slug}`;
+    // The overrides apply to this attempt only; otherwise the original request is repeated: a
+    // given branch as given, the default chosen again (a branch the failed attempt left in place
+    // makes it take the next suffix).
+    const given = params.branch ?? source.spec.branch ?? undefined;
     // The seat before any Git runs, so that a retry beyond the cap starts nothing.
     const seat = this.reserve();
     if (!seat) return refuse(domainError("BUSY"));
     let committed = false;
     try {
-      const invalid = await this.checkBranchName(
-        {},
-        performance.now() + (this.options.requestStepMs ?? REQUEST_STEP_MS),
-        branch,
-      );
-      if (invalid) return refuse(invalid);
+      const deadline = performance.now() + (this.options.requestStepMs ?? REQUEST_STEP_MS);
+      let branch: string;
+      if (given !== undefined || source.commonDir === null) {
+        // Without its registration the preparation fails with REPO_NOT_FOUND; the default name is
+        // then only recorded.
+        branch = given ?? `cove/${task.record.slug}`;
+        const invalid = await this.checkBranchName({}, deadline, branch);
+        if (invalid) return refuse(invalid);
+      } else {
+        const chosen = await this.defaultBranch({}, deadline, source.commonDir, task.record.slug);
+        if (typeof chosen !== "string") return refuse(chosen);
+        branch = chosen;
+      }
       const written = await executeDatabaseWriteCommitted(
         this.context,
         principalId,
