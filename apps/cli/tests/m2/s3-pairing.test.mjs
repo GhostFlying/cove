@@ -168,10 +168,13 @@ test("five wrong secrets void an invitation, and its right secret is refused aft
   const { secret, inviteId } = payloadOf(target.invitation);
   const wrong = alteredInvitation(target.invitation, { secret: wrongSecret(secret) });
   const answers = [];
+  const states = [];
   for (let attempt = 1; attempt <= 5; attempt++) {
-    if (attempt < 5) expect((await inviteStates(serverHome))[inviteId]).toBe("open");
+    states.push((await inviteStates(serverHome))[inviteId]);
     answers.push(await refused(fixture.home(`wrong-${attempt}`), "box", wrong));
   }
+  // Open through the fourth wrong secret; the fifth voids it.
+  expect(states).toEqual(["open", "open", "open", "open", "open"]);
   expect(new Set(answers).size).toBe(1);
   expect((await inviteStates(serverHome))[inviteId]).toBe("cancelled");
   expect(await refused(fixture.home("right"), "box", target.invitation)).toBe(answers[0]);

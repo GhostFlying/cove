@@ -420,7 +420,7 @@ test("an invitation string round-trips its payload and nothing else decodes", as
     42,
   ])
     expect(decodeInvitation(invalid)).toBeNull();
-  expect(() => encodeInvitation({ ...payload, entries: {} })).toThrow();
+  expect(() => encodeInvitation({ ...payload, entries: {} })).toThrow("Invalid input");
 });
 
 test("pairing requests and answers are strict and the token names the device", async () => {
