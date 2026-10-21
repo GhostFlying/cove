@@ -36,6 +36,11 @@ jobs:
     # and records evidence before the job is cancelled. A tooling test fails if this drops below
     # the budget.
     timeout-minutes: 90
+    env:
+      # m2 S1/S2 install a runtime closure and register a real user service (a LaunchAgent, a
+      # systemd user unit) named after their temporary data directory; the runners have both
+      # managers (verified for M2 T3). See apps/cli/tests/m2/s1-install-fixture.mjs.
+      COVE_TEST_SERVICE_MANAGER: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -43,9 +48,24 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
+      # The runtime closure (scripts/runtime-closure.mjs) builds cove-tsnet.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: native/tailscale/go.mod
+          cache-dependency-path: native/tailscale/go.sum
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
         with:
           run_install: false
+      # Linux: linger keeps the runner's systemd user manager independent of a login session (D2),
+      # and systemctl --user finds it through XDG_RUNTIME_DIR.
+      - name: Prepare the systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          runtime="/run/user/$(id -u)"
+          for _ in $(seq 1 50); do [ -S "$runtime/systemd/private" ] && break; sleep 0.2; done
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$runtime" systemctl --user show-environment > /dev/null
       - run: node scripts/ci-environment-setup.mjs --init
       - run: node scripts/ci-environment-setup.mjs --install
       - run: node scripts/ci-test-gate.mjs --environment
