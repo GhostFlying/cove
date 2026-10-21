@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,28 @@ func assertPrivate(t *testing.T, dirs ...string) {
 		if fi.Mode().Perm() != 0o700 {
 			t.Errorf("%s has mode %04o, want 0700", d, fi.Mode().Perm())
 		}
+	}
+}
+
+// assertPrivateFiles checks that every regular file under the roots has no
+// group or other permission bits.
+func assertPrivateFiles(t *testing.T, roots ...string) {
+	t.Helper()
+	for _, root := range roots {
+		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				t.Errorf("walking %s: %v", path, err)
+				return nil
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			fi, err := d.Info()
+			if err == nil && fi.Mode().Perm()&0o077 != 0 {
+				t.Errorf("%s has mode %04o, want no group or other access", path, fi.Mode().Perm())
+			}
+			return nil
+		})
 	}
 }
 
@@ -161,6 +184,7 @@ func TestServeAndDialOverTestControl(t *testing.T) {
 	wantCode(t, request(t, d.sock, proto.Request{Op: proto.OpLogin, AuthKey: testAuthKey}), proto.CodeAlreadyLoggedIn)
 	assertPrivate(t, cliHome, filepath.Join(cliHome, "run"), filepath.Join(cliHome, "state"),
 		srv.home, filepath.Join(srv.home, "state"))
+	assertPrivateFiles(t, filepath.Join(cliHome, "run"), filepath.Join(cliHome, "state"), filepath.Join(srv.home, "state"))
 	if fi, err := os.Stat(d.sock); err != nil || fi.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("dial socket mode: %v %v", fi.Mode(), err)
 	}
@@ -204,6 +228,28 @@ func TestServeAndDialOverTestControl(t *testing.T) {
 	if _, err := io.ReadAll(s2.br); err != nil {
 		t.Fatalf("client read to EOF: %v", err)
 	}
+
+	// Bytes the CLI sends in the same write as the dial frame are held until
+	// the peer is verified, then delivered first.
+	s4 := connect(t, d.sock, proto.Version)
+	dialFrame, _ := json.Marshal(proto.Request{ID: "c", Op: proto.OpDial,
+		Target: &proto.Target{StableNodeID: srvID}, Port: 7001})
+	if _, err := s4.conn.Write(append(append(dialFrame, '\n'), "early bytes"...)); err != nil {
+		t.Fatal(err)
+	}
+	s4.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if line, err := proto.ReadFrame(s4.br, proto.MaxFrameBytes); err != nil ||
+		!strings.Contains(string(line), `"ok":true`) {
+		t.Fatalf("coalesced dial: %q %v", line, err)
+	}
+	f4 := srv.accept(15 * time.Second)
+	early := make([]byte, len("early bytes"))
+	f4.conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	if _, err := io.ReadFull(f4.br, early); err != nil || string(early) != "early bytes" {
+		t.Fatalf("server received %q %v", early, err)
+	}
+	s4.conn.Close()
+	f4.conn.Close()
 
 	// Failures are explicit and never fall back to names.
 	_, resp = openStream(t, d.sock, srvID, 7002, "")

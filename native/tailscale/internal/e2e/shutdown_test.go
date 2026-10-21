@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -10,6 +11,25 @@ import (
 
 	"github.com/GhostFlying/cove/native/tailscale/internal/proto"
 )
+
+func TestChildPathHasNoTailscale(t *testing.T) {
+	var paths []string
+	for _, kv := range childEnv() {
+		if strings.HasPrefix(kv, "PATH=") {
+			paths = append(paths, kv)
+		}
+	}
+	if len(paths) != 1 || paths[0] != "PATH="+childPath {
+		t.Fatalf("child PATH entries %q, want only %q", paths, childPath)
+	}
+	for _, dir := range filepath.SplitList(childPath) {
+		for _, name := range []string{"tailscale", "tailscaled"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				t.Errorf("%s is on the children's PATH", filepath.Join(dir, name))
+			}
+		}
+	}
+}
 
 // SIGTERM while an interactive login waits on a control plane that never
 // offers a login URL: the login is cancelled, the daemon exits promptly and
