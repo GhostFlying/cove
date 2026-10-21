@@ -1,4 +1,11 @@
-import { appendFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { connect, createServer } from "node:net";
 import { join } from "node:path";
 
@@ -20,6 +27,8 @@ import { join } from "node:path";
 //     "dialPeer": "nodeID",              the peer a successful dial reports
 //     "delayMs": N,                      wait before answering a request
 //     "delays": { "<op>": N },           wait before answering that request (hello included)
+//     "exitOnce": "/path",               the first fake started exits 0 before it listens
+//                                        (and creates the file); later ones run normally
 //     "events": "/path" }                one JSON line per request: { op, authKey: bool, force,
 //                                        bytesBeforeAnswer }; never the key itself
 // It keeps no lock. In its place, a fake started while another one answers connections on the
@@ -48,6 +57,13 @@ const owned = await new Promise((done) => {
   probe.once("error", () => done(false));
 });
 if (owned) process.exit(75);
+// A daemon that ends normally (status 0) before it listens, as one stopped or idle-exiting before
+// the command that started it connected; the first start only.
+const { exitOnce } = config();
+if (exitOnce && !existsSync(exitOnce)) {
+  writeFileSync(exitOnce, "exited\n");
+  process.exit(0);
+}
 rmSync(sock, { force: true });
 const wait = (ms) => (ms ? new Promise((done) => setTimeout(done, ms)) : undefined);
 
