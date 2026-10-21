@@ -3,6 +3,13 @@ import type { RunStatus } from "@cove/protocol/pipe";
 import { RunRegistry } from "../terminal/run-registry.js";
 import type { RuntimeComposition } from "../terminal/runtime-composition.js";
 import type { RunLog } from "../store/runs.js";
+import { retryRefused, type RetrySchedule } from "../store/store-errors.js";
+
+// The late-retirement cleanup is repeated for as long as the store refuses it (#127 item 5), with
+// the delay doubling up to a cap, like the operation hand-off of domain/worktrees.ts
+// (STORE_HANDOFF). A refusal (a full queue, or a transaction that rolled back) changed nothing, so
+// the repeat is safe; giving up would leave the run starting and its tab blocked until a restart.
+export const NOT_STARTED_RETRY: RetrySchedule = { tries: Infinity, delayMs: 50, capMs: 5_000 };
 
 // The run registry of a server with a store: every exit fact the registry accepts is also written
 // to the durable run record (D9). The registry stays the only source of exit facts, so the terminal
@@ -32,10 +39,17 @@ export class RecordingRunRegistry extends RunRegistry {
   // the same for a refusal that answers the launch in time; this covers one that arrives after the
   // launch was answered RESULT_UNKNOWN, which otherwise left the run starting and its tab
   // blocked. A second notStarted for the same run finds no starting row and changes nothing.
+  //
+  // The registry entry is gone before the write is admitted, so the write itself must not be lost
+  // to a transient refusal: it is repeated by NOT_STARTED_RETRY. Repeating it later cannot reorder
+  // it against another record of the run: a refused spawn has no exit, and while the row is
+  // starting the tab refuses reopen and close (LIVE_RUNS_PRESENT). Only a closed or failed store,
+  // or a write whose outcome is unknown, ends the cleanup without a record; the server stops
+  // serving then, and the next start marks a run still starting as interrupted.
   override retireRefusedSpawn(run: RunRef, worker: WorkerRef): boolean {
     const retired = super.retireRefusedSpawn(run, worker);
     if (retired)
-      this.runs.notStarted(run).catch(() => {
+      retryRefused(() => this.runs.notStarted(run), NOT_STARTED_RETRY).catch(() => {
         /* The record stays starting; the next start marks it interrupted. */
       });
     return retired;
