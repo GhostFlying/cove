@@ -495,6 +495,36 @@ describe("repository queries", () => {
     ]);
   });
 
+  // PR #145 review: Debian installs /usr/bin/git and /usr/lib/git-core/git as separate identical
+  // files (different inodes). That copy runs the same program, so its verdict is cached like a
+  // hardlink's: one version check for three commands, not one per command.
+  it("caches the verdict of a git whose exec-path holds an identical separate copy", async () => {
+    const root = await temporary();
+    const calls = join(root, "calls.log");
+    const bin = join(root, "bin");
+    const core = join(root, "git-core");
+    await mkdir(bin);
+    await mkdir(core);
+    const script =
+      `#!/bin/sh\nfor last; do :; done\necho "$last" >> '${calls}'\n` +
+      `if [ "$last" = version ]; then echo 'git version 2.45.0'; exit 0; fi\n` +
+      `if [ "$last" = --exec-path ]; then echo '${core}'; exit 0; fi\necho ran\n`;
+    for (const directory of [bin, core]) {
+      await writeFile(join(directory, "git"), script);
+      await chmod(join(directory, "git"), 0o755);
+    }
+    process.env.PATH = `${bin}:${savedEnv.PATH}`;
+    for (let i = 0; i < 3; i++)
+      expect(await runGit(["status"], { cwd: root })).toMatchObject({
+        kind: "exited",
+        stdout: "ran\n",
+      });
+    const asked = (await readFile(calls, "utf8")).trim().split("\n");
+    expect(asked.filter((line) => line === "version")).toHaveLength(1);
+    expect(asked.filter((line) => line === "--exec-path")).toHaveLength(1);
+    expect(asked.filter((line) => line === "status")).toHaveLength(3);
+  });
+
   // A relative PATH entry names a different file in each working directory, so no single version
   // check could cover it: it is not searched, and the git of the next absolute entry runs.
   it("does not run a git found through a relative PATH entry", async () => {

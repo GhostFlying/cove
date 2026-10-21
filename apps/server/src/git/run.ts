@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants, type Stats } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 
@@ -99,8 +99,10 @@ const VERIFIED_LIMIT = 16;
 // (another selection, an Xcode update), so a cached verdict could let an older Git run. Telling
 // them apart: the first check also asks `<path> --exec-path`, the directory of the Git that
 // actually runs, where Git installs its own `git`. When that is the same file as `path` (device
-// and inode, after symlinks: Homebrew, distribution and Xcode-internal Gits), the verdict is
-// cached. Otherwise, or when there is no usable answer, the file is treated as handing off, and
+// and inode, after symlinks: Homebrew and Xcode-internal Gits), or an identical copy of it (the
+// same size and bytes: Debian and Git's own install copy the executable there rather than
+// hardlinking it across directories), the verdict is cached: running either runs the same
+// program. A shim or wrapper is a different program from the Git it runs. Otherwise, or when there is no usable answer, the file is treated as handing off, and
 // its version is asked again before every command (one extra `git version`). Cove still runs
 // `path` itself, the file the shell runs, so a wrapper keeps working as it does for the owner.
 // A selection changed between that check and the command's exec is a residual window, like a
@@ -186,13 +188,22 @@ async function verify(
   const directory =
     execPath.kind === "exited" && execPath.code === 0 ? execPath.stdout.replace(/\n$/, "") : "";
   if (!isAbsolute(directory) || directory.includes("\n")) return { git, direct: false };
+  const own = `${directory}/git`;
   try {
-    const own = await stat(`${directory}/git`);
-    return { git, direct: own.dev === found.dev && own.ino === found.ino };
+    const ownStat = await stat(own);
+    if (ownStat.dev === found.dev && ownStat.ino === found.ino) return { git, direct: true };
+    // A separately installed copy: compared once per file identity (VERIFIED), size first.
+    if (!ownStat.isFile() || ownStat.size !== found.size || found.size > COPY_COMPARE_BYTES)
+      return { git, direct: false };
+    const [mine, theirs] = await Promise.all([readFile(path), readFile(own)]);
+    return { git, direct: mine.equals(theirs) };
   } catch {
     return { git, direct: false };
   }
 }
+
+// Larger files are not compared (a git executable is a few MiB); they are only checked every time.
+const COPY_COMPARE_BYTES = 64 * 1024 * 1024;
 
 // `<path> version`, which reads no repository and runs nothing configured. It runs under the
 // same supervision as every other command (see runGit), so a Git that hangs, floods its output or
