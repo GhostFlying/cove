@@ -1081,27 +1081,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.bootstrap-exact",
       "fixtureBindings": {
@@ -1196,27 +1178,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.bootstrap-exact",
       "fixtureBindings": {
@@ -1963,27 +1927,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 1
       },
       "validCounterpart": "DN03.rpc-exact",
       "fixtureBindings": {
@@ -2070,27 +2016,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 1
       },
       "validCounterpart": "DN03.rpc-exact",
       "fixtureBindings": {
@@ -2781,27 +2709,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.preflight-exact",
       "fixtureBindings": {
@@ -2883,27 +2793,9 @@
         "classification": "Actual registered HTTP extraction; no caller-forced browser predicate bit"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": 200,
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.preflight-exact",
       "fixtureBindings": {
@@ -3562,27 +3454,9 @@
         "classification": "Origin present enforced for every peer; no UA label trusted"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": "actual protocol WS upgrade; unauth claim1 before bootstrap",
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.terminal-exact",
       "fixtureBindings": {
@@ -3663,27 +3537,9 @@
         "classification": "Origin present enforced for every peer; no UA label trusted"
       },
       "expected": {
-        "admission": "forbidden",
-        "domainDelta": {
-          "workerCreates": 0,
-          "runCreates": 0,
-          "receiptReservations": 0,
-          "spawn": 0,
-          "stop": 0,
-          "input": 0,
-          "resize": 0,
-          "control": 0,
-          "openSubscription": 0,
-          "closeSubscription": 0,
-          "ackApplied": 0,
-          "preview": 0,
-          "businessDecode": 0,
-          "dispatch": 0,
-          "foreignMutations": 0,
-          "sensitivePublications": 0
-        },
-        "noBusinessPublication": true,
-        "HTTP": 403
+        "admission": "accepted",
+        "HTTP": "actual protocol WS upgrade; unauth claim1 before bootstrap",
+        "domainCalls": 0
       },
       "validCounterpart": "DN03.terminal-exact",
       "fixtureBindings": {

@@ -8,14 +8,15 @@ import {
   type PairingRedeemRequest,
   type PairingRedeemResult,
 } from "@cove/protocol/auth";
-import { bootstrapIdentity } from "@cove/protocol/bootstrap";
+import { bootstrapIdentity, isLoopbackLiteralHost } from "@cove/protocol/bootstrap";
 
 // The pairing listener (m2 D6): a separate loopback port that exists only while an invitation is
 // open. It is reachable before authentication, so it is small and bounded on purpose:
 // - two POST paths (PAIRING_PATHS), bodies of at most PAIRING_LIMITS.requestBytes, a short
 //   request deadline and a connection cap;
-// - the M0 browser defenses: the Host must be the bound loopback authority (no DNS rebinding) and
-//   a request that carries an Origin or Sec-Fetch metadata (a browser) is refused;
+// - the M0 browser defenses: the Host must be a loopback IP literal (no DNS rebinding; any port, so
+//   an SSH -L forward's local port is accepted, user decision 2026-10-22) and a request that
+//   carries an Origin or Sec-Fetch metadata (a browser) is refused;
 // - a global limit on redemption attempts across all invitations, beside the per-invitation
 //   wrong-secret limit the store enforces;
 // - fixed answers that never echo the request, so a secret sent here cannot come back in an
@@ -133,13 +134,11 @@ export class PairingListener {
       });
       res.end(text);
     };
-    const authority =
-      this.host === "::1" ? `[::1]:${this.boundPort}` : `127.0.0.1:${this.boundPort}`;
     const path = req.url;
     if (
       req.method !== "POST" ||
       (path !== PAIRING_PATHS.identity && path !== PAIRING_PATHS.redeem) ||
-      req.headers.host !== authority ||
+      !isLoopbackLiteralHost(req.headers.host ?? "") ||
       req.headers.origin !== undefined ||
       req.headers["sec-fetch-mode"] !== undefined ||
       req.headers["sec-fetch-site"] !== undefined

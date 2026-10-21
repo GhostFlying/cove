@@ -191,13 +191,58 @@ test("bootstrap success decoding remains strict at the local protocol version", 
   expect(BootstrapSuccessSchema.safeParse({ ...success, protocolVersion: 1 }).success).toBe(false);
 });
 
-test("HTTP admission binds exact numeric authority, origin and authenticated verdict", () => {
+test("HTTP admission binds numeric loopback authority, origin and authenticated verdict", () => {
   expect(evaluateAdmission(admission)).toBe("accepted");
   expect(evaluateAdmission({ ...admission, host: "localhost:4096" })).toBe("forbidden");
   expect(evaluateAdmission({ ...admission, origin: "null" })).toBe("forbidden");
   expect(evaluateAdmission({ ...admission, origin: undefined })).toBe("forbidden");
   expect(evaluateAdmission({ ...admission, authenticated: false })).toBe("unauthenticated");
   expect(ADMISSION_STATUS.unauthenticated).toBe(401);
+});
+
+// User decision 2026-10-22: any loopback IP literal Host is accepted (an SSH -L forward presents its
+// own local port); a domain Host, which DNS rebinding needs, and `localhost` stay refused.
+const DOMAIN_HOSTS = [
+  "evil.example:4096",
+  "localhost:4096",
+  "localhost",
+  "127.0.0.1.evil.example:4096",
+];
+const MALFORMED_HOSTS = [
+  "127.0.0.1",
+  "127.0.0.1:",
+  "127.0.0.1:0",
+  "127.0.0.1:04096",
+  "127.0.0.1:65536",
+  "127.0.0.1:99999",
+  "127.0.0.1:4096x",
+  "[::1]",
+  "::1:4096",
+  "127.0.0.2:4096",
+  " 127.0.0.1:4096",
+  "",
+];
+
+test("HTTP admission accepts any loopback literal Host and refuses domain or malformed ones", () => {
+  for (const host of [
+    "127.0.0.1:50123",
+    "127.0.0.1:1",
+    "127.0.0.1:65535",
+    "[::1]:4096",
+    "[::1]:50123",
+  ])
+    expect(evaluateAdmission({ ...admission, host })).toBe("accepted");
+  for (const host of [...DOMAIN_HOSTS, ...MALFORMED_HOSTS])
+    expect(evaluateAdmission({ ...admission, host })).toBe("forbidden");
+  // The Origin rules do not change with a different-port Host.
+  const tunnelled = { ...admission, host: "127.0.0.1:50123" };
+  expect(evaluateAdmission({ ...tunnelled, origin: "null" })).toBe("forbidden");
+  expect(evaluateAdmission({ ...tunnelled, origin: "http://127.0.0.1:50123" })).toBe("forbidden");
+  expect(evaluateAdmission({ ...tunnelled, origin: undefined })).toBe("forbidden");
+  expect(evaluateAdmission({ ...tunnelled, browser: false, origin: undefined })).toBe("accepted");
+  expect(evaluateAdmission({ ...tunnelled, authenticated: false })).toBe("unauthenticated");
+  // The bound authority itself is still validated as before.
+  expect(evaluateAdmission({ ...tunnelled, boundAuthority: "localhost:4096" })).toBe("forbidden");
 });
 
 test("native CLI may omit Origin but still requires authentication", () => {
@@ -249,6 +294,15 @@ test("WS upgrade checks present Origin and authenticates every first message", (
   expect(evaluateWsUpgrade({ ...upgrade, origin: "null" })).toBe("forbidden");
   expect(evaluateWsUpgrade({ ...upgrade, host: "localhost:4096" })).toBe("forbidden");
   expect(evaluateWsUpgrade({ ...upgrade, path: "/rpc" })).toBe("forbidden");
+  expect(evaluateWsUpgrade({ ...upgrade, host: "127.0.0.1:50123" })).toBe("accepted");
+  expect(evaluateWsUpgrade({ ...upgrade, host: "[::1]:50123", origin: undefined })).toBe(
+    "accepted",
+  );
+  expect(
+    evaluateWsUpgrade({ ...upgrade, host: "127.0.0.1:50123", origin: "http://127.0.0.1:50123" }),
+  ).toBe("forbidden");
+  for (const host of [...DOMAIN_HOSTS, ...MALFORMED_HOSTS])
+    expect(evaluateWsUpgrade({ ...upgrade, host })).toBe("forbidden");
   expect(WsBootstrapSchema.safeParse({ ...request, secret: "x".repeat(43) }).success).toBe(true);
   expect(WsBootstrapSchema.safeParse(request).success).toBe(false);
   expect(validateWsFirstMessage({ ...request, secret: "x".repeat(43) }, 200, 5000, true)).toEqual(
