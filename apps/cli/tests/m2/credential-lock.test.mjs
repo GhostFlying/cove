@@ -38,9 +38,9 @@ afterEach(async () => {
   fixture = undefined;
 });
 
-// A TCP relay to the server's business port. It rewrites the Host header the server checks and,
-// while `hold` is set, keeps back every connection whose request names auth.device.rotate: it
-// records it in `held` and forwards it only on `release()`.
+// A TCP relay to the server's business port. The server accepts its port in Host as a loopback
+// literal, so bytes pass unchanged. While `hold` is set it keeps back every connection whose
+// request names auth.device.rotate: it records it in `held` and forwards it only on `release()`.
 async function businessRelay(targetPort) {
   const held = [];
   const sockets = new Set();
@@ -52,11 +52,8 @@ async function businessRelay(targetPort) {
     sockets.add(upstream);
     let parked = null;
     client.on("data", (chunk) => {
-      const text = chunk
-        .toString("latin1")
-        .replace(`Host: 127.0.0.1:${relay.port}`, `Host: 127.0.0.1:${targetPort}`)
-        .replace(`host: 127.0.0.1:${relay.port}`, `host: 127.0.0.1:${targetPort}`);
-      const bytes = Buffer.from(text, "latin1");
+      const text = chunk.toString("latin1");
+      const bytes = chunk;
       if (parked) parked.push(bytes);
       else if (hold && text.includes('"auth.device.rotate"')) {
         parked = [bytes];
