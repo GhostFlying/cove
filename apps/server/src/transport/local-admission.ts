@@ -62,8 +62,10 @@ export interface CredentialVerifier {
 }
 
 // The credential of an HTTP request, or `anonymous` for the one request that needs none: a POST
-// /bootstrap without an Authorization header, answered with the pre-authentication identity only
-// (relay-protocol §11.8).
+// /bootstrap without an Authorization header and without an Origin, answered with the
+// pre-authentication identity only (relay-protocol §11.8). The identity is for a non-browser
+// client checking the serverId before it sends a device token; a browser request (it carries an
+// Origin) without credentials stays UNAUTHENTICATED as in M0, so a web page learns nothing new.
 export type HttpCredential = Authentication | { readonly kind: "anonymous" };
 
 function bearer(headers: LocalHeaders): string | undefined {
@@ -112,7 +114,8 @@ export class LocalAdmission {
     if (
       method === "POST" &&
       path === "/bootstrap" &&
-      header(headers, "authorization") === undefined
+      header(headers, "authorization") === undefined &&
+      header(headers, "origin") === undefined
     )
       return { kind: "anonymous" };
     return this.authenticate(bearer(headers));
