@@ -348,8 +348,9 @@ PENDING：
 
 - `--via ssh` 可用：每条命令启动一个系统 `ssh -N -L`，命令结束（包括被 kill）时随之结束。ssh 用用户自己的配置、
   agent 与 known_hosts，从不交互提示（`BatchMode=yes`）；host key 未知或不符时命令以 1 退出，stderr 含
-  `ENTRY_UNAVAILABLE` 与 ssh 的最后一行，且没有发送 token。tend-runner 若经 SSH 调用远程 server，运行它的用户须能
-  非交互地登录该 SSH 目标。
+  `ENTRY_UNAVAILABLE` 与 ssh 的最后一行，且没有发送 token。用户配置跳过 host key 检查（本机目标、ProxyCommand）或
+  `ForkAfterAuthentication yes` 被命令行覆盖；`ssh -G` 解析出的配置仍会关闭 host 认证时同样以 1 退出并报
+  `ENTRY_UNAVAILABLE`，不连接。tend-runner 若经 SSH 调用远程 server，运行它的用户须能非交互地登录该 SSH 目标。
 - 入口不可达时以 1 退出，stderr 含 `ENTRY_UNAVAILABLE`、所用入口与记录中的全部入口（`Entries of <alias>: ...`），
   不改用别的入口；入口另一端的 server 不是配对的那个时为 `SERVER_ID_MISMATCH`，同样以 1 退出且不发送 token。
   `--via tsnet` 仍为 `ENTRY_UNAVAILABLE`。

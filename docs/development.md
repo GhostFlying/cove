@@ -219,8 +219,12 @@ SSH 入口：
 - 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
   ssh 在 `sh` 监督进程下运行，监督进程在 CLI 的管道关闭时结束 ssh，不留下孤儿进程。
 - 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
-  `ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，并关闭连接复用（ControlMaster）；命令行选项优先于
-  用户配置，因此用户配置中的 `GatewayPorts yes` 或 `ControlPersist` 不会让转发监听非 loopback 地址或在命令后继续存在。
+  `NoHostAuthenticationForLocalhost=no`、`ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，
+  并关闭连接复用（ControlMaster）；ssh 认识时还固定 `NoHostAuthenticationForProxyCommand=no`（Apple 的 ssh）与
+  `ForkAfterAuthentication=no`（OpenSSH 8.7 起）。命令行选项优先于用户配置，因此用户配置中的 `GatewayPorts yes`、
+  `ControlPersist`、跳过本机或 ProxyCommand 目标 host key 检查的设置以及 `ForkAfterAuthentication yes`，都不会关闭
+  host key 检查、让转发监听非 loopback 地址或在命令后继续存在。每次建隧道前先用 `ssh -G` 解析目标的实际配置：
+  ssh 不认识的可选项不加，解析结果中 host 认证未开启、会 fork 或固定项未生效时，命令报 `ENTRY_UNAVAILABLE` 且不连接。
   CLI 不写 known_hosts：第一次连接某台主机前，先用普通 `ssh <目标>` 确认并记录它的 host key。
 - host key 未知或不符时，ssh 在建立转发前失败，命令报 `ENTRY_UNAVAILABLE` 与 ssh 的最后一行输出，不发送 token 或邀请。
   隧道建立后先核对 serverId，再交出 token。

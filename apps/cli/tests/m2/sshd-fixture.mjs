@@ -18,10 +18,17 @@ import { waitFor } from "../recording-view.mjs";
 // The sshd authenticates the current user by the fixture key only. Everything is under `directory`,
 // which the caller removes; stop() ends the sshd.
 //
+// `hostile: true` adds honest settings a user's config may have that would switch the host-key
+// check off or detach ssh unless the CLI pins them (ssh-tunnel.ts): NoHostAuthenticationForLocalhost
+// yes (TARGET resolves to 127.0.0.1), NoHostAuthenticationForProxyCommand yes (Apple's ssh; other
+// builds ignore it through IgnoreUnknown) and ForkAfterAuthentication yes. It also adds
+// PROXY_TARGET, the same host reached through a ProxyCommand (proxy.mjs under `directory`).
+//
 // Availability. sshd is looked up in the usual system locations. When it cannot run,
 // sshdUnavailable() returns the reason and the scenario fails with it (ssh-scenario.mjs).
 
 export const TARGET = "cove-test-sshd";
+export const PROXY_TARGET = "cove-test-sshd-proxy";
 const SSHD_PATHS = ["/usr/sbin/sshd", "/usr/local/sbin/sshd", "/opt/homebrew/sbin/sshd"];
 
 function run(command, args, options = {}) {
@@ -85,7 +92,7 @@ async function keyPair(path, comment) {
 }
 
 // Starts the sshd under `directory` (created 0700). Returns the fixture; see the top of the file.
-export async function startSshd(directory) {
+export async function startSshd(directory, { hostile = false } = {}) {
   const sshd = SSHD_PATHS[(await Promise.all(SSHD_PATHS.map(executable))).findIndex(Boolean)];
   const ssh = await which("ssh");
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -156,24 +163,60 @@ export async function startSshd(directory) {
 
   const knownHostsLine = (key) => `[127.0.0.1]:${port} ${key}\n`;
   await writeFile(knownHosts, knownHostsLine(hostKey), { mode: 0o600 });
+  const proxyScript = join(directory, "proxy.mjs");
+  await writeFile(
+    proxyScript,
+    [
+      'import { connect } from "node:net";',
+      "const socket = connect({ host: process.argv[2], port: Number(process.argv[3]) });",
+      "process.stdin.pipe(socket);",
+      "socket.pipe(process.stdout);",
+      "socket.on('error', () => process.exit(1));",
+      "socket.on('close', () => process.exit(0));",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+  const hostileOptions = hostile
+    ? [
+        "  NoHostAuthenticationForLocalhost yes",
+        "  NoHostAuthenticationForProxyCommand yes",
+        "  ForkAfterAuthentication yes",
+      ]
+    : [];
+  const hostBlock = (alias, extra) => [
+    `Host ${alias}`,
+    "  HostName 127.0.0.1",
+    `  Port ${port}`,
+    `  User ${user}`,
+    `  IdentityFile ${join(directory, "client_ed25519")}`,
+    "  IdentitiesOnly yes",
+    "  IdentityAgent none",
+    `  UserKnownHostsFile ${knownHosts}`,
+    "  GlobalKnownHostsFile /dev/null",
+    "  CheckHostIP no",
+    // Options the CLI's command line must override (ssh-tunnel.ts).
+    "  GatewayPorts yes",
+    "  ControlMaster auto",
+    `  ControlPath ${join(directory, "cm-%C")}`,
+    "  ControlPersist 60",
+    ...hostileOptions,
+    ...extra,
+  ];
   await writeFile(
     clientConfig,
     [
-      `Host ${TARGET}`,
-      "  HostName 127.0.0.1",
-      `  Port ${port}`,
-      `  User ${user}`,
-      `  IdentityFile ${join(directory, "client_ed25519")}`,
-      "  IdentitiesOnly yes",
-      "  IdentityAgent none",
-      `  UserKnownHostsFile ${knownHosts}`,
-      "  GlobalKnownHostsFile /dev/null",
-      "  CheckHostIP no",
-      // Options the CLI's command line must override (ssh-tunnel.ts).
-      "  GatewayPorts yes",
-      "  ControlMaster auto",
-      `  ControlPath ${join(directory, "cm-%C")}`,
-      "  ControlPersist 60",
+      // Global, before every Host block: ssh rejects an unknown keyword even in a block that does
+      // not apply to the target, unless IgnoreUnknown already names it.
+      ...(hostile
+        ? ["IgnoreUnknown NoHostAuthenticationForProxyCommand,ForkAfterAuthentication"]
+        : []),
+      ...hostBlock(TARGET, []),
+      ...(hostile
+        ? hostBlock(PROXY_TARGET, [
+            `  ProxyCommand ${JSON.stringify(process.execPath)} ${JSON.stringify(proxyScript)} %h %p`,
+          ])
+        : []),
       "",
     ].join("\n"),
     { mode: 0o600 },
@@ -183,6 +226,8 @@ export async function startSshd(directory) {
     directory,
     port,
     target: TARGET,
+    proxyTarget: PROXY_TARGET,
+    proxyScript,
     knownHosts,
     clientConfig,
     // `env` with the fixture's ssh first on PATH.
@@ -208,6 +253,18 @@ export async function startSshd(directory) {
       clearTimeout(timer);
     },
   };
+}
+
+// The PIDs and argv of every running process whose arguments mention `marker` (a ProxyCommand
+// helper: its script path).
+export async function processesWith(marker) {
+  const listed = await run("ps", ["-A", "-o", "pid=,args="]);
+  if (listed.code !== 0) throw new Error(`ps failed: ${listed.stderr}`);
+  return listed.stdout
+    .split("\n")
+    .map((line) => /^\s*(\d+)\s+(.*)$/.exec(line))
+    .filter((match) => match && match[2].includes(marker) && !match[2].startsWith("ps "))
+    .map((match) => ({ pid: Number(match[1]), args: match[2] }));
 }
 
 // The PIDs and argv of every running ssh client whose arguments mention `marker`.
