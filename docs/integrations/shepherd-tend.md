@@ -262,8 +262,8 @@ PENDING：
   之于 `cove/Fix`）也算占用；名字含 `/` 的远端（如 `team/upstream`）的远端跟踪分支按完整前缀识别。
 - 设置了 `worktree.useRelativePaths=true` 的 clone 中，`--worktree` 创建与 `mount convert` 能正常 ready（此前停在
   `requires_attention`）。
-- 存储一时拒绝（队列满或事务回滚）时，准备、abandon、转换与删除先有界重试，仍被拒绝则操作转为
-  `requires_attention`；不再无执行者地停在 `running` 直到重启。
+- 存储一时拒绝（队列满或 SQLite 争用使事务回滚）时，准备、abandon、转换与删除先有界重试，仍被拒绝则操作转为
+  `requires_attention`；不再因一时的拒绝无执行者地停在 `running` 直到重启。持久的存储错误不重试，见 #145。
 - 多次未确认的 fetch 填满步骤记录后，abandon 仍能完成（此前停在 `requires_attention`）。
 
 #143（run 退役、操作回执输出与 Git 2.45 下限，#126、#127，未合入）：请求不变。
@@ -280,6 +280,21 @@ PENDING：
   变为不满足要求时，需要 Git 的请求以 `GIT_UNAVAILABLE` 拒绝（未接受）。CLI 自己的 `--checkout PATH` 查找同样要求
   2.45，过旧时提示 `git <主.次> is too old for --checkout PATH, which needs Git 2.45 or later`，不发送并以 1 退出。
   macOS 上 Xcode Command Line Tools 的 `/usr/bin/git` 可能早于 2.45，需把更新的 Git（如 Homebrew 的）放在 `PATH` 前面。
+
+#145（Git 下限、存储错误重试与 CLI 回执输出，#144，未合入）：请求与输出格式不变。
+
+- 只有一时的存储拒绝会重试：队列满，或 SQLite 争用（`SQLITE_BUSY`、`SQLITE_LOCKED` 及其扩展码）。持久的
+  操作错误（如 `SQLITE_READONLY`、`SQLITE_CORRUPT`、`SQLITE_IOERR_*`、`SQLITE_FULL`）不重试：操作立即转
+  `requires_attention`；若这次转交也同样失败，记录可能停在 `running`、没有执行者，store 仍打开、server 继续服务，
+  直到下次启动核实并恢复该操作（被拒 spawn 的 run 清理失败时，run 停在 starting，下次启动标为 interrupted）。
+  server 在 stderr 为每个这样的错误写一行
+  `{"event":"store-operation-failed","operation":"<store 操作名>","code":"<SQLite 错误码或 null>"}`（不含参数与错误文本）；
+  看到它说明数据库需要处理（权限、磁盘空间或损坏），处理后重启 server。
+- `cove operation continue/abandon` 受理后读取失败时，`operation` 确为最后读到的本操作记录（此前轮询成功后
+  再失败时输出的是受理时 revision 0 的回执）。
+- Git 下限的检查：转交给另一个 Git 的 `git`（Apple 的 xcrun shim `/usr/bin/git`、包装脚本）每条命令前都重新检查
+  版本，切换 Xcode 选择后不会运行旧 Git；`PATH` 项按 shell 的方式拼接（不按字面化简 `..`）；等待共享版本检查的
+  请求以自己的期限为界。
 
 PLANNED：
 
@@ -346,3 +361,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `9638501`（PR #134、#136）；#141（未合入） | 基准改为 main `9638501`；#134 与 #136 的 PENDING 项改为 AVAILABLE（§2），注明各项引入的提交，接口与此前 PENDING 的说明相同；新增 PENDING #141：挂载结果的 `branch` 与 `leftovers[].branch`、遗留占住路径时 `mount retry`/`mount convert` 改为受理并先删除遗留（Git 仍拒绝时为 `MOUNT_NAME_CONFLICT` 并给出遗留）、默认分支后缀按 Unicode 大小写折叠、子分支与含 `/` 的远端判断、相对路径 worktree 能 ready、存储拒绝时转为 `requires_attention`、步骤记录填满后 abandon 仍能完成                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | 2026-10-21 | main `ee1f0cc`；#143（未合入）                  | 新增 PENDING #143：`operation continue/abandon` 受理后读取失败时输出 `{ operation, targetReadError }` 并以 1 退出（此前 stdout 为空）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 2026-10-21 | main `ee1f0cc`；#143（未合入）                  | PENDING #143 增加 Git 2.45 下限：server 在 Git 缺失、过旧或不报版本时不启动并说明原因，运行中变为不满足时请求为 `GIT_UNAVAILABLE`；`--checkout PATH` 的 CLI 查找由 2.31 提高到 2.45                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-10-21 | main `7a67bc7`；#145（未合入）                  | 新增 PENDING #145：持久的存储操作错误不再重试，转交也失败时记录可停在 `running` 直到下次启动恢复，server 写 `store-operation-failed` 诊断事件；`operation continue/abandon` 读取失败时输出最后读到的记录；转交给另一个 Git 的 `git`（xcrun shim、包装脚本）每条命令前重新检查版本                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
