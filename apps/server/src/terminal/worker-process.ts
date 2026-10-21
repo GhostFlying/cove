@@ -58,6 +58,10 @@ export class WorkerProcess {
     this.session = new WorkerPipeSession({
       worker,
       composition: runtime.composition,
+      // The worker pipe is internal: the server and the worker it spawns from the same
+      // installation are one build, and neither side compares this value. It stays a fixed
+      // placeholder rather than the build ID (m2 T0, build-id.ts), so spawning a worker never
+      // hashes the build.
       buildVersion: "0.0.0",
       now,
       timeoutMs: runtime.composition.budgets.recoveryDeadlineMs,

@@ -5,9 +5,15 @@ import { join } from "node:path";
 import { createClient, type Client } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
+import { buildId } from "@cove/server/build-id";
 import { createNodePorts } from "./node-ports.js";
 
-export const CLI_BUILD_VERSION = "0.0.0";
+// This CLI's build (m2 D12): the server's computation over the same build, so the two agree when
+// they come from one build. Computed on first use and cached for the process, so a command that
+// never connects never hashes the build.
+export function cliBuildVersion(): string {
+  return buildId();
+}
 
 export interface Rendezvous {
   readonly bootstrapVersion: 1;
@@ -50,7 +56,7 @@ export function createSessionClient(record: Rendezvous): Client {
   return createClient({
     expectedServerId: record.serverId,
     expectedRelayInstanceId: record.relayInstanceId,
-    buildVersion: CLI_BUILD_VERSION,
+    buildVersion: cliBuildVersion(),
     credentials: () => ({
       authorization: `Bearer ${record.secret}`,
       terminalSecret: record.secret,

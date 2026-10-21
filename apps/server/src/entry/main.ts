@@ -6,6 +6,7 @@ import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { M0_LIMITS, validateEffectiveBudgets, type EffectiveBudgets } from "@cove/protocol/budgets";
+import { buildId } from "../build-id.js";
 import { RuntimeRetainedBytes } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import { WorkerPool } from "../terminal/worker-pool.js";
@@ -128,7 +129,7 @@ export function createLocalApplication(
       encodeUtf8,
       ...(runs ? { runs } : {}),
     }),
-    buildVersion: "0.0.0",
+    buildVersion: buildId(),
     ...(persistence
       ? {
           principalId: persistence.principalId,

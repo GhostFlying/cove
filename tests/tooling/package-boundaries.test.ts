@@ -137,9 +137,15 @@ function assertServerBoundary(manifest: Record<string, unknown>): void {
   )
     throw new Error("Server package identity escaped the private application boundary");
   // D adds one installed local executable; the server remains a private app,
-  // without a public import surface or alternate executable entry points.
+  // without alternate executable entry points. Its only import surface is the build
+  // identity (m2 T0), which the CLI must compute over the same build, plus the manifest
+  // the CLI reads to find the executable.
   if (
-    "exports" in manifest ||
+    JSON.stringify(manifest.exports) !==
+      JSON.stringify({
+        "./build-id": { types: "./dist/build-id.d.ts", import: "./dist/build-id.js" },
+        "./package.json": "./package.json",
+      }) ||
     JSON.stringify(manifest.bin) !== JSON.stringify({ "cove-server": "./dist/entry/main.js" })
   )
     throw new Error("Server package escaped the installed D entry boundary");

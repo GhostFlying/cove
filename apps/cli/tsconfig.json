@@ -7,5 +7,9 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/client" }]
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/client" },
+    { "path": "../server" }
+  ]
 }

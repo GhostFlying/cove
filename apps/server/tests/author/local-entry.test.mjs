@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLocalApplication } from "../../dist/entry/main.js";
+import { buildId } from "../../dist/build-id.js";
 import { validateLocalOptions, parseLocalOptions } from "../../dist/entry/m0-local-options.js";
 import { LocalRendezvous, launchIdentity } from "../../dist/entry/local-rendezvous.js";
 import { LocalRuntimeClock } from "../../dist/terminal/local-runtime-clock.js";
@@ -376,7 +377,7 @@ const wsClassificationControls = [
         serverId: "author-server",
         relayInstanceId: "author-instance",
         protocolVersion: 2,
-        buildVersion: "0.0.0",
+        buildVersion: buildId(),
         capabilities: ["terminal-framing-v2", "logical-grid-recovery-v1"],
         profile: "pragmatic-logical-grid-v1",
         encoding: "vt-checkpoint-tail-v1",
@@ -1519,7 +1520,7 @@ const batchEnvelopeAuthorControls = [
           result: {
             serverId: "author-server",
             relayInstanceId: "author-instance",
-            buildVersion: "0.0.0",
+            buildVersion: buildId(),
             protocolVersion: 2,
             profile: "pragmatic-logical-grid-v1",
             effectiveBudgets: {
@@ -1795,7 +1796,7 @@ const batchEnvelopeAuthorControls = [
           result: {
             serverId: "author-server",
             relayInstanceId: "author-instance",
-            buildVersion: "0.0.0",
+            buildVersion: buildId(),
             protocolVersion: 2,
             profile: "pragmatic-logical-grid-v1",
             effectiveBudgets: {
@@ -1980,7 +1981,7 @@ const batchEnvelopeAuthorControls = [
           result: {
             serverId: "author-server",
             relayInstanceId: "author-instance",
-            buildVersion: "0.0.0",
+            buildVersion: buildId(),
             protocolVersion: 2,
             profile: "pragmatic-logical-grid-v1",
             effectiveBudgets: {
@@ -2042,7 +2043,7 @@ const batchEnvelopeAuthorControls = [
           result: {
             serverId: "author-server",
             relayInstanceId: "author-instance",
-            buildVersion: "0.0.0",
+            buildVersion: buildId(),
             protocolVersion: 2,
             profile: "pragmatic-logical-grid-v1",
             effectiveBudgets: {
@@ -2221,7 +2222,7 @@ const batchEnvelopeAuthorControls = [
           result: {
             serverId: "author-server",
             relayInstanceId: "author-instance",
-            buildVersion: "0.0.0",
+            buildVersion: buildId(),
             protocolVersion: 2,
             profile: "pragmatic-logical-grid-v1",
             effectiveBudgets: {
