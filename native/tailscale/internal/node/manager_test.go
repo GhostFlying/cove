@@ -108,12 +108,13 @@ func TestFailedFreshLoginReportsStateCleanupFailure(t *testing.T) {
 		// The partial state exists and cannot be removed.
 		os.WriteFile(filepath.Join(dir, "partial"), nil, 0o600)
 		os.Chmod(parent, 0o500)
-		return nil, errors.New("control rejected the key tskey-test-0000")
+		// Long enough that the message alone fills the error text bound.
+		return nil, errors.New("control rejected the key tskey-test-0000: " + strings.Repeat("x", 2*proto.MaxTextBytes))
 	})
 	_, err := m.Login(context.Background(), "tskey-test-0000", 5*time.Second)
 	var pe *proto.Error
 	if !errors.As(err, &pe) || pe.Code != proto.CodeLoginFailed ||
-		!strings.Contains(pe.Message, "removing the partial node state also failed") ||
+		!strings.Contains(pe.Message, "removing the partial node state failed") ||
 		strings.Contains(pe.Message, "tskey-test-0000") {
 		t.Fatalf("got %v", err)
 	}

@@ -105,7 +105,8 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 	m.closeNode()
 	lerr := loginError(ctx, err, authKey)
 	if rerr := os.RemoveAll(m.cfg.StateDir); rerr != nil {
-		lerr.Message = proto.Truncate(lerr.Message + "; removing the partial node state also failed: " + rerr.Error())
+		// First, so truncating a long control-plane message cannot drop it.
+		lerr.Message = proto.Truncate("removing the partial node state failed: " + rerr.Error() + "; " + lerr.Message)
 	}
 	return proto.Status{}, lerr
 }
