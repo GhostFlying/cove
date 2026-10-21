@@ -256,10 +256,12 @@ Node/pnpm 精确版本，再执行 native 准备、浏览器安装与 `pnpm chec
 逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
 缺失 artifact 会使该 job 失败。时间上限是防挂死预算，并非性能 SLA，统一定义在
 `scripts/ci-environment-setup.mjs` 的 `ciTimeBudget`：install/native/browser 各 10 分钟，
-gate 辅助命令（toolchain、discovery、source revision）各 2 分钟，Vitest 20 分钟；`pnpm check` 阶段
-32 分钟，包括无独立上限的 native/format/lint/build 预留 5 分钟、两条辅助命令、Vitest、source
-revision 与收尾 1 分钟；job 至少 69 分钟，包括三个准备步骤、`--environment`、check 阶段与 runner
-action/上传预留 5 分钟，`check.yml` 设为 70 分钟。外层上限按内层的配置上限而非实测耗时组合；只要无独立
+gate 辅助命令（toolchain、discovery、source revision）各 2 分钟，Vitest 40 分钟；`pnpm check` 阶段
+52 分钟，包括无独立上限的 native/format/lint/build 预留 5 分钟、两条辅助命令、Vitest、source
+revision 与收尾 1 分钟；job 至少 89 分钟，包括三个准备步骤、`--environment`、check 阶段与 runner
+action/上传预留 5 分钟，`check.yml` 设为 90 分钟。Vitest 上限由 #151 从 20 分钟提高：除少数纯逻辑 project 外都设
+`maxWorkers: 1`，这些 project 依次执行，Vitest 实际串行，每个新增场景 suite 都把自身耗时全部加到总时长上；
+2026-10-21 macOS 绿色运行为 15.5–19.95 分钟。接近 30 分钟时应分片或并行，而不是再提高上限。外层上限按内层的配置上限而非实测耗时组合；只要无独立
 上限的工作不超出其预留，挂死时就由最内层上限先触发并写下证据；tooling 测试校验这一组合与 workflow 值。C1 原有 tooling 测试仍在；应用、完整 PTY
 生命周期与移动端测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。B0 只补齐两个真实实验环境；C1
 实施记录见 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
