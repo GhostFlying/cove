@@ -120,6 +120,11 @@ export function isRemote(): boolean {
   return remoteTarget !== null;
 }
 
+// The paired server this command addresses, or null (see selectTarget).
+export function currentRemote(): RemoteTarget | null {
+  return remoteTarget;
+}
+
 // The path the server should inspect.
 //
 // Local mode (M1): a relative path is made absolute against this command's directory without

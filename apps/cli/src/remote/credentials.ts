@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { PortSchema } from "@cove/protocol/auth";
 import { DeviceIdSchema, DeviceTokenSchema } from "@cove/protocol/bootstrap";
@@ -161,6 +171,114 @@ export async function saveServer(home: string, record: ServerRecord): Promise<vo
     throw error;
   }
   await syncDirectory(serversDirectory(home));
+}
+
+// The record of `serverId` as it is on disk now, or null when there is none.
+export async function readServer(home: string, serverId: string): Promise<ServerRecord | null> {
+  const path = recordPath(home, serverId);
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  let record: ServerRecord | null;
+  try {
+    record = parseServerRecord(JSON.parse(text));
+  } catch {
+    record = null;
+  }
+  if (!record || record.serverId !== serverId)
+    throw new Error(`the client credential file ${path} is invalid`);
+  return record;
+}
+
+// How long a command waits for another cove command to release a server's record, and how often
+// it looks. A rotation holds the lock across its requests, which the client bounds.
+const LOCK_WAIT_MS = 60_000;
+const LOCK_POLL_MS = 50;
+// A lock file still empty this long after it was created belongs to a command that died between
+// creating it and writing its PID.
+const EMPTY_LOCK_STALE_MS = 5_000;
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+// Runs `action` holding the record lock of `serverId`: `<serverId>.lock` beside the record,
+// created exclusively and holding the PID of the command that holds it. Every command that
+// changes a record (rotate, remote entry default, remote remove) reads the latest record under
+// the lock and writes it before releasing it, so concurrent commands are serialized and none
+// writes over another's change (a token saved by one rotation, a default entry chosen by
+// another command). Commands that only read the record take no lock.
+//
+// A lock whose holder is no longer running (a command that crashed) is taken over: it is renamed
+// away first, and restored when the renamed file turns out to be another command's newer lock.
+// The PID check cannot tell a reused PID from the holder, which then only delays this command
+// until LOCK_WAIT_MS ends with an error naming the lock file.
+export async function withServerLock<T>(
+  home: string,
+  serverId: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  await ownerOnlyDirectory(home);
+  await ownerOnlyDirectory(clientDirectory(home));
+  await ownerOnlyDirectory(serversDirectory(home));
+  const path = recordPath(home, serverId).replace(/\.json$/, ".lock");
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try {
+        await handle.writeFile(`${process.pid}\n`, "utf8");
+      } finally {
+        await handle.close();
+      }
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    const seen = await readFile(path, "utf8").catch(() => null);
+    if (seen !== null) {
+      const pid = Number(seen.trim());
+      const created = seen === "" ? await lstat(path).catch(() => null) : null;
+      const stale =
+        seen === ""
+          ? created !== null && Date.now() - created.mtimeMs > EMPTY_LOCK_STALE_MS
+          : Number.isSafeInteger(pid) && pid > 0 && !alive(pid);
+      if (stale) {
+        const moved = `${path}.${randomUUID()}.stale`;
+        if (
+          await rename(path, moved).then(
+            () => true,
+            () => false,
+          )
+        ) {
+          if ((await readFile(moved, "utf8").catch(() => null)) !== seen)
+            await link(moved, path).catch(() => undefined);
+          await unlink(moved).catch(() => undefined);
+        }
+        continue;
+      }
+    }
+    if (Date.now() > deadline)
+      throw new Error(
+        `another cove command holds the credential record of server ${serverId} (${path}); ` +
+          "nothing was changed. Remove the file if no cove command is running",
+      );
+    await new Promise((done) => setTimeout(done, LOCK_POLL_MS));
+  }
+  try {
+    return await action();
+  } finally {
+    await unlink(path).catch(() => undefined);
+  }
 }
 
 export async function removeServer(home: string, record: ServerRecord): Promise<void> {
