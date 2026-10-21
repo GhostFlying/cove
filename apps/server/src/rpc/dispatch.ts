@@ -1,6 +1,7 @@
 import { domainError } from "@cove/protocol/errors";
 import {
   RPC_METHODS,
+  SECRETS_MEMBER,
   checkedOutputSecrets,
   holdsSecret,
   isWriteRpcMethod,
@@ -65,9 +66,17 @@ function guardSecrets(
   inputSecrets: Record<string, unknown> | undefined,
 ): RpcHandlerResult {
   const inputs = secretStrings(inputSecrets ?? {});
+  const fields = RPC_METHODS[method].secrets;
   if (!result || typeof result !== "object" || Array.isArray(result) || "error" in result) {
-    if (holdsSecret(result, inputs))
-      throw new Error(`A ${method} refusal holds a secret of its request`);
+    // A refusal never delivers secrets: one carrying a secrets member at any depth is a defect,
+    // and its values may not reappear elsewhere in it (its details) either.
+    if (
+      (result &&
+        typeof result === "object" &&
+        (Object.hasOwn(result, SECRETS_MEMBER) || nestedSecretsMember(result))) ||
+      holdsSecret(result, inputs)
+    )
+      throw new Error(`A ${method} refusal holds a secret`);
     return result;
   }
   const { value, secrets } = splitSecrets(result as Record<string, unknown>);
@@ -78,7 +87,6 @@ function guardSecrets(
     kept = checked;
   }
   // Only a method with secrets can misplace one; other answers skip the walk.
-  const fields = RPC_METHODS[method].secrets;
   if (fields.input.length + fields.output.length > 0 && nestedSecretsMember(value))
     throw new Error(`A ${method} result holds a misplaced secrets member`);
   if (holdsSecret(value, [...inputs, ...secretStrings(kept ?? {})]))
