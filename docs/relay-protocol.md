@@ -693,6 +693,13 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   其余无法认证的情况都是 `UNAUTHENTICATED`，不区分设备不存在与秘密错误。
 - 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
   `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
+- 配对监听（m2 T1）不是 RPC，只接受两个 POST（`PAIRING_PATHS`），请求与响应各不超过 4 KiB。
+  - `/bootstrap` 返回同样的认证前身份。
+  - `/pair` 接受 `cove-pairing-redeem`（`inviteId`、`secret`、`deviceName`）：成功时以 `cove-pairing-result`
+    （`serverId`、`deviceId`、`token`、`businessPort`）应答，失败时以 `cove-pairing-error` 应答，其 `kind` 为
+    `INVITATION_UNAVAILABLE`、`BUSY` 或 `INVALID_ARGUMENT`。
+  - 应答是固定内容，不回显请求。`token` 是秘密，只出现在这一次应答中，不建操作记录。
+  - 邀请字符串为 `cove-invite:v1:<payload JSON 的 base64url>`，编解码见 `encodeInvitation`/`decodeInvitation`。
 - `buildVersion` 为 `<根 package 版本>+<16 位十六进制>`：运行时对 `apps/*/dist`、`packages/*/dist` 中的编译产物
   （不含 `.d.ts`、`.map`、`.tsbuildinfo`）、这些 package 的 `package.json` 与 `pnpm-lock.yaml` 按相对路径计算 SHA-256，
   取前 16 位，每个进程缓存一次。server 与 CLI 对同一构建得到同一值；找不到 workspace 根目录时为 `unidentified`。

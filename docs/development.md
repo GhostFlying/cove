@@ -189,6 +189,35 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
 - 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
   `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
 
+## M2 设备配对与 `--server`（T1：只有 loopback 入口）
+
+范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。T1 只实现 loopback 入口，也就是同一主机上的 server，
+它主要用于验证授权；SSH 与 tsnet 入口由 T2、T4 加入，在此之前给 `--via ssh|tsnet` 时报 `ENTRY_UNAVAILABLE`。
+
+```sh
+# server 端（数据目录 A）。--ssh-target 是邀请中写入的 SSH 目标，省略时取 <用户>@<主机名>；
+# --pairing-port 固定配对端口，省略时沿用未结束邀请记录的端口，或取任意空闲端口。
+# 两者都是临时参数，T3 的 entry.set 将取代它们。
+node apps/server/dist/entry/main.js --mode m0-local --host 127.0.0.1 --port 0 \
+  --rendezvous A/server/run/rendezvous.json --home A --ssh-target user@example.test
+cove --home A auth invite create [--ttl-minutes N]   # 输出邀请，只显示这一次
+# 客户端（数据目录 B），从提示或 stdin 粘贴邀请，不经命令行参数
+cove --home B remote add box [--name laptop]
+cove --home B --server box status                    # 或 COVE_SERVER=box
+cove --home A auth device list                        # 本机所有者也能管理设备
+cove --home B --server box auth device rotate         # 轮换本客户端自己的 token
+cove --home A auth device revoke <deviceId>
+```
+
+- 配对监听是单独的 loopback 端口，只在有未结束的邀请时开放。邀请默认 10 分钟有效，最长 24 小时，
+  错误 secret 达到 5 次后作废。兑换的响应丢失时不能重试：重新创建邀请，那次留下的设备显示为 never-connected，可以撤销。
+- token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
+  `remote remove` 只删除本机记录，不撤销 server 上的设备。
+- `--server` 模式下路径参数是 server 主机上的路径：相对路径与 `~` 是用法错误，不发送；绝对路径原样发送，
+  `terminal create` 必须给 `--cwd`。`server` 与 `remote` 两组命令只作用于本机，不接受 `--server`。
+- 撤销会立即拒绝该设备的所有请求，并关闭它的连接；它已受理的操作照常完成。
+  `auth device revoke` 等这些连接关闭后才返回。
+
 ## B0 实验环境
 
 Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行十项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
