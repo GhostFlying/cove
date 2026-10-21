@@ -209,6 +209,8 @@ cove --home B --server box auth device rotate         # 轮换本客户端自己
 cove --home A auth device revoke <deviceId>
 ```
 
+- loopback 入口只核对 server 回报的 serverId：它识别 server，但不证明对端就是它。同一主机上的其他进程抢先占用端口
+  并冒充 server 的情况不在防护范围内（见 [relay-protocol §11.8](relay-protocol.md)）。
 - 配对监听是单独的 loopback 端口，只在有未结束的邀请时开放。邀请默认 10 分钟有效，最长 24 小时，
   错误 secret 达到 5 次后作废。兑换的响应丢失时不能重试：重新创建邀请，那次留下的设备显示为 never-connected，可以撤销。
 - token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
