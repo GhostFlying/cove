@@ -21,5 +21,8 @@ export const handle: RpcHandler<"server"> = (core) => {
       .sessions()
       .map((session) => session.workerStatus())
       .filter((status) => status !== undefined),
+    // How this server runs as a service (m2 T3): manager, installed and pending build, why it
+    // last started. Absent for a composition without a data directory.
+    ...(core.service ? { service: core.service.status(core.buildVersion) } : {}),
   };
 };

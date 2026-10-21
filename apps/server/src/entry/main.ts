@@ -36,6 +36,7 @@ import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
 import { EntryConfigService } from "./entry-config.js";
+import { recordServiceStart, ServiceState, type StartReason } from "./service-state.js";
 import type { EntryConfigState } from "../store/config-rules.js";
 // Type only: the instrumentation is constructed by the separate probe entry (d6-probe-main.ts), so
 // this executable cannot enable it, whatever its environment.
@@ -76,6 +77,9 @@ export function createLocalApplication(
       // The entry configuration read at startup (m2 T3). Without it entry.get and entry.set
       // report CAPABILITY_UNAVAILABLE.
       entry?: EntryConfigState;
+      // Why this instance started (service-state.ts), recorded before the composition is built.
+      // Without it server.status has no `service` and server.impact is unavailable.
+      lastStart?: StartReason;
     };
     // Where operational log lines go (one JSON object per line); stderr by default.
     log?: (line: string) => void;
@@ -179,6 +183,14 @@ export function createLocalApplication(
         })
       : undefined;
   if (entry && !injected?.core) core.entry = entry;
+  if (persistence?.lastStart && !injected?.core)
+    core.service = new ServiceState({
+      store: persistence.store,
+      home: persistence.home,
+      relayInstanceId: identity.relayInstanceId,
+      manager: options.service ?? "foreground",
+      lastStart: persistence.lastStart,
+    });
   // Device authorization (m2 T1): verifies credentials for both transports and serves the auth
   // domain and the pairing listener. Its log lines carry device IDs and ports, never a secret.
   const auth =
@@ -365,6 +377,14 @@ async function openLocalApplication(
     // The fixed ports of the entry configuration (m2 D3), read once: a change applies at the next
     // start. A startup flag overrides the stored value (m0-local-options.ts).
     const entry = await store.call("entry.read", undefined);
+    // How and why this instance started (S1, S2): the service manager named by the unit, and the
+    // reason derived from the previous instance and the host boot. Recorded once, before
+    // anything is served.
+    const lastStart = await recordServiceStart(store, {
+      home: persistence.layout.home,
+      relayInstanceId: identity.relayInstanceId,
+      manager: options.service ?? "foreground",
+    });
     let configured: M0LocalOptions;
     try {
       configured = validateLocalOptions({
@@ -388,6 +408,7 @@ async function openLocalApplication(
         ...(probe ? { probe } : {}),
         auth,
         entry,
+        lastStart,
       },
     });
     try {

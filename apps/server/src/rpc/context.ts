@@ -3,6 +3,7 @@ import type { RpcDomain, RpcMethod } from "@cove/protocol/rpc";
 import { RPC_METHODS } from "@cove/protocol/rpc";
 import type { AuthService } from "../auth/service.js";
 import type { EntryConfigService } from "../entry/entry-config.js";
+import type { ServiceState } from "../entry/service-state.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { TerminalOperations } from "../operations/terminal-operations.js";
 import type { ConfigService } from "../store/config.js";
@@ -29,9 +30,11 @@ export type LocalCore = {
   // Device authorization (m2 T1): credentials, invitations, devices and the pairing listener.
   // Absent without a store; the auth domain then reports CAPABILITY_UNAVAILABLE.
   auth?: AuthService;
-  // Entry configuration (m2 T3; entry.get, entry.set). Absent without a store; its methods then
-  // report CAPABILITY_UNAVAILABLE.
+  // Entry configuration (m2 T3; entry.get, entry.set) and how this instance runs as a service
+  // (server.status `service`, server.impact). Absent without a store; their methods then report
+  // CAPABILITY_UNAVAILABLE.
   entry?: EntryConfigService;
+  service?: ServiceState;
 };
 
 export const M0_LOCAL_PRINCIPAL_ID = "m0-local";
