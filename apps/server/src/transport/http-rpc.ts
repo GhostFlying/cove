@@ -536,6 +536,7 @@ export function registerHttpRpc(
               const socket = request.raw.socket;
               const forget = core.auth?.connections.register(credential.deviceId, {
                 owner: principal,
+                answered: new Promise<void>((done) => reply.raw.once("close", () => done())),
                 close: () => socket.destroy(),
                 closed: new Promise<void>((done) => {
                   if (socket.destroyed) done();
