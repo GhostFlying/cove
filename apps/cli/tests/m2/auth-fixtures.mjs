@@ -35,6 +35,12 @@ import { waitFor } from "../recording-view.mjs";
 // records hold it), it is printed by auth-server-entry.mjs (server stderr), and it is in every
 // CLI's environment (process samples, S11). The scan must find it in each carrier class it
 // applies to, through the same check that must find no secret: the negative control.
+//
+// Tokens are remembered when they are issued or observed, not only at cleanup (#159): a token a
+// test client receives, and every token a CLI command saved in a credential file of its home,
+// read when the command ends and, while a background command runs, every 20 ms. Pairing and CLI
+// rotation never print the token, so a token superseded by a later rotation would otherwise
+// never be known to the scan; secret-scan-superseded.test.mjs is the negative control.
 
 export const SERVER_ENTRY = resolve(import.meta.dirname, "auth-server-entry.mjs");
 export const SSH_TARGET = "user@example.test";
@@ -85,6 +91,22 @@ export async function createAuthFixture() {
     for (const [value] of String(text).matchAll(INVITATION_PATTERN)) remember(value);
     for (const [value] of String(text).matchAll(TOKEN_PATTERN)) remember(value);
   };
+  // Every token in a credential file of `home` now. A file being replaced is read as it is; an
+  // unreadable or partial one is read again at the next observation.
+  const observe = async (home) => {
+    if (home === undefined) return;
+    const directory = join(home, "client", "servers");
+    let names;
+    try {
+      names = await readdir(directory);
+    } catch {
+      return;
+    }
+    for (const name of names.filter((entry) => entry.endsWith(".json"))) {
+      const text = await readFile(join(directory, name), "utf8").catch(() => "");
+      for (const [value] of text.matchAll(TOKEN_PATTERN)) remember(value);
+    }
+  };
 
   const fixture = {
     ...base,
@@ -116,22 +138,39 @@ export async function createAuthFixture() {
     },
 
     async cove(args, options) {
-      const result = await base.cove(args, options);
-      harvest(result.stdout);
-      return result;
+      try {
+        const result = await base.cove(args, options);
+        harvest(result.stdout);
+        return result;
+      } finally {
+        await observe(options?.home);
+      }
     },
 
     async coveJson(args, options) {
-      const value = await base.coveJson(args, options);
-      harvest(JSON.stringify(value));
-      return value;
+      try {
+        const value = await base.coveJson(args, options);
+        harvest(JSON.stringify(value));
+        return value;
+      } finally {
+        await observe(options?.home);
+      }
     },
 
     spawnCove(args, options) {
       const spawned = base.spawnCove(args, options);
+      // A background command can save a token that a concurrent one supersedes before this one
+      // ends (credential-lock.test.mjs), so its home is observed while it runs as well.
+      let observing = Promise.resolve();
+      const poll = setInterval(() => {
+        observing = observing.then(() => observe(options?.home));
+      }, 20);
       return {
         ...spawned,
-        done: spawned.done.then((result) => {
+        done: spawned.done.then(async (result) => {
+          clearInterval(poll);
+          await observing;
+          await observe(options?.home);
           harvest(result.stdout);
           return result;
         }),
@@ -165,6 +204,7 @@ export async function createAuthFixture() {
           return { ...result, sampled };
         } finally {
           clearTimeout(timeout);
+          await observe(home);
         }
       })();
     },
