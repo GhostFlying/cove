@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createClient, type Client } from "@cove/client";
+import { createClient, credentialSupplier, type Client } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
 import { buildId } from "@cove/server/build-id";
@@ -57,10 +57,11 @@ export function createSessionClient(record: Rendezvous): Client {
     expectedServerId: record.serverId,
     expectedRelayInstanceId: record.relayInstanceId,
     buildVersion: cliBuildVersion(),
-    credentials: () => ({
-      authorization: `Bearer ${record.secret}`,
-      terminalSecret: record.secret,
-    }),
+    // The local owner secret from the rendezvous file (m2 D7).
+    credentials: credentialSupplier(
+      () => ({ kind: "local-secret", secret: record.secret }),
+      record.serverId,
+    ),
     codec: createUtf8Codec(),
     createOpaqueId: () => randomUUID(),
     scheduler: createDefaultScheduler(),

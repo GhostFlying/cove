@@ -1504,6 +1504,8 @@ export function createClient(options: ClientOptions): Client {
   return new CoveClient(options);
 }
 
+export { credentialHeaders, credentialSupplier } from "./credentials.js";
+export type { ClientCredential, CredentialProvider, CredentialRequest } from "./credentials.js";
 export type { ParamsFor, ResultFor } from "./rpc-calls.js";
 export type { NegotiatedConnection } from "./connection-session.js";
 export type { RpcMethod } from "@cove/protocol/rpc";
