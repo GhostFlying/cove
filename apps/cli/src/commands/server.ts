@@ -11,24 +11,35 @@ import {
   homeDirectory,
   homeRendezvousPath,
   integerFlag,
+  optionalIntegerFlag,
   print,
   rendezvousPath,
   sleep,
   StatusError,
   takeFlags,
+  unwrap,
   UsageError,
+  withSession,
   type Arguments,
 } from "./_common.js";
+import { operationIdFor, printSucceeded, submitWrite } from "./_pending.js";
 
 export const usage = `  server init [--workspace-root DIR]
   server start [--port N] [--origin URL]... [--harness [--harness-port N]]
+  server entry get
+  server entry set <businessPort|pairingPort|sshTarget|tsnetHostname> <VALUE> [--expected-revision N] [--operation-id ID]
+  server entry reset <businessPort|pairingPort|sshTarget|tsnetHostname> [--expected-revision N] [--operation-id ID]
 
 The data directory is --home, $COVE_HOME or ~/.cove; the server keeps its database there and
 refuses to start while another server uses it. \`server init\` prepares it while no server runs;
 \`server start\` initializes it with defaults when needed.
 The rendezvous path defaults to <home>/server/run/rendezvous.json (or $COVE_RENDEZVOUS).
 With --harness, the M0 browser test page is served on 127.0.0.1 and its URL, which carries the
-server secret in its fragment, is printed once the server is ready.`;
+server secret in its fragment, is printed once the server is ready.
+The entry configuration holds the fixed loopback business and pairing ports, the SSH target that
+invitations advertise and the server's tsnet hostname. Ports and the hostname take effect when the
+server next starts (\`server start\` without --port uses the stored business port); the SSH target
+applies to the next invitation. \`server entry\` also works with --server.`;
 
 const RENDEZVOUS_WAIT_MS = 20_000;
 
@@ -215,7 +226,9 @@ async function serverStart(args: Arguments): Promise<number> {
   takeFlags(args, ["--port", "--origin", "--harness", "--harness-port"]);
   if (args.words.length !== 2 || args.command)
     throw new UsageError("server start takes no arguments");
-  const port = integerFlag(args, "--port", 0);
+  // Without --port the server binds the business port of its entry configuration (m2 D3), or a
+  // free one when none is configured; --port (0: a free one) overrides it for this start.
+  const port = args.flags.has("--port") ? integerFlag(args, "--port", 0) : undefined;
   const withHarness = args.flags.has("--harness");
   if (!withHarness && args.flags.has("--harness-port"))
     throw new UsageError("--harness-port needs --harness");
@@ -253,7 +266,8 @@ async function serverStart(args: Arguments): Promise<number> {
       process.execPath,
       [
         entry,
-        ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", String(port)],
+        ...["--mode", "m0-local", "--host", "127.0.0.1"],
+        ...(port === undefined ? [] : ["--port", String(port)]),
         ...["--rendezvous", path, "--home", home],
         ...[...origins, ...(harness ? [harness.origin] : [])].flatMap((origin) => [
           "--origin",
@@ -307,9 +321,75 @@ async function serverStart(args: Arguments): Promise<number> {
   return exit;
 }
 
+// The entry settings by name, with how a command-line value becomes the setting.
+const ENTRY_SETTINGS: Record<string, (value: string) => number | string> = {
+  businessPort: entryPort,
+  pairingPort: entryPort,
+  sshTarget: (value) => value,
+  tsnetHostname: (value) => value,
+};
+
+function entryPort(value: string): number {
+  if (!/^[1-9][0-9]{3,4}$/.test(value) || Number(value) > 65535)
+    throw new UsageError("a port is a number from 1024 to 65535");
+  return Number(value);
+}
+
+// `cove server entry get|set|reset` (m2 D3): an ordinary read and write through the server, so it
+// works with --server too. The server validates the value (SshTargetSchema, TsnetHostnameSchema).
+async function entryCommand(args: Arguments): Promise<number> {
+  const sub = args.words[2];
+  if (sub === "get") {
+    takeFlags(args, []);
+    if (args.words.length !== 3 || args.command)
+      throw new UsageError("server entry get takes no arguments");
+    return withSession(args, async ({ client }) => {
+      print(unwrap("entry.get", await client.call("entry.get", {})).entry);
+      return 0;
+    });
+  }
+  if (sub !== "set" && sub !== "reset")
+    throw new UsageError(`Unknown server entry command ${sub ?? ""}`.trim());
+  takeFlags(args, ["--expected-revision", "--operation-id"]);
+  const key = args.words[3];
+  const parse = key === undefined ? undefined : ENTRY_SETTINGS[key];
+  if (!key || !parse || !Object.hasOwn(ENTRY_SETTINGS, key) || args.command)
+    throw new UsageError(
+      `server entry ${sub} needs a setting name (${Object.keys(ENTRY_SETTINGS).join(", ")})`,
+    );
+  if (args.words.length !== (sub === "set" ? 5 : 4))
+    throw new UsageError(
+      sub === "set" ? "server entry set needs one value" : "server entry reset takes no value",
+    );
+  const value = sub === "set" ? parse(args.words[4]!) : null;
+  const expectedRevision = optionalIntegerFlag(args, "--expected-revision");
+  const operationId = operationIdFor(args);
+  return withSession(args, async (session) => {
+    const operation = await submitWrite(args, session, "entry.set", {
+      operationId,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      patch: { [key]: value },
+    });
+    printSucceeded(operation);
+    if (operation.result?.appliesAfterRestart)
+      process.stderr.write(
+        "cove: the change takes effect when the server restarts (`cove server restart`)\n",
+      );
+    return 0;
+  });
+}
+
+// Subcommands a paired device may send with --server (m2 D7, D11): reads and the entry
+// configuration. Installing, starting, stopping, restarting and upgrading the service, and
+// initializing the data directory, act on this host only.
+const REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["entry"]);
+export const localOnly = (subcommand: string | undefined): boolean =>
+  subcommand === undefined || !REMOTE_SUBCOMMANDS.has(subcommand);
+
 export async function run(args: Arguments): Promise<number> {
   const sub = args.words[1];
   if (sub === "start") return serverStart(args);
   if (sub === "init") return serverInit(args);
+  if (sub === "entry") return entryCommand(args);
   throw new UsageError(`Unknown server command ${sub ?? ""}`.trim());
 }

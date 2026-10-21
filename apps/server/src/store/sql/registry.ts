@@ -1,6 +1,7 @@
 import { authOperations } from "./auth.js";
 import { bindingOperations } from "./bindings.js";
 import { configOperations } from "./config.js";
+import { entryOperations } from "./entry.js";
 import { identityOperations } from "./identity.js";
 import { processOperations } from "./processes.js";
 import { receiptOperations } from "./receipts.js";
@@ -26,6 +27,7 @@ export const STORE_OPERATIONS = Object.freeze({
   ...worktreeOperations,
   ...bindingOperations,
   ...authOperations,
+  ...entryOperations,
 });
 
 export type StoreOperations = typeof STORE_OPERATIONS;

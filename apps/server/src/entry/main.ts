@@ -3,13 +3,13 @@ import Fastify, { LogController } from "fastify";
 import websocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { M0_LIMITS, validateEffectiveBudgets, type EffectiveBudgets } from "@cove/protocol/budgets";
-import { SshTargetSchema } from "@cove/protocol/auth";
 import { AuthService, loadAuthState, type AuthState } from "../auth/service.js";
+import { PortSchema } from "@cove/protocol/auth";
 import { buildId } from "../build-id.js";
+import { ListenerSet, tsnetBinaryPath } from "../network/listeners.js";
 import { RuntimeRetainedBytes } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import { WorkerPool } from "../terminal/worker-pool.js";
@@ -35,6 +35,8 @@ import { describeUnsupportedGit, findGit } from "../git/run.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
+import { EntryConfigService } from "./entry-config.js";
+import type { EntryConfigState } from "../store/config-rules.js";
 // Type only: the instrumentation is constructed by the separate probe entry (d6-probe-main.ts), so
 // this executable cannot enable it, whatever its environment.
 import type { D6Probe } from "./d6-probe.js";
@@ -71,6 +73,9 @@ export function createLocalApplication(
       // Device authorization state read at startup (auth/service.ts loadAuthState). Without it
       // the composition accepts the local owner secret only.
       auth?: AuthState;
+      // The entry configuration read at startup (m2 T3). Without it entry.get and entry.set
+      // report CAPABILITY_UNAVAILABLE.
+      entry?: EntryConfigState;
     };
     // Where operational log lines go (one JSON object per line); stderr by default.
     log?: (line: string) => void;
@@ -160,7 +165,20 @@ export function createLocalApplication(
   };
   // Where operational log lines go (one JSON object per line); stderr by default.
   const log = injected?.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
-  const advertisedSshTarget = sshTarget(options);
+  // Entry configuration (m2 T3). The auth service reads the SSH target through it each time an
+  // invitation is created, so an entry.set of sshTarget applies to the next invitation.
+  const entry =
+    persistence?.entry && receipts
+      ? new EntryConfigService({
+          store: persistence.store,
+          receipts,
+          serverId: identity.serverId,
+          encodeUtf8,
+          initial: persistence.entry,
+          ...(options.sshTarget === undefined ? {} : { sshTargetOverride: options.sshTarget }),
+        })
+      : undefined;
+  if (entry && !injected?.core) core.entry = entry;
   // Device authorization (m2 T1): verifies credentials for both transports and serves the auth
   // domain and the pairing listener. Its log lines carry device IDs and ports, never a secret.
   const auth =
@@ -176,7 +194,13 @@ export function createLocalApplication(
             localSecret: identity.secret,
             host: options.host,
             ...(options.pairingPort === undefined ? {} : { pairingPort: options.pairingPort }),
-            ...(advertisedSshTarget === undefined ? {} : { sshTarget: advertisedSshTarget }),
+            // A getter, read at each invitation: see `entry` above. Without an entry
+            // configuration (a test composition) the startup flag alone decides. The option is
+            // optional, and the auth service reads an absent target as "none" (ENTRY_UNAVAILABLE);
+            // a getter cannot be absent, so it reports undefined instead.
+            get sshTarget(): string {
+              return (entry ? entry.sshTarget : options.sshTarget) as string;
+            },
             log: (event) => {
               try {
                 log(JSON.stringify(event));
@@ -264,6 +288,7 @@ export function createLocalApplication(
       return worker;
     },
     auth,
+    entry,
     disposeCore: () => {
       healthLog?.dispose();
       storeErrorLog?.();
@@ -277,20 +302,6 @@ export function createLocalApplication(
   };
 }
 
-// The SSH target invitations advertise: --ssh-target, else `<OS user>@<host name>` when that is
-// a valid target (SshTargetSchema), else none, and then no invitation can be created
-// (ENTRY_UNAVAILABLE). A startup flag and a derivation until T3's entry configuration
-// (entry.set sshTarget) replaces both; it is not logged.
-function sshTarget(options: M0LocalOptions): string | undefined {
-  if (options.sshTarget !== undefined) return options.sshTarget;
-  try {
-    const derived = `${userInfo().username}@${hostname()}`;
-    return SshTargetSchema.safeParse(derived).success ? derived : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export class LocalEntryStartupError extends Error {
   constructor(
     readonly category: "store" | "worker" | "listen" | "rendezvous" | "interrupted" | "git",
@@ -301,6 +312,16 @@ export class LocalEntryStartupError extends Error {
   ) {
     super("Local entry startup unavailable");
     this.name = "LocalEntryStartupError";
+  }
+}
+
+// A startup port flag collides with a stored port (both name the same port).
+class EntryConfigurationError extends Error {
+  constructor() {
+    super(
+      "The business and pairing ports would be the same port; change the entry configuration " +
+        "(`cove server entry set`) or the startup flags",
+    );
   }
 }
 
@@ -341,7 +362,24 @@ async function openLocalApplication(
     const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
     await recordInstanceStart(store, identity.relayInstanceId, Date.now());
     const auth = await loadAuthState(store);
-    const local = createLocalApplication(options, {
+    // The fixed ports of the entry configuration (m2 D3), read once: a change applies at the next
+    // start. A startup flag overrides the stored value (m0-local-options.ts).
+    const entry = await store.call("entry.read", undefined);
+    let configured: M0LocalOptions;
+    try {
+      configured = validateLocalOptions({
+        ...options,
+        ...(options.portFromEntryConfig && entry.businessPort !== null
+          ? { port: entry.businessPort }
+          : {}),
+        ...(options.pairingPort === undefined && entry.pairingPort !== null
+          ? { pairingPort: entry.pairingPort }
+          : {}),
+      });
+    } catch {
+      throw new EntryConfigurationError();
+    }
+    const local = createLocalApplication(configured, {
       identity,
       persistence: {
         store,
@@ -349,6 +387,7 @@ async function openLocalApplication(
         principalId: persistence.identity.principalId,
         ...(probe ? { probe } : {}),
         auth,
+        entry,
       },
     });
     try {
@@ -379,6 +418,8 @@ async function openLocalApplication(
     await store.close().catch(() => undefined);
     if (error instanceof RendezvousConflictError)
       throw new LocalEntryStartupError("rendezvous", "verified", error.message);
+    if (error instanceof EntryConfigurationError)
+      throw new LocalEntryStartupError("listen", "verified", error.message);
     throw new LocalEntryStartupError("store", "verified", "The Cove data directory is unusable");
   }
 }
@@ -394,6 +435,28 @@ export async function startLocalEntry(
 ) {
   const { local, store } = await openLocalApplication(input, probe, hooks);
   const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
+  // The entries (network/listeners.ts): loopback business port, pairing listener and tsnet node.
+  const log = (event: Record<string, unknown>): void => {
+    try {
+      process.stderr.write(`${JSON.stringify(event)}\n`);
+    } catch {
+      // Logging is best effort.
+    }
+  };
+  const listeners = new ListenerSet({
+    host: local.options.host,
+    businessPort: local.options.port,
+    business: local.app,
+    ...(local.auth ? { pairing: local.auth } : {}),
+    tsnet: {
+      home: local.options.home ?? "",
+      hostname: local.entry?.initial.tsnetHostname ?? null,
+      buildVersion: local.core.buildVersion,
+      binary: tsnetBinaryPath(),
+      log,
+    },
+    log,
+  });
   const worker = local.createWorker();
   const instance = local.identity.relayInstanceId;
   // Fail closed (D6 B): a failed store is never restarted, so the server stops serving. The
@@ -422,18 +485,7 @@ export async function startLocalEntry(
         failed = true;
       }
       local.terminal.close();
-      try {
-        await local.app.close();
-      } catch {
-        failed = true;
-      }
-      // The pairing listener closes with the business listener; pending last-use writes settle
-      // before the store closes.
-      try {
-        await local.auth?.dispose();
-      } catch {
-        failed = true;
-      }
+      if (!(await listeners.close())) failed = true;
       let receipt: Awaited<WorkerProcess["closed"]> | undefined;
       try {
         receipt = await worker.close();
@@ -493,19 +545,19 @@ export async function startLocalEntry(
     }
     interrupted();
     category = "listen";
-    await local.app.listen({ host: local.options.host, port: local.options.port });
-    // Drain an in-flight listen/publication before rollback. Abandoning either
-    // promise on a signal could publish a listener/file after cleanup completed.
+    // Binds the business port, then reopens the pairing listener when open invitations survived a
+    // restart (m2 S12) and starts the tsnet entry. A pairing port or tsnet node that cannot start
+    // is logged and leaves the business entry serving. Drain an in-flight listen/publication
+    // before rollback: abandoning either promise on a signal could publish a listener/file after
+    // cleanup completed.
+    const businessPort = await listeners.start((port) => local.admission.bind(port));
     interrupted();
-    const bound = local.app.server.address();
-    if (!bound || typeof bound === "string" || bound.address !== local.options.host)
-      throw new Error("Invalid numeric local bind");
-    local.admission.bind(bound.port);
-    // Reopens the pairing listener when open invitations survived a restart (m2 S12). A port that
-    // cannot be bound is logged and leaves the business entry serving.
-    await local.auth?.start(bound.port);
-    interrupted();
-    const endpoint = `http://${localAuthority(local.options.host, bound.port)}`;
+    local.entry?.bound({
+      businessPort,
+      pairingPort: local.options.pairingPort,
+      tsnetHostname: local.entry.initial.tsnetHostname,
+    });
+    const endpoint = `http://${localAuthority(local.options.host, businessPort)}`;
     category = "rendezvous";
     await rendezvous.publish({ bootstrapVersion: 1, ...local.identity, endpoint });
     interrupted();
@@ -531,19 +583,37 @@ export async function startLocalEntry(
   }
 }
 
-// `cove-server --mode init --home DIR [--workspace-root DIR]` (D7): initializes the data
-// directory, the persistent identity and optionally the first workspaceRoot while no server runs.
-// It takes the same database lock as a server, so it is refused while one is running.
+// `cove-server --mode init --home DIR [--workspace-root DIR] [--business-port N --pairing-port N]`
+// (D7): initializes the data directory, the persistent identity and optionally the first
+// workspaceRoot while no server runs. It takes the same database lock as a server, so it is
+// refused while one is running. The two ports are `cove server install`'s (m2 D3): they fix the
+// business and pairing ports that are not configured yet and never replace a configured one;
+// changing a port later is `cove server entry set` through the running server.
 async function initializeHome(argv: readonly string[]): Promise<void> {
   const values = new Map<string, string>();
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i];
     const value = argv[i + 1];
-    if (!key || value === undefined || !["--mode", "--home", "--workspace-root"].includes(key))
+    if (
+      !key ||
+      value === undefined ||
+      !["--mode", "--home", "--workspace-root", "--business-port", "--pairing-port"].includes(key)
+    )
       throw new Error("Invalid init arguments");
     if (values.has(key)) throw new Error("Invalid init arguments");
     values.set(key, value);
   }
+  const ports = [values.get("--business-port"), values.get("--pairing-port")];
+  if (
+    ports.filter((port) => port !== undefined).length === 1 ||
+    ports.some(
+      (port) =>
+        port !== undefined &&
+        (!/^[1-9][0-9]{3,4}$/.test(port) || !PortSchema.safeParse(Number(port)).success),
+    ) ||
+    (ports[0] !== undefined && ports[0] === ports[1])
+  )
+    throw new Error("Invalid init arguments");
   let persistence;
   try {
     persistence = await openPersistence(resolveHome(values.get("--home")));
@@ -565,6 +635,14 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
       );
     if (workspaceRoot !== undefined)
       await initializeWorkspaceRoot(persistence.store, workspaceRoot, Date.now());
+    const entry =
+      ports[0] !== undefined && ports[1] !== undefined
+        ? await persistence.store.call("entry.initializePorts", {
+            businessPort: Number(ports[0]),
+            pairingPort: Number(ports[1]),
+            at: Date.now(),
+          })
+        : await persistence.store.call("entry.read", undefined);
     const config = await sqliteConfigState(persistence.store).read();
     process.stdout.write(
       `${JSON.stringify({
@@ -573,6 +651,7 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
         created: persistence.created,
         schemaVersion: persistence.store.schemaVersion,
         workspaceRoot: config.workspaceRoot ?? join(persistence.layout.home, "workspace"),
+        entry: { businessPort: entry.businessPort, pairingPort: entry.pairingPort },
       })}\n`,
     );
   } finally {

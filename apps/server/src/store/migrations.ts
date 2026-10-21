@@ -4,6 +4,7 @@ import { MIGRATION_003 } from "./migrations/003-worktree-preparations.js";
 import { MIGRATION_004 } from "./migrations/004-binding-changes.js";
 import { MIGRATION_005 } from "./migrations/005-operation-tombstones.js";
 import { MIGRATION_006 } from "./migrations/006-device-auth.js";
+import { MIGRATION_007 } from "./migrations/007-entry-service.js";
 
 export type Migration = { readonly version: number; readonly name: string; readonly sql: string };
 
@@ -18,6 +19,7 @@ export const MIGRATIONS: readonly Migration[] = Object.freeze([
   { version: 4, name: "binding-changes", sql: MIGRATION_004 },
   { version: 5, name: "operation-tombstones", sql: MIGRATION_005 },
   { version: 6, name: "device-auth", sql: MIGRATION_006 },
+  { version: 7, name: "entry-service", sql: MIGRATION_007 },
 ]);
 
 export const SCHEMA_VERSION = MIGRATIONS.length;
