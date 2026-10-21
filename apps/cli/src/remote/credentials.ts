@@ -1,16 +1,7 @@
 import { randomUUID } from "node:crypto";
-import {
-  chmod,
-  link,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  unlink,
-} from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { PortSchema } from "@cove/protocol/auth";
 import { DeviceIdSchema, DeviceTokenSchema } from "@cove/protocol/bootstrap";
 import { OpaqueIdSchema } from "@cove/protocol/identity";
@@ -198,30 +189,29 @@ export async function readServer(home: string, serverId: string): Promise<Server
 // it looks. A rotation holds the lock across its requests, which the client bounds.
 const LOCK_WAIT_MS = 60_000;
 const LOCK_POLL_MS = 50;
-// A lock file still empty this long after it was created belongs to a command that died between
-// creating it and writing its PID.
-const EMPTY_LOCK_STALE_MS = 5_000;
+// SQLite's result code for a lock that another connection holds.
+const SQLITE_BUSY = 5;
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
+function busy(error: unknown): boolean {
+  return (error as { errcode?: unknown } | null)?.errcode === SQLITE_BUSY;
 }
 
-// Runs `action` holding the record lock of `serverId`: `<serverId>.lock` beside the record,
-// created exclusively and holding the PID of the command that holds it. Every command that
-// changes a record (rotate, remote entry default, remote remove) reads the latest record under
-// the lock and writes it before releasing it, so concurrent commands are serialized and none
-// writes over another's change (a token saved by one rotation, a default entry chosen by
-// another command). Commands that only read the record take no lock.
+// Runs `action` holding the record lock of `serverId`. Every command that changes a record
+// (rotate, remote entry default, remote remove) reads the latest record under the lock and writes
+// it before releasing it, so concurrent commands are serialized and none writes over another's
+// change (a token saved by one rotation, a default entry chosen by another command). Commands
+// that only read the record take no lock.
 //
-// A lock whose holder is no longer running (a command that crashed) is taken over: it is renamed
-// away first, and restored when the renamed file turns out to be another command's newer lock.
-// The PID check cannot tell a reused PID from the holder, which then only delays this command
-// until LOCK_WAIT_MS ends with an error naming the lock file.
+// The lock is an OS lock that lives exactly as long as the process holding it: an exclusive
+// SQLite transaction, which is a POSIX advisory lock the kernel arbitrates, on the empty database
+// `<serverId>.lock.sqlite` beside the record. The kernel drops the lock when its holder exits,
+// however it exits, so a crashed command's lock needs no takeover and there is no stale-holder
+// guess (a PID check could not tell a reused PID from the holder). No command ever deletes or
+// renames the file: had one removed it while another held its lock, a third command could lock a
+// new file at the same path alongside the holder. Release is the holder rolling back its own
+// transaction and closing its own connection, which cannot touch another command's lock. The file
+// therefore stays after `remote remove`; it holds nothing. Waiting is bounded by LOCK_WAIT_MS and
+// polls without blocking the event loop.
 export async function withServerLock<T>(
   home: string,
   serverId: string,
@@ -230,54 +220,33 @@ export async function withServerLock<T>(
   await ownerOnlyDirectory(home);
   await ownerOnlyDirectory(clientDirectory(home));
   await ownerOnlyDirectory(serversDirectory(home));
-  const path = recordPath(home, serverId).replace(/\.json$/, ".lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      const handle = await open(path, "wx", 0o600);
-      try {
-        await handle.writeFile(`${process.pid}\n`, "utf8");
-      } finally {
-        await handle.close();
-      }
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const seen = await readFile(path, "utf8").catch(() => null);
-    if (seen !== null) {
-      const pid = Number(seen.trim());
-      const created = seen === "" ? await lstat(path).catch(() => null) : null;
-      const stale =
-        seen === ""
-          ? created !== null && Date.now() - created.mtimeMs > EMPTY_LOCK_STALE_MS
-          : Number.isSafeInteger(pid) && pid > 0 && !alive(pid);
-      if (stale) {
-        const moved = `${path}.${randomUUID()}.stale`;
-        if (
-          await rename(path, moved).then(
-            () => true,
-            () => false,
-          )
-        ) {
-          if ((await readFile(moved, "utf8").catch(() => null)) !== seen)
-            await link(moved, path).catch(() => undefined);
-          await unlink(moved).catch(() => undefined);
-        }
-        continue;
-      }
-    }
-    if (Date.now() > deadline)
-      throw new Error(
-        `another cove command holds the credential record of server ${serverId} (${path}); ` +
-          "nothing was changed. Remove the file if no cove command is running",
-      );
-    await new Promise((done) => setTimeout(done, LOCK_POLL_MS));
-  }
+  const path = recordPath(home, serverId).replace(/\.json$/, ".lock.sqlite");
+  // Created 0600 before SQLite opens it, which would otherwise create it with the umask's mode.
+  await (await open(path, "a", 0o600)).close();
+  const database = new DatabaseSync(path, { timeout: 0 });
   try {
-    return await action();
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    for (;;) {
+      try {
+        database.exec("BEGIN EXCLUSIVE");
+        break;
+      } catch (error) {
+        if (!busy(error)) throw error;
+      }
+      if (Date.now() > deadline)
+        throw new Error(
+          `another cove command holds the credential record of server ${serverId} (${path}); ` +
+            "nothing was changed",
+        );
+      await new Promise((done) => setTimeout(done, LOCK_POLL_MS));
+    }
+    try {
+      return await action();
+    } finally {
+      database.exec("ROLLBACK");
+    }
   } finally {
-    await unlink(path).catch(() => undefined);
+    database.close();
   }
 }
 

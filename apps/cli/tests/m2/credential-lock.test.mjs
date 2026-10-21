@@ -1,6 +1,7 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { waitFor } from "../recording-view.mjs";
 import { createAuthFixture, portOf } from "./auth-fixtures.mjs";
@@ -11,17 +12,28 @@ import { createAuthFixture, portOf } from "./auth-fixtures.mjs";
 // the token saved last is the valid one and no command's change is lost. The interleaving is
 // controlled: the first rotation's request is held in a TCP relay until the other commands had
 // every chance to run into it.
+//
+// The lock is an OS lock held for the holder's process lifetime (credentials.ts withServerLock):
+// a holder that is killed releases it, and contenders that all find it released at once enter
+// one at a time (#159: the earlier stale-lock takeover could let a second contender remove the
+// first one's live lock).
+
+const CONTENDER = resolve(import.meta.dirname, "lock-contender.mjs");
 
 let fixture;
 let relays;
+let contenders;
 
 beforeEach(async () => {
   fixture = await createAuthFixture();
   relays = [];
+  contenders = [];
 });
 
 afterEach(async () => {
   for (const relay of relays) relay.close();
+  for (const contender of contenders) contender.child.kill("SIGKILL");
+  await Promise.all(contenders.map((contender) => contender.exited));
   await fixture?.cleanup();
   fixture = undefined;
 });
@@ -121,20 +133,76 @@ test("concurrent record changes are serialized and the token saved last is the v
   const old = await fixture.deviceClient(server, original.token);
   expect((await old.client.connect()).ok).toBe(false);
   old.client.dispose();
-  await expect(readFile(`${recordPath.replace(/\.json$/, "")}.lock`)).rejects.toThrow("ENOENT");
+  // The lock file stays (it holds nothing); no other lock residue is left beside the record.
+  expect((await readdir(join(home, "client", "servers"))).sort()).toEqual([
+    `${paired.serverId}.json`,
+    `${paired.serverId}.lock.sqlite`,
+  ]);
 }, 60_000);
 
-test("a lock left by a command that no longer runs is taken over", async () => {
+// A contender process (lock-contender.mjs) for the record lock of `serverId` under `home`.
+function contend(home, serverId, log, name, hold) {
+  const child = spawn(process.execPath, [CONTENDER, home, serverId, log, name, String(hold)], {
+    env: fixture.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const exited = new Promise((done) =>
+    child.once("exit", (code, signal) => done({ code, signal })),
+  );
+  const contender = { child, exited, stdout: () => stdout, stderr: () => stderr };
+  contenders.push(contender);
+  return contender;
+}
+
+test("a lock whose holder was killed is free, and its contenders enter one at a time", async () => {
   const serverHome = fixture.home("server");
   await fixture.startAuthServer(serverHome);
   const home = fixture.home("device");
   const paired = await fixture.pairOk(home, "box", (await fixture.invite(serverHome)).invitation);
-  const lock = join(home, "client", "servers", `${paired.serverId}.lock`);
-  // A PID that is not running: a short-lived process that has exited.
-  const gone = fixture.spawnCove(["remote", "list"], { home });
-  await gone.done;
-  await writeFile(lock, `${gone.child.pid}\n`, { mode: 0o600 });
+  const log = join(fixture.root, "lock.log");
+  await writeFile(log, "");
+
+  // H holds the lock and is killed while holding it, after every contender is already waiting:
+  // they all find the lock released at the same moment, the race #159 describes.
+  const holder = contend(home, paired.serverId, log, "H", "forever");
+  await waitFor("the holder to take the lock", () => holder.stdout().includes("held"), 20_000);
+  const names = ["A", "B", "C", "D", "E", "F"];
+  const waiting = names.map((name) => contend(home, paired.serverId, log, name, 150));
+  await waitFor(
+    "every contender to wait",
+    () => waiting.every((contender) => contender.stdout().includes("waiting")),
+    20_000,
+  );
+  // Each one polls the lock while H holds it; none gets in.
+  await new Promise((done) => setTimeout(done, 500));
+  expect(waiting.some((contender) => contender.stdout().includes("held"))).toBe(false);
+  holder.child.kill("SIGKILL");
+  expect((await holder.exited).signal).toBe("SIGKILL");
+  const results = await Promise.all(waiting.map((contender) => contender.exited));
+  const failed = results.filter((result) => result.code !== 0);
+  if (failed.length > 0)
+    throw new Error(`contenders failed: ${waiting.map((c) => c.stderr()).join("\n")}`);
+
+  // The log is H's enter, then one enter/exit pair per contender with nothing in between: no two
+  // holders ever overlapped, and every contender got the lock exactly once.
+  const lines = (await readFile(log, "utf8")).trim().split("\n");
+  expect(lines[0]).toBe("enter H");
+  const pairs = lines.slice(1);
+  expect(pairs).toHaveLength(names.length * 2);
+  const entered = [];
+  for (let index = 0; index < pairs.length; index += 2) {
+    const name = pairs[index].replace(/^enter /, "");
+    expect(pairs[index]).toBe(`enter ${name}`);
+    expect(pairs[index + 1]).toBe(`exit ${name}`);
+    entered.push(name);
+  }
+  expect(entered.sort()).toEqual(names);
+
+  // A command run afterwards takes the lock at once.
   const changed = await fixture.cove(["remote", "entry", "default", "box", "loopback"], { home });
   expect(changed.code).toBe(0);
-  await expect(readFile(lock)).rejects.toThrow("ENOENT");
-});
+}, 60_000);
