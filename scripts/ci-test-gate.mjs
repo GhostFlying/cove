@@ -1061,6 +1061,13 @@ export const fileRegisteredDirectories = [
       "test-isolation",
     ],
   },
+  // M2 acceptance (docs/milestones/m2.md "任务拆分"): each M2 task adds its scenario tests and
+  // their .suite.json here without changing this script.
+  {
+    project: "cli",
+    directory: "apps/cli/tests/m2",
+    required: ["pending-secrets"],
+  },
 ];
 
 const SUITE_SUFFIX = ".suite.json";
