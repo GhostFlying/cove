@@ -11,6 +11,7 @@ import {
   homeDirectory,
   homeRendezvousPath,
   integerFlag,
+  isRemote,
   optionalIntegerFlag,
   print,
   rendezvousPath,
@@ -23,12 +24,32 @@ import {
   type Arguments,
 } from "./_common.js";
 import { operationIdFor, printSucceeded, submitWrite } from "./_pending.js";
+import { run as tsnetCommand, usage as tsnetUsage } from "./_tsnet.js";
+import {
+  serverImpact,
+  serverInstall,
+  serverPrune,
+  serverRestart,
+  serverStatus,
+  serverUninstall,
+  serverUpgrade,
+  serviceCommand,
+} from "../install/commands.js";
 
 export const usage = `  server init [--workspace-root DIR]
   server start [--port N] [--origin URL]... [--harness [--harness-port N]]
   server entry get
   server entry set <businessPort|pairingPort|sshTarget|tsnetHostname> <VALUE> [--expected-revision N] [--operation-id ID]
   server entry reset <businessPort|pairingPort|sshTarget|tsnetHostname> [--expected-revision N] [--operation-id ID]
+  server install [--closure DIR | --activate BUILD]
+  server prune
+  server uninstall [--yes]
+  server service start|stop [--yes]|status
+  server restart [--yes]
+  server upgrade [--yes] [--closure DIR]
+  server status
+  server impact
+${tsnetUsage}
 
 The data directory is --home, $COVE_HOME or ~/.cove; the server keeps its database there and
 refuses to start while another server uses it. \`server init\` prepares it while no server runs;
@@ -39,7 +60,16 @@ server secret in its fragment, is printed once the server is ready.
 The entry configuration holds the fixed loopback business and pairing ports, the SSH target that
 invitations advertise and the server's tsnet hostname. Ports and the hostname take effect when the
 server next starts (\`server start\` without --port uses the stored business port); the SSH target
-applies to the next invitation. \`server entry\` also works with --server.`;
+applies to the next invitation.
+\`server install\` puts this checkout's runtime closure (or a sealed --closure DIR) at
+<home>/install/<build>/, makes it current after checking that it accepts the database schema,
+writes <home>/bin/cove, chooses the fixed ports when none are configured and registers the user
+service (a LaunchAgent on macOS, a systemd user unit on Linux), starting it unless a server already
+runs: a new build takes effect only at \`server restart\`. \`--activate BUILD\` switches to an
+installed build. \`server restart\`, \`upgrade\`, \`service stop\` and \`uninstall\` first list the
+live runs that end and the platform consequences; without --yes and without a terminal they exit 2
+and do nothing. \`uninstall\` keeps the data directory. \`server entry\`, \`status\` and \`impact\`
+also work with --server; the others act on this host only.`;
 
 const RENDEZVOUS_WAIT_MS = 20_000;
 
@@ -382,7 +412,7 @@ async function entryCommand(args: Arguments): Promise<number> {
 // Subcommands a paired device may send with --server (m2 D7, D11): reads and the entry
 // configuration. Installing, starting, stopping, restarting and upgrading the service, and
 // initializing the data directory, act on this host only.
-const REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["entry"]);
+const REMOTE_SUBCOMMANDS: ReadonlySet<string> = new Set(["entry", "status", "impact"]);
 export const localOnly = (subcommand: string | undefined): boolean =>
   subcommand === undefined || !REMOTE_SUBCOMMANDS.has(subcommand);
 
@@ -391,5 +421,14 @@ export async function run(args: Arguments): Promise<number> {
   if (sub === "start") return serverStart(args);
   if (sub === "init") return serverInit(args);
   if (sub === "entry") return entryCommand(args);
+  if (sub === "install") return serverInstall(args);
+  if (sub === "prune") return serverPrune(args);
+  if (sub === "uninstall") return serverUninstall(args);
+  if (sub === "service") return serviceCommand(args);
+  if (sub === "restart") return serverRestart(args);
+  if (sub === "upgrade") return serverUpgrade(args);
+  if (sub === "status") return serverStatus(args, isRemote());
+  if (sub === "impact") return serverImpact(args);
+  if (sub === "tsnet") return tsnetCommand(args);
   throw new UsageError(`Unknown server command ${sub ?? ""}`.trim());
 }
