@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatBuildId } from "@cove/protocol/bootstrap";
+import { formatBuildId, isBuildId } from "@cove/protocol/bootstrap";
 
 // The build identity of this Cove build (m2 D1, D12; format in protocol bootstrap.ts):
 // `<root package version>+<16 hex>`, where the digest is a SHA-256, by relative path, over every
@@ -19,18 +19,57 @@ import { formatBuildId } from "@cove/protocol/bootstrap";
 // are rebuilt or installed per machine. Two checkouts with the same ID can therefore still differ
 // in those; the ID tells builds apart for diagnostics and the D12 warning, nothing more.
 //
-// This runtime scan is the development fallback. An installed Cove (m2 T3, D1) is to carry an
-// identity stamped at installation over its complete closure, which takes precedence over this
-// scan once T3 provides it. Until then, and for a layout without a workspace root,
-// UNIDENTIFIED_BUILD is reported rather than failing startup: builds then compare equal, which
-// only loses the D12 warning, never a refusal.
+// This runtime scan is the development fallback. An installed Cove (m2 T3, D1) carries an identity
+// stamped at installation over its complete closure, Node binary, native addons and cove-tsnet
+// included (INSTALL_STAMP at the closure root, written by scripts/runtime-closure.mjs), and that
+// stamp takes precedence: a module that finds the stamp above itself before any workspace root
+// reports the stamped build and scans nothing. A stamp that cannot be read or does not hold a
+// build ID gives UNIDENTIFIED_BUILD, never the scan's answer, because the closure has no workspace
+// to scan. For a layout with neither, UNIDENTIFIED_BUILD is reported rather than failing startup:
+// builds then compare equal, which only loses the D12 warning, never a refusal.
 export const UNIDENTIFIED_BUILD = "unidentified";
 const EXCLUDED = /(?:\.d\.ts|\.d\.mts|\.map|\.tsbuildinfo)$/;
 
-function workspaceRoot(from: string): string | null {
+// The stamp of an installed closure, at its root (`<home>/install/<build>/cove-install.json`).
+export const INSTALL_STAMP = "cove-install.json";
+
+// What a module of this build is part of, found by walking up from it: an installed closure (its
+// stamp) or a development workspace (pnpm-workspace.yaml), whichever is nearer.
+type Layout = { kind: "installed" | "workspace"; root: string } | null;
+function layoutOf(from: string): Layout {
   for (let current = from; ; current = dirname(current)) {
-    if (existsSync(join(current, "pnpm-workspace.yaml"))) return current;
+    if (existsSync(join(current, INSTALL_STAMP))) return { kind: "installed", root: current };
+    if (existsSync(join(current, "pnpm-workspace.yaml")))
+      return { kind: "workspace", root: current };
     if (dirname(current) === current) return null;
+  }
+}
+
+let layout: Layout | undefined;
+function ownLayout(): Layout {
+  if (layout === undefined) layout = layoutOf(dirname(fileURLToPath(import.meta.url)));
+  return layout;
+}
+
+// The root of the installed closure this module runs from, or null for a development build.
+export function installedClosureRoot(): string | null {
+  const own = ownLayout();
+  return own?.kind === "installed" ? own.root : null;
+}
+
+// The workspace this module was built in, or null for an installed closure.
+export function workspaceRootOf(): string | null {
+  const own = ownLayout();
+  return own?.kind === "workspace" ? own.root : null;
+}
+
+// The build ID an install stamp names, or null when the text is not a stamp of a build.
+export function stampedBuild(text: string): string | null {
+  try {
+    const stamp = JSON.parse(text) as { type?: unknown; build?: unknown } | null;
+    return stamp?.type === "cove-install" && isBuildId(stamp.build) ? stamp.build : null;
+  } catch {
+    return null;
   }
 }
 
@@ -80,14 +119,15 @@ let cached: string | undefined;
 // server never hashes anything.
 export function buildId(): string {
   if (cached === undefined) {
-    const root = workspaceRoot(dirname(fileURLToPath(import.meta.url)));
+    const own = ownLayout();
     let id = UNIDENTIFIED_BUILD;
-    if (root)
-      try {
-        id = computeBuildId(root);
-      } catch {
-        // An unreadable tree identifies nothing; see UNIDENTIFIED_BUILD.
-      }
+    try {
+      if (own?.kind === "installed")
+        id = stampedBuild(readFileSync(join(own.root, INSTALL_STAMP), "utf8")) ?? id;
+      else if (own) id = computeBuildId(own.root);
+    } catch {
+      // An unreadable stamp or tree identifies nothing; see UNIDENTIFIED_BUILD.
+    }
     cached = id;
   }
   return cached;
