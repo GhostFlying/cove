@@ -333,7 +333,7 @@ class SystemdUser implements ServiceBackend {
       "--user",
       "show",
       "-p",
-      "LoadState,ActiveState,SubState,MainPID,Result",
+      "LoadState,ActiveState,SubState,MainPID,Result,NRestarts",
       this.unit,
     ]);
     const values: Record<string, string> = {};
@@ -386,7 +386,13 @@ class SystemdUser implements ServiceBackend {
       running: values.ActiveState === "active" && values.SubState === "running",
       pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
       linger: lingerEnabled(),
-      stoppedAfterCrashes: values.Result === "start-limit-hit",
+      // When automatic restarts hit the start limit, systemd (255 on Ubuntu 24.04) logs "Start
+      // request repeated too quickly" but keeps the last failure's Result (`signal`,
+      // `exit-code`); only a refused manual start records `start-limit-hit`. With
+      // Restart=on-failure, a failed unit that systemd had restarted before is one it gave up on.
+      stoppedAfterCrashes:
+        values.ActiveState === "failed" &&
+        (values.Result === "start-limit-hit" || Number(values.NRestarts) > 0),
     };
   }
 
