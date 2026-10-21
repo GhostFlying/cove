@@ -6,6 +6,12 @@ import { join, resolve } from "node:path";
 import { createClient } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec, createWebPorts } from "@cove/client/web-ports";
 import { decodeInvitation, encodeInvitation } from "@cove/protocol/auth";
+import {
+  BOOTSTRAP_VERSION,
+  PROTOCOL_VERSION,
+  REQUIRED_CAPABILITIES,
+} from "@cove/protocol/bootstrap";
+import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
 import { randomUUID } from "node:crypto";
 import { createNodeHttpPort } from "../../dist/node-ports.js";
 import { cliBuildVersion } from "../../dist/session.js";
@@ -32,15 +38,18 @@ export async function createAuthFixture() {
     ...base,
 
     // A server for `home` with the auth flags; `args` adds more (e.g. --pairing-port).
-    async startAuthServer(home, args = []) {
+    // `storeFaults`: store limits that enable the store-fault seams (auth-server-entry.mjs).
+    async startAuthServer(home, args = [], { storeFaults } = {}) {
       // startServerEntry waits for the rendezvous to exist; the one a killed server left would
       // be taken for the new server's, so it is removed first (it names no live server).
       await rm(join(home, "server", "run", "rendezvous.json"), { force: true });
       base.env.COVE_TEST_SERVER_ARGS = JSON.stringify(["--ssh-target", SSH_TARGET, ...args]);
+      if (storeFaults) base.env.COVE_TEST_STORE_FAULTS = JSON.stringify(storeFaults);
       try {
         return await base.startServerEntry(SERVER_ENTRY, home);
       } finally {
         delete base.env.COVE_TEST_SERVER_ARGS;
+        delete base.env.COVE_TEST_STORE_FAULTS;
       }
     },
 
@@ -277,4 +286,36 @@ export async function filesUnder(directory) {
     else if (entry.isFile()) found.push({ path, bytes: await readFile(path) });
   }
   return found;
+}
+
+export const portOf = (server) => Number(new URL(server.record.endpoint).port);
+
+export function bootstrapRequest(server) {
+  return {
+    type: "cove-bootstrap",
+    bootstrapVersion: BOOTSTRAP_VERSION,
+    expectedServerId: server.record.serverId,
+    expectedRelayInstanceId: server.record.relayInstanceId,
+    protocolVersion: PROTOCOL_VERSION,
+    buildVersion: "0.0.0+0000000000000000",
+    capabilities: [...REQUIRED_CAPABILITIES],
+    profiles: [PROFILE],
+    encodings: [BASELINE_ENCODING],
+  };
+}
+
+// A terminal WebSocket whose first frame carries `secret`: every text message and the close code.
+export async function terminalAttempt(server, secret) {
+  const socket = new WebSocket(`ws://127.0.0.1:${portOf(server)}/terminal`);
+  const messages = [];
+  socket.addEventListener("message", (event) => messages.push(String(event.data)));
+  const closed = new Promise((done) =>
+    socket.addEventListener("close", (event) => done(event.code)),
+  );
+  await new Promise((done, fail) => {
+    socket.addEventListener("open", done);
+    socket.addEventListener("error", fail);
+  });
+  socket.send(JSON.stringify({ ...bootstrapRequest(server), secret }));
+  return { code: await closed, messages };
 }

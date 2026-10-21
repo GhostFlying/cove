@@ -12,11 +12,14 @@ import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
 import { waitFor } from "../recording-view.mjs";
 import {
   alteredInvitation,
+  bootstrapRequest,
   connectable,
   createAuthFixture,
   filesUnder,
   payloadOf,
+  portOf,
   post,
+  terminalAttempt,
   waitUntilClosed,
   wrongSecret,
 } from "./auth-fixtures.mjs";
@@ -40,38 +43,6 @@ afterEach(async () => {
   await fixture?.cleanup();
   fixture = undefined;
 });
-
-const portOf = (server) => Number(new URL(server.record.endpoint).port);
-
-function bootstrapRequest(server) {
-  return {
-    type: "cove-bootstrap",
-    bootstrapVersion: BOOTSTRAP_VERSION,
-    expectedServerId: server.record.serverId,
-    expectedRelayInstanceId: server.record.relayInstanceId,
-    protocolVersion: PROTOCOL_VERSION,
-    buildVersion: "0.0.0+0000000000000000",
-    capabilities: [...REQUIRED_CAPABILITIES],
-    profiles: [PROFILE],
-    encodings: [BASELINE_ENCODING],
-  };
-}
-
-// A terminal WebSocket whose first frame carries `secret`: every text message and the close code.
-async function terminalAttempt(server, secret) {
-  const socket = new WebSocket(`ws://127.0.0.1:${portOf(server)}/terminal`);
-  const messages = [];
-  socket.addEventListener("message", (event) => messages.push(String(event.data)));
-  const closed = new Promise((done) =>
-    socket.addEventListener("close", (event) => done(event.code)),
-  );
-  await new Promise((done, fail) => {
-    socket.addEventListener("open", done);
-    socket.addEventListener("error", fail);
-  });
-  socket.send(JSON.stringify({ ...bootstrapRequest(server), secret }));
-  return { code: await closed, messages };
-}
 
 function run(file, args) {
   return new Promise((done) =>
