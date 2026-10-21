@@ -323,6 +323,25 @@ PENDING：
   - `cove operation get <id>` 不受影响，仍向 server 查询。
 - tend 若长期保存 operationId 用于重试，30 天后的重试会得到上述结果；在 30 天内按原 ID 重发的语义不变。
 
+#153（M2 T1 设备授权核心与客户端登记，只有 loopback 入口，未合入）：本机命令的请求与 JSON 输出不变。
+
+- 新的全局参数 `--server ALIAS`（或 `$COVE_SERVER`）与 `--via ssh|tsnet`：把命令发给用 `cove remote add` 配对过的 server。
+  tend-runner 调用本机 CLI 时不要设置 `COVE_SERVER`，否则命令会发往该 server。本 PR 只有 loopback 入口（同一主机上的
+  server）可用；`--via ssh|tsnet` 以 `ENTRY_UNAVAILABLE` 失败并以 1 退出，不会改用别的入口。`server` 与 `remote` 两组命令只作用于本机，
+  给 `--server` 时为用法错误（2），且不受 `COVE_SERVER` 影响。
+- `--server` 模式下路径参数是 server 主机上的路径：相对路径或以 `~` 开头时以 2 退出，不写待定记录也不发送；绝对路径原样发送。
+  `terminal create` 必须给出绝对的 `--cwd`；`--checkout PATH` 只匹配 server 报告的已注册 clone 路径，其余以 1 退出并提示
+  `REPO_ID,path=PATH`。本机模式保持原行为。
+- `cove auth invite create [--ttl-minutes N]` 输出 `{ operation, invitation }`；邀请只在首次响应中出现，以同一 `--operation-id`
+  重发时只输出记录并以 1 退出。另有 `auth invite list/cancel`、`auth device list [--include-revoked]/rename/revoke`。
+  `auth device revoke` 等被撤销设备的连接关闭后才返回；有连接未在期限内关闭时仍输出记录，但以 1 退出。
+  `auth device rotate` 只能带 `--server`，用于轮换本客户端自己的 token。
+- `cove remote add <ALIAS> [--name N]` 只从隐藏提示或 stdin 读邀请，从不从参数读。另有 `remote list/remove`、
+  `remote entry default <ALIAS> <kind>`。`remote tsnet ...` 以 `CAPABILITY_UNAVAILABLE` 失败并以 1 退出。
+  输出不含 token；token 保存在 `<home>/client/servers/<serverId>.json` 中（0600）。
+- 带有效设备 token 的请求可用全部现有方法。撤销后的设备在 HTTP 上得到 401 `DEVICE_REVOKED`，在 WS 上被以 policy 关闭；
+  它已受理的操作照常完成，其他主体可查询。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -392,3 +411,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `a8f17f6`；#150（M2 T0，未合入）           | 新增 PENDING #150：`buildVersion` 改为真实构建标识；新增 M2 错误 kind（1042–1049）；带输入秘密的写的待定记录不保存秘密且不能 `operation resend`；现有请求与输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-21 | main `8855e3b`；#150（M2 T0，未合入）           | 更正 PENDING #150：`buildVersion` 也随 package 清单变化；以不同秘密字段重用 operationId、或请求含会被 schema 去掉的字段时，CLI 不写盘、不发送并以 1 退出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 2026-10-21 | main `e8b35bf`；#152（M2 T6，未合入）           | 新增 PENDING #152：已结束操作的记录 30 天后清除，`operation get`/`resend` 与直接 RPC 重发返回 `OPERATION_HISTORY_EXPIRED`（以 1 退出、不执行），未结束的记录不清除；本机待定记录 30 天后过期，`resend` 与同 ID 重用在本地拒绝、不发送                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-10-21 | main `034ffc9`；#153（M2 T1，未合入）           | 新增 PENDING #153：全局 `--server`/`$COVE_SERVER` 与 `--via`（只有 loopback 可用，其余入口为 `ENTRY_UNAVAILABLE`，`server`/`remote` 组拒绝 `--server`）；`--server` 模式下相对路径与 `~` 以 2 退出且不发送，`terminal create` 须给绝对 `--cwd`；新增 `auth invite create/list/cancel`、`auth device list/rename/revoke/rotate`（邀请与新 token 只在首次响应中，重发以 1 退出；撤销有连接未关闭时以 1 退出）与 `remote add/list/remove/entry default`（邀请只经提示或 stdin）；本机命令的请求与输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
