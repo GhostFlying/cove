@@ -109,3 +109,36 @@ test("a saved record that holds secrets or undeclared omissions is invalid", asy
   for (const operationId of ["held", "undeclared"])
     await expect(readPending(home, operationId)).rejects.toThrow(/is invalid/);
 });
+
+test("a malformed, misplaced or unknown secret is refused before anything is saved or sent", async () => {
+  const { args, session, sent } = command();
+  for (const params of [
+    { operationId: "bad-1", authKey },
+    { operationId: "bad-2", secrets: { authKey, recoveryKey: authKey } },
+    { operationId: "bad-3", secrets: { authKey: "short" } },
+  ])
+    await expect(acceptWrite(args, session, "server.tsnet.login", params)).rejects.toThrow(
+      /request is invalid.*nothing was saved or sent/,
+    );
+  expect(sent).toEqual([]);
+  await expect(readdir(join(home, "cli", "operations"))).rejects.toThrow(/ENOENT/);
+});
+
+test("reusing an operation ID with other secret fields is refused", async () => {
+  const { args, session, sent } = command();
+  await acceptWrite(args, session, "server.tsnet.login", { operationId: "k1" });
+  await expect(
+    acceptWrite(args, session, "server.tsnet.login", { operationId: "k1", secrets: { authKey } }),
+  ).rejects.toThrow(/saved with other secret fields \(none\); nothing was sent/);
+  await acceptWrite(args, session, "server.tsnet.login", {
+    operationId: "k2",
+    secrets: { authKey },
+  });
+  await expect(
+    acceptWrite(args, session, "server.tsnet.login", { operationId: "k2" }),
+  ).rejects.toThrow(/saved with other secret fields \(authKey\)/);
+  expect(sent.map(({ params }) => params.operationId)).toEqual(["k1", "k2"]);
+  // The unkeyed record stays resendable; the keyed one never is.
+  expect(await readPending(home, "k1")).not.toHaveProperty("omittedSecrets");
+  await expect(readPending(home, "k2")).rejects.toThrow(/cannot be resent/);
+});

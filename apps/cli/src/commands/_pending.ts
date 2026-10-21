@@ -208,6 +208,21 @@ export function samePendingRequest(a: PendingOperation, b: PendingOperation): bo
   );
 }
 
+// Whether parsing kept every member of `input` with its value: the parse may add defaults, but
+// may not drop or change anything the caller gave.
+function keptByParse(input: unknown, parsed: unknown): boolean {
+  if (input === null || typeof input !== "object") return Object.is(input, parsed);
+  if (parsed === null || typeof parsed !== "object") return false;
+  if (Array.isArray(input) !== Array.isArray(parsed)) return false;
+  if (Array.isArray(input) && input.length !== (parsed as unknown[]).length) return false;
+  return Object.entries(input).every(
+    // An undefined member is absent on the wire (JSON drops it), so it has nothing to keep.
+    ([key, value]) =>
+      value === undefined ||
+      (Object.hasOwn(parsed, key) && keptByParse(value, (parsed as Record<string, unknown>)[key])),
+  );
+}
+
 // The operation ID of a write: --operation-id, or a fresh one the CLI chooses before sending.
 export function operationIdFor(args: Arguments): string {
   const chosen = flag(args, "--operation-id");
@@ -243,9 +258,18 @@ export async function acceptWrite<M extends WriteRpcMethod>(
   params: Record<string, unknown> & { operationId: string },
   onFailure?: (outcome: Exclude<CallOutcome<unknown>, { ok: true }>) => void,
 ): Promise<OperationRecord> {
+  // Checked before anything touches the disk: params the method's schema would change (a member
+  // it strips, such as a secret placed outside `secrets` or under an undeclared name there) are
+  // refused, so what is saved below is exactly a valid request without its declared secrets.
+  const validated = validateRpcMethodParams(method, params);
+  if (!validated || !keptByParse(params, validated.params))
+    throw new Error(
+      `the ${method} request is invalid (a field is malformed or not part of the method); ` +
+        `nothing was saved or sent`,
+    );
   // The secrets stay in this process: the record keeps the params without them.
   const { value: stored, secrets } = splitSecrets(params);
-  const omitted = Object.keys(secrets ?? {});
+  const omitted = Object.keys(secrets ?? {}).sort();
   const pending: PendingOperation = {
     version: 1,
     serverId: session.record.serverId,
@@ -260,6 +284,16 @@ export async function acceptWrite<M extends WriteRpcMethod>(
       `operation ${params.operationId} already has a saved request with another server, method ` +
         `or parameters; nothing was sent. Use a fresh --operation-id for this request ` +
         `(\`cove operation resend ${params.operationId}\` sends the saved one)`,
+    );
+  // The secrets are not part of the intent, but whether a request has them decides whether its
+  // saved record may be resent. A reused ID whose secret fields differ from the saved record's
+  // (a login first sent without an auth key, then with one) would leave a resendable record for
+  // a request that carried a secret, so it is refused.
+  if ([...(saved.omittedSecrets ?? [])].sort().join() !== omitted.join())
+    throw new Error(
+      `operation ${params.operationId} was saved with other secret fields ` +
+        `(${(saved.omittedSecrets ?? []).join(", ") || "none"}); nothing was sent. Use a fresh ` +
+        `--operation-id for this request`,
     );
   // The saved request plus this command's own secrets (same intent: secrets are not part of it).
   const outcome = await session.client.call(
