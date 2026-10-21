@@ -7,8 +7,10 @@ import {
   findServer,
   isEntryKind,
   listServers,
+  readServer,
   removeServer,
   saveServer,
+  withServerLock,
   type ServerRecord,
 } from "../remote/credentials.js";
 import type { Via } from "../remote/entries.js";
@@ -144,27 +146,39 @@ export async function run(args: Arguments): Promise<number> {
     takeFlags(args, []);
     if (args.words.length !== 3 || args.command)
       throw new UsageError("remote remove takes one alias");
-    const record = await findServer(home, alias(args.words[2]));
-    if (!record) throw new Error(`no paired server is named ${args.words[2]}`);
-    await removeServer(home, record);
-    print({ removed: describeServer(record) });
-    return 0;
+    const found = await findServer(home, alias(args.words[2]));
+    if (!found) throw new Error(`no paired server is named ${args.words[2]}`);
+    // Under the record lock: a rotation in progress finishes (or a removal comes first) rather
+    // than saving its token into a record removed meanwhile.
+    return withServerLock(home, found.serverId, async () => {
+      const record = await readServer(home, found.serverId);
+      if (!record) throw new Error(`no paired server is named ${args.words[2]}`);
+      await removeServer(home, record);
+      print({ removed: describeServer(record) });
+      return 0;
+    });
   }
   if (sub === "entry") {
     takeFlags(args, []);
     const [, , verb, target, kind] = args.words;
     if (verb !== "default" || args.words.length !== 5 || args.command || !isEntryKind(kind))
       throw new UsageError("remote entry default takes an alias and loopback, ssh or tsnet");
-    const record = await findServer(home, alias(target));
-    if (!record) throw new Error(`no paired server is named ${target}`);
-    if (!Object.hasOwn(record.entries, kind))
-      throw new Error(
-        `${record.alias} has no verified ${kind} entry (entries: ${Object.keys(record.entries).join(", ")})`,
-      );
-    const updated: ServerRecord = { ...record, defaultEntry: kind };
-    await saveServer(home, updated);
-    print(describeServer(updated));
-    return 0;
+    const found = await findServer(home, alias(target));
+    if (!found) throw new Error(`no paired server is named ${target}`);
+    // The default entry is merged into the record as it is under the lock, so a token a
+    // concurrent rotation saved is kept (credentials.ts withServerLock).
+    return withServerLock(home, found.serverId, async () => {
+      const record = await readServer(home, found.serverId);
+      if (!record) throw new Error(`no paired server is named ${target}`);
+      if (!Object.hasOwn(record.entries, kind))
+        throw new Error(
+          `${record.alias} has no verified ${kind} entry (entries: ${Object.keys(record.entries).join(", ")})`,
+        );
+      const updated: ServerRecord = { ...record, defaultEntry: kind };
+      await saveServer(home, updated);
+      print(describeServer(updated));
+      return 0;
+    });
   }
   throw new UsageError(`Unknown remote command ${sub ?? ""}`.trim());
 }

@@ -2,10 +2,11 @@ import type { CallOutcome, Client } from "@cove/client";
 import { AUTH_LIMITS, DeviceNameSchema, InviteIdSchema } from "@cove/protocol/auth";
 import { DeviceIdSchema } from "@cove/protocol/bootstrap";
 import type { OperationRecord, WriteRpcMethod } from "@cove/protocol/rpc";
-import { saveServer } from "../remote/credentials.js";
+import { findServer, readServer, saveServer, withServerLock } from "../remote/credentials.js";
 import { directCallClient } from "../remote/direct-rpc.js";
 import type { Session } from "../session.js";
 import {
+  currentRemote,
   homeDirectory,
   isRemote,
   optionalIntegerFlag,
@@ -162,6 +163,16 @@ async function rotate(args: Arguments): Promise<number> {
         "(the local owner has no token)",
     );
   const operationId = operationIdFor(args);
+  const home = homeDirectory(args);
+  // The record lock is held from reading the record (the session's token) through the rotation,
+  // the save and the first use, so a concurrent rotation or record change of another command
+  // waits instead of writing over this one (credentials.ts withServerLock).
+  const paired = await findServer(home, currentRemote()!.alias);
+  if (!paired) return withSession(args, () => Promise.resolve(1));
+  return withServerLock(home, paired.serverId, () => rotateLocked(args, home, operationId));
+}
+
+async function rotateLocked(args: Arguments, home: string, operationId: string): Promise<number> {
   return withSession(args, async (session) => {
     const remote = session.remote!;
     const { operation, secrets } = await secretWrite(args, session, "auth.device.rotate", {
@@ -177,7 +188,10 @@ async function rotate(args: Arguments): Promise<number> {
       return 1;
     }
     try {
-      await saveServer(homeDirectory(args), { ...remote.server, token });
+      // Merged into the record as it is now; under the lock it still holds the session's token.
+      const latest = await readServer(home, remote.server.serverId);
+      if (!latest || latest.token !== remote.server.token) throw new Error("the record changed");
+      await saveServer(home, { ...latest, token });
     } catch {
       print({ operation });
       process.stderr.write(`cove: the new token could not be saved; ${retry}\n`);
