@@ -1508,34 +1508,55 @@ test("worker byte cap refuses a model allocation before native spawn and release
 });
 
 test("a native factory failure of unknown ownership keeps the run identity", async () => {
-  // The factory threw: it may have created a PTY, so the answer is unknown and the identity
-  // (and its slot) stays retained.
+  // A failure from the factory call onwards may have left a PTY, so the answer is unknown and the
+  // identity (and its slot) stays retained. Two paths reach that answer: a factory that throws,
+  // which startRunSession maps to unclassified-failure, and an exception that escapes the session
+  // start after the factory recorded its owner (here a throwing `kind` getter on the factory's
+  // result), which only the spawn's outer catch in worker-execution can answer. That catch used to
+  // answer WORKER_UNAVAILABLE and release the identity although an owner existed.
   const budgets = { ...M0_LIMITS, maxRuns: 1, listPage: 1 };
-  const factory = fakeFactory();
-  const execution = createWorkerExecution({
-    worker,
-    effectiveBudgets: budgets,
-    factory: {
-      ...factory,
-      spawn() {
-        throw new Error("native failure after the factory boundary");
+  const throwing = () => {
+    throw new Error("native failure after the factory boundary");
+  };
+  const escaping = (factory) => (spec, observer) => {
+    const created = factory.spawn(spec, observer);
+    return {
+      ...created,
+      get kind() {
+        throw new Error("native failure after the owner was recorded");
       },
-    },
-  });
-  try {
-    const uncertain = spawnCommand(run(), budgets);
-    expect(await execution.execute(uncertain.command, uncertain.payload)).toMatchObject({
-      type: "error",
-      error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" },
+    };
+  };
+  for (const [name, spawn, owners] of [
+    ["thrown by the factory", () => throwing, 0],
+    ["escaping the session start", escaping, 1],
+  ]) {
+    const factory = fakeFactory();
+    const execution = createWorkerExecution({
+      worker,
+      effectiveBudgets: budgets,
+      factory: { ...factory, spawn: spawn(factory) },
     });
-    expect(execution.snapshot().runIds).toBe(1);
-    const next = spawnCommand(run("next"), budgets);
-    expect(await execution.execute(next.command, next.payload)).toMatchObject({
-      type: "error",
-      error: { kind: "BUSY" },
-    });
-  } finally {
-    await execution.shutdown("test");
+    try {
+      const uncertain = spawnCommand(run(), budgets);
+      const answer = await execution.execute(uncertain.command, uncertain.payload);
+      const retained = { owners: factory.owned.size, runIds: execution.snapshot().runIds };
+      const next = spawnCommand(run("next"), budgets);
+      // The case name is part of each compared value, so a failure names its case.
+      expect({
+        name,
+        answer,
+        retained,
+        next: await execution.execute(next.command, next.payload),
+      }).toMatchObject({
+        name,
+        answer: { type: "error", error: { kind: "RESULT_UNKNOWN", acceptance: "unknown" } },
+        retained: { owners, runIds: 1 },
+        next: { type: "error", error: { kind: "BUSY" } },
+      });
+    } finally {
+      await execution.shutdown("test");
+    }
   }
 });
 
