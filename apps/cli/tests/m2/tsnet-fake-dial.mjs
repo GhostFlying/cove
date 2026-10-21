@@ -27,6 +27,8 @@ import { join } from "node:path";
 //     "dialPeer": "nodeID",              the peer a successful dial reports
 //     "delayMs": N,                      wait before answering a request
 //     "delays": { "<op>": N },           wait before answering that request (hello included)
+//     "laterDials": answer,              the answer to every dial after the first of a label (a
+//                                        hold or mismatch that starts after the bootstrap stream)
 //     "exitOnce": "/path",               the first fake started exits 0 before it listens
 //                                        (and creates the file); later ones run normally
 //     "events": "/path" }                one JSON line per request: { op, authKey: bool, force,
@@ -72,6 +74,8 @@ const record = (event) => {
   if (events) appendFileSync(events, `${JSON.stringify(event)}\n`);
 };
 const reply = (socket, frame) => socket.write(`${JSON.stringify(frame)}\n`);
+// The stream labels seen (one per CLI process and entry: "box (cove pid N)").
+const labels = new Set();
 
 const server = createServer((socket) => {
   let buffer = Buffer.alloc(0);
@@ -120,7 +124,12 @@ const server = createServer((socket) => {
         socket.end(() => process.exit(0));
         return;
       }
-      const answer = settings.answers?.[request.op];
+      // A command's first stream gets the ordinary answer; its later ones `laterDials`, if set.
+      let answer = settings.answers?.[request.op];
+      if (request.op === "dial") {
+        if (labels.has(request.label) && settings.laterDials) answer = settings.laterDials;
+        labels.add(request.label);
+      }
       if (request.op === "dial" && (!answer || answer.ok)) {
         const upstream = connect({ host: "127.0.0.1", port: settings.dialForward });
         upstream.once("connect", () => {

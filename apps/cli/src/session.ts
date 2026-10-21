@@ -15,6 +15,7 @@ import { buildId } from "@cove/server/build-id";
 import { createNodePorts } from "./node-ports.js";
 import { findServer, type ServerRecord } from "./remote/credentials.js";
 import { openEntry, RemoteError, verifiedIdentity, type Via } from "./remote/entries.js";
+import { withEntryFailure } from "./remote/entry-types.js";
 
 // This CLI's build (m2 D12): the server's computation over the same build, so the two agree when
 // they come from one build. Computed on first use and cached for the process, so a command that
@@ -94,6 +95,9 @@ export interface Session {
   readonly remote?: { server: ServerRecord; token(): string; useToken(token: string): void };
   // Releases what the session's entry holds (an SSH tunnel) after the client is disposed.
   close?(): Promise<void>;
+  // Adds the entry's latest channel failure (a refused later tsnet stream) to a command's error,
+  // which the client alone reports only as a closed connection.
+  withEntryFailure?(error: unknown): unknown;
 }
 
 async function connected(client: Client, endpoint: string): Promise<void> {
@@ -152,9 +156,10 @@ export async function openRemoteSession(
       client,
       remote: { server, token: () => token, useToken: (next) => void (token = next) },
       close: () => entry.close(),
+      withEntryFailure: (error) => withEntryFailure(error, entry),
     };
   } catch (error) {
     await entry.close();
-    throw error;
+    throw withEntryFailure(error, entry);
   }
 }

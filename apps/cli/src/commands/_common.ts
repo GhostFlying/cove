@@ -277,6 +277,9 @@ export async function withSession<T>(
     : await openSession(rendezvousPath(args));
   try {
     return await action(session);
+  } catch (error) {
+    // A remote entry's own reason for a closed connection (a refused later tsnet stream).
+    throw session.withEntryFailure ? session.withEntryFailure(error) : error;
   } finally {
     session.client.dispose();
     await session.close?.();

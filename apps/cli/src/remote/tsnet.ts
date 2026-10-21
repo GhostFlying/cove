@@ -30,7 +30,10 @@ import {
 // bytes the local client already wrote stay in the local socket, and a failed dial sends nothing.
 // The first stream is opened while the entry opens, so that a failure (not logged in, peer not
 // found, PEER_MISMATCH, the node held after an identity change) is reported with its reason and
-// before anything is sent; the first local connection uses it.
+// before anything is sent; the first local connection uses it. A stream for a later connection
+// can fail for the same reasons (the node was held, or the address now answers as another node);
+// that connection is closed with nothing forwarded, and the reason is kept as the entry's
+// failure(), which a failing command adds to its error.
 //
 // Retries. Opening a stream retries only what happens before the stream exists: the daemon start
 // loop (tsnet-daemon.ts), and a dial refused with SHUTTING_DOWN (the daemon was stopping; nothing
@@ -43,6 +46,9 @@ import {
 const DIAL_TIMEOUT_MS = 15_000;
 const DIAL_ANSWER_MARGIN_MS = 5_000;
 const OPEN_DEADLINE_MS = 10_000;
+// What a failed stream for a later connection did not send: that connection's request. Earlier
+// requests of the command went over their own streams.
+const LATER_UNSENT = "the request on that connection was not sent";
 
 type Target = {
   readonly nodeId: string;
@@ -207,6 +213,21 @@ function splice(local: Socket, stream: Stream): void {
 async function openBridge(home: string, target: Target, unsent: string): Promise<OpenedEntry> {
   let pending: PendingStream | undefined = await openStream(home, target, unsent);
   const sockets = new Set<Socket>();
+  // The latest failure of a stream for a later connection. The client sees only that connection
+  // close, so the reason (an identity hold, PEER_MISMATCH, the daemon gone) is kept for the
+  // command's own error (entry-types.ts withEntryFailure).
+  let failure: RemoteError | undefined;
+  const failed = (error: unknown) => {
+    const reason =
+      error instanceof RemoteError
+        ? error.detail
+        : `the stream to server node ${target.nodeId}: ` +
+          `${error instanceof Error ? error.message : String(error)}; ${LATER_UNSENT}`;
+    failure = new RemoteError(
+      "ENTRY_UNAVAILABLE",
+      `the tsnet entry refused a later connection: ${reason}`,
+    );
+  };
   const server: Server = createServer({ allowHalfOpen: true, pauseOnConnect: true }, (local) => {
     sockets.add(local);
     local.on("close", () => sockets.delete(local));
@@ -215,8 +236,8 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
     pending = undefined;
     // A later connection gets its own stream. If that fails, or a held stream failed while it
     // waited, nothing is forwarded and the local connection is closed, which the client reports
-    // as a failed request.
-    (ready ? Promise.resolve(ready) : openStream(home, target, unsent)).then(
+    // as a failed request; the reason is kept in `failure`.
+    (ready ? Promise.resolve(ready) : openStream(home, target, LATER_UNSENT)).then(
       (held) => {
         if (local.destroyed) {
           held.discard();
@@ -225,7 +246,8 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
         let stream: Stream;
         try {
           stream = held.claim();
-        } catch {
+        } catch (error) {
+          failed(error);
           local.destroy();
           return;
         }
@@ -236,7 +258,10 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
         splice(local, stream);
         local.resume();
       },
-      () => local.destroy(),
+      (error: unknown) => {
+        failed(error);
+        local.destroy();
+      },
     );
   });
   try {
@@ -263,6 +288,7 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
         for (const socket of sockets) socket.destroy();
         server.close(() => resolve());
       }),
+    failure: () => failure,
   };
 }
 

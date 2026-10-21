@@ -23,8 +23,26 @@ export class RemoteError extends Error {
 // Host: the server's (loopback) or the channel's local end (an SSH tunnel), which the server
 // accepts as a loopback literal (user decision 2026-10-22). close() releases the channel (an SSH
 // tunnel's process) and never throws; the entry must not be used afterwards.
+// failure(), when the entry has it, is the latest failure of the channel after the entry opened
+// (a tsnet stream the daemon refused for a later connection), which the client itself only sees
+// as a closed connection; a command that fails reports it with its own error.
 export type OpenedEntry = {
   readonly kind: EntryKind;
   readonly endpoint: string;
   close(): Promise<void>;
+  failure?(): RemoteError | undefined;
 };
+
+// `error` (a command's failure over `entry`) with the entry's own latest failure, if any, so that
+// the reason a later connection was refused (an identity hold, PEER_MISMATCH) is not lost behind
+// the client's report of a closed connection.
+export function withEntryFailure(error: unknown, entry: Pick<OpenedEntry, "failure">): unknown {
+  const failure = entry.failure?.();
+  if (!failure) return error;
+  // The same error object, so that its class (an exit status, a usage error) still applies.
+  if (error instanceof Error) {
+    error.message = `${error.message}; ${failure.message}`;
+    return error;
+  }
+  return new Error(`${String(error)}; ${failure.message}`);
+}
