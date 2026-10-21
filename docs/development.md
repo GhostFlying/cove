@@ -215,8 +215,9 @@ cove --home A auth device revoke <deviceId>
   错误 secret 达到 5 次后作废。兑换的响应丢失时不能重试：重新创建邀请，那次留下的设备显示为 never-connected，可以撤销。
 - token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
   `remote remove` 只删除本机记录，不撤销 server 上的设备。修改记录的命令（`auth device rotate`、`remote entry default`、
-  `remote remove`）持有同目录下的 `<serverId>.lock` 并合并到最新记录，因此并发执行时依次进行，最后保存的 token 就是有效的那个；
-  rotate 从读取 token 到新 token 首次使用一直持有该锁。持有者已不在运行的锁会被接管。
+  `remote remove`）持有同目录下 `<serverId>.lock.sqlite` 上的锁并合并到最新记录，因此并发执行时依次进行，最后保存的 token 就是有效的那个；
+  rotate 从读取 token 到新 token 首次使用一直持有该锁。这是随持有进程存在的 OS 锁（SQLite 排他事务）：
+  持有者无论怎样退出，锁都由内核释放，不需要接管；锁文件不含内容，`remote remove` 后也保留，不要手工删除。
 - `--server` 模式下路径参数是 server 主机上的路径：相对路径与 `~` 是用法错误，不发送；绝对路径原样发送，
   `terminal create` 必须给 `--cwd`。CLI 不在本机文件系统上解析这些路径：`mount delete-worktree PATH` 要在本机
   解析真实路径，因此 `--server` 模式下以 2 拒绝，须改用 `<taskId> <mountId>`。`server` 与 `remote` 两组命令只作用于本机，不接受 `--server`。
