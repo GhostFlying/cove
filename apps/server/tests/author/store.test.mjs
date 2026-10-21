@@ -146,6 +146,7 @@ describe("store opening, migrations and the data directory lock", () => {
       "managed_worktrees",
       "mounts",
       "operation_processes",
+      "operation_tombstones",
       "operations",
       "principals",
       "relay_instances",
@@ -617,6 +618,387 @@ describe("durable operation receipts", () => {
       throws: "requires_attention",
     });
     receipts.dispose();
+  });
+});
+
+describe("operation receipt retention (m2 D13)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const RETENTION = 30 * DAY;
+  const T0 = 1_700_000_000_000;
+  const key = (operationId) => ({ serverId: "server", principalId: "principal", operationId });
+  const intent = (operationId) => `intent-${operationId}`;
+
+  // Receipts whose backend stamps records with `clock.now`, the wall clock the purge also reads.
+  async function clocked(store, retention = {}) {
+    const clock = { now: T0 };
+    const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+    const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes);
+    await recordInstanceStart(store, "instance", T0);
+    const receipts = new OperationReceipts(
+      composition,
+      encode,
+      new SqliteReceiptBackend(store, "instance", () => clock.now),
+      { now: () => clock.now, ...retention },
+    );
+    return { clock, receipts };
+  }
+
+  // Commits operationId as accepted and, unless `state` is accepted, moves it to `state`.
+  async function settled(receipts, operationId, state, extra = {}) {
+    const accepted = {
+      operationId,
+      method: "config.set",
+      revision: 0,
+      state: "accepted",
+      ...extra,
+    };
+    expect(
+      await (await receipts.prepare(key(operationId), intent(operationId))).commit(accepted),
+    ).toBe(true);
+    const moved =
+      state === "accepted" ||
+      (await receipts.update(key(operationId), { ...accepted, revision: 1, state }));
+    expect(moved).toBe(true);
+  }
+
+  const states = async (store) =>
+    Object.fromEntries(
+      (await all(store, "SELECT operation_id, state FROM operations")).map((row) => [
+        row.operation_id,
+        row.state,
+      ]),
+    );
+  const tombstones = (store) =>
+    all(store, "SELECT * FROM operation_tombstones ORDER BY operation_id");
+
+  it("replaces ended receipts 30 days after they ended with permanent tombstones and keeps the rest", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { clock, receipts } = await clocked(store);
+    for (const state of ["succeeded", "failed", "cancelled", "requires_attention", "running"])
+      await settled(receipts, state, state);
+    await settled(receipts, "accepted", "accepted");
+    clock.now = T0 + DAY;
+    await settled(receipts, "young", "succeeded");
+
+    // One millisecond short of the retention period nothing is due.
+    clock.now = T0 + RETENTION - 1;
+    expect(await receipts.purgeExpired()).toBe(0);
+    clock.now = T0 + RETENTION;
+    expect(await receipts.purgeExpired()).toBe(3);
+    expect(await states(store)).toEqual({
+      accepted: "accepted",
+      requires_attention: "requires_attention",
+      running: "running",
+      young: "succeeded",
+    });
+    const rows = await tombstones(store);
+    expect(rows).toEqual(
+      ["cancelled", "failed", "succeeded"].map((state) => ({
+        server_id: "server",
+        principal_id: "principal",
+        operation_id: state,
+        method: "config.set",
+        state,
+        intent_digest: createHash("sha256").update(intent(state)).digest("hex").slice(0, 32),
+        ended_at_ms: T0,
+        purged_at_ms: T0 + RETENTION,
+      })),
+    );
+    // About a hundred bytes, and nothing of the request or its result.
+    for (const row of rows) expect(JSON.stringify(row).length).toBeLessThan(260);
+
+    // The same request is expired, another one under the ID conflicts; neither can be reserved.
+    expect((await receipts.lookup(key("succeeded"), intent("succeeded"))).kind).toBe("expired");
+    expect((await receipts.lookup(key("succeeded"), "another")).kind).toBe("conflict");
+    expect(await receipts.prepare(key("succeeded"), intent("succeeded"))).toBeNull();
+    expect(await receipts.read(key("failed"))).toBe("expired");
+    expect(await receipts.get(key("failed"))).toBeNull();
+    expect(await receipts.read(key("never-used"))).toBeNull();
+    // A tombstoned receipt never changes again.
+    expect(
+      await receipts.update(key("succeeded"), {
+        operationId: "succeeded",
+        method: "config.set",
+        revision: 2,
+        state: "running",
+      }),
+    ).toBe(false);
+
+    // Tombstones are never purged, however long after.
+    clock.now = T0 + 10 * RETENTION;
+    expect(await receipts.purgeExpired()).toBe(1);
+    expect((await tombstones(store)).map((row) => row.operation_id)).toEqual([
+      "cancelled",
+      "failed",
+      "succeeded",
+      "young",
+    ]);
+    expect(Object.keys(await states(store)).sort()).toEqual([
+      "accepted",
+      "requires_attention",
+      "running",
+    ]);
+    receipts.dispose();
+  });
+
+  it("never purges early when the clock goes back", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { clock, receipts } = await clocked(store);
+    await settled(receipts, "a", "succeeded");
+    // The clock went back after the receipt ended: it looks younger, never older.
+    clock.now = T0 - 5 * DAY;
+    expect(await receipts.purgeExpired()).toBe(0);
+    clock.now = T0 + RETENTION - DAY;
+    expect(await receipts.purgeExpired()).toBe(0);
+    // A receipt stamped while the clock was ahead waits for the clock to pass its end.
+    clock.now = T0 + 100 * DAY;
+    await settled(receipts, "ahead", "succeeded");
+    clock.now = T0 + 40 * DAY;
+    expect(await receipts.purgeExpired()).toBe(1);
+    expect(await states(store)).toEqual({ ahead: "succeeded" });
+    receipts.dispose();
+  });
+
+  it("purges in bounded batches, each one transaction that a failure rolls back whole", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { clock, receipts } = await clocked(store, { batchSize: 2 });
+    for (const id of ["a", "b", "c", "d", "e"]) {
+      await settled(receipts, id, "succeeded");
+      clock.now += 1;
+    }
+    clock.now = T0 + RETENTION + 10;
+    const calls = [];
+    const backend = new SqliteReceiptBackend(store, "instance", () => clock.now);
+    const purge = backend.purge.bind(backend);
+    backend.purge = async (batch) => {
+      calls.push(batch);
+      return purge(batch);
+    };
+    // The second batch (c, d) fails half way through: deleting d is refused.
+    await run(
+      store,
+      `CREATE TRIGGER refuse_d BEFORE DELETE ON operations WHEN OLD.operation_id = 'd'
+       BEGIN SELECT RAISE(ABORT, 'injected'); END`,
+    );
+    const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+    const batched = new OperationReceipts(
+      new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes),
+      encode,
+      backend,
+      { now: () => clock.now, batchSize: 2 },
+    );
+    await expect(batched.purgeExpired()).rejects.toThrow("injected");
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ limit: 2, retentionMs: RETENTION, now: T0 + RETENTION + 10 });
+    // a and b were purged by the first batch; c is whole again, with no tombstone.
+    expect((await tombstones(store)).map((row) => row.operation_id)).toEqual(["a", "b"]);
+    expect(Object.keys(await states(store)).sort()).toEqual(["c", "d", "e"]);
+    // The next pass purges what is still due.
+    await run(store, "DROP TRIGGER refuse_d");
+    expect(await batched.purgeExpired()).toBe(3);
+    expect(calls.slice(2).map((call) => call.limit)).toEqual([2, 2]);
+    expect(await states(store)).toEqual({});
+    expect(await tombstones(store)).toHaveLength(5);
+    batched.dispose();
+    receipts.dispose();
+  });
+
+  it("keeps a receipt that a worktree mount, a live process or the run high-water mark still needs", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { clock, receipts } = await clocked(store);
+    for (const id of ["current", "abandon", "earlier", "process", "ended-process", "plain"])
+      await settled(receipts, id, "succeeded");
+    const runRef = (runId) => ({ serverId: "server", relayInstanceId: "instance", runId });
+    await settled(receipts, "run-high", "failed", {
+      method: "terminal.create",
+      run: runRef("run-7"),
+    });
+    await settled(receipts, "run-low", "succeeded", {
+      method: "terminal.create",
+      run: runRef("run-3"),
+    });
+    // A worktree mount whose current attempt belongs to "current" and was claimed by "abandon";
+    // an earlier attempt of the same mount belongs to "earlier".
+    await run(
+      store,
+      "INSERT INTO tasks (task_id, revision, title, slug, archived, created_at_ms, updated_at_ms) VALUES ('t1', 0, 'T', 't', 0, 1, 1)",
+    );
+    await run(
+      store,
+      "INSERT INTO workspaces (workspace_id, task_id, revision, entry_path, created_at_ms) VALUES ('w1', 't1', 0, '/w1', 1)",
+    );
+    await run(
+      store,
+      `INSERT INTO mounts (mount_id, workspace_id, name, source, repo_id, path, state, created_at_ms)
+       VALUES ('m1', 'w1', 'm', 'worktree', 'r1', '/m1', 'failed', 1)`,
+    );
+    const attempt = (attemptId, operationId, abandon) =>
+      run(
+        store,
+        `INSERT INTO worktree_attempts (attempt_id, operation_server_id, operation_principal_id,
+           operation_id, position, mount_id, workspace_id, path, branch, no_fetch, phase,
+           steps_json, outcome, abandon_server_id, abandon_principal_id, abandon_operation_id,
+           created_at_ms, updated_at_ms)
+         VALUES (?, 'server', 'principal', ?, 0, 'm1', 'w1', '/m1', 'b', 0, 'planned', '[]',
+           'failed', ?, ?, ?, 1, 1)`,
+        [
+          attemptId,
+          operationId,
+          ...(abandon ? ["server", "principal", abandon] : [null, null, null]),
+        ],
+      );
+    await attempt("a-earlier", "earlier");
+    await attempt("a-current", "current", "abandon");
+    await run(
+      store,
+      "INSERT INTO worktree_preparations (mount_id, spec_branch, spec_base_ref, spec_no_fetch, attempt_id) VALUES ('m1', NULL, NULL, 0, 'a-current')",
+    );
+    const processRow = (processId, operationId, endedAt) =>
+      run(
+        store,
+        `INSERT INTO operation_processes (process_id, operation_server_id, operation_principal_id,
+           operation_id, pid, pgid, start_identity, started_by_instance_id, started_at_ms,
+           ended_at_ms)
+         VALUES (?, 'server', 'principal', ?, ?, ?, 'boot:start', 'instance', 1, ?)`,
+        [processId, operationId, processId === "p1" ? 101 : 102, 100, endedAt],
+      );
+    await processRow("p1", "process", null);
+    await processRow("p2", "ended-process", 5);
+
+    clock.now = T0 + RETENTION;
+    expect(await receipts.purgeExpired()).toBe(4);
+    expect(Object.keys(await states(store)).sort()).toEqual([
+      "abandon",
+      "current",
+      "process",
+      "run-high",
+    ]);
+    expect((await tombstones(store)).map((row) => row.operation_id)).toEqual([
+      "earlier",
+      "ended-process",
+      "plain",
+      "run-low",
+    ]);
+    // The ended process's attribution went with its receipt; the live one stays.
+    expect(
+      (await all(store, "SELECT process_id FROM operation_processes")).map((r) => r.process_id),
+    ).toEqual(["p1"]);
+
+    // Once that state is gone the receipts become due: the process ended, the mount was removed
+    // (its preparation goes with it), and a later run raised the high-water mark.
+    await run(store, "UPDATE operation_processes SET ended_at_ms = 9 WHERE process_id = 'p1'");
+    await run(store, "DELETE FROM mounts WHERE mount_id = 'm1'");
+    clock.now = T0 + RETENTION + DAY;
+    await settled(receipts, "run-higher", "succeeded", {
+      method: "terminal.create",
+      run: runRef("run-8"),
+    });
+    expect(await receipts.purgeExpired()).toBe(4);
+    expect(Object.keys(await states(store))).toEqual(["run-higher"]);
+    receipts.dispose();
+  });
+
+  it("refuses a tombstoned ID in the write transaction and at the database itself", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { clock, receipts } = await clocked(store);
+    await settled(receipts, "gone", "succeeded");
+    clock.now = T0 + RETENTION;
+    expect(await receipts.purgeExpired()).toBe(1);
+    const backend = new SqliteReceiptBackend(store, "instance", () => clock.now);
+    const limits = { serverId: "server", operationRecordBytes: M0_LIMITS.operationRecordBytes };
+    const write = (canonicalIntent) =>
+      backend.write(
+        {
+          key: key("gone"),
+          canonicalIntent,
+          method: "config.set",
+          apply: { name: "config.set", args: { workspaceRoot: "/elsewhere", expectedRevision: 0 } },
+        },
+        limits,
+      );
+    expect(await write(intent("gone"))).toMatchObject({
+      error: { kind: "OPERATION_HISTORY_EXPIRED", acceptance: "not-accepted" },
+    });
+    expect(await write("another")).toMatchObject({ error: { kind: "OPERATION_ID_CONFLICT" } });
+    // Any insert of a receipt under the key is refused by the database.
+    await expect(
+      backend.insert({
+        key: key("gone"),
+        canonicalIntent: intent("gone"),
+        record: { operationId: "gone", method: "config.set", revision: 0, state: "accepted" },
+      }),
+    ).rejects.toThrow(/operation history expired/);
+    expect(await states(store)).toEqual({});
+    receipts.dispose();
+  });
+
+  it("starts after startup verification, repeats on its interval and stops on dispose", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const scheduled = [];
+    const cleared = [];
+    const timers = {
+      set: (callback, ms) => {
+        const handle = { callback, ms };
+        scheduled.push(handle);
+        return handle;
+      },
+      clear: (handle) => cleared.push(handle),
+    };
+    const { clock, receipts } = await clocked(store, { timers, intervalMs: 5000 });
+    await settled(receipts, "old", "succeeded");
+    clock.now = T0 + RETENTION;
+    expect(scheduled).toEqual([]);
+    await receipts.recoverInterrupted();
+    expect(scheduled.map((handle) => handle.ms)).toEqual([0]);
+    scheduled[0].callback();
+    await receipts.purgeExpired();
+    // The pass ran, and the next one is scheduled after it ended.
+    await new Promise((done) => setImmediate(done));
+    expect(await states(store)).toEqual({});
+    expect(scheduled.map((handle) => handle.ms)).toEqual([0, 5000]);
+    receipts.dispose();
+    expect(cleared).toEqual([scheduled[1]]);
+    // A callback that fires after dispose does nothing and schedules nothing.
+    scheduled[1].callback();
+    await new Promise((done) => setImmediate(done));
+    expect(scheduled).toHaveLength(2);
+    expect(await receipts.purgeExpired()).toBe(0);
+  });
+
+  it("uses an unref'd timer by default, so a scheduled pass never keeps the process alive", async () => {
+    const layout = await home();
+    const store = await open(layout);
+    const { receipts } = await clocked(store, { intervalMs: 60_000 });
+    const created = [];
+    const set = globalThis.setTimeout;
+    const clear = globalThis.clearTimeout;
+    const clearedHandles = [];
+    globalThis.setTimeout = (...args) => {
+      const handle = set(...args);
+      created.push(handle);
+      return handle;
+    };
+    globalThis.clearTimeout = (handle) => {
+      clearedHandles.push(handle);
+      return clear(handle);
+    };
+    try {
+      await receipts.recoverInterrupted();
+      // Scheduling the first pass is the last thing startup verification does.
+      const timer = created.at(-1);
+      expect(timer.hasRef()).toBe(false);
+      receipts.dispose();
+      expect(clearedHandles).toContain(timer);
+    } finally {
+      globalThis.setTimeout = set;
+      globalThis.clearTimeout = clear;
+    }
   });
 });
 

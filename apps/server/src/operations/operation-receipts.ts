@@ -11,9 +11,14 @@ import type { ByteReservation } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import {
   checkedReceiptRecord,
+  intentDigest,
+  RECEIPT_RETENTION_MS,
   type DatabaseWriteResult,
   type DatabaseWriteRequest,
+  type PurgeArgs,
+  type PurgeBatch,
   type ReceiptLimits,
+  type ReceiptTombstone,
 } from "./receipt-records.js";
 
 const TERMINAL_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
@@ -35,7 +40,8 @@ const RECOVERY_STATES: ReadonlySet<OperationRecord["state"]> = new Set([
 // whatever else runs between a read and the write. A rejected promise is a store failure
 // (store/store-errors.ts), never an answer: an unreadable receipt must not look absent.
 export interface DurableReceiptBackend {
-  get(key: OperationReceiptKey): Promise<StoredReceipt | null>;
+  // The receipt, or the tombstone its purge left (m2 D13), or null for a key never used.
+  get(key: OperationReceiptKey): Promise<StoredReceipt | ReceiptTombstone | null>;
   // Inserts a new receipt; false when the key already exists.
   insert(receipt: StoredReceipt): Promise<boolean>;
   // Replaces the record when the stored revision still equals expectedRevision.
@@ -49,6 +55,45 @@ export interface DurableReceiptBackend {
   // One receipt-checked database write: receipt recheck, the named change and the receipt in a
   // single transaction (store/sql/receipts.ts, receipts.write).
   write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteResult>;
+  // Receipt retention (m2 D13), when the backend has it: one bounded batch per call, and the
+  // run-N high-water mark a pass reads first (store/sql/receipts.ts receipts.purge). A backend
+  // without them keeps every receipt.
+  purge?(batch: PurgeArgs): Promise<PurgeBatch>;
+  highestRun?(): Promise<number>;
+}
+
+// How OperationReceipts runs receipt retention. Production uses the defaults; tests pass a clock
+// and timers. `now` is the wall clock (ms) that receipts are stamped with (store/operations.ts).
+export type ReceiptRetentionOptions = {
+  now?: () => number;
+  retentionMs?: number;
+  // Between the end of one pass and the start of the next.
+  intervalMs?: number;
+  // Receipts per batch, each batch one transaction.
+  batchSize?: number;
+  timers?: {
+    set(callback: () => void, ms: number): unknown;
+    clear(handle: unknown): void;
+  };
+};
+
+const RETENTION_INTERVAL_MS = 60 * 60 * 1000;
+const RETENTION_BATCH = 256;
+
+// The production timers: unref'd, so a scheduled pass never keeps the process alive.
+const UNREF_TIMERS = {
+  set(callback: () => void, ms: number): unknown {
+    const handle = setTimeout(callback, ms);
+    handle.unref();
+    return handle;
+  },
+  clear(handle: unknown): void {
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  },
+};
+
+function isTombstone(found: StoredReceipt | ReceiptTombstone | null): found is ReceiptTombstone {
+  return found !== null && "expired" in found;
 }
 
 // Proves the outcome of an operation an earlier instance left unfinished. It receives the record
@@ -66,9 +111,11 @@ type Entry = {
   record: OperationRecord | null;
   lease: ByteReservation;
 };
+// `expired`: the receipt of the same request was purged after the retention period (m2 D13); the
+// caller answers OPERATION_HISTORY_EXPIRED and executes nothing.
 export type ReceiptLookup =
   | { kind: "existing"; record: OperationRecord }
-  | { kind: "reserve" | "busy" | "conflict" | "invalid" };
+  | { kind: "reserve" | "busy" | "conflict" | "invalid" | "expired" };
 export interface ReceiptPreparation {
   // Commits the accepted record. False: refused (invalid, or the key exists), nothing written.
   // Rejects with the store's error when the store failed; an uncertain failure
@@ -99,11 +146,22 @@ export class OperationReceipts {
   private readonly entries = new Map<string, Entry>();
   private readonly scratch: ByteReservation;
   private disposed = false;
+  private readonly retention: Required<ReceiptRetentionOptions>;
+  private retentionTimer: { handle: unknown } | null = null;
+  private retentionPass: Promise<number> | null = null;
   constructor(
     readonly composition: RuntimeComposition,
     private readonly encodeUtf8: (text: string) => Uint8Array,
     private readonly durable?: DurableReceiptBackend,
+    retention: ReceiptRetentionOptions = {},
   ) {
+    this.retention = {
+      now: retention.now ?? (() => Date.now()),
+      retentionMs: retention.retentionMs ?? RECEIPT_RETENTION_MS,
+      intervalMs: retention.intervalMs ?? RETENTION_INTERVAL_MS,
+      batchSize: retention.batchSize ?? RETENTION_BATCH,
+      timers: retention.timers ?? UNREF_TIMERS,
+    };
     const scratch = this.bytes.reserve(
       6 * this.budgets.operationRecordBytes + 6 * this.budgets.canonicalIntentBytes,
     );
@@ -130,9 +188,12 @@ export class OperationReceipts {
     );
   }
 
-  // The committed receipt of a key, wherever it is kept. A backend failure rejects: an unreadable
-  // receipt must never look absent, or a resend would execute the operation again.
-  private async committed(key: OperationReceiptKey): Promise<StoredReceipt | null> {
+  // The committed receipt of a key, wherever it is kept, or the tombstone its purge left. A backend
+  // failure rejects: an unreadable receipt must never look absent, or a resend would execute the
+  // operation again; for the same reason a tombstone is never taken for an absent receipt.
+  private async committed(
+    key: OperationReceiptKey,
+  ): Promise<StoredReceipt | ReceiptTombstone | null> {
     if (this.durable) return this.durable.get(key);
     const entry = this.entries.get(this.id(key));
     return entry?.record
@@ -148,12 +209,19 @@ export class OperationReceipts {
       return { kind: "invalid" };
     const pending = this.pending(key, canonicalIntent);
     if (pending) return { kind: pending };
-    let existing: StoredReceipt | null;
+    let found: StoredReceipt | ReceiptTombstone | null;
     try {
-      existing = await this.committed(key);
+      found = await this.committed(key);
     } catch {
       return { kind: "invalid" };
     }
+    // A purged receipt (m2 D13): the ID is used for good. The same request is expired, another one
+    // reusing the ID conflicts; neither is executed.
+    if (isTombstone(found))
+      return {
+        kind: found.intentDigest === intentDigest(canonicalIntent) ? "expired" : "conflict",
+      };
+    const existing = found;
     // A reservation for the key may have been made while the store answered.
     const reserved = this.pending(key, canonicalIntent);
     if (reserved && !existing) return { kind: reserved };
@@ -250,7 +318,9 @@ export class OperationReceipts {
     next: OperationRecord,
   ): Promise<StoredReceipt | null> {
     if (!this.valid(key)) return null;
-    const current = await this.committed(key);
+    const found = await this.committed(key);
+    if (isTombstone(found)) return null;
+    const current = found;
     const record = current?.record;
     if (
       !record ||
@@ -327,7 +397,8 @@ export class OperationReceipts {
     const verified: OperationRecord[] = [];
     for (const receipt of await durable.unfinished()) {
       const key = receipt.key;
-      const current = (await this.committed(key))?.record;
+      const found = await this.committed(key);
+      const current = isTombstone(found) ? undefined : found?.record;
       if (!current || TERMINAL_STATES.has(current.state)) continue;
       let record = current;
       if (current.state !== "recovering") {
@@ -354,7 +425,69 @@ export class OperationReceipts {
       }
       verified.push(outcome);
     }
+    // Retention starts once startup verification is done (nothing is left accepted, running or
+    // recovering by an earlier instance) and runs in the background from then on.
+    this.startRetention();
     return verified;
+  }
+
+  // Receipt retention (m2 D13, #97; relay-protocol §11.3). The first pass is scheduled at once,
+  // then one pass every intervalMs after the previous one ended; passes never overlap. Each pass
+  // reads the run-N high-water mark, then purges due receipts in batches of batchSize, one store
+  // call (one transaction in the store worker) per batch, until a batch is not full. Other store
+  // calls queue between batches, so a long backlog delays a request by at most about one batch.
+  //
+  // Failures end the pass and leave the rest for the next one: a refused or failed batch rolled
+  // back, and one whose answer was lost either committed whole or not at all, so repeating it
+  // later is safe (what it purged is no longer due, its tombstones stay). dispose() clears the
+  // timer, and a running pass stops before its next batch; the production timer is unref'd, so a
+  // scheduled pass never keeps the process alive.
+  private startRetention(): void {
+    if (this.disposed || this.retentionTimer || !this.durable?.purge) return;
+    this.scheduleRetention(0);
+  }
+
+  private scheduleRetention(ms: number): void {
+    if (this.disposed) return;
+    const timer: { handle: unknown } = { handle: undefined };
+    timer.handle = this.retention.timers.set(() => {
+      if (this.retentionTimer !== timer) return;
+      void this.purgeExpired()
+        .catch(() => 0)
+        .then(() => {
+          if (this.retentionTimer === timer) this.scheduleRetention(this.retention.intervalMs);
+        });
+    }, ms);
+    this.retentionTimer = timer;
+  }
+
+  // One retention pass; resolves to the number of receipts purged. A pass already running is
+  // joined rather than started twice. Rejects with the store's error when a store call fails.
+  purgeExpired(): Promise<number> {
+    this.retentionPass ??= this.runRetentionPass().finally(() => {
+      this.retentionPass = null;
+    });
+    return this.retentionPass;
+  }
+
+  private async runRetentionPass(): Promise<number> {
+    const durable = this.durable;
+    if (!durable?.purge || this.disposed) return 0;
+    // Read before any batch: every receipt that may hold the current mark names a run numbered at
+    // least this (store/sql/receipts.ts purge). Without it, no receipt naming a run-N is purged.
+    const highestRun = durable.highestRun ? await durable.highestRun() : 0;
+    let purged = 0;
+    while (!this.disposed) {
+      const batch = await durable.purge({
+        now: Math.trunc(this.retention.now()),
+        retentionMs: this.retention.retentionMs,
+        limit: this.retention.batchSize,
+        highestRun,
+      });
+      purged += batch.purged;
+      if (!batch.more) break;
+    }
+    return purged;
   }
 
   // One receipt-checked database write (operations/database-operations.ts). Without a durable
@@ -365,11 +498,21 @@ export class OperationReceipts {
     return this.durable.write(request, this.limits);
   }
 
-  // Rejects on a store failure: an unreadable receipt is not an absent one.
+  // Rejects on a store failure: an unreadable receipt is not an absent one. A purged receipt is
+  // null here (nothing can act on it); read() tells it from one that never existed.
   async get(key: OperationReceiptKey): Promise<OperationRecord | null> {
+    const found = await this.read(key);
+    return found === "expired" ? null : found;
+  }
+
+  // The record of a key, "expired" when its receipt was purged after the retention period
+  // (operation.get answers OPERATION_HISTORY_EXPIRED), or null when the key was never used.
+  // Rejects on a store failure.
+  async read(key: OperationReceiptKey): Promise<OperationRecord | "expired" | null> {
     if (!this.valid(key)) return null;
-    const record = (await this.committed(key))?.record;
-    return record ? structuredClone(record) : null;
+    const found = await this.committed(key);
+    if (isTombstone(found)) return "expired";
+    return found ? structuredClone(found.record) : null;
   }
   // Receipts held in memory: every receipt without a backend, in-flight reservations with one.
   get count(): number {
@@ -378,6 +521,8 @@ export class OperationReceipts {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    if (this.retentionTimer) this.retention.timers.clear(this.retentionTimer.handle);
+    this.retentionTimer = null;
     for (const entry of this.entries.values()) entry.lease.release();
     this.entries.clear();
     this.scratch.release();
