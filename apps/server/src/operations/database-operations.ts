@@ -70,6 +70,7 @@ export async function recordedWrite(
   );
   if (found.kind === "existing") return { operation: found.record };
   if (found.kind === "conflict") return { error: domainError("OPERATION_ID_CONFLICT") };
+  if (found.kind === "expired") return { error: domainError("OPERATION_HISTORY_EXPIRED") };
   if (found.kind !== "reserve") return { error: domainError("BUSY") };
   return null;
 }
@@ -119,6 +120,7 @@ export async function executeDatabaseWriteCommitted(
   const found = await context.receipts.lookup(key, intent);
   if (found.kind === "existing") return answer({ operation: found.record });
   if (found.kind === "conflict") return answer({ error: domainError("OPERATION_ID_CONFLICT") });
+  if (found.kind === "expired") return answer({ error: domainError("OPERATION_HISTORY_EXPIRED") });
   if (found.kind !== "reserve") return answer({ error: domainError("BUSY") });
   const preparation = await context.receipts.prepare(key, intent);
   if (!preparation) return answer({ error: domainError("BUSY") });

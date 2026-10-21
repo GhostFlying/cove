@@ -284,6 +284,7 @@ export class TerminalOperations {
     const found = await this.options.receipts.lookup(key, request.intent);
     if (found.kind === "existing") return { operation: found.record };
     if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
+    if (found.kind === "expired") return this.failure("OPERATION_HISTORY_EXPIRED");
     const refused = request.precondition?.();
     if (refused) return { error: refused };
     if (found.kind !== "reserve") return this.failure("BUSY");
@@ -424,6 +425,7 @@ export class TerminalOperations {
     const found = await this.options.receipts.lookup(key, request.intent);
     if (found.kind === "existing") return { operation: found.record };
     if (found.kind === "conflict") return this.failure("OPERATION_ID_CONFLICT");
+    if (found.kind === "expired") return this.failure("OPERATION_HISTORY_EXPIRED");
     const refused = request.precondition?.();
     if (refused) return { error: refused };
     if (found.kind !== "reserve") return this.failure("BUSY");
@@ -548,7 +550,10 @@ export class TerminalOperations {
   async get(principalId: string, operationId: string): Promise<OperationOutcome> {
     const key = this.key(principalId, operationId);
     try {
-      let record = await this.options.receipts.get(key);
+      // A receipt purged after the retention period (m2 D13) is not an unknown operation.
+      const found = await this.options.receipts.read(key);
+      if (found === "expired") return this.failure("OPERATION_HISTORY_EXPIRED");
+      let record = found;
       if (
         (record?.method === "terminal.stop" || record?.method === "tab.stop") &&
         record.state === "running" &&

@@ -8,10 +8,14 @@ import {
 } from "@cove/protocol/rpc";
 import {
   checkedReceiptRecord,
+  intentDigest,
   type DatabaseWriteResult,
   type DatabaseWriteRequest,
   type OperationResultData,
+  type PurgeArgs,
+  type PurgeBatch,
   type ReceiptLimits,
+  type ReceiptTombstone,
 } from "../../operations/receipt-records.js";
 import { Rollback, statement, type Connection } from "./statements.js";
 import { DATABASE_WRITES } from "./writes.js";
@@ -50,6 +54,158 @@ function get(db: Connection, key: OperationReceiptKey): StoredReceipt | null {
      FROM operations WHERE server_id = ? AND principal_id = ? AND operation_id = ?`,
   ).get(key.serverId, key.principalId, key.operationId) as Row | undefined;
   return row ? receipt(row) : null;
+}
+
+type TombstoneRow = {
+  server_id: string;
+  principal_id: string;
+  operation_id: string;
+  method: string;
+  state: ReceiptTombstone["state"];
+  intent_digest: string;
+  ended_at_ms: number;
+};
+
+// The tombstone a purged receipt left under `key` (migration 005), or null.
+function tombstone(db: Connection, key: OperationReceiptKey): ReceiptTombstone | null {
+  const row = statement(
+    db,
+    `SELECT server_id, principal_id, operation_id, method, state, intent_digest, ended_at_ms
+     FROM operation_tombstones WHERE server_id = ? AND principal_id = ? AND operation_id = ?`,
+  ).get(key.serverId, key.principalId, key.operationId) as TombstoneRow | undefined;
+  if (!row) return null;
+  return {
+    expired: true,
+    key: { serverId: row.server_id, principalId: row.principal_id, operationId: row.operation_id },
+    method: row.method,
+    state: row.state,
+    intentDigest: row.intent_digest,
+    endedAtMs: row.ended_at_ms,
+  };
+}
+
+// The answer to a request under a tombstoned key: the same request is OPERATION_HISTORY_EXPIRED,
+// another one reusing the ID is OPERATION_ID_CONFLICT (relay-protocol §11.3). Neither executes.
+function tombstoneRefusal(gone: ReceiptTombstone, canonicalIntent: string): DomainError {
+  return domainError(
+    gone.intentDigest === intentDigest(canonicalIntent)
+      ? "OPERATION_HISTORY_EXPIRED"
+      : "OPERATION_ID_CONFLICT",
+  );
+}
+
+type PurgeRow = {
+  server_id: string;
+  principal_id: string;
+  operation_id: string;
+  method: string;
+  state: ReceiptTombstone["state"];
+  canonical_intent: string;
+  updated_at_ms: number;
+};
+
+// See receipts.purge.
+function purge(db: Connection, args: PurgeArgs): PurgeBatch {
+  if (
+    !Number.isSafeInteger(args.now) ||
+    !Number.isSafeInteger(args.retentionMs) ||
+    args.retentionMs <= 0 ||
+    !Number.isSafeInteger(args.limit) ||
+    args.limit <= 0 ||
+    !Number.isSafeInteger(args.highestRun) ||
+    args.highestRun < 0
+  )
+    throw new Error("Invalid receipt purge arguments");
+  // Due: ended succeeded, failed or cancelled at least retentionMs ago by the wall clock
+  // (updated_at_ms is when a terminal receipt ended: it never changes again). A clock that went
+  // back only makes receipts look younger, so it delays a purge and never brings one forward; a
+  // receipt that ended "in the future" of the current clock waits until the clock passes its end
+  // plus the retention. A clock set forward does purge early: the full record is gone sooner, but
+  // its tombstone still refuses the ID, so nothing is ever executed twice.
+  //
+  // Never purged while live state still consults the receipt row itself; each of these readers
+  // would misread a missing row (a purged receipt is not "ended" to them, only absent):
+  // - the current attempt of a worktree mount (worktree_preparations) naming it as its operation
+  //   or as the abandon that claimed it: store/sql/worktrees.ts attemptOperationOpen reads that
+  //   receipt's state and takes a missing one for an operation that has not ended, which would
+  //   block the mount's removal and retries for good. The receipt becomes due once the mount is
+  //   removed (its preparation goes with it) or a retry makes another attempt current. Earlier
+  //   attempts are read for their ledgers and processes, never for their receipt's state;
+  // - a recorded process of the operation that was never observed to have ended (operation
+  //   continue/abandon and restart verification rely on that attribution, and its foreign key
+  //   needs the receipt);
+  // - a receipt naming a run run-N with N >= highestRun. runs.highestNumber, the mark a new
+  //   instance continues after, is the maximum over the run rows and the receipts naming a run;
+  //   a receipt may be the only holder of that maximum (a run that never started leaves no run
+  //   row), and purging it would let the number be handed out again after a restart. The mark
+  //   only grows (a launch's receipt names its run before the run row exists and outlives it), so
+  //   with highestRun read before the pass, the current maximum is at least highestRun and every
+  //   receipt that may hold it is kept; receipts of later runs are young anyway. Reading the mark
+  //   once per pass keeps its full scan out of every batch.
+  // These conditions are part of the statement that picks the batch, inside the batch's
+  // transaction, so a receipt is never tombstoned while one of them holds.
+  const rows = statement(
+    db,
+    `SELECT o.server_id, o.principal_id, o.operation_id, o.method, o.state, o.canonical_intent,
+       o.updated_at_ms
+     FROM operations o
+     WHERE o.state IN ('succeeded', 'failed', 'cancelled') AND o.updated_at_ms <= ?
+       AND NOT EXISTS (
+         SELECT 1 FROM worktree_attempts a
+           JOIN worktree_preparations p ON p.attempt_id = a.attempt_id
+         WHERE a.operation_server_id = o.server_id AND a.operation_principal_id = o.principal_id
+           AND a.operation_id = o.operation_id)
+       AND NOT EXISTS (
+         SELECT 1 FROM worktree_attempts a
+           JOIN worktree_preparations p ON p.attempt_id = a.attempt_id
+         WHERE a.abandon_server_id = o.server_id AND a.abandon_principal_id = o.principal_id
+           AND a.abandon_operation_id = o.operation_id)
+       AND NOT EXISTS (
+         SELECT 1 FROM operation_processes p
+         WHERE p.operation_server_id = o.server_id AND p.operation_principal_id = o.principal_id
+           AND p.operation_id = o.operation_id AND p.ended_at_ms IS NULL)
+       AND NOT coalesce(
+         json_extract(o.record_json, '$.run.runId') GLOB 'run-[1-9]*'
+           AND json_extract(o.record_json, '$.run.runId') NOT GLOB 'run-*[^0-9]*'
+           AND CAST(substr(json_extract(o.record_json, '$.run.runId'), 5) AS INTEGER) >= ?,
+         0)
+     ORDER BY o.updated_at_ms, o.server_id, o.principal_id, o.operation_id
+     LIMIT ?`,
+  ).all(args.now - args.retentionMs, args.highestRun, args.limit) as PurgeRow[];
+  for (const row of rows) {
+    // The tombstone, then the receipt, in this one transaction: a crash at any point of the batch
+    // leaves each of its receipts either whole or replaced by its tombstone, never neither. A
+    // tombstone already present is kept as it is; tombstones are never rewritten or deleted.
+    statement(
+      db,
+      `INSERT INTO operation_tombstones (server_id, principal_id, operation_id, method, state,
+         intent_digest, ended_at_ms, purged_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT DO NOTHING`,
+    ).run(
+      row.server_id,
+      row.principal_id,
+      row.operation_id,
+      row.method,
+      row.state,
+      intentDigest(row.canonical_intent),
+      row.updated_at_ms,
+      args.now,
+    );
+    // Only ended process attributions are left here: an unended one kept the receipt out.
+    statement(
+      db,
+      `DELETE FROM operation_processes
+       WHERE operation_server_id = ? AND operation_principal_id = ? AND operation_id = ?`,
+    ).run(row.server_id, row.principal_id, row.operation_id);
+    const removed = statement(
+      db,
+      `DELETE FROM operations
+       WHERE server_id = ? AND principal_id = ? AND operation_id = ? AND state = ?`,
+    ).run(row.server_id, row.principal_id, row.operation_id, row.state).changes;
+    if (removed !== 1) throw new Error("Receipt purge lost its row");
+  }
+  return { purged: rows.length, more: rows.length === args.limit };
 }
 
 function insert(
@@ -111,8 +267,21 @@ function replace(
 // The operations table (migration 001), the durable backend of OperationReceipts
 // (store/operations.ts). Callers validate every record before it reaches insert or replace.
 export const receiptOperations = {
-  "receipts.get": (db: Connection, args: { key: OperationReceiptKey }): StoredReceipt | null =>
-    get(db, args.key),
+  // The receipt of a key, the tombstone its purge left (m2 D13), or null when the key was never
+  // used. Both tables are read in this one transaction, so a purge can never make a used key look
+  // unused to a caller.
+  "receipts.get": (
+    db: Connection,
+    args: { key: OperationReceiptKey },
+  ): StoredReceipt | ReceiptTombstone | null => get(db, args.key) ?? tombstone(db, args.key),
+
+  // One bounded batch of receipt retention (m2 D13, #97) in one transaction: at most `limit`
+  // receipts due at `now` (the main thread's wall clock) are replaced by their tombstones; purge
+  // above says which receipts are due and which are kept. A batch holds the connection briefly;
+  // the caller (OperationReceipts.purgeExpired) runs batches one after another while `more`, and
+  // other store calls are served in between. A crash or a lost answer is harmless: the batch
+  // committed whole or not at all, and the next pass purges whatever is still due.
+  "receipts.purge": (db: Connection, args: PurgeArgs): PurgeBatch => purge(db, args),
 
   "receipts.insert": (
     db: Connection,
@@ -159,6 +328,10 @@ export const receiptOperations = {
       return existing.canonicalIntent === args.canonicalIntent
         ? { operation: existing.record }
         : { error: domainError("OPERATION_ID_CONFLICT") };
+    // A purged key (m2 D13) stays used for good. The caller's lookup already refuses it; this
+    // keeps the transaction itself from executing under it.
+    const gone = tombstone(db, key);
+    if (gone) return { error: tombstoneRefusal(gone, args.canonicalIntent) };
     if (!Object.hasOwn(DATABASE_WRITES, args.apply.name)) throw new Error("Unknown database write");
     const write = DATABASE_WRITES[args.apply.name] as (
       db: Connection,

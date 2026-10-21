@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DomainError } from "@cove/protocol/errors";
 import {
   validateOperationRecord,
@@ -25,6 +26,38 @@ export type DatabaseWriteResult =
   | { operation: OperationRecord; committed?: true }
   | { error: DomainError }
   | { secretRefused: true };
+
+// Receipt retention (m2 D13, #97; relay-protocol §11.3). A receipt that ended succeeded, failed or
+// cancelled is purged once RECEIPT_RETENTION_MS have passed since it ended, by the wall clock;
+// what remains is a permanent tombstone (migration 005), so its operation ID is never executed
+// again. A receipt that has not ended (accepted, running, recovering, requires_attention) is never
+// purged, whatever its age.
+export const RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// What a purged receipt leaves (migration 005 operation_tombstones): no params, result or secret.
+export type ReceiptTombstone = {
+  expired: true;
+  key: OperationReceiptKey;
+  method: string;
+  state: "succeeded" | "failed" | "cancelled";
+  intentDigest: string;
+  endedAtMs: number;
+};
+
+// One batch of receipt retention (store/sql/receipts.ts receipts.purge): at most `limit` receipts
+// due at `now` (wall clock, ms) under `retentionMs`; `highestRun` is the run-N high-water mark
+// (runs.highestNumber) read before the pass. The answer says how many were purged and whether more
+// may be due (the batch was full).
+export type PurgeArgs = { now: number; retentionMs: number; limit: number; highestRun: number };
+export type PurgeBatch = { purged: number; more: boolean };
+
+// The digest a tombstone keeps of the canonical intent it replaced: hex of the first 16 bytes of
+// its SHA-256. It only tells a resend of the same request (OPERATION_HISTORY_EXPIRED) from another
+// request reusing the ID (OPERATION_ID_CONFLICT); both refuse, so a collision cannot execute
+// anything.
+export function intentDigest(canonicalIntent: string): string {
+  return createHash("sha256").update(canonicalIntent, "utf8").digest("hex").slice(0, 32);
+}
 
 // The limits a stored record must respect.
 export type ReceiptLimits = { serverId: string; operationRecordBytes: number };

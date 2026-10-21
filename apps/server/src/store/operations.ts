@@ -3,7 +3,10 @@ import type { DurableReceiptBackend } from "../operations/operation-receipts.js"
 import type {
   DatabaseWriteResult,
   DatabaseWriteRequest,
+  PurgeArgs,
+  PurgeBatch,
   ReceiptLimits,
+  ReceiptTombstone,
 } from "../operations/receipt-records.js";
 import type { Store } from "./database.js";
 
@@ -18,7 +21,7 @@ export class SqliteReceiptBackend implements DurableReceiptBackend {
     private readonly now: () => number = Date.now,
   ) {}
 
-  get(key: OperationReceiptKey): Promise<StoredReceipt | null> {
+  get(key: OperationReceiptKey): Promise<StoredReceipt | ReceiptTombstone | null> {
     return this.store.call("receipts.get", { key: { ...key } });
   }
 
@@ -45,6 +48,15 @@ export class SqliteReceiptBackend implements DurableReceiptBackend {
 
   unfinished(): Promise<StoredReceipt[]> {
     return this.store.call("receipts.unfinished", undefined);
+  }
+
+  // Receipt retention (m2 D13): one batch per call, each its own transaction in the store worker.
+  purge(batch: PurgeArgs): Promise<PurgeBatch> {
+    return this.store.call("receipts.purge", { ...batch });
+  }
+
+  highestRun(): Promise<number> {
+    return this.store.call("runs.highestNumber", undefined);
   }
 
   write(request: DatabaseWriteRequest, limits: ReceiptLimits): Promise<DatabaseWriteResult> {
