@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
   ADMISSION_STATUS,
+  bootstrapIdentity,
   negotiateBootstrap,
   LOCAL_PATHS,
   PROTOCOL_VERSION,
@@ -21,7 +22,7 @@ import {
   type RpcId,
   type RpcMethod,
 } from "@cove/protocol/rpc";
-import type { LocalCore, Principal } from "../rpc/context.js";
+import { localOwner, type LocalCore, type Principal } from "../rpc/context.js";
 import { dispatchRpc } from "../rpc/dispatch.js";
 import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 
@@ -421,7 +422,9 @@ export function registerHttpRpc(
                 .header("Cove-Protocol", String(PROTOCOL_VERSION))
                 .header("Cove-Server-Id", admission.identity.serverId)
                 .header("Cove-Instance-Id", admission.identity.relayInstanceId);
-            const claim = admission.claim("rpc");
+            const anonymous =
+              admission.credential("POST", path, headers(request)).kind === "anonymous";
+            const claim = admission.claim(anonymous ? "unauthenticated" : "rpc");
             if (!claim) {
               sendHttpAdmissionFailure(reply, "busy");
               return;
@@ -516,6 +519,31 @@ export function registerHttpRpc(
             if (result !== "accepted")
               return sendHttpAdmissionFailure(reply, result, headers(request));
             cors(request, reply);
+            // Who is calling (m2 D7), verified again now that the body is read: a device revoked
+            // meanwhile was refused just above. An admitted device is recorded as used and its
+            // request registered for revocation in the same synchronous step
+            // (auth/connections.ts). Every request so far arrives on the loopback listener; T3/T5b
+            // tell their entries apart when they add them.
+            const credential = admission.credential("POST", path, headers(request));
+            let principal: Principal | undefined;
+            if (credential.kind === "device") {
+              principal = {
+                kind: "device",
+                principalId: localOwner(core).principalId,
+                deviceId: credential.deviceId,
+              };
+              core.auth?.admitted(credential, "loopback");
+              const socket = request.raw.socket;
+              const forget = core.auth?.connections.register(credential.deviceId, {
+                owner: principal,
+                close: () => socket.destroy(),
+                closed: new Promise<void>((done) => {
+                  if (socket.destroyed) done();
+                  else socket.once("close", () => done());
+                }),
+              });
+              if (forget) reply.raw.once("close", forget);
+            } else if (credential.kind === "local-owner") principal = localOwner(core);
             if (path === LOCAL_PATHS.bootstrap) {
               let parsed: unknown;
               try {
@@ -523,13 +551,21 @@ export function registerHttpRpc(
               } catch {
                 return sendHttpAdmissionFailure(reply, "malformed");
               }
-              const outcome = negotiateBootstrap(parsed, {
-                ...admission.identity,
-                buildVersion: core.buildVersion,
-                effectiveBudgets: admission.budgets,
-              });
+              // Without credentials: the pre-authentication identity and nothing else.
+              const outcome =
+                credential.kind === "anonymous"
+                  ? bootstrapIdentity(parsed, {
+                      ...admission.identity,
+                      buildVersion: core.buildVersion,
+                    })
+                  : negotiateBootstrap(parsed, {
+                      ...admission.identity,
+                      buildVersion: core.buildVersion,
+                      effectiveBudgets: admission.budgets,
+                    });
               const status =
-                outcome.type === "cove-bootstrap-result"
+                outcome.type === "cove-bootstrap-result" ||
+                outcome.type === "cove-bootstrap-identity"
                   ? ADMISSION_STATUS.accepted
                   : outcome.kind === "PROTOCOL_MISMATCH" || outcome.kind === "INSTANCE_MISMATCH"
                     ? ADMISSION_STATUS.mismatch
@@ -545,7 +581,8 @@ export function registerHttpRpc(
                 .type("application/json; charset=utf-8")
                 .send(output.subarray(0, length));
             }
-            const response = await rpcBody(core, bytes, owner.buffers);
+            if (!principal) return sendHttpAdmissionFailure(reply, "unauthenticated");
+            const response = await rpcBody(core, bytes, owner.buffers, principal);
             if (owner.logicalClosed) return reply;
             const body =
               response.body === undefined

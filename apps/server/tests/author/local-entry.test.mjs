@@ -1287,8 +1287,9 @@ async function wsClassificationControl(control) {
       return now;
     },
   });
-  const originalVerify = local.admission.verifies;
-  local.admission.verifies = function (...args) {
+  // authenticate is the one verification step (verifies wraps it), so each check counts once.
+  const originalVerify = local.admission.authenticate;
+  local.admission.authenticate = function (...args) {
     verifyCalls++;
     return Reflect.apply(originalVerify, this, args);
   };
@@ -1375,7 +1376,7 @@ async function wsClassificationControl(control) {
       () => local.app.close(),
       () => local.disposeCore(),
       () => {
-        local.admission.verifies = originalVerify;
+        local.admission.authenticate = originalVerify;
       },
     ]) {
       try {

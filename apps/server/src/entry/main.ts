@@ -3,9 +3,12 @@ import Fastify, { LogController } from "fastify";
 import websocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { M0_LIMITS, validateEffectiveBudgets, type EffectiveBudgets } from "@cove/protocol/budgets";
+import { SshTargetSchema } from "@cove/protocol/auth";
+import { AuthService, loadAuthState, type AuthState } from "../auth/service.js";
 import { buildId } from "../build-id.js";
 import { RuntimeRetainedBytes } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
@@ -60,7 +63,15 @@ export function createLocalApplication(
     timer?: LocalTimer;
     workerSpawn?: WorkerSpawn;
     // The opened data directory (M1 T1). identity.serverId must be its persistent serverId.
-    persistence?: { store: Store; home: string; principalId: string; probe?: D6Probe };
+    persistence?: {
+      store: Store;
+      home: string;
+      principalId: string;
+      probe?: D6Probe;
+      // Device authorization state read at startup (auth/service.ts loadAuthState). Without it
+      // the composition accepts the local owner secret only.
+      auth?: AuthState;
+    };
     // Where operational log lines go (one JSON object per line); stderr by default.
     log?: (line: string) => void;
   },
@@ -147,10 +158,40 @@ export function createLocalApplication(
         }
       : {}),
   };
+  // Where operational log lines go (one JSON object per line); stderr by default.
+  const log = injected?.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
+  const advertisedSshTarget = sshTarget(options);
+  // Device authorization (m2 T1): verifies credentials for both transports and serves the auth
+  // domain and the pairing listener. Its log lines carry device IDs and ports, never a secret.
+  const auth =
+    persistence?.auth && receipts
+      ? new AuthService(
+          {
+            store: persistence.store,
+            receipts,
+            serverId: identity.serverId,
+            relayInstanceId: identity.relayInstanceId,
+            buildVersion: core.buildVersion,
+            encodeUtf8,
+            localSecret: identity.secret,
+            host: options.host,
+            ...(options.pairingPort === undefined ? {} : { pairingPort: options.pairingPort }),
+            ...(advertisedSshTarget === undefined ? {} : { sshTarget: advertisedSshTarget }),
+            log: (event) => {
+              try {
+                log(JSON.stringify(event));
+              } catch {
+                // Logging is best effort.
+              }
+            },
+          },
+          persistence.auth,
+        )
+      : undefined;
+  if (auth && !injected?.core) core.auth = auth;
   const arbiter = new ControlArbiter(runtime);
   // Worker health transitions are logged (issue #103): which worker, the new state and why.
   // Only the worker identity and the reason names are written, never terminal contents.
-  const log = injected?.log ?? ((line: string) => void process.stderr.write(`${line}\n`));
   const healthLog = injected?.core
     ? undefined
     : runtime.onWorkerHealth((worker, health) => {
@@ -178,6 +219,7 @@ export function createLocalApplication(
     identity,
     budgets,
     composition.bytes,
+    auth,
   );
   terminal = new TerminalWebSocket(admission, core, arbiter, clock.now, injected?.timer);
   const app = Fastify({
@@ -221,6 +263,7 @@ export function createLocalApplication(
       );
       return worker;
     },
+    auth,
     disposeCore: () => {
       healthLog?.dispose();
       storeErrorLog?.();
@@ -232,6 +275,20 @@ export function createLocalApplication(
       runtime.dispose();
     },
   };
+}
+
+// The SSH target invitations advertise: --ssh-target, else `<OS user>@<host name>` when that is
+// a valid target (SshTargetSchema), else none, and then no invitation can be created
+// (ENTRY_UNAVAILABLE). A startup flag and a derivation until T3's entry configuration
+// (entry.set sshTarget) replaces both; it is not logged.
+function sshTarget(options: M0LocalOptions): string | undefined {
+  if (options.sshTarget !== undefined) return options.sshTarget;
+  try {
+    const derived = `${userInfo().username}@${hostname()}`;
+    return SshTargetSchema.safeParse(derived).success ? derived : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export class LocalEntryStartupError extends Error {
@@ -283,6 +340,7 @@ async function openLocalApplication(
   try {
     const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
     await recordInstanceStart(store, identity.relayInstanceId, Date.now());
+    const auth = await loadAuthState(store);
     const local = createLocalApplication(options, {
       identity,
       persistence: {
@@ -290,6 +348,7 @@ async function openLocalApplication(
         home: persistence.layout.home,
         principalId: persistence.identity.principalId,
         ...(probe ? { probe } : {}),
+        auth,
       },
     });
     try {
@@ -368,6 +427,13 @@ export async function startLocalEntry(
       } catch {
         failed = true;
       }
+      // The pairing listener closes with the business listener; pending last-use writes settle
+      // before the store closes.
+      try {
+        await local.auth?.dispose();
+      } catch {
+        failed = true;
+      }
       let receipt: Awaited<WorkerProcess["closed"]> | undefined;
       try {
         receipt = await worker.close();
@@ -435,6 +501,10 @@ export async function startLocalEntry(
     if (!bound || typeof bound === "string" || bound.address !== local.options.host)
       throw new Error("Invalid numeric local bind");
     local.admission.bind(bound.port);
+    // Reopens the pairing listener when open invitations survived a restart (m2 S12). A port that
+    // cannot be bound is logged and leaves the business entry serving.
+    await local.auth?.start(bound.port);
+    interrupted();
     const endpoint = `http://${localAuthority(local.options.host, bound.port)}`;
     category = "rendezvous";
     await rendezvous.publish({ bootstrapVersion: 1, ...local.identity, endpoint });

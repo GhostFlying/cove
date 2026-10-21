@@ -10,6 +10,7 @@ import {
 import type { EffectiveBudgets } from "@cove/protocol/budgets";
 import { MAX_FRAME_BYTES } from "@cove/protocol/terminal";
 import type { RuntimeRetainedBytes } from "../terminal/runtime-retained-bytes.js";
+import type { Authentication } from "../auth/service.js";
 import type { M0LocalOptions } from "../entry/m0-local-options.js";
 import { localAuthority } from "../entry/m0-local-options.js";
 
@@ -54,6 +55,22 @@ function malformedHeaders(headers: LocalHeaders): boolean {
     return value !== undefined && !OpaqueIdSchema.safeParse(value).success;
   });
 }
+// What verifies a presented credential (auth/service.ts AuthService). Without one (store-less
+// unit compositions) only the local owner secret is accepted.
+export interface CredentialVerifier {
+  authenticate(value: string | undefined): Authentication;
+}
+
+// The credential of an HTTP request, or `anonymous` for the one request that needs none: a POST
+// /bootstrap without an Authorization header, answered with the pre-authentication identity only
+// (relay-protocol §11.8).
+export type HttpCredential = Authentication | { readonly kind: "anonymous" };
+
+function bearer(headers: LocalHeaders): string | undefined {
+  const value = header(headers, "authorization");
+  return value?.startsWith("Bearer ") ? value.slice(7) : undefined;
+}
+
 export class LocalAdmission {
   private authority: string | undefined;
   private counts = { unauthenticated: 0, authenticated: 0, rpc: 0 };
@@ -63,6 +80,7 @@ export class LocalAdmission {
     readonly identity: { serverId: string; relayInstanceId: string },
     readonly budgets: EffectiveBudgets,
     private readonly bytes: RuntimeRetainedBytes,
+    private readonly verifier?: CredentialVerifier,
   ) {
     if (options.port) this.authority = localAuthority(options.host, options.port);
   }
@@ -74,11 +92,30 @@ export class LocalAdmission {
   get boundAuthority(): string {
     return this.authority ?? "";
   }
-  verifies(value: string | undefined): boolean {
-    if (!value || value.length !== this.secret.length) return false;
+  // The verdict on a credential string: the local owner secret of this start or a device token
+  // (m2 D4, D7). Pure; the transport reports an admitted device to the verifier itself.
+  authenticate(value: string | undefined): Authentication {
+    if (this.verifier) return this.verifier.authenticate(value);
+    if (!value || value.length !== this.secret.length) return { kind: "unauthenticated" };
     const expected = Buffer.from(this.secret);
     const actual = Buffer.from(value);
-    return actual.length === expected.length && timingSafeEqual(actual, expected);
+    return actual.length === expected.length && timingSafeEqual(actual, expected)
+      ? { kind: "local-owner" }
+      : { kind: "unauthenticated" };
+  }
+  verifies(value: string | undefined): boolean {
+    const verdict = this.authenticate(value).kind;
+    return verdict === "local-owner" || verdict === "device";
+  }
+  // The credential an HTTP request presents (see HttpCredential).
+  credential(method: "POST" | "OPTIONS", path: string, headers: LocalHeaders): HttpCredential {
+    if (
+      method === "POST" &&
+      path === "/bootstrap" &&
+      header(headers, "authorization") === undefined
+    )
+      return { kind: "anonymous" };
+    return this.authenticate(bearer(headers));
   }
   http(
     method: "POST" | "OPTIONS",
@@ -103,6 +140,7 @@ export class LocalAdmission {
     const origin = header(headers, "origin");
     const requested = header(headers, "access-control-request-method");
     const requestedHeaders = header(headers, "access-control-request-headers");
+    const credential = this.credential(method, path, headers);
     const result = evaluateAdmission({
       method,
       path,
@@ -113,11 +151,9 @@ export class LocalAdmission {
       browser:
         header(headers, "sec-fetch-mode") !== undefined ||
         header(headers, "sec-fetch-site") !== undefined,
-      authenticated: this.verifies(
-        header(headers, "authorization")?.startsWith("Bearer ")
-          ? header(headers, "authorization")!.slice(7)
-          : undefined,
-      ),
+      // An anonymous identity request passes the same Host, Origin, size and identity checks as
+      // an authenticated one; it is answered with the identity alone (http-rpc.ts).
+      authenticated: credential.kind !== "unauthenticated" && credential.kind !== "revoked",
       ...(requested !== undefined ? { requestedMethod: requested } : {}),
       ...(requestedHeaders !== undefined
         ? { requestedHeaders: requestedHeaders.split(",").map((h) => h.trim()) }
@@ -129,8 +165,16 @@ export class LocalAdmission {
         ? { expectedProtocol: /^(0|[1-9][0-9]*)$/.test(protocol) ? Number(protocol) : -1 }
         : {}),
       ...this.identity,
-      capacityAvailable: ownsClaim || this.counts.rpc < this.budgets.rpcInflight,
+      // An anonymous identity request is counted with the unauthenticated connections, so that
+      // requests nobody authenticated cannot use up the slots of authenticated RPC.
+      capacityAvailable:
+        ownsClaim ||
+        (credential.kind === "anonymous"
+          ? this.counts.unauthenticated < this.budgets.unauthenticatedSockets
+          : this.counts.rpc < this.budgets.rpcInflight),
     });
+    // The correct token of a revoked device is told so; every other failure stays UNAUTHENTICATED.
+    if (result === "unauthenticated" && credential.kind === "revoked") return "revoked";
     return result === "accepted" && method === "POST" && bytes > cap ? "too-large" : result;
   }
   upgrade(path: string, headers: LocalHeaders): AdmissionKind {
