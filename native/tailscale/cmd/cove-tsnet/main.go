@@ -4,7 +4,8 @@
 //	cove-tsnet serve  the server node, a supervised child of cove-server (D10)
 //	cove-tsnet dial   the per-user client daemon used by the CLI (D14)
 //
-// See native/tailscale/PROTOCOL.md for the local protocols. Secrets (auth
+// plus `dial-owned`, which reports whether a dial daemon owns a directory, and
+// `version`. See native/tailscale/PROTOCOL.md for the local protocols. Secrets (auth
 // keys) arrive only inside control frames: serve reads them from stdin, dial
 // from its 0700 socket. Neither mode accepts a secret in argv or the
 // environment, and neither writes one to stdout, stderr or disk.
@@ -70,6 +71,8 @@ func run(args []string) int {
 		return runServe(args[1:])
 	case "dial":
 		return runDial(args[1:])
+	case "dial-owned":
+		return runDialOwned(args[1:])
 	case "version":
 		fmt.Printf("cove-tsnet build=%s protocol=%d\n", buildinfo.String(), proto.Version)
 		return exitOK
@@ -86,6 +89,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage:
   cove-tsnet serve --home DIR --forward-socket PATH [--hostname NAME] [--control-url URL] [--verbose]
   cove-tsnet dial  --home DIR [--hostname NAME] [--control-url URL] [--idle-timeout DUR] [--verbose]
+  cove-tsnet dial-owned --home DIR
   cove-tsnet version
 `)
 }
@@ -235,6 +239,33 @@ func runDial(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cove-tsnet dial: %v\n", err)
 		return exitError
+	}
+	return exitOK
+}
+
+// runDialOwned prints "owned" or "free": whether a dial daemon holds the
+// directory's lock. `cove remote tsnet stop` uses it to tell "no daemon" from
+// "a daemon that has not answered yet" without starting one (PROTOCOL.md).
+func runDialOwned(args []string) int {
+	var home string
+	fs := flag.NewFlagSet("dial-owned", flag.ContinueOnError)
+	fs.StringVar(&home, "home", "", "tsnet directory (required)")
+	if !parse(fs, args) {
+		return exitUsage
+	}
+	if home == "" {
+		fmt.Fprintln(os.Stderr, "dial-owned needs --home")
+		return exitUsage
+	}
+	owned, err := dial.Owned(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cove-tsnet dial-owned: %v\n", err)
+		return exitError
+	}
+	if owned {
+		fmt.Println("owned")
+	} else {
+		fmt.Println("free")
 	}
 	return exitOK
 }

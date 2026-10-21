@@ -219,6 +219,16 @@ only means "someone else holds the lock right now", not that it will become read
 connection is established and `hello` answered may the CLI send a business request; after that, a
 broken connection is a connection loss, never retried silently.
 
+**Ownership probe.** `cove-tsnet dial-owned --home DIR` prints `owned` when a process holds the
+lock (a daemon that is running, starting before it listens, or exiting after it unlinked its
+socket) and `free` otherwise, then exits 0 (`1` error, `2` usage). It creates no file and holds a
+shared lock only for an instant; a daemon starting at that instant exits 75, which the startup loop
+retries. `free` is about that instant only. A command that must not start a daemon
+(`cove remote tsnet stop`) reports "no daemon" only after a failed connect and a `free` answer;
+while the lock is `owned` it waits, boundedly, for the owner's socket and `hello`. This command is
+part of the executable, not of the socket protocol: the CLI runs it only from the binary it would
+start itself.
+
 ### Connection
 
 Each connection carries `hello`, then at most one request. A connection that sends only `hello`
