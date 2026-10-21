@@ -194,6 +194,54 @@ test("restart lists the live runs first, applies a pending build only when confi
       buildVersion: next.build,
       service: { manager: expectedManager, lastStart: "crash-restart" },
     });
+
+    // Crash restarts are bounded (D2): killed again and again, the server is soon no longer
+    // started (systemd's start limit; under launchd the server's own budget, after which it exits
+    // 0), and status says why. A person's start brings it back.
+    let instance = crashed.server.relayInstanceId;
+    let kills = 0;
+    let serviceUnit = crashed.unit;
+    for (; kills < 8 && serviceUnit.running; kills++) {
+      process.kill(serviceUnit.pid, "SIGKILL");
+      await waitFor(
+        "a new instance, or the manager to give up",
+        async () => {
+          const current = JSON.parse((await fixture.cove(["server", "status"], { home })).stdout);
+          serviceUnit = current.unit;
+          if (current.server && current.server.relayInstanceId !== instance) {
+            instance = current.server.relayInstanceId;
+            return true;
+          }
+          return serviceUnit.stoppedAfterCrashes;
+        },
+        60_000,
+      );
+    }
+    console.log(`${process.platform}: crash restarts stopped after ${kills} more kills`);
+    expect(serviceUnit).toMatchObject({
+      registered: true,
+      running: false,
+      stoppedAfterCrashes: true,
+    });
+    // Not started again behind the operator's back.
+    await new Promise((done) => setTimeout(done, 12_000));
+    const given = await status(home);
+    expect(given).toMatchObject({ serverState: "stopped", server: null });
+    expect(given.unit).toMatchObject({ running: false, stoppedAfterCrashes: true });
+    // Under launchd the server's own diagnostic is in the service log (systemd records its start
+    // limit in the journal).
+    const launchd = process.platform === "darwin";
+    const log = launchd ? await readFile(join(home, "server", "log", "service.log"), "utf8") : "";
+    expect({
+      event: log.includes('"event":"crash-restart-budget-exhausted"'),
+      advice: log.includes("cove server service start"),
+    }).toEqual({ event: launchd, advice: launchd });
+    const started = await fixture.coveJson(["server", "service", "start"], {
+      home,
+      timeoutMs: SLOW,
+    });
+    expect(started).toMatchObject({ running: true, stoppedAfterCrashes: false });
+    expect((await status(home)).server.service.lastStart).toBe("manual");
   } finally {
     const leftover = await removeService(fixture, home);
     if (leftover) failures.push(leftover);

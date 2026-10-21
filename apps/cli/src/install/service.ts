@@ -8,7 +8,9 @@ import { serverCommand, type InstallLayout } from "./layout.js";
 // The user-level service manager that runs an installed server (m2 D2): a LaunchAgent in the
 // macOS gui domain, a systemd user unit on Linux. Both detach the server from the shell, SSH
 // session and client that started it, restart it after a crash and not after an orderly exit (the
-// server exits 0 on SIGTERM), and reference only `<home>/install/current`.
+// server exits 0 on SIGTERM), and reference only `<home>/install/current`. Crash restarts are
+// bounded (D2): by the systemd unit's start limit, and under launchd, which has no such limit, by
+// the server itself (apps/server/src/entry/service-state.ts CRASH_RESTART_BUDGET).
 //
 // Neither manager gives a service the login shell's environment, so the unit carries what the
 // server needs: SHELL, which terminals start, and a PATH of the system directories plus the
@@ -29,7 +31,14 @@ export type UnitStatus = {
   pid: number | null;
   // Linux: whether the user manager outlives logout and starts at boot (D2); null on macOS.
   linger: boolean | null;
+  // The server crashed repeatedly and is no longer restarted (D2's bounded crash restart): systemd
+  // hit the unit's start limit, or under launchd the server stopped itself at its crash restart
+  // budget (apps/server/src/entry/service-state.ts). `cove server service start` starts it again.
+  stoppedAfterCrashes: boolean;
 };
+
+// Mirrors apps/server/src/entry/service-state.ts CRASH_STOP (the server writes it).
+const CRASH_STOP = join("server", "service", "crash-stop.json");
 
 export interface ServiceBackend {
   readonly manager: Manager;
@@ -252,6 +261,7 @@ class LaunchAgent implements ServiceBackend {
       running: state === "running",
       pid: pid === undefined ? null : Number(pid),
       linger: null,
+      stoppedAfterCrashes: state !== "running" && existsSync(join(this.layout.home, CRASH_STOP)),
     };
   }
 
@@ -321,7 +331,7 @@ class SystemdUser implements ServiceBackend {
       "--user",
       "show",
       "-p",
-      "LoadState,ActiveState,SubState,MainPID",
+      "LoadState,ActiveState,SubState,MainPID,Result",
       this.unit,
     ]);
     const values: Record<string, string> = {};
@@ -346,7 +356,10 @@ class SystemdUser implements ServiceBackend {
     if (start) await this.start();
   }
 
+  // A person's start also clears a unit that hit its start limit after repeated crashes (D2),
+  // which systemd otherwise refuses to start until the interval has passed.
   async start(): Promise<void> {
+    run("systemctl", ["--user", "reset-failed", this.unit]);
     this.systemctl("start", this.unit);
   }
 
@@ -356,6 +369,7 @@ class SystemdUser implements ServiceBackend {
 
   async restart(): Promise<void> {
     this.systemctl("daemon-reload");
+    run("systemctl", ["--user", "reset-failed", this.unit]);
     this.systemctl("restart", this.unit);
   }
 
@@ -370,6 +384,7 @@ class SystemdUser implements ServiceBackend {
       running: values.ActiveState === "active" && values.SubState === "running",
       pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
       linger: lingerEnabled(),
+      stoppedAfterCrashes: values.Result === "start-limit-hit",
     };
   }
 

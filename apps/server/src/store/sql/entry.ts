@@ -66,6 +66,11 @@ export type ServiceStartRecord = {
   reason: "manual" | "crash-restart" | "boot" | "login" | "unknown";
 };
 
+export type RecentStart = {
+  reason: ServiceStartRecord["reason"] | null;
+  startedAtMs: number;
+};
+
 export type LiveRunImpact = {
   run: { serverId: string; relayInstanceId: string; runId: string };
   taskId: string | null;
@@ -112,6 +117,19 @@ export const entryOperations = {
       { stopped_at_ms: number | null; boot_id: string | null } | undefined;
     return row ? { stopped: row.stopped_at_ms !== null, bootId: row.boot_id } : null;
   },
+
+  // The `limit` most recent relay instances, newest first, with their start reason (null for an
+  // instance of a build before migration 007) and start time: what the crash restart budget counts
+  // (service-state.ts crashRestartsOverBudget).
+  "service.recentStarts": (db: Connection, args: { limit: number }): RecentStart[] =>
+    (
+      statement(
+        db,
+        `SELECT s.reason AS reason, r.started_at_ms AS started_at_ms
+         FROM relay_instances r LEFT JOIN service_starts s USING (relay_instance_id)
+         ORDER BY r.rowid DESC LIMIT ?`,
+      ).all(args.limit) as { reason: ServiceStartRecord["reason"] | null; started_at_ms: number }[]
+    ).map((row) => ({ reason: row.reason, startedAtMs: row.started_at_ms })),
 
   "service.recordStart": (db: Connection, args: ServiceStartRecord): void => {
     statement(

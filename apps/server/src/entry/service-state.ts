@@ -1,11 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { readFile, unlink } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { stampedBuild, INSTALL_STAMP } from "../build-id.js";
 import type { Store } from "../store/database.js";
-import type { LiveRunImpact, PreviousStart, ServiceStartRecord } from "../store/sql/entry.js";
+import type {
+  LiveRunImpact,
+  PreviousStart,
+  RecentStart,
+  ServiceStartRecord,
+} from "../store/sql/entry.js";
 import type { ServiceManagerName } from "./m0-local-options.js";
 
 export type ServiceManager = ServiceManagerName | "foreground";
@@ -104,6 +109,79 @@ async function takeStartRequest(home: string, now: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// The bound on crash restarts (D2) under launchd. systemd bounds them itself (the unit's
+// StartLimitBurst=5 in StartLimitIntervalSec=300, apps/cli/src/install/service.ts); launchd's
+// KeepAlive has no such limit and only spaces restarts by ThrottleInterval. So a server that
+// launchd started again after a crash counts the crash restarts just before it: when this one
+// would be more than RESTARTS within WINDOW_MS, it records an orderly stop and exits 0 instead of
+// serving, which KeepAlive (SuccessfulExit false) does not restart, and leaves CRASH_STOP and a log
+// line saying so. The chain is broken by any other start (manual, login), so a person's start,
+// restart or upgrade through `cove` begins a new budget.
+//
+// Residual: a crash before the server reaches this check (a closure whose server cannot load, or
+// a data directory it cannot open) is still restarted by launchd every ThrottleInterval without
+// bound; it leaves nothing in the database to count.
+export const CRASH_RESTART_BUDGET = Object.freeze({ restarts: 5, windowMs: 300_000 });
+// Written when the budget stopped the server, removed by the next start that serves; read by
+// `cove server service status` (apps/cli/src/install/service.ts).
+export const CRASH_STOP = join("server", "service", "crash-stop.json");
+
+// The number of consecutive crash restarts ending with this one (`starts` newest first, this
+// instance included) within the window, when it is over the budget; null otherwise.
+export function crashRestartsOverBudget(
+  starts: readonly RecentStart[],
+  now: number,
+  budget: { restarts: number; windowMs: number } = CRASH_RESTART_BUDGET,
+): number | null {
+  let count = 0;
+  for (const start of starts) {
+    if (start.reason !== "crash-restart" || start.startedAtMs < now - budget.windowMs) break;
+    count++;
+  }
+  return count > budget.restarts ? count : null;
+}
+
+export class CrashRestartBudgetError extends Error {
+  constructor(readonly crashRestarts: number) {
+    super(
+      `the server crashed and launchd restarted it ${crashRestarts} times within ` +
+        `${CRASH_RESTART_BUDGET.windowMs / 1000} s; it stops here and launchd does not start it ` +
+        "again. Find the cause in this log, then start it with `cove server service start`",
+    );
+    this.name = "CrashRestartBudgetError";
+  }
+}
+
+// Under launchd, a crash restart over the budget throws CrashRestartBudgetError (see above).
+export async function checkCrashRestartBudget(
+  store: Store,
+  input: { manager: ServiceManager; lastStart: StartReason; now?: number },
+): Promise<void> {
+  if (input.manager !== "launchd-agent" || input.lastStart !== "crash-restart") return;
+  const starts = await store.call("service.recentStarts", {
+    limit: CRASH_RESTART_BUDGET.restarts + 1,
+  });
+  const over = crashRestartsOverBudget(starts, input.now ?? Date.now());
+  if (over !== null) throw new CrashRestartBudgetError(over);
+}
+
+export async function recordCrashStop(home: string, crashRestarts: number): Promise<void> {
+  const path = join(home, CRASH_STOP);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  const record = {
+    stoppedAtMs: Date.now(),
+    crashRestarts,
+    windowMs: CRASH_RESTART_BUDGET.windowMs,
+  };
+  await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+export async function clearCrashStop(home: string): Promise<void> {
+  await rm(join(home, CRASH_STOP), { force: true });
 }
 
 // Records how this instance started (service_starts), once, before anything is served.

@@ -38,7 +38,15 @@ import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
 import { EntryConfigService } from "./entry-config.js";
-import { recordServiceStart, ServiceState, type StartReason } from "./service-state.js";
+import {
+  checkCrashRestartBudget,
+  clearCrashStop,
+  CrashRestartBudgetError,
+  recordCrashStop,
+  recordServiceStart,
+  ServiceState,
+  type StartReason,
+} from "./service-state.js";
 import type { EntryConfigState } from "../store/config-rules.js";
 // Type only: the instrumentation is constructed by the separate probe entry (d6-probe-main.ts), so
 // this executable cannot enable it, whatever its environment.
@@ -372,8 +380,8 @@ async function openLocalApplication(
     );
   }
   const store = persistence.store;
+  const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
   try {
-    const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
     await recordInstanceStart(store, identity.relayInstanceId, Date.now());
     const auth = await loadAuthState(store);
     // The fixed ports of the entry configuration (m2 D3), read once: a change applies at the next
@@ -387,6 +395,10 @@ async function openLocalApplication(
       relayInstanceId: identity.relayInstanceId,
       manager: options.service ?? "foreground",
     });
+    // Bounded crash restarts under launchd (service-state.ts CRASH_RESTART_BUDGET): checked
+    // before recovery or any listener, so a server that crashes while starting stops the loop.
+    await checkCrashRestartBudget(store, { manager: options.service ?? "foreground", lastStart });
+    await clearCrashStop(persistence.layout.home);
     let configured: M0LocalOptions;
     try {
       configured = validateLocalOptions({
@@ -438,6 +450,16 @@ async function openLocalApplication(
     hooks?.onStoreOpen?.(store);
     return { local, store };
   } catch (error) {
+    if (error instanceof CrashRestartBudgetError) {
+      // An orderly stop: recorded as one, so that the next start (a person's, or the next login)
+      // is not taken for another crash restart. The record is written while this process still
+      // holds the data directory, so a start that follows cannot be overtaken by it.
+      await recordCrashStop(persistence.layout.home, error.crashRestarts).catch(() => undefined);
+      await store
+        .close([instanceStopCall(identity.relayInstanceId, Date.now())])
+        .catch(() => undefined);
+      throw error;
+    }
     await store.close().catch(() => undefined);
     if (error instanceof RendezvousConflictError)
       throw new LocalEntryStartupError("rendezvous", "verified", error.message);
@@ -776,6 +798,14 @@ export function runServerProcess(
         });
       } catch (error) {
         detach();
+        // Exit status 0, which launchd's KeepAlive does not restart (service-state.ts).
+        if (error instanceof CrashRestartBudgetError) {
+          process.stderr.write(
+            `${JSON.stringify({ event: "crash-restart-budget-exhausted", crashRestarts: error.crashRestarts })}\n` +
+              `cove-server: ${error.message}\n`,
+          );
+          return;
+        }
         if (
           error instanceof LocalEntryStartupError &&
           error.category === "interrupted" &&
