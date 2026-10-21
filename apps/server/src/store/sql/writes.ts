@@ -1,6 +1,7 @@
 import { authWrites } from "./auth.js";
 import { bindingWrites } from "./bindings.js";
 import { configWrites } from "./config.js";
+import { entryWrites } from "./entry.js";
 import { repoWrites } from "./repos.js";
 import { tabWrites } from "./tabs.js";
 import { workspaceWrites } from "./workspaces.js";
@@ -21,6 +22,7 @@ export const DATABASE_WRITES = Object.freeze({
   ...worktreeWrites,
   ...bindingWrites,
   ...authWrites,
+  ...entryWrites,
 });
 
 export type DatabaseWrites = typeof DATABASE_WRITES;
