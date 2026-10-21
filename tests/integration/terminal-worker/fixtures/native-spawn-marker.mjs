@@ -1,5 +1,5 @@
-import { writeFileSync } from "node:fs";
+import { publishReceipt } from "./publish-receipt.mjs";
 
 const [nonce, marker] = process.argv.slice(2);
 if (!nonce || !marker) process.exit(64);
-writeFileSync(marker, JSON.stringify({ nonce, pid: process.pid, ppid: process.ppid }) + "\n");
+publishReceipt(marker, JSON.stringify({ nonce, pid: process.pid, ppid: process.ppid }) + "\n");
