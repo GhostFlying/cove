@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { RPC_METHODS } from "@cove/protocol/rpc";
 import { DEFAULT_APPEARANCE, PROFILE } from "@cove/protocol/profile";
-import { fixture, run, geometry, coalesce, pump, decode } from "./preview-byte-peer.mjs";
+import { domainError } from "@cove/protocol/errors";
+import { fixture, frame, run, geometry, coalesce, pump, decode } from "./preview-byte-peer.mjs";
 
 async function cleaned(f) {
   await f.dispose();
@@ -265,6 +266,73 @@ describe("bounded server preview cache", () => {
     const spawn = f.commands().find((command) => command.type === "spawn");
     f.session.receive(f.reply(spawn, { operationId: spawn.operationId }));
     expect((await pending).outcome).toBe("accepted");
+    await cleaned(f);
+  });
+
+  // Issue #127: an attach in flight while the worker refuses the spawn left a pipe route that only
+  // its unsubscribe would release, and the retired run's unsubscribe never reaches the session.
+  // With the route cap at maxRuns × subscriptionsPerConnection (here 2), two such attaches made
+  // every later attach on the worker BUSY.
+  it("author spawn refused while an attach is in flight retires the attach's route", async () => {
+    const f = fixture({ maxRuns: 2, listPage: 2, subscriptionsPerConnection: 1 });
+    const connection = { connectionId: "attacher", generation: 0 };
+    const errorFrame = (command, kind) =>
+      frame({
+        type: "error",
+        worker: f.session.worker,
+        run: command.run,
+        requestId: command.requestId,
+        commandType: command.type,
+        error: domainError(kind),
+      });
+    for (const order of ["opener-first", "opener-last"]) {
+      const target = { ...run, runId: `refused-${order}` };
+      expect(f.runtime.reserveRun(target, geometry)).toBeTruthy();
+      const spawned = f.runtime.spawn(spawnInput(f, target, `spawn-${order}`));
+      const spawn = f.latest();
+      const subscription = { run: target, connection, subscriptionId: order, viewId: "view" };
+      const opened = f.runtime.openSubscription({
+        type: "subscribe",
+        worker: f.session.worker,
+        run: target,
+        requestId: `subscribe-${order}`,
+        subscription,
+        atSeq: 0,
+      });
+      const subscribe = f.latest();
+      expect(subscribe).toMatchObject({ type: "subscribe", run: target });
+      if (order === "opener-first") f.session.receive(errorFrame(subscribe, "RUN_NOT_FOUND"));
+      f.session.receive(errorFrame(spawn, "WORKER_UNAVAILABLE"));
+      expect((await spawned).error.kind).toBe("WORKER_UNAVAILABLE");
+      if (order === "opener-last") f.session.receive(errorFrame(subscribe, "RUN_NOT_FOUND"));
+      expect((await opened).error.kind).toBe("RUN_NOT_FOUND");
+      // The subscription layer's unsubscribe finds no placement for the retired run.
+      const closed = await f.runtime.closeSubscription({
+        type: "unsubscribe",
+        worker: f.session.worker,
+        run: target,
+        requestId: `unsubscribe-${order}`,
+        subscription,
+      });
+      expect(closed.error.kind).toBe("WORKER_UNAVAILABLE");
+      expect(f.session.snapshot().routes).toBe(0);
+      expectReleased(f, target, { reserveAgain: false });
+    }
+    // A later attach on the worker is admitted, not refused for the route cap.
+    const live = { run, connection, subscriptionId: "live", viewId: "view" };
+    const attach = f.runtime.openSubscription({
+      type: "subscribe",
+      worker: f.session.worker,
+      run,
+      requestId: "subscribe-live",
+      subscription: live,
+      atSeq: 0,
+    });
+    await pump();
+    expect(f.latest()).toMatchObject({ type: "subscribe", requestId: "subscribe-live" });
+    expect(f.session.snapshot().routes).toBe(1);
+    f.session.receive(errorFrame(f.latest(), "RESYNC_REQUIRED"));
+    expect((await attach).error.kind).toBe("RESYNC_REQUIRED");
     await cleaned(f);
   });
 

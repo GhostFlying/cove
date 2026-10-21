@@ -329,10 +329,34 @@ export class WorkerPipeSession {
   // other commands for the run (a preview refresh or status read sent while the spawn was in
   // flight) may still be pending; they settle by request ID, and the worker, which owns no session
   // for the run, has no events for it, so the route is not needed for them.
+  //
+  // The run's subscription routes are withdrawn here too (issue #127). An attach in flight with
+  // the spawn left a route that only its unsubscribe would release, but once the run is retired
+  // the runtime has no placement for it, so that unsubscribe is answered WORKER_UNAVAILABLE
+  // without reaching this session. Each such attach stranded a route, and enough of them made
+  // every later attach on the worker BUSY (the route cap). Marking the route unsubscribed is what
+  // the unsubscribe would have done: it is dropped now if no command for it is pending, and
+  // otherwise by forgetRoute when its pending opener or unsubscribe settles. No other route
+  // control can be pending: the worker owns no session for the run, so it accepted no opener.
   forgetRefusedRun(run: RunRef): boolean {
     const found = this.runs.get(run.runId);
     if (!found || !sameRunRef(found, run)) return false;
     this.runs.delete(run.runId);
+    for (const route of this.routes.filter((entry) => sameRunRef(entry.ref.run, run))) {
+      route.active = false;
+      route.unsubscribed = true;
+      if (
+        [...this.pending.values()].some(
+          (entry) =>
+            "subscription" in entry.command &&
+            entry.command.subscription !== undefined &&
+            sameSubscriptionRef(entry.command.subscription, route.ref),
+        )
+      )
+        continue;
+      this.routes.splice(this.routes.indexOf(route), 1);
+      route.lease.release();
+    }
     return true;
   }
 
