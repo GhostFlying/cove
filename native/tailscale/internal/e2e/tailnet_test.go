@@ -303,7 +303,8 @@ func TestServeAndDialOverTestControl(t *testing.T) {
 
 	// Forced logout closes the stream first, then deletes the node state.
 	st := decodeStatus(t, request(t, d.sock, proto.Request{Op: proto.OpLogout, Force: true}))
-	if st.State != proto.StateLoggedOut {
+	if st.State != proto.StateLoggedOut || st.RemoteLogoutConfirmed == nil || !*st.RemoteLogoutConfirmed ||
+		len(st.Warnings) != 0 {
 		t.Fatalf("after logout: %+v", st)
 	}
 	if _, err := io.ReadAll(s1.br); err != nil && !errors.Is(err, net.ErrClosed) {
@@ -443,7 +444,8 @@ func TestServeRestartKeepsIdentity(t *testing.T) {
 
 	// Logout deletes the state; the next start needs a new login.
 	st := decodeStatus(t, srv.call(proto.Request{Op: proto.OpLogout}))
-	if st.State != proto.StateLoggedOut || len(st.Ports) != 0 {
+	if st.State != proto.StateLoggedOut || len(st.Ports) != 0 || st.RemoteLogoutConfirmed == nil ||
+		!*st.RemoteLogoutConfirmed {
 		t.Fatalf("after logout: %+v", st)
 	}
 	srv.stop()

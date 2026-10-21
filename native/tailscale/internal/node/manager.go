@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -56,18 +57,23 @@ func (m *Manager) Status(ctx context.Context) (proto.Status, error) {
 			if m.bootErr != nil {
 				msg = m.bootErr.Error()
 			}
-			return proto.Status{State: proto.StateUnavailable, Warnings: []string{msg}}, nil
+			return proto.Status{State: proto.StateUnavailable, Warnings: []string{msg}}.Bounded(), nil
 		}
 		return proto.Status{State: proto.StateLoggedOut}, nil
 	}
 	return m.node.Status(ctx)
 }
 
-// Login logs the node in. With authKey it restarts the node with that key
-// and waits until it is Running. Without authKey it starts an interactive
-// login and returns as soon as the control plane provides the login URL;
-// the owner then polls Status. A failed key login of a node that had no
-// state removes the partial state, so no half-logged-in node remains.
+// Login logs the node in.
+//
+// With authKey and no persisted state it starts a fresh node with the key
+// and waits until it is Running; on failure the partial state is deleted,
+// so no half-logged-in node remains. With authKey and persisted state (for
+// example a node whose key expired) it forces a reauthentication of the
+// existing node with the key, keeping its identity; on failure the state is
+// kept as it was. Without authKey it starts an interactive login and returns
+// as soon as the control plane provides the login URL; the owner then polls
+// Status.
 func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Duration) (proto.Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -84,9 +90,9 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 	if authKey == "" {
 		return m.loginInteractive(ctx)
 	}
-	hadState := HasState(m.cfg.StateDir)
-	// A node already started without a key ignores a key supplied later, so
-	// the key login always uses a fresh node over the same state.
+	if HasState(m.cfg.StateDir) {
+		return m.reauth(ctx, authKey)
+	}
 	m.closeNode()
 	n, err := m.start(m.cfg, authKey)
 	if err == nil {
@@ -97,18 +103,41 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 		return m.node.Status(ctx)
 	}
 	m.closeNode()
-	if hadState {
-		m.Boot()
-	} else {
-		os.RemoveAll(m.cfg.StateDir)
+	lerr := loginError(ctx, err, authKey)
+	if rerr := os.RemoveAll(m.cfg.StateDir); rerr != nil {
+		lerr.Message = proto.Truncate(lerr.Message + "; removing the partial node state also failed: " + rerr.Error())
 	}
+	return proto.Status{}, lerr
+}
+
+func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, error) {
+	if m.node == nil {
+		m.Boot()
+	}
+	if m.node == nil {
+		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "the enrolled node cannot start: %v", m.bootErr)
+	}
+	err := m.node.Reauth(ctx, authKey)
+	if err == nil {
+		err = m.node.WaitRunning(ctx)
+	}
+	if err != nil {
+		return proto.Status{}, loginError(ctx, err, authKey)
+	}
+	return m.node.Status(ctx)
+}
+
+// loginError classifies a failed login. The control plane's message is
+// third-party text; it is redacted so it can never echo the key back.
+func loginError(ctx context.Context, err error, authKey string) *proto.Error {
 	code := proto.CodeLoginFailed
-	if errors.Is(err, context.DeadlineExceeded) {
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		code = proto.CodeShuttingDown
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
 		code = proto.CodeLoginTimeout
 	}
-	// The control plane's message is third-party text; never let it echo the
-	// key back to the caller.
-	return proto.Status{}, proto.Errorf(code, "%s", redact(err.Error(), authKey))
+	return proto.Errorf(code, "%s", redact(err.Error(), authKey))
 }
 
 func (m *Manager) loginInteractive(ctx context.Context) (proto.Status, error) {
@@ -126,35 +155,47 @@ func (m *Manager) loginInteractive(ctx context.Context) (proto.Status, error) {
 		}
 		select {
 		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return proto.Status{}, proto.Errorf(proto.CodeShuttingDown, "shutting down")
+			}
 			return proto.Status{}, proto.Errorf(proto.CodeLoginTimeout, "control plane gave no login URL in time")
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
 
-// Logout deauthorizes the node, stops it and deletes its state. If the
-// control plane cannot be reached the local state is still deleted, and the
-// result carries a warning that the node may remain listed in the tailnet.
+// Logout deauthorizes the node, stops it and deletes its state. The local
+// state is deleted even when the control plane does not confirm the logout
+// (unreachable, or the node cannot start at all), so a local logout is never
+// blocked; the result then says remoteLogoutConfirmed: false with a warning
+// that the node may remain listed in the tailnet.
 func (m *Manager) Logout(ctx context.Context, timeout time.Duration) (proto.Status, error) {
-	if m.node == nil && HasState(m.cfg.StateDir) {
+	hadState := HasState(m.cfg.StateDir)
+	if m.node == nil && hadState {
 		// Start the node so the control plane learns about the logout.
 		m.Boot()
 	}
+	confirmed := true
 	var warnings []string
-	if m.node != nil {
+	switch {
+	case m.node != nil:
 		lctx, cancel := context.WithTimeout(ctx, timeout)
 		err := m.node.Logout(lctx)
 		cancel()
 		if err != nil {
+			confirmed = false
 			warnings = append(warnings, "control-plane logout failed; remove the node in the Tailscale admin console: "+err.Error())
 		}
+	case hadState:
+		confirmed = false
+		warnings = append(warnings, fmt.Sprintf("the node could not start, so the control plane was not told; remove the node in the Tailscale admin console: %v", m.bootErr))
 	}
 	m.closeNode()
 	if err := os.RemoveAll(m.cfg.StateDir); err != nil {
-		return proto.Status{}, err
+		return proto.Status{}, fmt.Errorf("deleting node state: %w", err)
 	}
 	m.bootErr = nil
-	return proto.Status{State: proto.StateLoggedOut, Warnings: warnings}, nil
+	return proto.Status{State: proto.StateLoggedOut, Warnings: warnings, RemoteLogoutConfirmed: &confirmed}.Bounded(), nil
 }
 
 // Running returns the node once its backend is Running, waiting at most
