@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -286,6 +287,55 @@ func TestStopDoesNotWaitForIdleConnections(t *testing.T) {
 
 // Shutdown cancels a login blocked on the control plane: the client gets
 // SHUTTING_DOWN and Run returns promptly.
+// signal returns a hook that closes the returned channel the first time it
+// runs.
+func signal() (func(), chan struct{}) {
+	ch := make(chan struct{})
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }, ch
+}
+
+func dialFrame(timeoutMs int) []byte {
+	return frame(proto.Request{ID: "d", Op: proto.OpDial, Target: &proto.Target{StableNodeID: "nServer"},
+		Port: 7001, TimeoutMs: timeoutMs})
+}
+
+// A dial cut short by shutdown reports SHUTTING_DOWN whichever setup step
+// it was in, while its own timeout still reports what timed out.
+func TestShutdownDuringDialSetup(t *testing.T) {
+	for _, step := range []string{"node startup", "peer lookup"} {
+		t.Run(step, func(t *testing.T) {
+			hook, reached := signal()
+			fn := &fakenode.Node{State: proto.StateRunning}
+			if step == "node startup" {
+				fn.State, fn.BlockWait, fn.OnWait = proto.StateStarting, true, hook
+			} else {
+				fn.OnLookup = hook // no peers: the lookup keeps retrying
+			}
+			r := startDaemon(t, fn, true)
+			cl := open(t, r.sock, dialFrame(60000))
+			select {
+			case <-reached:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("dial never reached %s", step)
+			}
+			r.stop()
+			if resp := cl.read(t); resp.OK || resp.Error.Code != proto.CodeShuttingDown {
+				t.Fatalf("dial during %s: %+v", step, resp.Error)
+			}
+			r.wait(t, 5*time.Second)
+		})
+	}
+}
+
+func TestDialTimeoutIsNotShutdown(t *testing.T) {
+	r := startDaemon(t, &fakenode.Node{State: proto.StateStarting, BlockWait: true}, true)
+	cl := open(t, r.sock, dialFrame(300))
+	if resp := cl.read(t); resp.OK || resp.Error.Code != proto.CodeNodeUnavailable {
+		t.Fatalf("timed-out dial: %+v", resp.Error)
+	}
+}
+
 func TestShutdownCancelsABlockedLogin(t *testing.T) {
 	r := startDaemon(t, &fakenode.Node{State: proto.StateNeedsLogin, BlockWait: true}, false)
 	cl := open(t, r.sock, frame(proto.Request{ID: "l", Op: proto.OpLogin, AuthKey: "tskey-test-0000", TimeoutMs: 300000}))

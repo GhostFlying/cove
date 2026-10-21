@@ -538,6 +538,12 @@ func (d *daemon) dial(ctx context.Context, c net.Conn, br *bufio.Reader, req pro
 		}
 	}
 	d.ctl.RUnlock()
+	if err != nil && d.life.Err() != nil {
+		// Shutdown cancelled the setup, whatever step noticed it (waiting
+		// for the node, the peer lookup, the dial or WhoIs). The request's
+		// own timeout is a separate deadline on ctx and keeps its error.
+		err = errShuttingDown
+	}
 	if err != nil {
 		writeErr(c, req, err)
 		return
