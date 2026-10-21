@@ -2,12 +2,46 @@ package e2e
 
 import (
 	"io"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/GhostFlying/cove/native/tailscale/internal/proto"
 )
+
+// SIGTERM while an interactive login waits on a control plane that never
+// offers a login URL: the login is cancelled, the daemon exits promptly and
+// releases the directory to the next daemon.
+func TestDialSignalDuringBlockedLogin(t *testing.T) {
+	tn := newTailnet(t, true)
+	home := filepath.Join(shortDir(t), "tsnet-client")
+	d := startDial(t, tn, home)
+	s := connect(t, d.sock, proto.Version)
+	got := make(chan proto.Response, 1)
+	go func() {
+		got <- s.roundTrip(t, proto.Request{Op: proto.OpLogin, TimeoutMs: 300000})
+	}()
+	time.Sleep(time.Second) // let the login block
+	start := time.Now()
+	d.cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case resp := <-got:
+		wantCode(t, resp, proto.CodeShuttingDown)
+	case <-time.After(15 * time.Second):
+		t.Fatal("no reply to the blocked login")
+	}
+	if code := d.wait(15 * time.Second); code != 0 {
+		t.Fatalf("exit code %d\n%s", code, d.stderr)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("shutdown took %v", elapsed)
+	}
+	assertNoSocket(t, d.sock)
+	next := startDial(t, tn, home)
+	dialStatus(t, next.sock)
+}
 
 // stdin EOF while a login is blocked ends serve promptly with exit 0.
 func TestServeEOFDuringBlockedLogin(t *testing.T) {

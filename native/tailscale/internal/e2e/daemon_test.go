@@ -144,6 +144,10 @@ func TestDialProtocolHandling(t *testing.T) {
 	// Without a logged-in node every dial fails before touching the network.
 	_, resp := openStream(t, d.sock, "nSomeNodeCNTRL", 443, "")
 	wantCode(t, resp, proto.CodeNotLoggedIn)
+	_, resp = openStream(t, d.sock, "nSomeNodeCNTRL", 443, strings.Repeat("l", proto.MaxLabelBytes+1))
+	wantCode(t, resp, proto.CodeBadRequest)
+	_, resp = openStream(t, d.sock, "some-node.ts.net", 443, "")
+	wantCode(t, resp, proto.CodeBadRequest)
 	wantCode(t, request(t, d.sock, proto.Request{Op: "bogus"}), proto.CodeBadRequest)
 
 	stop := connect(t, d.sock, proto.Version+1)
