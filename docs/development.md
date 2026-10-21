@@ -189,10 +189,10 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
 - 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
   `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
 
-## M2 设备配对与 `--server`（loopback 与 SSH 入口）
+## M2 设备配对与 `--server`（loopback、SSH 与 tsnet 入口）
 
 范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。loopback 入口是同一主机上的 server（T1），SSH 入口经系统 `ssh`
-连到另一台主机（T2）；tsnet 入口由 T4 加入，在此之前 `--via tsnet` 报 `ENTRY_UNAVAILABLE`。
+连到另一台主机（T2），tsnet 入口经客户端自己的 Tailnet 节点（T4，见下文“tsnet 客户端”）。
 
 ```sh
 # server 端（数据目录 A）。--ssh-target 是邀请中写入的 SSH 目标，省略时取 <用户>@<主机名>；
@@ -252,6 +252,43 @@ SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixtur
   `auth device revoke` 等这些连接关闭后才返回，响应中的 `unclosedConnections` 是等待期限内仍未关闭的连接数，
   不为 0 时命令以 1 退出。设备撤销自己时同样如此：server 先关闭它除承载这次撤销的请求之外的所有连接（包括 CLI
   自己的终端连接），再应答，应答发出后才结束那个请求；CLI 因此用一个不依赖终端连接的单独 HTTP 请求发送自我撤销。
+
+### tsnet 客户端（D9、D14）
+
+客户端的 Tailnet 节点由每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程承载，状态在 `<home>/tsnet-client/`
+（0700），不需要系统 Tailscale。CLI 找 `cove-tsnet` 的顺序：安装闭包的 `bin/cove-tsnet`，再是开发 checkout 的
+`native/tailscale/dist/<平台>-<架构>/cove-tsnet`（`pnpm tsnet:build`）；都没有时 tsnet 入口报 `ENTRY_UNAVAILABLE`。
+
+```sh
+cove --home B remote tsnet login          # auth key 从隐藏提示或 stdin 读；输入为空则在 stderr 显示登录 URL 并等待
+cove --home B remote tsnet status         # 节点状态、活动流与 dial 进程（pid、build）
+cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet
+cove --home B --server box --via tsnet status # 同一主机配对时也记录邀请中的 tsnet 入口
+cove --home B remote tsnet logout [--yes] # 有活动流时不带 --yes 列出它们并以 1 退出；带 --yes 先关闭再登出
+cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；没有进程时不启动
+cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（默认 10m），下次启动生效
+```
+
+- 每条经 tsnet 的命令先连 `<home>/tsnet-client/run/dial.sock`（0600），连不上时以脱离的方式启动 dial 进程并在
+  10 秒总期限内循环连接与重新启动；期限用尽报 `ENTRY_UNAVAILABLE`，附 `run/dial.log` 的末尾。重试只发生在提交请求之前；
+  流建立并转发字节后，连接中断就是连接中断，不重发。dial 进程没有活动流时空闲 10 分钟退出，先删 socket 再释放锁。
+- 每条流按配对记录中 server 节点的稳定 ID 请求，dial 进程用 WhoIs 核对对端后才转发（`PEER_MISMATCH` 时拒绝），
+  CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。
+- 版本：dial 进程的 build 与 CLI 将启动的 `cove-tsnet` 不同时，没有活动流就请它退出并启动当前版本；
+  有活动流时绝不替换——本机协议兼容则沿用并在 stderr 警告，不兼容则报错并列出活动流（等待其结束或 `remote tsnet stop --yes`）。
+- 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
+  `LOGIN_UNCERTAIN`（未完成且可能已生效，先看 status）以 1 退出；status 中的 `hold` 表示节点在此期间拒绝流；
+  logout 的 `remoteLogoutConfirmed: false` 表示本地状态已删除但控制面未确认，需要在管理控制台删除该节点。
+- auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
+- 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
+  （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。
+
+tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
+同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
+需要 `native/tailscale/go.mod` 固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。
+所有节点只加入 testcontrol 的测试 Tailnet（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`）。在 server 自己的 tsnet 接线（T5b）
+合入前，测试自己运行 `cove-tsnet serve`，把业务端口与配对端口转发到 server 的同号 loopback 端口，并把 serve 节点
+写入邀请；协议不兼容、身份冻结、未确认的登出与 `PEER_MISMATCH` 用脚本化的假 dial 进程（`tsnet-fake-dial.mjs`）覆盖。
 
 ## M2 安装与用户服务（T3）
 

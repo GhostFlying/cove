@@ -28,9 +28,11 @@ export { RemoteError, type OpenedEntry, type Via } from "./entry-types.js";
 // - ssh: an `ssh -L` tunnel to the target host's loopback business port (ssh-tunnel.ts). Requests
 //   carry the tunnel's local authority as Host, which the server accepts as a loopback literal
 //   (user decision 2026-10-22, protocol bootstrap.ts), so no Host rewriting is needed.
-// - tsnet: tsnet.ts, which T4 replaces; until then ENTRY_UNAVAILABLE.
-// The channel's own peer check (the SSH host key) happens while it opens; verifiedIdentity checks
-// the serverId over it next. Both precede any token or invitation secret.
+// - tsnet: streams through this client's tailnet node (tsnet.ts) to the recorded server node;
+//   `home` locates the node's dial daemon (`<home>/tsnet-client`).
+// The channel's own peer check (the SSH host key; the tsnet node's stable ID) happens while it
+// opens; verifiedIdentity checks the serverId over it next. Both precede any token or invitation
+// secret.
 
 const IDENTITY_TIMEOUT_MS = 10_000;
 
@@ -57,7 +59,7 @@ async function openSsh(target: string, remotePort: number): Promise<OpenedEntry>
   };
 }
 
-async function open(record: ServerRecord, kind: EntryKind): Promise<OpenedEntry> {
+async function open(record: ServerRecord, kind: EntryKind, home: string): Promise<OpenedEntry> {
   const missing = () =>
     new RemoteError("ENTRY_UNAVAILABLE", `${record.alias} has no ${kind} entry; nothing was sent`);
   if (kind === "loopback") {
@@ -70,14 +72,18 @@ async function open(record: ServerRecord, kind: EntryKind): Promise<OpenedEntry>
     if (!entry) throw missing();
     return openSsh(entry.target, entry.port);
   }
-  return openTsnetEntry(record);
+  return openTsnetEntry(record, home);
 }
 
 // Opens the selected entry of `record`: `via`, else the record's default. Nothing else is tried.
-export async function openEntry(record: ServerRecord, via: Via | undefined): Promise<OpenedEntry> {
+export async function openEntry(
+  record: ServerRecord,
+  via: Via | undefined,
+  home: string,
+): Promise<OpenedEntry> {
   const kind: EntryKind = via ?? record.defaultEntry;
   try {
-    return await open(record, kind);
+    return await open(record, kind, home);
   } catch (error) {
     if (!(error instanceof RemoteError)) throw error;
     throw new RemoteError(
@@ -92,6 +98,7 @@ export async function openEntry(record: ServerRecord, via: Via | undefined): Pro
 export async function openPairingEntry(
   payload: InvitationPayload,
   via: Via | undefined,
+  home: string,
 ): Promise<OpenedEntry> {
   if (via === undefined)
     return {
@@ -99,7 +106,7 @@ export async function openPairingEntry(
       endpoint: `http://127.0.0.1:${payload.pairingPort}`,
       close: async () => undefined,
     };
-  if (via === "tsnet") return openTsnetPairing(payload);
+  if (via === "tsnet") return openTsnetPairing(payload, home);
   const ssh = payload.entries.ssh;
   if (!ssh)
     throw new RemoteError(
@@ -112,7 +119,7 @@ export async function openPairingEntry(
 // The pre-authentication identity of a server (relay-protocol §11.8): a bootstrap request
 // without credentials. Its serverId is compared with the expected one before any secret or token
 // is sent; serverId identifies, it does not prove. The channel's own peer check proves it: the
-// SSH host key (ssh-tunnel.ts), and the tsnet node's stable ID (T4); loopback has none.
+// SSH host key (ssh-tunnel.ts), and the tsnet node's stable ID (tsnet.ts); loopback has none.
 export async function preAuthIdentity(
   endpoint: string,
   buildVersion: string,

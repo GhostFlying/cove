@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { PortSchema, SshTargetSchema } from "@cove/protocol/auth";
+import {
+  PortSchema,
+  SshTargetSchema,
+  TsnetNodeIdSchema,
+  TsnetNodeNameSchema,
+} from "@cove/protocol/auth";
 import { DeviceIdSchema, DeviceTokenSchema } from "@cove/protocol/bootstrap";
 import { OpaqueIdSchema } from "@cove/protocol/identity";
 
@@ -16,15 +21,25 @@ import { OpaqueIdSchema } from "@cove/protocol/identity";
 // - loopback `{ port }`: the server is on this host (recorded when pairing over loopback);
 // - ssh `{ target, port }`: `ssh -L` to `target`, forwarding to 127.0.0.1:`port` on its host
 //   (ssh-tunnel.ts). The target is the one the invitation advertised.
+// - tsnet `{ nodeId, name, port }`: a stream from this client's tailnet node to the server's node
+//   with stable ID `nodeId`, at tailnet port `port` (the business port, which the server's node
+//   serves at the same number; tsnet.ts). Both come from the invitation and the pairing answer;
+//   `name` is the node's MagicDNS name, display data only: only the stable ID identifies the node.
 // An entry is verified on every use, not once at pairing: the channel's own peer check (ssh's
-// host key against the user's known_hosts) and then the serverId (entries.ts verifiedIdentity),
-// both before the token is released. T4 adds the tsnet kind with its node identity.
+// host key against the user's known_hosts; the tsnet node's stable ID, which the dial daemon
+// checks with WhoIs) and then the serverId (entries.ts verifiedIdentity), both before the token is
+// released.
 
 export const ENTRY_KINDS = ["loopback", "ssh", "tsnet"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
 export type LoopbackEntry = { readonly port: number };
 export type SshEntry = { readonly target: string; readonly port: number };
-export type ServerEntries = { readonly loopback?: LoopbackEntry; readonly ssh?: SshEntry };
+export type TsnetEntry = { readonly nodeId: string; readonly name: string; readonly port: number };
+export type ServerEntries = {
+  readonly loopback?: LoopbackEntry;
+  readonly ssh?: SshEntry;
+  readonly tsnet?: TsnetEntry;
+};
 
 // Whether `entry` is a valid entry of `kind`, with exactly its members.
 function validEntry(kind: string, entry: unknown): boolean {
@@ -35,6 +50,12 @@ function validEntry(kind: string, entry: unknown): boolean {
   if (kind === "loopback") return keys === "port";
   if (kind === "ssh")
     return keys === "port,target" && SshTargetSchema.safeParse(fields.target).success;
+  if (kind === "tsnet")
+    return (
+      keys === "name,nodeId,port" &&
+      TsnetNodeIdSchema.safeParse(fields.nodeId).success &&
+      TsnetNodeNameSchema.safeParse(fields.name).success
+    );
   return false;
 }
 
