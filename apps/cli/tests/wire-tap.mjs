@@ -3,7 +3,7 @@ import { createClient } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { createTerminalDecoder, encodeTerminalFrame } from "@cove/protocol/terminal";
 import { createNodePorts } from "../dist/node-ports.js";
-import { CLI_BUILD_VERSION } from "../dist/session.js";
+import { cliBuildVersion } from "../dist/session.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -208,7 +208,7 @@ export function createTappedClient(record) {
   const client = createClient({
     expectedServerId: record.serverId,
     expectedRelayInstanceId: record.relayInstanceId,
-    buildVersion: CLI_BUILD_VERSION,
+    buildVersion: cliBuildVersion(),
     credentials: () => ({
       authorization: `Bearer ${record.secret}`,
       terminalSecret: record.secret,

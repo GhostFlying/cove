@@ -3,6 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "exports": {
+    "./build-id": {
+      "types": "./dist/build-id.d.ts",
+      "import": "./dist/build-id.js"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "pnpm build && pnpm --dir ../.. exec vitest run --project server",
