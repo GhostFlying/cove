@@ -1,0 +1,37 @@
+name: Shepherd/tend doc
+
+# A pull request that changes a surface tend consumes must change docs/integrations/shepherd-tend.md
+# or opt out in its description (scripts/tend-doc-check.mjs, issue #101). This is its own workflow,
+# not a job in check.yml, because it must rerun when the description changes: `edited` is not one
+# of the default pull_request types, and adding it to check.yml would rerun the full checks on every
+# description edit. Re-running an earlier run does not help, since a rerun reuses that run's event
+# payload and so its old description.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # On main the script reports that it skipped: there is no description or base to compare.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tend-doc-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tend-doc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The full history: origin/<base ref> and the pull request head (a parent of the
+          # checked-out merge ref) must both be present to diff the head against its merge base.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - run: node scripts/tend-doc-check.mjs

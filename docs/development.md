@@ -265,3 +265,11 @@ action/上传预留 5 分钟，`check.yml` 设为 90 分钟。Vitest 上限由 #
 上限的工作不超出其预留，挂死时就由最内层上限先触发并写下证据；tooling 测试校验这一组合与 workflow 值。C1 原有 tooling 测试仍在；应用、完整 PTY
 生命周期与移动端测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。B0 只补齐两个真实实验环境；C1
 实施记录见 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
+
+`Shepherd/tend doc` workflow（`.github/workflows/tend-doc.yml`，#101）执行 `scripts/tend-doc-check.mjs`：PR 改动 tend
+依赖的接口而未改 [Shepherd/tend 集成说明](integrations/shepherd-tend.md) 时失败。路径清单及理由见脚本：
+`apps/cli/src/commands/`、`apps/cli/src/main.ts`、`apps/cli/src/session.ts`、protocol 的 RPC 方法与 schema
+（`rpc-methods.ts`、`rpc.ts`、`workspace.ts`、`errors.ts`、`auth.ts`、`bootstrap.ts`）、server 的 `store/` 与
+`operations/`；`tests/` 下文件与 `*.test.*` 不计。比较的是 PR head 与它和 base 分支的 merge base 之间的改动。
+确实不影响 tend 时，在 PR 描述中单独一行写 `Shepherd-Doc: not-affected <理由>`，理由不能为空；以 `Shepherd-Doc:`
+开头但格式不符的行也会失败。修改描述会重新触发该检查；push 到 main 等非 PR 事件只报告“已跳过”，不算通过。
