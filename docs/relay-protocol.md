@@ -697,6 +697,9 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   两个 token 都保持原状，客户端稍后重试；有效 token 不会因此得到 `UNAUTHENTICATED`。
 - 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
   `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
+  serverId 只用于识别 server，不能证明对端就是它：loopback 入口上，同一主机的其他进程（例如另一个系统用户）
+  先占用业务端口或配对端口并回报相同的 serverId 时，客户端无法分辨。同主机端口抢占不在 T1 的防护范围内，
+  这是已记录的残留限制（2026-10-21 用户决定）；跨主机入口的对端认证由 SSH（T2）与 tsnet（T4）提供。
 - 配对监听（m2 T1）不是 RPC，只接受两个 POST（`PAIRING_PATHS`），请求与响应各不超过 4 KiB。
   - `/bootstrap` 返回同样的认证前身份。
   - `/pair` 接受 `cove-pairing-redeem`（`inviteId`、`secret`、`deviceName`）：成功时以 `cove-pairing-result`
