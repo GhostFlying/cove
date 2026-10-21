@@ -29,10 +29,17 @@ loopback. That works from this external module on macOS and Linux and needs no n
 real tailnet or system `tailscaled`. Limits of that setup:
 
 - testcontrol is not a stable Tailscale API and may change with a `tailscale.com` upgrade.
-- With `RequireAuthKey` set, testcontrol also rejects a restored node's re-registration (real
-  control does not), so only the rejected-key test enables it.
-- Everything runs on one host over loopback and DERP, so NAT traversal, real MagicDNS, ACLs, key
-  expiry and admin-console removal are not covered. Those parts of S8/S9 still need a real tailnet.
+- With `RequireAuthKey` set, testcontrol also rejects a restored node's keyless re-registration
+  (real control does not while the node key is valid), so tests that restart a node use a tailnet
+  without it. The reauth test enables it on purpose: together with a per-node key expiry it models
+  an enrolled node that needs login again. Without it testcontrol approves the client's automatic
+  key rotation, which real control does not.
+- Everything runs on one host over loopback and DERP, so NAT traversal, real MagicDNS, ACLs, real
+  key expiry and admin-console removal are not covered. Those parts of S8/S9 still need a real
+  tailnet.
+- Child processes run with `PATH` set to one empty directory, so they could not find a system
+  `tailscale` or `tailscaled` even on a host that has Tailscale installed, and run no external
+  program at all.
 
 ## License and size
 
