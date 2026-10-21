@@ -269,13 +269,26 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
 - 闭包：`<home>/install/<build>/` 含 `bin/node`（固定版本）、`bin/cove-tsnet`、`app/`（`pnpm deploy --prod` 的 CLI、server、
   worker 与原生模块）与 `cove-install.json`（build、schema 版本与内容摘要）。装好后不再修改；`current` 原子切换，
   服务单元与 `<home>/bin/cove` 只引用 `current`。`cove server prune` 删除既不是 `current` 也不在运行的 build。
+  build ID 覆盖闭包全部内容与 cove-tsnet 本身：用占位 ID 构建一次 cove-tsnet 并计入其摘要，再用最终 ID 重建，所以 Go
+  源码、工具链、构建参数、`GOAMD64`/`GOARM64` 等环境与 Go 嵌入的 VCS 信息（提交、工作区是否修改）都会改变 build ID。
   同一提交在不同路径的 checkout 中构建出的 build ID 不同（pnpm 按源路径命名 workspace 包），只多一个安装目录。
+  已安装的同名 build 只有内容摘要相同才复用，否则拒绝安装。
 - 安装新 build 不替换正在运行的 server：`server status` 显示 `pendingBuild`，`server restart`（或一步完成的
   `server upgrade`）之后才生效。
+- server 是否在运行：能连上即为运行；连不上时看它的实例锁（`<home>/server/cove.lock`，server 存活期间一直持有）：
+  没有进程持有才算已停止。锁被持有却连不上（握手超时、容量拒绝、启动中或卡住）时状态未知：`restart`、`upgrade`、
+  `service stop` 与 `uninstall` 照样要求确认，但无法列出 run，`--yes` 才继续（这也是停止一个不再应答的 server 的办法）；
+  `prune` 拒绝删除任何 build；`service start` 与 `install` 不动服务。`server status` 的 `serverState` 为
+  `running`、`stopped` 或 `unknown`（附 `serverError`）。
+- 安装锁（`<home>/install/.lock.sqlite`）是随进程结束而释放的 OS 锁，崩溃的命令不留下需要接管的锁；第二个安装命令立即被拒绝。
 - 服务：macOS 为 `~/Library/LaunchAgents/dev.cove.server.<摘要>.plist`（gui 域，登录时启动、注销时停止，日志在
   `<home>/server/log/service.log`）；Linux 为 `~/.config/systemd/user/cove-server-<摘要>.service`（日志用 `journalctl --user -u`）。
   `<摘要>` 取自数据目录的真实路径，不同数据目录各有一个服务。Linux 需要 linger 才能在注销后与开机后运行：
   `sudo loginctl enable-linger $USER`（CLI 只提示，不执行 sudo）。没有 systemd user 的主机继续用前台 `cove server start`。
+- 崩溃重启有上限：systemd 单元 300 秒内最多启动 5 次；launchd 没有这种上限，由 server 自己计数，300 秒内第 6 次崩溃重启时
+  记录一次有序停止并以 0 退出（launchd 不再重启），在 `service.log` 写明原因。两种情况下 `cove server service status`
+  显示 `stoppedAfterCrashes: true`，`cove server service start` 重新开始计数。server 来不及读到计数就崩溃时（闭包无法加载、
+  数据目录无法打开），launchd 仍会每 5 秒（ThrottleInterval）重启它，没有上限。
 - 停止与重启的后果：systemd 用默认的 `KillMode=control-group`，停止或重启服务会结束 cgroup 内全部进程，**包括在 Cove
   终端里用 `nohup`、tmux 等脱离的进程**，前台 `cove server start` 则不会。macOS 上由 launchd 停止或重启 server（`bootout`）时，
   Cove 终端里用 `nohup` 脱离的进程在测试中继续运行（本机 macOS 26 arm64 观察，S2 在 CI 中记录）；这是 launchd 与进程会话
