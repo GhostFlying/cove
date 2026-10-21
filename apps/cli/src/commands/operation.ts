@@ -1,4 +1,4 @@
-import type { Client } from "@cove/client";
+import type { CallOutcome, Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import {
   homeDirectory,
@@ -19,6 +19,12 @@ export const usage = `  operation get <operationId>
   operation continue <operationId> [--operation-id ID]
   operation abandon <operationId> [--operation-id ID]
 
+The server keeps the record of an operation that ended (succeeded, failed or cancelled) for 30
+days, then only its ID: get and resend then fail with OPERATION_HISTORY_EXPIRED, and the
+operation is never executed again. Records of operations that have not ended are kept. The
+request a write saved locally expires 30 days after it was saved: resend refuses it without
+sending, and so does a command reusing its --operation-id.
+
 continue and abandon act on an operation in requires_attention. Each is a write with its own
 --operation-id. The server refuses both while a Git process the operation started may still run
 (OPERATION_EFFECTS_ACTIVE; nothing is accepted, so send it again later). continue goes on from
@@ -36,6 +42,25 @@ abandon that cannot finish is itself requires_attention; continue it. Both print
 (empty when nothing was left). continue exits 0 when the target succeeded; abandon exits 0
 when the target was cancelled. When the write was accepted but reading its outcome or the
 target's failed, both print {operation, targetReadError} with the last record read and exit 1.`;
+
+// Whether the server answered that the operation's record was cleared after the retention period
+// (m2 D13): the ID is known for good and nothing is executed under it again.
+function historyExpired(outcome: CallOutcome<unknown>): boolean {
+  return (
+    !outcome.ok &&
+    outcome.kind === "rpc-error" &&
+    "kind" in outcome.error &&
+    outcome.error.kind === "OPERATION_HISTORY_EXPIRED"
+  );
+}
+
+function expiredMessage(operationId: string, what: string): string {
+  return (
+    `${what}: operation ${operationId} ended more than 30 days ago and the server cleared its ` +
+    `record (OPERATION_HISTORY_EXPIRED). It keeps only the ID and never executes the operation ` +
+    `again; inspect the resources the operation affected instead`
+  );
+}
 
 // operation continue/abandon (M1 T3b): the write's own record and the target as it settled.
 //
@@ -124,7 +149,10 @@ export async function run(args: Arguments): Promise<number> {
     takeFlags(args, []);
     const operationId = one(args, "operation id");
     return withSession(args, async ({ client }) => {
-      print(unwrap("operation.get", await client.getOperation(operationId)).operation);
+      const outcome = await client.getOperation(operationId);
+      if (historyExpired(outcome))
+        throw new Error(expiredMessage(operationId, "operation.get failed"));
+      print(unwrap("operation.get", outcome).operation);
       return 0;
     });
   }
@@ -145,10 +173,11 @@ export async function run(args: Arguments): Promise<number> {
           `operation ${operationId} was saved for server ${pending.serverId}, but the connected ` +
             `server is ${record.serverId}; nothing was sent`,
         );
-      const sent = unwrap(
-        pending.method,
-        await client.call(pending.method, pending.params as never),
-      ) as { operation: OperationRecord };
+      const outcome = await client.call(pending.method, pending.params as never);
+      // Refused, not executed: the request was not accepted again (acceptance not-accepted).
+      if (historyExpired(outcome))
+        throw new Error(expiredMessage(operationId, `${pending.method} was refused`));
+      const sent = unwrap(pending.method, outcome) as { operation: OperationRecord };
       // The record is printed as the server returned it, whatever its state: a resend never
       // turns a historical failure or requires_attention into a new execution.
       print(await settle(client, sent.operation));

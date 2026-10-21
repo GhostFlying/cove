@@ -87,7 +87,8 @@ test("request B under the ID of unsent request A is refused, and resend sends A"
     serverId: server.record.serverId,
     method: "config.set",
     params: { operationId: "ab", patch: { workspaceRoot: rootA } },
-    savedAtMs: 1,
+    // Recent: a record past the 30-day retention is never resent (m2 D13).
+    savedAtMs: Date.now(),
   });
 
   const b = await fixture.cove(["config", "set", "workspaceRoot", rootB, "--operation-id", "ab"], {
