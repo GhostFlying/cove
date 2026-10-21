@@ -423,6 +423,21 @@ PENDING：
   - CLI 与正常客户端不变。
 - `COVE_TSNET_BINARY`、`COVE_TSNET_CONTROL_URL` 只在开发 workspace 中生效；安装闭包中设置时 server 不启动 tsnet 节点。tend-runner 不应设置它们。
 
+#165（M2 T4 客户端 tsnet，未合入；在 server 的 tsnet 接线 T5b 之后合入）：本机命令与 loopback、SSH 入口的请求和 JSON 输出不变。
+
+- `--via tsnet` 可用：经客户端自己的 Tailnet 节点（每个 OS 用户一个按需启动的 `cove-tsnet dial` 常驻进程，空闲 10 分钟退出）
+  连到配对记录中按稳定 ID 指定的 server 节点。dial 进程在 10 秒内未就绪、未登录、找不到或核对不符（`PEER_MISMATCH`）时以 1 退出，
+  stderr 含 `ENTRY_UNAVAILABLE` 与原因，不发送 token；不换入口。tend-runner 经 tsnet 调用远程 server 前须先完成
+  `remote tsnet login`；dial 进程在命令之后继续存在，属预期。
+- `cove remote add <ALIAS> --via tsnet` 经邀请中的 tsnet 节点配对，记录只有 tsnet 入口且为默认入口；不带 `--via` 时还记录邀请中的
+  tsnet 入口。`remote list` 的 `entries` 可含 `tsnet: { nodeId, name, port }`。
+- 新增 `cove remote tsnet login|status|logout [--yes]|stop [--yes]|config [--idle-timeout D]`，JSON 输出：
+  `{ state, self, hold?, remoteLogoutConfirmed?, streams, warnings, daemon: { pid, build, protocol } }`；`stop` 输出
+  `{ running: false, stopped? }`，没有 dial 进程时不启动；`config` 输出 `{ idleTimeoutSeconds, appliesFrom }`。
+  auth key 只从隐藏提示或 stdin 读，输入为空时在 stderr 显示登录 URL（不进 JSON）。`IDENTITY_CHANGED`、`LOGIN_UNCERTAIN`、
+  `ALREADY_LOGGED_IN` 与有活动流而未带 `--yes` 的 `ACTIVE_STREAMS` 以 1 退出；`remoteLogoutConfirmed: false` 以 0 退出并在 stderr 警告。
+- dial 进程的 build 与 CLI 不同时：无活动流则替换；有活动流且本机协议兼容则沿用并在 stderr 警告；不兼容则以 1 退出并列出活动流。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -500,3 +515,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `eea6b9b`；#162（M2 T3，未合入）           | 更正 PENDING #162：`server upgrade` 在重启前再查一次 server，安装期间状态或实例变了就重新确认（没有 `--yes` 且不在终端中时以 2 退出，输出另带 `build`，新 build 已安装并激活但未重启）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 2026-10-22 | main `eea6b9b`；#162（M2 T3，未合入）           | 更正 PENDING #162：systemd 下 `stoppedAfterCrashes` 只在单元 journal 记录了启动次数限制（且其后没有再启动或停止）时为 true，请求的停止失败不再算作崩溃后停止                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 2026-10-22 | main `9878530`；#167（M2 T5b，未合入）          | 新增 PENDING #167：`server tsnet login/status/logout`（auth key 只从提示或 stdin 读，提示处取消以 130 退出，登录 URL 只在 stderr；结果不确定为 `requires_attention`）；新增错误 kind `TSNET_LOGIN_FAILED`、`TSNET_IDENTITY_CHANGED`、`TSNET_LOGIN_UNCERTAIN`（1050–1052）；邀请可含 `entries.tsnet`；业务端口的原始连接上限与请求头期限                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 2026-10-22 | main `eea6b9b`；#165（M2 T4，未合入）           | 新增 PENDING #165：`--via tsnet` 可用（客户端自己的按需 `cove-tsnet dial` 节点，按稳定 ID 连 server 节点，不可用或核对不符时以 1 退出且不发送 token）；`remote add --via tsnet` 经 tsnet 配对，配对记录增加 tsnet 入口 `{nodeId, name, port}`；新增 `remote tsnet login/status/logout/stop/config`（auth key 只经提示或 stdin，有活动连接时 `logout`/`stop` 须 `--yes`）；本机、loopback 与 SSH 的请求和输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
