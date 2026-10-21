@@ -13,7 +13,8 @@ import { sshClients, sshdUnavailable, startSshd } from "./sshd-fixture.mjs";
 // Where an unprivileged sshd cannot run, createSshFixture fails with the reason: the test gate
 // counts a skipped required test as a failure, so the SSH cases never pass by not running.
 
-export async function createSshFixture() {
+// `options` go to startSshd (`hostile`).
+export async function createSshFixture(options = {}) {
   const unavailable = await sshdUnavailable();
   if (unavailable)
     throw new Error(`the m2 SSH scenarios need an unprivileged sshd: ${unavailable}`);
@@ -22,7 +23,7 @@ export async function createSshFixture() {
   const savedPath = process.env.PATH;
   const sessions = [];
   try {
-    sshd = await startSshd(join(fixture.root, "ssh"));
+    sshd = await startSshd(join(fixture.root, "ssh"), options);
   } catch (error) {
     await fixture.cleanup();
     throw error;

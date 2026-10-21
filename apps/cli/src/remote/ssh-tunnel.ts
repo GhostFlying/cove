@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { connect, createServer } from "node:net";
 import { SshTargetSchema } from "@cove/protocol/auth";
 import { RemoteError } from "./entry-types.js";
@@ -13,7 +13,14 @@ import { RemoteError } from "./entry-types.js";
 // invitation secret released. Cove never writes the user's known_hosts or ssh config.
 //
 // Options on the command line take precedence over the user's ssh config (ssh uses the first value
-// it obtains for an option), so the user's config cannot widen the forward:
+// it obtains for an option), so the user's config can neither switch the host-key check off nor
+// widen or prolong the forward:
+// - NoHostAuthenticationForLocalhost=no, and on Apple's ssh NoHostAuthenticationForProxyCommand=no:
+//   ordinary settings (a target alias that resolves to loopback, a target behind a ProxyCommand)
+//   would otherwise skip the host-key check, and a man in the middle that relays the public
+//   serverId would receive the token or the invitation secret;
+// - ForkAfterAuthentication=no: a forking ssh leaves the supervisor, which then cannot end it, and
+//   its forward would outlive the command;
 // - `-L 127.0.0.1:<local>:127.0.0.1:<remote>` binds the local end on 127.0.0.1 only, and
 //   GatewayPorts=no keeps it there even when the config says `GatewayPorts yes`; the remote end
 //   is the target host's own 127.0.0.1;
@@ -25,6 +32,15 @@ import { RemoteError } from "./entry-types.js";
 // - UpdateHostKeys=no: ssh does not add keys the server offers to the user's known_hosts (with
 //   StrictHostKeyChecking=yes it never adds an unknown host either), so a command never writes it.
 // The argv holds only the target and the ports: no token or secret ever goes to ssh.
+//
+// Effective configuration. Some keywords exist only in some ssh builds (Apple's ProxyCommand
+// option; ForkAfterAuthentication since OpenSSH 8.7), and ssh refuses an unknown keyword on its
+// command line. Before each tunnel `ssh -G` resolves the target's configuration with the pins: an
+// optional pin it rejects as unknown is left out (that build cannot have the setting either, and
+// IgnoreUnknown on the command line would replace the user's own), and the resolved values must
+// show host authentication on, no fork, and the forward's own pins. Anything else, or a failed
+// resolution, refuses the entry before ssh connects, so the tunnel never runs with host
+// authentication off.
 //
 // Lifetime. The tunnel lives as long as the command. ssh runs under a small POSIX sh supervisor
 // in a session and process group of its own (spawn `detached`), whose stdin is a pipe from this
@@ -69,6 +85,41 @@ const KILL_GRACE_MS = 1_000;
 // printable ASCII before it is shown.
 const STDERR_TAIL_BYTES = 4096;
 const DETAIL_CHARS = 200;
+const CONFIG_TIMEOUT_MS = 10_000;
+const CONFIG_OUTPUT_BYTES = 1 << 20;
+
+// Pins every supported ssh knows, as `-o` values.
+const PINS = [
+  "BatchMode=yes",
+  "StrictHostKeyChecking=yes",
+  "NoHostAuthenticationForLocalhost=no",
+  "ExitOnForwardFailure=yes",
+  "GatewayPorts=no",
+  "ControlMaster=no",
+  "ControlPath=none",
+  `ConnectTimeout=${CONNECT_TIMEOUT_S}`,
+  "ServerAliveInterval=15",
+  "ServerAliveCountMax=3",
+  "UpdateHostKeys=no",
+];
+// Pins whose keyword only some builds know; left out where `ssh -G` rejects the keyword.
+export const OPTIONAL_PINS = [
+  "NoHostAuthenticationForProxyCommand=no",
+  "ForkAfterAuthentication=no",
+] as const;
+// The values `ssh -G` must resolve with the pins in effect (its lowercase keys and spellings).
+const REQUIRED_VALUES: Readonly<Record<string, string>> = {
+  batchmode: "yes",
+  stricthostkeychecking: "true",
+  nohostauthenticationforlocalhost: "no",
+  exitonforwardfailure: "yes",
+  gatewayports: "no",
+  controlmaster: "false",
+};
+// Keys that must resolve to `no` wherever this build knows them.
+const NO_WHERE_KNOWN = ["nohostauthenticationforproxycommand", "forkafterauthentication"];
+// The optional keywords this process's ssh rejected, learned once.
+let rejectedKeywords = new Set<string>();
 
 // The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process
 // and fd 4 the stderr pipe, which only ssh writes to: the shell's own stderr goes to /dev/null, so
@@ -88,20 +139,23 @@ const SUPERVISOR = [
   'exit "$status"',
 ].join("\n");
 
-export function sshArguments(target: string, localPort: number, remotePort: number): string[] {
+function pinArguments(optional: readonly string[]): string[] {
+  return [...PINS, ...optional].flatMap((pin) => ["-o", pin]);
+}
+
+const keywordOf = (pin: string): string => pin.slice(0, pin.indexOf("=")).toLowerCase();
+
+// ssh's argv for a tunnel, with the optional pins this build accepts (resolvedPins).
+export function sshArguments(
+  target: string,
+  localPort: number,
+  remotePort: number,
+  optional: readonly string[] = OPTIONAL_PINS,
+): string[] {
   return [
     "-N",
     "-T",
-    ...["-o", "BatchMode=yes"],
-    ...["-o", "StrictHostKeyChecking=yes"],
-    ...["-o", "ExitOnForwardFailure=yes"],
-    ...["-o", "GatewayPorts=no"],
-    ...["-o", "ControlMaster=no"],
-    ...["-o", "ControlPath=none"],
-    ...["-o", `ConnectTimeout=${CONNECT_TIMEOUT_S}`],
-    ...["-o", "ServerAliveInterval=15"],
-    ...["-o", "ServerAliveCountMax=3"],
-    ...["-o", "UpdateHostKeys=no"],
+    ...pinArguments(optional),
     ...["-L", `127.0.0.1:${localPort}:127.0.0.1:${remotePort}`],
     // Everything after `--` is the destination: a target can never be read as an option.
     "--",
@@ -171,6 +225,75 @@ function delay(ms: number): Promise<"timeout"> {
   return new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
 }
 
+type Resolved = { code: number | null; stdout: string; stderr: string };
+
+function resolveConfig(args: string[]): Promise<Resolved> {
+  return new Promise((resolve) => {
+    execFile(
+      "ssh",
+      ["-G", ...args],
+      { timeout: CONFIG_TIMEOUT_MS, maxBuffer: CONFIG_OUTPUT_BYTES, encoding: "latin1" },
+      (error, stdout, stderr) =>
+        resolve({
+          code: error ? (typeof error.code === "number" ? error.code : null) : 0,
+          stdout,
+          stderr: error && !stderr ? error.message : stderr,
+        }),
+    );
+  });
+}
+
+// The optional pins to use for `target`, after `ssh -G` showed that the resolved configuration
+// keeps host authentication on and ssh attached (see the top of the file). Throws RemoteError.
+export async function resolvedPins(target: string): Promise<string[]> {
+  const rejected = new Set(rejectedKeywords);
+  for (let attempt = 0; attempt <= OPTIONAL_PINS.length; attempt++) {
+    const optional = OPTIONAL_PINS.filter((pin) => !rejected.has(keywordOf(pin)));
+    const result = await resolveConfig([...pinArguments(optional), "--", target]);
+    if (result.code !== 0) {
+      const unknown = /Bad configuration option: (\S+)/i.exec(result.stderr)?.[1]?.toLowerCase();
+      if (unknown !== undefined && optional.some((pin) => keywordOf(pin) === unknown)) {
+        rejected.add(unknown);
+        continue;
+      }
+      const line = lastLine(result.stderr);
+      throw new RemoteError(
+        "ENTRY_UNAVAILABLE",
+        `ssh -G could not resolve the configuration of ${target}` +
+          `${result.code === null ? "" : ` (status ${result.code})`}${line ? `: ${line}` : ""}; ` +
+          "nothing was sent",
+      );
+    }
+    rejectedKeywords = rejected;
+    const values = new Map<string, string>();
+    for (const line of result.stdout.split("\n")) {
+      const match = /^(\S+) (.*)$/.exec(line.trim());
+      if (match && !values.has(match[1]!.toLowerCase()))
+        values.set(match[1]!.toLowerCase(), match[2]!);
+    }
+    const wrong = [
+      ...Object.entries(REQUIRED_VALUES).filter(([key, value]) => values.get(key) !== value),
+      ...NO_WHERE_KNOWN.filter((key) => values.has(key) && values.get(key) !== "no").map(
+        (key) => [key, "no"] as const,
+      ),
+    ];
+    if (wrong.length > 0)
+      throw new RemoteError(
+        "ENTRY_UNAVAILABLE",
+        `ssh would connect to ${target} with ` +
+          wrong
+            .map(([key, value]) => `${key} ${lastLine(values.get(key) ?? "unset")} (not ${value})`)
+            .join(", ") +
+          "; Cove does not open the tunnel; nothing was sent",
+      );
+    return optional;
+  }
+  throw new RemoteError(
+    "ENTRY_UNAVAILABLE",
+    `ssh -G could not resolve the configuration of ${target}; nothing was sent`,
+  );
+}
+
 // Ends a supervised ssh: end-of-file on the supervisor's pipe, then TERM and KILL to its group
 // while the supervisor (the group's leader, so the group is still this tunnel's) has not exited.
 async function stop({ child, ended }: Started): Promise<void> {
@@ -198,11 +321,14 @@ export async function openSshTunnel(options: SshTunnelOptions): Promise<SshTunne
       "ENTRY_UNAVAILABLE",
       "the recorded SSH target is invalid; nothing was sent",
     );
+  const optional = await resolvedPins(options.target);
   const deadline = Date.now() + (options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
   let failure = "";
   for (let attempt = 1; attempt <= BIND_ATTEMPTS; attempt++) {
     const localPort = await freeLoopbackPort();
-    const started = startSupervised(sshArguments(options.target, localPort, options.remotePort));
+    const started = startSupervised(
+      sshArguments(options.target, localPort, options.remotePort, optional),
+    );
     let exited = false;
     void started.ended.then(() => (exited = true));
     for (;;) {
