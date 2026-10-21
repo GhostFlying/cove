@@ -128,3 +128,26 @@ func TestRemoteHalfCloseKeepsLocalSideOpen(t *testing.T) {
 	}
 	waitDone(t, done, 5*time.Second)
 }
+
+// The grace is an inactivity bound, not a deadline: after the local side
+// half-closes, a peer that keeps sending keeps the stream well past the
+// grace, and only silence ends it.
+func TestLocalHalfCloseKeepsAnActivePeerPastGrace(t *testing.T) {
+	localNear, localFar, remoteNear, remoteFar := pairs(t)
+	const grace = 200 * time.Millisecond
+	done := joined(localNear, remoteNear, grace)
+	localFar.(*net.UnixConn).CloseWrite()
+	go func() {
+		for range 10 { // 10 × 100 ms: five graces of streaming
+			remoteFar.Write([]byte("chunk"))
+			time.Sleep(grace / 2)
+		}
+		remoteFar.(*net.TCPConn).CloseWrite()
+	}()
+	localFar.SetReadDeadline(time.Now().Add(10 * time.Second))
+	b, err := io.ReadAll(localFar)
+	if err != nil || len(b) != 10*len("chunk") {
+		t.Fatalf("local read %d bytes: %v", len(b), err)
+	}
+	waitDone(t, done, 5*time.Second)
+}
