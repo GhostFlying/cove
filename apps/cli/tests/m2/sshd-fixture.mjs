@@ -18,9 +18,8 @@ import { waitFor } from "../recording-view.mjs";
 // The sshd authenticates the current user by the fixture key only. Everything is under `directory`,
 // which the caller removes; stop() ends the sshd.
 //
-// Availability. sshd is looked up in the usual system locations. When it cannot run (no sshd, or
-// a platform that refuses an unprivileged one), sshdUnavailable() returns the reason and the
-// scenario logs it and skips only its SSH cases; never silently.
+// Availability. sshd is looked up in the usual system locations. When it cannot run,
+// sshdUnavailable() returns the reason and the scenario fails with it (ssh-scenario.mjs).
 
 export const TARGET = "cove-test-sshd";
 const SSHD_PATHS = ["/usr/sbin/sshd", "/usr/local/sbin/sshd", "/opt/homebrew/sbin/sshd"];

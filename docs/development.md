@@ -230,7 +230,7 @@ SSH 入口：
 
 SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixture.mjs` 自起一个非特权 sshd：独立配置、
 测试生成的 host key 与客户端 key、127.0.0.1 上的高端口、`UsePAM no`。客户端经 PATH 上的 `ssh` 包装加 `-F`
-使用夹具自己的 ssh 配置与 known_hosts，不读取操作者的 `~/.ssh`。找不到 sshd 时这些用例在 stderr 说明原因后跳过。
+使用夹具自己的 ssh 配置与 known_hosts，不读取操作者的 `~/.ssh`。找不到 sshd 时这些用例以原因失败而不是跳过（门禁把跳过的必需用例算作失败）。
 
 - loopback 入口只核对 server 回报的 serverId：它识别 server，但不证明对端就是它。同一主机上的其他进程抢先占用端口
   并冒充 server 的情况不在防护范围内（见 [relay-protocol §11.8](relay-protocol.md)）。

@@ -10,13 +10,13 @@ import { sshClients, sshdUnavailable, startSshd } from "./sshd-fixture.mjs";
 // (sshd-fixture.mjs) whose target the server advertises, with the fixture's ssh first on the PATH
 // of every CLI the fixture runs and of this test process (the tunnels of in-process sessions).
 //
-// `unavailable` is the reason the SSH cases cannot run on this host, or null; the scenarios skip
-// only those cases, and say so on stderr.
-
-export const unavailable = await sshdUnavailable();
-if (unavailable) process.stderr.write(`m2 SSH scenarios skipped: ${unavailable}\n`);
+// Where an unprivileged sshd cannot run, createSshFixture fails with the reason: the test gate
+// counts a skipped required test as a failure, so the SSH cases never pass by not running.
 
 export async function createSshFixture() {
+  const unavailable = await sshdUnavailable();
+  if (unavailable)
+    throw new Error(`the m2 SSH scenarios need an unprivileged sshd: ${unavailable}`);
   const fixture = await createAuthFixture();
   let sshd;
   const savedPath = process.env.PATH;
