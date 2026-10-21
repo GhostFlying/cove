@@ -493,19 +493,28 @@ export async function serviceCommand(args: Arguments): Promise<number> {
   });
 }
 
-// Restarts the service with whatever `current` names. The caller holds the lock and confirmed.
-async function restartService(layout: InstallLayout, previous: Session | null) {
+type RunningServer = { serverId: string; relayInstanceId: string; buildVersion: string };
+
+// The running server's identity before a restart; refuses a server started in the foreground,
+// which the service manager cannot restart.
+async function restartable(local: LocalServer): Promise<RunningServer | null> {
+  if (local.state !== "running") return null;
+  const status = unwrap("server.status", await local.session.client.call("server.status", {}));
+  if (status.service?.manager === "foreground")
+    throw new Error(
+      "the running server was started in the foreground (`cove server start`); stop it there " +
+        "and run `cove server service start`",
+    );
+  return status;
+}
+
+// Restarts the service with whatever `current` names. The caller holds the lock, confirmed, and
+// has already closed its own session to the server: the service manager calls block this process
+// (spawnSync), so a session still open could not answer the stopping server's WebSocket close
+// handshake, and the server's orderly shutdown would wait for it until the manager's stop timeout
+// (TimeoutStopSec, ExitTimeOut) killed it.
+async function restartService(layout: InstallLayout, before: RunningServer | null) {
   const backend = backendOrThrow(layout);
-  let before: { serverId: string; relayInstanceId: string; buildVersion: string } | null = null;
-  if (previous) {
-    const status = unwrap("server.status", await previous.client.call("server.status", {}));
-    if (status.service?.manager === "foreground")
-      throw new Error(
-        "the running server was started in the foreground (`cove server start`); stop it there " +
-          "and run `cove server service start`",
-      );
-    before = status;
-  }
   const stale = before?.relayInstanceId ?? (await rendezvousInstance(layout));
   await requestStart(layout);
   if (backend.status().registered) await backend.restart();
@@ -529,13 +538,16 @@ export async function serverRestart(args: Arguments): Promise<number> {
   const layout = await layoutOf(args);
   return withLock(layout, async () => {
     const local = await localServer(layout);
+    let impact;
+    let before;
     try {
-      const impact = await confirmStop(args, local, "server restart");
-      print({ ...(await restartService(layout, sessionOf(local))), impact });
-      return 0;
+      impact = await confirmStop(args, local, "server restart");
+      before = await restartable(local);
     } finally {
       await release(local);
     }
+    print({ ...(await restartService(layout, before)), impact });
+    return 0;
   });
 }
 
@@ -547,22 +559,21 @@ export async function serverUpgrade(args: Arguments): Promise<number> {
   const layout = await layoutOf(args);
   return withLock(layout, async () => {
     const local = await localServer(layout);
+    let impact;
+    let before;
     try {
-      const impact = await confirmStop(args, local, "server upgrade");
-      const installed = await installClosure(
-        layout,
-        source === undefined ? undefined : resolve(source),
-      );
-      await activate(layout, installed.build);
-      print({
-        build: installed.build,
-        ...(await restartService(layout, sessionOf(local))),
-        impact,
-      });
-      return 0;
+      impact = await confirmStop(args, local, "server upgrade");
+      before = await restartable(local);
     } finally {
       await release(local);
     }
+    const installed = await installClosure(
+      layout,
+      source === undefined ? undefined : resolve(source),
+    );
+    await activate(layout, installed.build);
+    print({ build: installed.build, ...(await restartService(layout, before)), impact });
+    return 0;
   });
 }
 
