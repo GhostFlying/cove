@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -136,11 +137,41 @@ func shortDir(t *testing.T) string {
 	return d
 }
 
+// childPath is the only PATH a child sees: one empty directory owned by
+// the test run. System directories are not safe here: a host with
+// Tailscale installed has tailscale in /usr/bin and tailscaled in
+// /usr/sbin. cove-tsnet needs no external program, so an empty PATH also
+// shows that it runs none.
+var childPath string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "cove-tsnet-path-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	childPath = dir
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
 // childEnv is the environment of every child. It points the nodes at the
 // test control plane only, keeps them off the real one, and carries no
 // credential.
+//
+// PATH is replaced by childPath, so a child that tried to run a system
+// tailscale or tailscaled could not find one; TestChildPathHasNoTailscale
+// checks that the directories hold none.
 func childEnv() []string {
-	return append(os.Environ(),
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "PATH=") {
+			env = append(env, kv)
+		}
+	}
+	return append(env,
+		"PATH="+childPath,
 		"TS_ASSUME_NETWORK_UP_FOR_TEST=1",
 		"TS_PANIC_IF_HIT_MAIN_CONTROL=1",
 		"TS_DISABLE_PORTMAPPER=1",
