@@ -2,9 +2,11 @@
 package pipe
 
 import (
+	"errors"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -18,12 +20,14 @@ type closeWriter interface{ CloseWrite() error }
 // When one direction reaches EOF, the write side of the other connection is
 // half-closed, so request-then-EOF protocols keep working. A read cannot
 // tell a half-close from a full close, so when a finishes first and grace
-// is positive, b must finish its direction within grace or both are closed:
-// otherwise a remote peer that never sends again would pin the connection
-// after the local side has hung up (for serve, that is an unauthenticated
-// tailnet peer holding the forwarding budget). When b finishes first, a is
-// trusted and unbounded. Closing either connection from outside, or a write
-// error, ends both directions.
+// is positive, b is held to an inactivity bound: each read from b must
+// arrive within grace of the previous one (or of a's EOF), or both are
+// closed. Otherwise a remote peer that never sends again would pin the
+// connection after the local side has hung up (for serve, that is an
+// unauthenticated tailnet peer holding the forwarding budget), while a peer
+// still streaming its half keeps going for as long as it sends. When b
+// finishes first, a is trusted and unbounded. Closing either connection
+// from outside, or a read or write error, ends both directions.
 func Join(a net.Conn, aReader io.Reader, b net.Conn, grace time.Duration) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -31,6 +35,9 @@ func Join(a net.Conn, aReader io.Reader, b net.Conn, grace time.Duration) {
 		a.Close()
 		b.Close()
 	}
+	// bounded is set once a has finished; from then on every read from b
+	// pushes b's read deadline grace into the future.
+	var bounded atomic.Bool
 	go func() {
 		defer wg.Done()
 		_, err := io.Copy(b, aReader)
@@ -41,14 +48,19 @@ func Join(a net.Conn, aReader io.Reader, b net.Conn, grace time.Duration) {
 		}
 		cw.CloseWrite()
 		if grace > 0 {
+			bounded.Store(true)
 			// Unblocks the b→a copy below with a timeout error, which tears
-			// both connections down.
+			// both connections down, unless b sends again in time.
 			b.SetReadDeadline(time.Now().Add(grace))
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		_, err := io.Copy(a, b)
+		err := copyFrom(a, b, func() {
+			if bounded.Load() {
+				b.SetReadDeadline(time.Now().Add(grace))
+			}
+		})
 		cw, ok := a.(closeWriter)
 		if err != nil || !ok {
 			teardown()
@@ -58,4 +70,25 @@ func Join(a net.Conn, aReader io.Reader, b net.Conn, grace time.Duration) {
 	}()
 	wg.Wait()
 	teardown()
+}
+
+// copyFrom copies src to dst like io.Copy, calling onRead after each read
+// that returned data. It returns nil at EOF.
+func copyFrom(dst io.Writer, src io.Reader, onRead func()) error {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			onRead()
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				return werr
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
