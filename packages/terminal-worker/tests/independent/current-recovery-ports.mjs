@@ -51,12 +51,22 @@ export async function turns(count = 4) {
   assert(count <= 256, "bounded callback turns");
   for (let i = 0; i < count; i++) await new Promise((resolve) => setImmediate(resolve));
 }
-export async function untilTurn(predicate, label, count = 64) {
-  for (let i = 0; i < count; i++) {
-    if (predicate()) return;
+// Checks the predicate once per setImmediate turn until it holds, bounded by wall-clock time
+// rather than a turn count. Some of these observations wait on work that completes on a timer
+// (the real worker's engine, or the built client, which yields with setTimeout), and how many
+// immediate turns pass before a timer fires depends on machine speed: about 63 before a 2 ms
+// timer on an M-series Mac, so the old budget of 64 turns ran out on fast machines (#87). A wait
+// that only needs immediate turns still returns on the same turn as before; one that never
+// holds still fails as NOT_EXERCISED.
+export async function untilTurn(predicate, label, deadlineMs = 5_000) {
+  const deadline = performance.now() + deadlineMs;
+  let turnCount = 0;
+  while (!predicate()) {
+    if (performance.now() >= deadline)
+      assert.fail(`NOT_EXERCISED within ${deadlineMs}ms (${turnCount} turns): ${label}`);
     await turns(1);
+    turnCount++;
   }
-  assert(predicate(), `NOT_EXERCISED: ${label}`);
 }
 export function record(id, value) {
   const dir = process.env.COVE_W2_CURRENT_QA_OUTPUT;
