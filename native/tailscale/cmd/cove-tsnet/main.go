@@ -172,6 +172,18 @@ func runServe(args []string) int {
 	return exitOK
 }
 
+// debugPause stops the process at a test pause point and returns only after
+// SIGCONT. Stopping oneself is asynchronous on Linux, so the calling thread
+// could otherwise run past the pause point before the stop takes effect.
+func debugPause(point string) {
+	cont := make(chan os.Signal, 1)
+	signal.Notify(cont, syscall.SIGCONT)
+	defer signal.Stop(cont)
+	fmt.Fprintf(os.Stderr, "cove-tsnet: debug pause at %s pid=%d\n", point, os.Getpid())
+	syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+	<-cont
+}
+
 func runDial(args []string) int {
 	var c common
 	var idle time.Duration
@@ -212,8 +224,7 @@ func runDial(args []string) int {
 		Logf:        eventLogf(),
 		Pause: func(point string) {
 			if pauses[point] {
-				fmt.Fprintf(os.Stderr, "cove-tsnet: debug pause at %s pid=%d\n", point, os.Getpid())
-				syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+				debugPause(point)
 			}
 		},
 	})

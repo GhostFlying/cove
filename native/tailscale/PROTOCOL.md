@@ -261,8 +261,9 @@ audit only and never authorizes anything: the connection still needs a Cove devi
 ## Test pause points
 
 `cove-tsnet dial --debug-pause-at <point>[,<point>]` makes the daemon print
-`cove-tsnet: debug pause at <point> pid=<pid>` to stderr and stop itself with SIGSTOP, so a test
-fixture can interleave races and then SIGCONT or SIGKILL it. It is for tests only.
+`cove-tsnet: debug pause at <point> pid=<pid>` to stderr and stop itself with SIGSTOP. It does not
+continue past the point until it receives SIGCONT, so a test fixture can interleave races and then
+SIGCONT or SIGKILL it. It is for tests only.
 
 | Point      | State when paused                                                                          |
 | ---------- | ------------------------------------------------------------------------------------------ |
