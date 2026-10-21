@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { PortSchema } from "@cove/protocol/auth";
+import { PortSchema, SshTargetSchema } from "@cove/protocol/auth";
 import { DeviceIdSchema, DeviceTokenSchema } from "@cove/protocol/bootstrap";
 import { OpaqueIdSchema } from "@cove/protocol/identity";
 
@@ -12,14 +12,31 @@ import { OpaqueIdSchema } from "@cove/protocol/identity";
 // given at pairing (the only place the token is kept on disk), and the entries this client has
 // verified reach that server, with the default one (D11: never switched automatically).
 //
-// Entries. T1 verifies only the loopback entry: pairing over 127.0.0.1 checks the serverId the
-// pairing listener reports before the secret is submitted. T2 (SSH) and T4 (tsnet) add their
-// kinds here together with their verification.
+// Entries (D11). Each names how this client reaches the server's loopback business port:
+// - loopback `{ port }`: the server is on this host (recorded when pairing over loopback);
+// - ssh `{ target, port }`: `ssh -L` to `target`, forwarding to 127.0.0.1:`port` on its host
+//   (ssh-tunnel.ts). The target is the one the invitation advertised.
+// An entry is verified on every use, not once at pairing: the channel's own peer check (ssh's
+// host key against the user's known_hosts) and then the serverId (entries.ts verifiedIdentity),
+// both before the token is released. T4 adds the tsnet kind with its node identity.
 
 export const ENTRY_KINDS = ["loopback", "ssh", "tsnet"] as const;
 export type EntryKind = (typeof ENTRY_KINDS)[number];
 export type LoopbackEntry = { readonly port: number };
-export type ServerEntries = { readonly loopback?: LoopbackEntry };
+export type SshEntry = { readonly target: string; readonly port: number };
+export type ServerEntries = { readonly loopback?: LoopbackEntry; readonly ssh?: SshEntry };
+
+// Whether `entry` is a valid entry of `kind`, with exactly its members.
+function validEntry(kind: string, entry: unknown): boolean {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  const fields = entry as Record<string, unknown>;
+  const keys = Object.keys(fields).sort().join();
+  if (!PortSchema.safeParse(fields.port).success) return false;
+  if (kind === "loopback") return keys === "port";
+  if (kind === "ssh")
+    return keys === "port,target" && SshTargetSchema.safeParse(fields.target).success;
+  return false;
+}
 
 export type ServerRecord = {
   readonly version: 1;
@@ -48,13 +65,7 @@ export function parseServerRecord(value: unknown): ServerRecord | null {
   if (keys !== "alias,defaultEntry,deviceId,entries,pairedAtMs,serverId,token,version") return null;
   const entries = record.entries as Record<string, unknown> | null;
   if (!entries || typeof entries !== "object" || Array.isArray(entries)) return null;
-  for (const [kind, entry] of Object.entries(entries)) {
-    if (kind !== "loopback" || !entry || typeof entry !== "object" || Array.isArray(entry))
-      return null;
-    const fields = entry as Record<string, unknown>;
-    if (Object.keys(fields).join() !== "port" || !PortSchema.safeParse(fields.port).success)
-      return null;
-  }
+  for (const [kind, entry] of Object.entries(entries)) if (!validEntry(kind, entry)) return null;
   const token = DeviceTokenSchema.safeParse(record.token);
   if (
     record.version !== 1 ||

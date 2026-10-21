@@ -7,7 +7,8 @@ import {
   type InvitationPayload,
   type PairingRedeemResult,
 } from "@cove/protocol/auth";
-import { pairingEndpoint, preAuthIdentity, RemoteError, type Via } from "./entries.js";
+import type { ServerRecord } from "./credentials.js";
+import { openPairingEntry, preAuthIdentity, RemoteError, type Via } from "./entries.js";
 import { postJson, TransportFailure } from "./http.js";
 
 // Client side of pairing (m2 D6, "配对流程与状态" steps 2–5). The invitation string holds a
@@ -28,17 +29,33 @@ export function parseInvitation(text: string): InvitationPayload {
   return payload;
 }
 
-// Redeems an invitation: reach its pairing listener over the chosen entry, check that the server
-// there is the invitation's (serverId) before anything secret is sent, then submit the secret and
-// this device's name. A refusal is one answer for every reason (expired, redeemed, cancelled,
-// wrong secret); a lost answer is not retried (D6): the operator creates a new invitation.
+// Redeems an invitation: reach its pairing listener over the chosen entry (loopback without `via`,
+// or the invitation's SSH target through a tunnel to its pairing port), whose channel checks its
+// peer while it opens (the SSH host key), check that the server there is the invitation's
+// (serverId) before anything secret is sent, then submit the secret and this device's name. A
+// refusal is one answer for every reason (expired, redeemed, cancelled, wrong secret); a lost
+// answer is not retried (D6): the operator creates a new invitation. The entry (an SSH tunnel)
+// lives only for the redemption.
 export async function redeemInvitation(
   payload: InvitationPayload,
   deviceName: string,
   via: Via | undefined,
   buildVersion: string,
 ): Promise<PairingRedeemResult> {
-  const endpoint = pairingEndpoint(payload.pairingPort, via);
+  const entry = await openPairingEntry(payload, via);
+  try {
+    return await redeemOver(entry.endpoint, payload, deviceName, buildVersion);
+  } finally {
+    await entry.close();
+  }
+}
+
+async function redeemOver(
+  endpoint: string,
+  payload: InvitationPayload,
+  deviceName: string,
+  buildVersion: string,
+): Promise<PairingRedeemResult> {
   const identity = await preAuthIdentity(endpoint, buildVersion, "the invitation's pairing port");
   if (identity.serverId !== payload.serverId)
     throw new RemoteError(
@@ -88,4 +105,39 @@ export async function redeemInvitation(
       ? `the pairing listener refused the request (${failure.data.kind}); try again later`
       : "the pairing listener gave an invalid answer",
   );
+}
+
+// The credential record of a redeemed invitation (D5, D11). Its entries are the ones this pairing
+// reached and the invitation's own:
+// - paired over loopback (no `via`): the loopback business port, which is the default, and the
+//   invitation's SSH target, if any, at the same business port on that host;
+// - paired over SSH: that SSH target only, which is the default (the client is on another host,
+//   so the server's loopback port is not reachable as this host's).
+// Every entry is verified again on each use (the SSH host key, then the serverId), not trusted
+// because it was recorded. tsnet entries are T4's.
+export function pairedRecord(
+  alias: string,
+  payload: InvitationPayload,
+  result: PairingRedeemResult,
+  via: Via | undefined,
+  pairedAtMs: number = Date.now(),
+): ServerRecord {
+  const port = result.businessPort;
+  const ssh = payload.entries.ssh ? { ssh: { target: payload.entries.ssh.target, port } } : {};
+  const base = {
+    version: 1 as const,
+    alias,
+    serverId: result.serverId,
+    deviceId: result.deviceId,
+    token: result.token,
+    pairedAtMs,
+  };
+  if (via === "ssh" && payload.entries.ssh)
+    return {
+      ...base,
+      defaultEntry: "ssh",
+      entries: { ssh: { target: payload.entries.ssh.target, port } },
+    };
+  if (via !== undefined) throw new Error(`pairing over ${via} is not available in this build`);
+  return { ...base, defaultEntry: "loopback", entries: { loopback: { port }, ...ssh } };
 }

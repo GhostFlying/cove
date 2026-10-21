@@ -9,36 +9,28 @@ import {
 } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
+import type { InvitationPayload } from "@cove/protocol/auth";
 import type { EntryKind, ServerRecord } from "./credentials.js";
+import { RemoteError, type OpenedEntry, type Via } from "./entry-types.js";
 import { postJson, TransportFailure } from "./http.js";
+import { openSshTunnel } from "./ssh-tunnel.js";
+import { openTsnetEntry, openTsnetPairing } from "./tsnet.js";
+
+export { RemoteError, type OpenedEntry, type Via } from "./entry-types.js";
 
 // Entry selection of a remote command (m2 D11). The entry is `--via` when given, otherwise the
-// record's fixed default; a failure is reported with the entries the record has and never
-// answered by trying another one. T1 implements the loopback entry only; ssh and tsnet are
-// ENTRY_UNAVAILABLE until T2 (SSH, and the selection itself) and T4 (tsnet) replace this module's
-// branches for them.
-
-export type Via = "ssh" | "tsnet";
-
-// A failure of a remote command that is not an RPC answer. `kind` is the protocol error kind
-// (errors.ts) it corresponds to; nothing was sent to the server when it is raised before the
-// credential was released, which every raise in this module is.
-export class RemoteError extends Error {
-  constructor(
-    readonly kind: "ENTRY_UNAVAILABLE" | "SERVER_ID_MISMATCH" | "INVITATION_UNAVAILABLE",
-    readonly detail: string,
-  ) {
-    super(`${detail} (${kind})`);
-  }
-}
-
-// An opened entry: the local endpoint that reaches the server, and what to release afterwards
-// (an SSH tunnel's process, T2). The loopback entry has nothing to release.
-export type OpenedEntry = {
-  readonly kind: EntryKind;
-  readonly endpoint: string;
-  close(): Promise<void>;
-};
+// record's fixed default. There is no automatic fallback: a failure to open or verify the selected
+// entry fails the command, naming the entry tried and the entries the record has, and no other
+// entry is tried (Cove never switches entries on its own, for reads or writes alike). Every
+// failure here is raised before the credential is released, so nothing was sent.
+//
+// - loopback: the server's business port on this host.
+// - ssh: an `ssh -L` tunnel to the target host's loopback business port (ssh-tunnel.ts). Requests
+//   carry the tunnel's local authority as Host, which the server accepts as a loopback literal
+//   (user decision 2026-10-22, protocol bootstrap.ts), so no Host rewriting is needed.
+// - tsnet: tsnet.ts, which T4 replaces; until then ENTRY_UNAVAILABLE.
+// The channel's own peer check (the SSH host key) happens while it opens; verifiedIdentity checks
+// the serverId over it next. Both precede any token or invitation secret.
 
 const IDENTITY_TIMEOUT_MS = 10_000;
 
@@ -47,36 +39,80 @@ function available(record: ServerRecord): string {
   return kinds.length ? kinds.join(", ") : "none";
 }
 
-function unsupported(kind: EntryKind): RemoteError {
-  return new RemoteError(
-    "ENTRY_UNAVAILABLE",
-    `the ${kind} entry is not available in this build; nothing was sent`,
+// The hint every entry failure ends with.
+function choices(record: ServerRecord): string {
+  return (
+    `Entries of ${record.alias}: ${available(record)} (choose one with --via ssh|tsnet, or ` +
+    "`cove remote entry default`; Cove never switches entries on its own)"
   );
 }
 
-// Opens the selected entry of `record`.
-export async function openEntry(record: ServerRecord, via: Via | undefined): Promise<OpenedEntry> {
-  const kind: EntryKind = via ?? record.defaultEntry;
-  if (kind !== "loopback") throw unsupported(kind);
-  const entry = record.entries.loopback;
-  if (!entry)
-    throw new RemoteError(
-      "ENTRY_UNAVAILABLE",
-      `${record.alias} has no verified ${kind} entry (entries: ${available(record)}); nothing was sent`,
-    );
-  return { kind, endpoint: `http://127.0.0.1:${entry.port}`, close: async () => undefined };
+// An SSH tunnel to `remotePort` on `target`'s loopback; the endpoint is the tunnel's local end.
+async function openSsh(target: string, remotePort: number): Promise<OpenedEntry> {
+  const tunnel = await openSshTunnel({ target, remotePort });
+  return {
+    kind: "ssh",
+    endpoint: `http://127.0.0.1:${tunnel.localPort}`,
+    close: () => tunnel.close(),
+  };
 }
 
-// The endpoint of an invitation's pairing listener over the chosen entry. Pairing in T1 is over
-// loopback only: the pairing listener of a server on this host.
-export function pairingEndpoint(pairingPort: number, via: Via | undefined): string {
-  if (via !== undefined) throw unsupported(via);
-  return `http://127.0.0.1:${pairingPort}`;
+async function open(record: ServerRecord, kind: EntryKind): Promise<OpenedEntry> {
+  const missing = () =>
+    new RemoteError("ENTRY_UNAVAILABLE", `${record.alias} has no ${kind} entry; nothing was sent`);
+  if (kind === "loopback") {
+    const entry = record.entries.loopback;
+    if (!entry) throw missing();
+    return { kind, endpoint: `http://127.0.0.1:${entry.port}`, close: async () => undefined };
+  }
+  if (kind === "ssh") {
+    const entry = record.entries.ssh;
+    if (!entry) throw missing();
+    return openSsh(entry.target, entry.port);
+  }
+  return openTsnetEntry(record);
+}
+
+// Opens the selected entry of `record`: `via`, else the record's default. Nothing else is tried.
+export async function openEntry(record: ServerRecord, via: Via | undefined): Promise<OpenedEntry> {
+  const kind: EntryKind = via ?? record.defaultEntry;
+  try {
+    return await open(record, kind);
+  } catch (error) {
+    if (!(error instanceof RemoteError)) throw error;
+    throw new RemoteError(
+      error.kind,
+      `cannot open the ${kind} entry of ${record.alias}: ${error.detail}. ${choices(record)}`,
+    );
+  }
+}
+
+// The pairing listener of an invitation over the chosen entry: loopback (a server on this host)
+// when `via` is absent, else the invitation's entry of that kind, forwarded to its pairing port.
+export async function openPairingEntry(
+  payload: InvitationPayload,
+  via: Via | undefined,
+): Promise<OpenedEntry> {
+  if (via === undefined)
+    return {
+      kind: "loopback",
+      endpoint: `http://127.0.0.1:${payload.pairingPort}`,
+      close: async () => undefined,
+    };
+  if (via === "tsnet") return openTsnetPairing(payload);
+  const ssh = payload.entries.ssh;
+  if (!ssh)
+    throw new RemoteError(
+      "ENTRY_UNAVAILABLE",
+      "the invitation names no SSH entry; the invitation was not sent",
+    );
+  return openSsh(ssh.target, payload.pairingPort);
 }
 
 // The pre-authentication identity of a server (relay-protocol §11.8): a bootstrap request
 // without credentials. Its serverId is compared with the expected one before any secret or token
-// is sent; serverId identifies, it does not prove (the channel's own check does that, T2/T4).
+// is sent; serverId identifies, it does not prove. The channel's own peer check proves it: the
+// SSH host key (ssh-tunnel.ts), and the tsnet node's stable ID (T4); loopback has none.
 export async function preAuthIdentity(
   endpoint: string,
   buildVersion: string,
@@ -128,11 +164,7 @@ export async function verifiedIdentity(
     `${record.alias} over ${entry.kind}`,
   ).catch((error: unknown) => {
     if (!(error instanceof RemoteError)) throw error;
-    throw new RemoteError(
-      error.kind,
-      `${error.detail}. Entries of ${record.alias}: ${available(record)} ` +
-        "(choose one with --via; Cove never switches entries on its own)",
-    );
+    throw new RemoteError(error.kind, `${error.detail}. ${choices(record)}`);
   });
   if (identity.serverId !== record.serverId)
     throw new RemoteError(

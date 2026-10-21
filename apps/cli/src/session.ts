@@ -92,7 +92,7 @@ export interface Session {
   // A remote session: the paired server's record and the token in use, which `auth device
   // rotate` replaces (the client asks for the credential before every request).
   readonly remote?: { server: ServerRecord; token(): string; useToken(token: string): void };
-  // Releases what the session's entry holds (an SSH tunnel, T2) after the client is disposed.
+  // Releases what the session's entry holds (an SSH tunnel) after the client is disposed.
   close?(): Promise<void>;
 }
 

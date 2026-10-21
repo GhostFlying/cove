@@ -113,11 +113,11 @@ export async function createAuthFixture() {
 
     // A server for `home` with the auth flags; `args` adds more (e.g. --pairing-port).
     // `storeFaults`: store limits that enable the store-fault seams (auth-server-entry.mjs).
-    async startAuthServer(home, args = [], { storeFaults } = {}) {
+    async startAuthServer(home, args = [], { storeFaults, sshTarget = SSH_TARGET } = {}) {
       // startServerEntry waits for the rendezvous to exist; the one a killed server left would
       // be taken for the new server's, so it is removed first (it names no live server).
       await rm(join(home, "server", "run", "rendezvous.json"), { force: true });
-      base.env.COVE_TEST_SERVER_ARGS = JSON.stringify(["--ssh-target", SSH_TARGET, ...args]);
+      base.env.COVE_TEST_SERVER_ARGS = JSON.stringify(["--ssh-target", sshTarget, ...args]);
       if (storeFaults) base.env.COVE_TEST_STORE_FAULTS = JSON.stringify(storeFaults);
       try {
         const server = await base.startServerEntry(SERVER_ENTRY, home);
