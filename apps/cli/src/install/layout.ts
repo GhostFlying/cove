@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { CLOSURE_CLI, CLOSURE_NODE, CLOSURE_SERVER } from "./closure.js";
+import { releaseLock, tryExclusiveLock } from "./os-lock.js";
 
 // Where `cove server install` keeps things in a data directory (m2 D1). `home` is always the
 // canonical real path: the service unit, the launcher and the lock name it in one spelling.
@@ -9,7 +10,8 @@ import { CLOSURE_CLI, CLOSURE_NODE, CLOSURE_SERVER } from "./closure.js";
 //   install/<build>/          sealed closures, never modified once renamed into place
 //   install/current           relative symlink to one of them, switched atomically
 //   install/.staging-*        a closure being built or copied (removed on failure)
-//   install/.lock             held by one install, activation, service change or uninstall
+//   install/.lock.sqlite      held by one install, activation, service change or uninstall;
+//                             never removed (os-lock.ts)
 //   bin/cove                  the launcher: runs the CLI of install/current
 //   server/                   the server's data, which install never touches but for the
 //                             start request (server/service/) and the LaunchAgent log
@@ -39,7 +41,7 @@ export function installLayout(home: string): InstallLayout {
     home,
     installDirectory,
     current: join(installDirectory, "current"),
-    lock: join(installDirectory, ".lock"),
+    lock: join(installDirectory, ".lock.sqlite"),
     launcher: join(home, "bin", "cove"),
     rendezvous: join(home, "server", "run", "rendezvous.json"),
     logDirectory: join(home, "server", "log"),
@@ -83,53 +85,18 @@ export function launcherScript(layout: InstallLayout): string {
   ].join("\n");
 }
 
-function alive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 // One installation change at a time per data directory: installing, activating, starting or
-// stopping the service, restarting, upgrading, pruning and uninstalling. The lock file holds the
-// holder's pid; a lock whose process is gone (a crashed CLI) is taken over, since nothing else
-// can still be acting under it. Returns the release function.
-export async function acquireInstallLock(layout: InstallLayout): Promise<() => Promise<void>> {
+// stopping the service, restarting, upgrading, pruning and uninstalling. The lock is an OS lock
+// that ends with the holding process (os-lock.ts), so a crashed command leaves nothing to take
+// over. A second command is refused at once rather than queued: an installation command can run
+// for minutes (a closure build, a restart waiting for the new instance). Returns the release
+// function.
+export async function acquireInstallLock(layout: InstallLayout): Promise<() => void> {
   await mkdir(layout.installDirectory, { recursive: true, mode: 0o700 });
-  for (let attempt = 0; ; attempt++) {
-    let handle;
-    try {
-      handle = await open(layout.lock, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const holder = Number((await readFile(layout.lock, "utf8").catch(() => "")).trim());
-      // A lock without a pid yet was just created by a command that has not written it.
-      const fresh = await lstat(layout.lock)
-        .then((info) => Date.now() - info.mtimeMs < 10_000)
-        .catch(() => false);
-      const held = Number.isSafeInteger(holder) && holder > 0 ? alive(holder) : fresh;
-      if (attempt > 0 || held)
-        throw new Error(
-          `another installation command (${layout.lock}) is running for this data directory`,
-        );
-      await unlink(layout.lock).catch(() => undefined);
-      continue;
-    }
-    const owned = await handle.stat();
-    try {
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-    } finally {
-      await handle.close();
-    }
-    return async () => {
-      try {
-        const current = await lstat(layout.lock);
-        if (current.dev === owned.dev && current.ino === owned.ino) await unlink(layout.lock);
-      } catch {
-        /* Already gone. */
-      }
-    };
-  }
+  const held = await tryExclusiveLock(layout.lock);
+  if (!held)
+    throw new Error(
+      `another installation command (${layout.lock}) is running for this data directory`,
+    );
+  return () => releaseLock(held);
 }

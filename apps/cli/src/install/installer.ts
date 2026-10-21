@@ -244,10 +244,11 @@ export async function prune(layout: InstallLayout, keep: ReadonlySet<string>): P
   return removed;
 }
 
-// Removes every installed build, `current` and the launcher; the data directory stays (S1).
+// Removes every installed build, `current` and the launcher; the data directory stays (S1). The
+// install lock file stays too: the caller holds it, and a lock file is never removed (os-lock.ts).
 export async function removeInstallation(layout: InstallLayout): Promise<void> {
   for (const name of await readdir(layout.installDirectory).catch(() => [] as string[]))
-    if (name !== ".lock")
+    if (join(layout.installDirectory, name) !== layout.lock)
       await rm(join(layout.installDirectory, name), { recursive: true, force: true });
   await rm(layout.launcher, { force: true });
 }
