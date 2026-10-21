@@ -334,7 +334,9 @@ PENDING：
   `REPO_ID,path=PATH`。本机模式保持原行为。
 - `cove auth invite create [--ttl-minutes N]` 输出 `{ operation, invitation }`；邀请只在首次响应中出现，以同一 `--operation-id`
   重发时只输出记录并以 1 退出。另有 `auth invite list/cancel`、`auth device list [--include-revoked]/rename/revoke`。
-  `auth device revoke` 等被撤销设备的连接关闭后才返回；有连接未在期限内关闭时仍输出记录，但以 1 退出。
+  `auth device revoke` 等被撤销设备的连接关闭后才返回；有连接未在期限内关闭时仍输出记录（`result.unclosedConnections`
+  为未关闭的连接数），但以 1 退出。设备以 `--server` 撤销自己时语义相同：其他连接（包括持有控制权的终端连接）在应答前关闭，
+  应答报告实际未关闭数，不会因 CLI 自己的终端连接被关闭而变成 `RESULT_UNKNOWN`。
   `auth device rotate` 只能带 `--server`，用于轮换本客户端自己的 token。
 - `cove remote add <ALIAS> [--name N]` 只从隐藏提示或 stdin 读邀请，从不从参数读。另有 `remote list/remove`、
   `remote entry default <ALIAS> <kind>`。`remote tsnet ...` 以 `CAPABILITY_UNAVAILABLE` 失败并以 1 退出。

@@ -3,6 +3,7 @@ import { AUTH_LIMITS, DeviceNameSchema, InviteIdSchema } from "@cove/protocol/au
 import { DeviceIdSchema } from "@cove/protocol/bootstrap";
 import type { OperationRecord, WriteRpcMethod } from "@cove/protocol/rpc";
 import { saveServer } from "../remote/credentials.js";
+import { directCallClient } from "../remote/direct-rpc.js";
 import type { Session } from "../session.js";
 import {
   homeDirectory,
@@ -243,9 +244,24 @@ async function device(args: Arguments): Promise<number> {
     const deviceId = id(args.words[3], DeviceIdSchema, "a device ID");
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
+      // A device revoking itself: the server closes this client's terminal channel before it
+      // answers, so the request goes on an HTTP request of its own (remote/direct-rpc.ts).
+      const remote = session.remote;
+      const sender =
+        remote && remote.server.deviceId === deviceId
+          ? {
+              ...session,
+              client: directCallClient(
+                session.client,
+                session.record,
+                () => `Bearer ${remote.token()}`,
+                "auth.device.revoke",
+              ),
+            }
+          : session;
       // The live answer counts connections that did not close within the server's wait (D8);
       // only that answer has it, so it is read before polling.
-      const accepted = await acceptWrite(args, session, "auth.device.revoke", {
+      const accepted = await acceptWrite(args, sender, "auth.device.revoke", {
         operationId,
         deviceId,
       });
