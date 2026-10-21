@@ -58,6 +58,31 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # cove-tsnet (native/tailscale) builds with Go, not pnpm, so it is a separate job with its own
+  # small bound instead of a share of the check job's budget.
+  tsnet:
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.diagnostic == '' && inputs.expected_sha == '') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: native/tailscale/go.mod
+          cache-dependency-path: native/tailscale/go.sum
+      - run: node scripts/tsnet-build.mjs test -count=1
+      - run: node scripts/tsnet-build.mjs build --goarch arm64
+      - run: node scripts/tsnet-build.mjs build --goarch amd64
+
   browser-close-diagnostic:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic == 'browser-close-v1-l4' }}
     name: browser-close diagnostic (macos-latest)
