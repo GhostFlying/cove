@@ -7,9 +7,9 @@
 
 - M0 实施于 2026-09-26 获批；2026-10-15 用户批准 M0 退出与 M1 进入，并对 M1 的 D1–D10 作出决定
   （[M1](milestones/m1.md)）。
-- **M1 已退出**：用户于 2026-10-21 批准 M1 退出，并只批准 M2 规划。M2 计划草案见 [M2](milestones/m2.md)（PR #142），
+- **M1 已退出，M2 实施中**：用户于 2026-10-21 批准 M1 退出与 M2 规划，同日批准 M2 计划（[M2](milestones/m2.md)，PR #142），
   用户已于 2026-10-21 决定 D1–D14（D9：不用系统 Tailscale，两端内嵌 tsnet；D14：客户端 tsnet 用按需启动的常驻进程）；
-  用户批准计划之前不开始任何 M2 实施。
+  M2 实施已开始。依赖已满足的任务可在各自 worktree 中并行，共享文件单一写入者，零碎工作并入相邻任务。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
 - 威胁模型：单用户，经认证的用户是受信任的所有者；不防范其自我攻击，判据是不丢数据
@@ -17,7 +17,9 @@
 
 ## Main
 
-- main 为 `ee1f0cc`：M1 的最后一个实现 PR 是 #131（T5），之后合入了 T6 文档与试用修复（#134、#136、#137、#139、#141）。
+- main 为 `599dc37`：M1 的最后一个实现 PR 是 #131（T5），之后合入了 T6 文档与试用修复（#134、#136、#137、#139、#141），以及：
+  - #143 run retirement / CLI receipt / Git ≥2.45 floor；
+  - #145 Git floor hardening and store-error retries。
 - 已实现的范围（[M1 交付范围](milestones/m1.md#交付范围)）：
   - 持久 server 身份与 SQLite 存储（数据库在专用 worker thread 中执行，D5/D6），操作记录跨重启去重；
   - repo 注册；task/workspace（入口目录与挂载清单 `cove-workspace.json`）；checkout 与托管 worktree 挂载、
@@ -69,8 +71,8 @@
 
 ## 下一步
 
-1. 用户批准 M2 计划（PR #142）。
-2. 计划获批后按 [M2 任务拆分](milestones/m2.md#任务拆分) 派发；在此之前不开始 M2 实施。
+1. 合入 M2 计划（PR #142）。
+2. 按 [M2 任务拆分](milestones/m2.md#任务拆分) 派发，从 T0 与 T5a 开始。
 
 ## 环境
 
