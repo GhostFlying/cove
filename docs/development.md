@@ -189,10 +189,10 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
 - 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
   `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
 
-## M2 设备配对与 `--server`（T1：只有 loopback 入口）
+## M2 设备配对与 `--server`（loopback 与 SSH 入口）
 
-范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。T1 只实现 loopback 入口，也就是同一主机上的 server，
-它主要用于验证授权；SSH 与 tsnet 入口由 T2、T4 加入，在此之前给 `--via ssh|tsnet` 时报 `ENTRY_UNAVAILABLE`。
+范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。loopback 入口是同一主机上的 server（T1），SSH 入口经系统 `ssh`
+连到另一台主机（T2）；tsnet 入口由 T4 加入，在此之前 `--via tsnet` 报 `ENTRY_UNAVAILABLE`。
 
 ```sh
 # server 端（数据目录 A）。--ssh-target 是邀请中写入的 SSH 目标，省略时取 <用户>@<主机名>；
@@ -207,7 +207,30 @@ cove --home B --server box status                    # 或 COVE_SERVER=box
 cove --home A auth device list                        # 本机所有者也能管理设备
 cove --home B --server box auth device rotate         # 轮换本客户端自己的 token
 cove --home A auth device revoke <deviceId>
+# 另一台主机上的客户端（数据目录 C）经邀请中的 SSH 目标配对，之后默认走 SSH
+cove --home C remote add devbox --via ssh
+cove --home C --server devbox status
+cove --home B --server box --via ssh status           # 同一主机配对的记录也有 ssh 入口
+cove --home B remote entry default box ssh            # 改默认入口；失败时从不自动换入口
 ```
+
+SSH 入口：
+
+- 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
+  ssh 在 `sh` 监督进程下运行，监督进程在 CLI 的管道关闭时结束 ssh，不留下孤儿进程。
+- 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
+  `ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，并关闭连接复用（ControlMaster）；命令行选项优先于
+  用户配置，因此用户配置中的 `GatewayPorts yes` 或 `ControlPersist` 不会让转发监听非 loopback 地址或在命令后继续存在。
+  CLI 不写 known_hosts：第一次连接某台主机前，先用普通 `ssh <目标>` 确认并记录它的 host key。
+- host key 未知或不符时，ssh 在建立转发前失败，命令报 `ENTRY_UNAVAILABLE` 与 ssh 的最后一行输出，不发送 token 或邀请。
+  隧道建立后先核对 serverId，再交出 token。
+- 经隧道的请求以隧道本地端口作 Host。server 接受任何 loopback IP 字面量 Host（`127.0.0.1:<端口>`、`[::1]:<端口>`，
+  用户决定 2026-10-22），只拒绝域名 Host（DNS rebinding 必然带域名）与 `localhost`，因此 CLI 不改写 Host。
+- 入口失败时命令以 1 退出，列出记录中的入口；不会改用其他入口，需要时用 `--via` 或 `remote entry default`。
+
+SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixture.mjs` 自起一个非特权 sshd：独立配置、
+测试生成的 host key 与客户端 key、127.0.0.1 上的高端口、`UsePAM no`。客户端经 PATH 上的 `ssh` 包装加 `-F`
+使用夹具自己的 ssh 配置与 known_hosts，不读取操作者的 `~/.ssh`。找不到 sshd 时这些用例在 stderr 说明原因后跳过。
 
 - loopback 入口只核对 server 回报的 serverId：它识别 server，但不证明对端就是它。同一主机上的其他进程抢先占用端口
   并冒充 server 的情况不在防护范围内（见 [relay-protocol §11.8](relay-protocol.md)）。

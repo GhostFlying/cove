@@ -344,6 +344,21 @@ PENDING：
 - 带有效设备 token 的请求可用全部现有方法。撤销后的设备在 HTTP 上得到 401 `DEVICE_REVOKED`，在 WS 上被以 policy 关闭；
   它已受理的操作照常完成，其他主体可查询。
 
+#161（M2 T2 SSH 入口与入口选择，未合入）：本机命令与 loopback 入口的请求和 JSON 输出不变。
+
+- `--via ssh` 可用：每条命令启动一个系统 `ssh -N -L`，命令结束（包括被 kill）时随之结束。ssh 用用户自己的配置、
+  agent 与 known_hosts，从不交互提示（`BatchMode=yes`）；host key 未知或不符时命令以 1 退出，stderr 含
+  `ENTRY_UNAVAILABLE` 与 ssh 的最后一行，且没有发送 token。tend-runner 若经 SSH 调用远程 server，运行它的用户须能
+  非交互地登录该 SSH 目标。
+- 入口不可达时以 1 退出，stderr 含 `ENTRY_UNAVAILABLE`、所用入口与记录中的全部入口（`Entries of <alias>: ...`），
+  不改用别的入口；入口另一端的 server 不是配对的那个时为 `SERVER_ID_MISMATCH`，同样以 1 退出且不发送 token。
+  `--via tsnet` 仍为 `ENTRY_UNAVAILABLE`。
+- `cove remote add <ALIAS> --via ssh` 经邀请中的 SSH 目标配对，记录只有 ssh 入口且为默认入口；不带 `--via` 时（同一主机）
+  记录 loopback（默认）与邀请中的 ssh 入口。`remote list` 的 `entries` 可含 `ssh: { target, port }`。
+- 修改配对记录的命令改用 `<serverId>.lock.sqlite` 上的 OS 锁，持有者退出即释放；锁文件在 `remote remove` 后保留。
+- 设备以 `--server` 撤销自己的请求有 15 秒期限：请求已发出后超时报 `RESULT_UNKNOWN`（以 1 退出）；撤销可能已生效，
+  该设备的 token 随之失效，需从其他设备或本机所有者用 `cove operation get <operationId>` 查询结果。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -415,3 +430,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `e8b35bf`；#152（M2 T6，未合入）           | 新增 PENDING #152：已结束操作的记录 30 天后清除，`operation get`/`resend` 与直接 RPC 重发返回 `OPERATION_HISTORY_EXPIRED`（以 1 退出、不执行），未结束的记录不清除；本机待定记录 30 天后过期，`resend` 与同 ID 重用在本地拒绝、不发送                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 2026-10-21 | main `034ffc9`；#153（M2 T1，未合入）           | 新增 PENDING #153：全局 `--server`/`$COVE_SERVER` 与 `--via`（只有 loopback 可用，其余入口为 `ENTRY_UNAVAILABLE`，`server`/`remote` 组拒绝 `--server`）；`--server` 模式下相对路径与 `~` 以 2 退出且不发送，`terminal create` 须给绝对 `--cwd`；新增 `auth invite create/list/cancel`、`auth device list/rename/revoke/rotate`（邀请与新 token 只在首次响应中，重发以 1 退出；撤销有连接未关闭时以 1 退出）与 `remote add/list/remove/entry default`（邀请只经提示或 stdin）；本机命令的请求与输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 2026-10-21 | main `809e098`；#153（M2 T1，未合入）           | 更正 PENDING #153：设备以 `--server` 撤销自己时，其他连接在应答前关闭，应答报告实际 `unclosedConnections`（不为 0 时以 1 退出）；`mount delete-worktree PATH` 在 `--server` 模式下以 2 退出且不发送；`--server` 模式下 `repo register` 的路径用法错误在连接前给出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| 2026-10-22 | main `4d55063`；#161（M2 T2，未合入）           | 新增 PENDING #161：`--via ssh` 可用（每条命令一个系统 `ssh -N -L`，`BatchMode`，host key 不符或未知时以 1 退出且不发送 token）；入口失败以 1 退出并列出记录中的入口，不换入口，serverId 不符为 `SERVER_ID_MISMATCH`；`remote add --via ssh` 经 SSH 配对；配对记录的锁改为 `<serverId>.lock.sqlite`；自我撤销请求 15 秒期限，超时为 `RESULT_UNKNOWN`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
