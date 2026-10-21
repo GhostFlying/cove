@@ -26,14 +26,32 @@ import type { SessionTarget } from "../session.js";
 // cancels the calls in flight, which would turn the revocation's answer into RESULT_UNKNOWN. The
 // answer is checked as the library checks it: the binding headers, the request ID, the method's
 // result schema, and a refusal is a proven non-acceptance only when its data says so.
+//
+// The request is bounded by `timeoutMs`: at the deadline it is cancelled through its handle, and
+// the outcome is the disposition the port reports at that moment. Only a request still
+// connecting is proven not sent (operation-not-sent); once connected, any byte may have reached
+// the server, so a stalled request is RESULT_UNKNOWN, never a refusal. The revocation is accepted
+// or not regardless of the answer; `operation get` with the same operationId tells which.
+export const DIRECT_CALL_TIMEOUT_MS = 15_000;
+
 export function directCallClient(
   client: Client,
   target: SessionTarget,
   authorization: () => string,
   method: WriteRpcMethod,
+  timeoutMs: number = DIRECT_CALL_TIMEOUT_MS,
 ): Client {
   const call = (params: { operationId: string }): Promise<CallOutcome<unknown>> =>
-    new Promise((settle) => {
+    new Promise((resolve) => {
+      // The first outcome wins: the deadline, a failure or the response, whichever comes first.
+      let settled = false;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const settle = (outcome: CallOutcome<unknown>): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        resolve(outcome);
+      };
       const operation = {
         method,
         operationId: params.operationId,
@@ -50,7 +68,7 @@ export function directCallClient(
       const body = new TextEncoder().encode(
         JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }),
       );
-      createNodeHttpPort(target.endpoint).post(
+      const handle = createNodeHttpPort(target.endpoint).post(
         {
           path: LOCAL_PATHS.rpc,
           headers: {
@@ -131,6 +149,14 @@ export function directCallClient(
           },
         },
       );
+      if (!settled)
+        deadline = setTimeout(() => {
+          // cancel() reports the disposition at this moment and destroys the request; a
+          // response arriving later is ignored (settled).
+          if (handle.cancel() === "not-sent")
+            settle({ ok: false, kind: "operation-not-sent", operation });
+          else unknown();
+        }, timeoutMs);
     });
   return new Proxy(client, {
     get(target_, property, receiver) {
