@@ -63,23 +63,24 @@ responses can arrive out of order; on the dial socket it is optional.
 
 ### Error codes
 
-| Code                | Meaning                                                                       |
-| ------------------- | ----------------------------------------------------------------------------- |
-| `BAD_REQUEST`       | Malformed frame, missing or invalid field, unknown op, first op not `hello`.  |
-| `PROTOCOL_MISMATCH` | The client's `hello` protocol differs; only frozen operations are accepted.   |
-| `NOT_LOGGED_IN`     | No node, or the node needs login.                                             |
-| `ALREADY_LOGGED_IN` | `login` while the node is Running; log out first.                             |
-| `LOGIN_FAILED`      | The control plane rejected the login (message is redacted of the key).        |
-| `LOGIN_TIMEOUT`     | Login did not finish within the request's timeout.                            |
-| `NODE_UNAVAILABLE`  | The node did not reach Running in time, or its local API failed.              |
-| `PEER_NOT_FOUND`    | No peer with the requested stable node ID is visible in the netmap.           |
-| `PEER_MISMATCH`     | The connected address answered WhoIs as a different node, or WhoIs failed.    |
-| `DIAL_FAILED`       | The tailnet connection failed (for example, nothing listens on that port).    |
-| `ACTIVE_STREAMS`    | `logout`/`stop` without `force` while streams are open; `streams` lists them. |
-| `TOO_MANY_STREAMS`  | 64 streams are already open.                                                  |
-| `SHUTTING_DOWN`     | The process is exiting; the request was not carried out.                      |
-| `LISTEN_FAILED`     | `serve` could not open a requested tailnet port.                              |
-| `INTERNAL`          | Anything else.                                                                |
+| Code                | Meaning                                                                        |
+| ------------------- | ------------------------------------------------------------------------------ |
+| `BAD_REQUEST`       | Malformed frame, missing or invalid field, unknown op, first op not `hello`.   |
+| `PROTOCOL_MISMATCH` | The client's `hello` protocol differs; only frozen operations are accepted.    |
+| `NOT_LOGGED_IN`     | No node, or the node needs login.                                              |
+| `ALREADY_LOGGED_IN` | `login` while the node is Running; log out first.                              |
+| `LOGIN_FAILED`      | The control plane rejected the login (message is redacted of the key).         |
+| `LOGIN_TIMEOUT`     | Login did not finish within the request's timeout.                             |
+| `IDENTITY_CHANGED`  | A reauth completed as another node; the enrollment was restored, not replaced. |
+| `NODE_UNAVAILABLE`  | The node did not reach Running in time, or its local API failed.               |
+| `PEER_NOT_FOUND`    | No peer with the requested stable node ID is visible in the netmap.            |
+| `PEER_MISMATCH`     | The connected address answered WhoIs as a different node, or WhoIs failed.     |
+| `DIAL_FAILED`       | The tailnet connection failed (for example, nothing listens on that port).     |
+| `ACTIVE_STREAMS`    | `logout`/`stop` without `force` while streams are open; `streams` lists them.  |
+| `TOO_MANY_STREAMS`  | 64 streams are already open.                                                   |
+| `SHUTTING_DOWN`     | The process is exiting; the request was not carried out.                       |
+| `LISTEN_FAILED`     | `serve` could not open a requested tailnet port.                               |
+| `INTERNAL`          | Anything else.                                                                 |
 
 ### Status object
 
@@ -220,8 +221,13 @@ shutdown) fails with `SHUTTING_DOWN` without acting; a second `stop` does too. O
   On failure its partial state is deleted, so no half-logged-in node remains; if that deletion
   fails, the error message says so. With `authKey` and existing state (an enrolled node that needs
   login again, for example after its key expired) it forces a reauthentication of that node with
-  the key, as `tailscale up --force-reauth --auth-key` does, and waits for Running; the node keeps
-  its stable ID, and on failure its state is kept. Without `authKey` it starts an interactive login
+  the key, as `tailscale up --force-reauth --auth-key` does, and waits until that login completed:
+  the node is Running with a new node key (Running alone can come from the old enrollment). On
+  failure its state is kept. The node must keep its stable ID: if the login completes as another
+  node (a key of another tailnet, say), the request fails with `IDENTITY_CHANGED`, the enrolled
+  state is restored and the node restarted from it, still needing login; using that key takes an
+  explicit `logout` and `login`, and the other node may remain in that tailnet's admin console.
+  Without `authKey` it starts an interactive login
   and returns as soon as `authURL` is known (or the node is Running); the CLI shows the URL and
   polls `status`. `ALREADY_LOGGED_IN` if Running.
 - `logout` and `stop` with open streams and no `force` fail with `ACTIVE_STREAMS` and change
@@ -238,7 +244,9 @@ shutdown) fails with `SHUTTING_DOWN` without acting; a second `stop` does too. O
   response line is followed by raw bytes in both directions; half-close is propagated (neither
   side's half-close is time-bounded, since both ends are the owner's). The CLI may send stream
   bytes right after the `dial` frame, without waiting for the response: they are held in the
-  daemon and forwarded only after the peer is verified, and discarded unsent if the dial fails.
+  daemon and forwarded only after the peer is verified, and discarded unsent if the dial fails. A
+  dial whose setup is cut short by shutdown fails with `SHUTTING_DOWN`, whichever step it was in;
+  one that runs out of its own `timeoutMs` keeps the error of the step that timed out.
 
 ## `cove-tsnet serve` (server node, D10)
 
@@ -273,8 +281,9 @@ request must be `hello`.
 `setPorts` is declarative: it sets the full list of tailnet TCP ports to listen on (business port,
 plus the pairing port while an invitation is open). The list is kept and reapplied whenever a node
 starts (restored state or login), so after a restart the server sends it once. Closing a port never
-affects connections already accepted on it. While logged out nothing listens. `logout` closes every
-listener and every connection.
+affects connections already accepted on it. While logged out nothing listens, and a `login` of a
+node that is not Running closes the listeners until it finishes, so nothing is accepted while a
+reauth could complete as another node. `logout` closes every listener and every connection.
 
 ### Forwarded connections
 
@@ -303,9 +312,10 @@ audit only and never authorizes anything: the connection still needs a Cove devi
 512 forwarded connections are open at once; more are closed on accept.
 
 The tailnet peer is not trusted to end the connection. When the Cove server closes or half-closes
-its side, the peer's side is half-closed and the peer has 10 s to finish sending; then both are
-closed. A connection the server rejects therefore frees its slot within that grace even if the
-peer never sends or closes. A peer's half-close is propagated to the server without a bound.
+its side, the peer's side is half-closed and the peer may keep sending as long as no gap between
+its reads exceeds 10 s; after 10 s of silence both are closed. A connection the server rejects
+therefore frees its slot within 10 s if the peer never sends or closes, while a peer still
+streaming its half is not cut off. A peer's half-close is propagated to the server without a bound.
 
 ## Test pause points
 
