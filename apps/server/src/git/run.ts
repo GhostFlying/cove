@@ -87,7 +87,8 @@ const VERIFIED_LIMIT = 16;
 // answer follows PATH and the file it names; the version is asked once per file identity
 // (VERIFIED). Only absolute PATH entries are searched: the shell would resolve a relative or empty
 // entry against each command's working directory, so one query could reach a different Git than
-// the one checked here. `timeoutMs` bounds the version check. A file replaced between this check
+// the one checked here. `timeoutMs` bounds this caller's wait for the version check
+// (waitAtMost). A file replaced between this check
 // and the command's exec is a residual window: it takes the owner's own concurrent change, and
 // the next command checks the new file.
 export async function findGit(
@@ -110,7 +111,7 @@ export async function findGit(
       continue;
     }
     const known = VERIFIED.get(identity);
-    if (known) return known;
+    if (known) return waitAtMost(known, timeoutMs, path);
     const checked = gitVersion(path, env, timeoutMs);
     if (VERIFIED.size >= VERIFIED_LIMIT) VERIFIED.clear();
     VERIFIED.set(identity, checked);
@@ -122,6 +123,24 @@ export async function findGit(
     return checked;
   }
   return { kind: "missing" };
+}
+
+// A check in flight is shared, and its own deadline is the one of the caller that started it. A
+// caller that joins it waits only until its own `timeoutMs` (then it has no answer: `unknown`,
+// which runGit reports as a timeout); the check runs on for the callers still waiting, and its
+// verdict is kept as usual. A verdict already known resolves at once.
+function waitAtMost(
+  check: Promise<GitExecutable>,
+  timeoutMs: number,
+  path: string,
+): Promise<GitExecutable> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ kind: "unknown", path }), timeoutMs);
+    void check.then((result) => {
+      clearTimeout(timer);
+      resolve(result);
+    });
+  });
 }
 
 // `<path> version`, which reads no repository and runs nothing configured. It runs under the
