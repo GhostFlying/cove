@@ -26,7 +26,9 @@ import { LocalAdmission } from "../transport/local-admission.js";
 import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/terminal-websocket.js";
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
-import { resolveHome } from "../store/home.js";
+import { homeLayout, resolveHome } from "../store/home.js";
+import { SCHEMA_VERSION } from "../store/migrations.js";
+import { committedSchemaVersion } from "../store/schema-version.js";
 import { StoreError, type Store, type StoreOptions } from "../store/database.js";
 import { instanceStopCall, recordInstanceStart } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
@@ -680,7 +682,19 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
   }
 }
 
-// The server process: `--mode init` or the local server. `probe` is passed only by the D6 probe
+// `cove-server --mode schema --home DIR` (m2 D1): the schema version committed in the data
+// directory's database (0 when there is none yet) and the one this build migrates to and accepts.
+// `cove server install --activate` runs it with the target build before switching to it. It reads
+// the database files without opening them through SQLite (schema-version.ts), so it never changes
+// the database and also answers while a server runs.
+async function reportSchema(argv: readonly string[]): Promise<void> {
+  if (argv.length !== 4 || argv[2] !== "--home" || !argv[3])
+    throw new Error("Invalid schema arguments");
+  const database = await committedSchemaVersion(homeLayout(resolve(argv[3])).databasePath);
+  process.stdout.write(`${JSON.stringify({ database, supported: SCHEMA_VERSION })}\n`);
+}
+
+// The server process: `--mode init`, `--mode schema` or the local server. `probe` is passed only by the D6 probe
 // entry.
 export function runServerProcess(
   argv: readonly string[],
@@ -697,6 +711,8 @@ export function runServerProcess(
   };
   if (argv[0] === "--mode" && argv[1] === "init") {
     initializeHome(argv).catch((error: unknown) => fail(error, "cove-server init unavailable\n"));
+  } else if (argv[0] === "--mode" && argv[1] === "schema") {
+    reportSchema(argv).catch((error: unknown) => fail(error, "cove-server schema unavailable\n"));
   } else
     void (async () => {
       const controller = new AbortController();
