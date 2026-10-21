@@ -433,6 +433,8 @@ JSON-RPC 2.0 定义关联 ID、结果/错误、通知和 batch，不替代 Cove 
   端口 1–65535，不要求等于 server 自己的端口；域名 Host（含 `localhost`）与格式错误的 Host 一律拒绝，Origin 规则不变
   （用户决定 2026-10-22，此前为恰等于绑定地址）。Host 校验只是认证前对 DNS rebinding 的防线，rebinding 请求必然带域名
   Host；server 本就无法区分本机流量与经 SSH `-L` 等本机隧道转发的流量，信任来自每个业务请求必需的 token 或本机秘密。
+  请求目标须为 origin form（以 `/` 开头）：absolute form（如 `POST http://evil.example/bootstrap`）与 `*` 在准入前即为
+  malformed（HTTP 400），因为路由只按其路径匹配。
 - 每次调用声明 `Cove-Protocol`；服务端先完成认证和协议检查，再解码并分发业务调用。
   握手结果不能成为后续 HTTP 请求跳过检查的理由。
 - 版本不匹配通过稳定 bootstrap 错误格式返回，包含支持版本及 recovery 提示；不需要读懂当前业务 envelope。

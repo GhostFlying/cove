@@ -21,7 +21,7 @@ import { TerminalCommandService } from "../terminal/terminal-command-service.js"
 import { ControlArbiter } from "../terminal/control-arbiter.js";
 import { actualHeaders, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 import type { LocalCore } from "./http-rpc.js";
-import { encodeUtf8, sendHttpAdmissionFailure } from "./http-rpc.js";
+import { encodeUtf8, originFormTarget, sendHttpAdmissionFailure } from "./http-rpc.js";
 import type { LocalTimer } from "../terminal/local-runtime-clock.js";
 
 export interface LocalSocket {
@@ -351,7 +351,10 @@ export function registerTerminalWebSocket(app: FastifyInstance, terminal: Termin
     {
       websocket: true,
       onRequest: (request, reply, done) => {
-        const result = terminal.prepare(actualHeaders(request.headers, request.raw.rawHeaders));
+        // An absolute-form target is malformed before admission (http-rpc.ts originFormTarget).
+        const result = originFormTarget(request)
+          ? terminal.prepare(actualHeaders(request.headers, request.raw.rawHeaders))
+          : { kind: "malformed" as const };
         if (!result.claim) {
           sendHttpAdmissionFailure(reply, result.kind);
           return;
