@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { waitFor } from "../recording-view.mjs";
 import { createAuthFixture } from "./auth-fixtures.mjs";
@@ -114,6 +117,27 @@ test("restart lists the live runs first, applies a pending build only when confi
       installedBuild: next.build,
       pendingBuild: next.build,
     });
+
+    // The running service stops answering (here: its rendezvous names a credential it refuses)
+    // while `current` already names the new build. It is not taken for stopped: prune keeps the
+    // build it runs, and restart asks for confirmation without an impact list.
+    const rendezvous = join(home, "server", "run", "rendezvous.json");
+    const record = await readFile(rendezvous, "utf8");
+    await writeFile(rendezvous, JSON.stringify({ ...JSON.parse(record), secret: "x".repeat(43) }), {
+      mode: 0o600,
+    });
+    try {
+      const prune = await fixture.cove(["server", "prune"], { home });
+      expect(prune.code).toBe(1);
+      expect(prune.stderr).toContain("nothing was removed");
+      expect(existsSync(join(home, "install", closure.build))).toBe(true);
+      const unconfirmed = await fixture.cove(["server", "restart"], { home });
+      expect(unconfirmed.code).toBe(2);
+      expect(JSON.parse(unconfirmed.stdout)).toMatchObject({ state: "unknown", impact: null });
+    } finally {
+      await writeFile(rendezvous, record, { mode: 0o600 });
+    }
+    expect((await status(home)).server.relayInstanceId).toBe(first.relayInstanceId);
 
     // Confirmed: same server, new instance, the new build; the runs ended and were not re-run.
     const restarted = await fixture.coveJson(["server", "restart", "--yes"], {

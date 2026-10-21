@@ -27,6 +27,7 @@ import {
   removeInstallation,
 } from "./installer.js";
 import { acquireInstallLock, installLayout, type InstallLayout } from "./layout.js";
+import { lockHeld } from "./os-lock.js";
 import { lingerAdvice, serviceBackend, type ServiceBackend, type UnitStatus } from "./service.js";
 
 // `cove server install|prune|uninstall|service|restart|upgrade|status|impact` (m2 D1, D2, S1,
@@ -55,14 +56,60 @@ async function withLock<T>(layout: InstallLayout, action: () => Promise<T>): Pro
   }
 }
 
-// The server of this data directory, when one answers at its rendezvous; null otherwise (none
-// published, or a record a crashed server left behind).
-async function localServer(layout: InstallLayout): Promise<Session | null> {
+// The server that answers at the data directory's rendezvous, or null.
+async function answering(layout: InstallLayout): Promise<Session | null> {
   try {
     return await openSession(layout.rendezvous);
   } catch {
     return null;
   }
+}
+
+// Whether the server of this data directory runs, as far as this command can prove it:
+// - running: it answered at its rendezvous (the session is open);
+// - stopped: no process holds its instance lock (os-lock.ts), so no server of this data directory
+//   runs, whatever the rendezvous file says (a crashed server leaves one behind);
+// - unknown: the lock is held but the server did not answer (a handshake timeout, a refusal at
+//   capacity, a server still starting or stuck). It may be running with live runs, so a command
+//   that stops it or removes builds treats it as possibly running, never as stopped: it asks for
+//   confirmation without an impact list, and prune keeps every build.
+// The lock is checked only after the server did not answer, so that a probe cannot make a starting
+// server find its lock taken. A server that starts just after a "stopped" answer (a service
+// manager's crash restart) is the remaining window: the command acts as if none ran, and that
+// server, just started, has no live run of its own yet.
+type LocalServer =
+  | { state: "running"; session: Session }
+  | { state: "stopped" }
+  | { state: "unknown"; reason: string };
+
+async function localServer(layout: InstallLayout): Promise<LocalServer> {
+  let reason: string;
+  try {
+    return { state: "running", session: await openSession(layout.rendezvous) };
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  try {
+    if (!lockHeld(layout.serverLock)) return { state: "stopped" };
+  } catch (error) {
+    reason += `; the server lock cannot be checked: ${(error as Error).message}`;
+  }
+  return { state: "unknown", reason };
+}
+
+function sessionOf(local: LocalServer): Session | null {
+  return local.state === "running" ? local.session : null;
+}
+
+async function release(local: LocalServer): Promise<void> {
+  if (local.state === "running") await closing(local.session, async () => undefined);
+}
+
+function unconfirmed(local: { reason: string }): string {
+  return (
+    "cannot tell whether the server of this data directory is running: it holds the data " +
+    `directory but did not answer (${local.reason})`
+  );
 }
 
 async function closing<T>(session: Session, action: (session: Session) => Promise<T>): Promise<T> {
@@ -108,7 +155,7 @@ async function waitForNewInstance(layout: InstallLayout, previous: string | null
   while (Date.now() < deadline) {
     const instance = await rendezvousInstance(layout);
     if (instance !== null && instance !== previous) {
-      const session = await localServer(layout);
+      const session = await answering(layout);
       if (session)
         return closing(session, async ({ client }) =>
           unwrap("server.status", await client.call("server.status", {})),
@@ -164,17 +211,42 @@ async function ask(question: string): Promise<boolean> {
 
 // Shows what stopping the running server ends (S2) and asks for confirmation. Without --yes and
 // without a terminal to ask on, it prints the impact and fails with status 2, having done nothing.
+// A server whose state is unknown may be running: the confirmation is asked all the same, saying
+// that the impact cannot be listed; --yes goes ahead, which is how an operator stops a server
+// that no longer answers. Only a server proven stopped needs no confirmation.
 async function confirmStop(
   args: Arguments,
-  session: Session | null,
+  local: LocalServer,
   action: string,
 ): Promise<ServerImpactResult | null> {
-  if (!session) return null;
+  if (local.state === "stopped") return null;
+  const interactive = process.stdin.isTTY === true && process.stderr.isTTY === true;
+  if (local.state === "unknown") {
+    const message = `${action}: ${unconfirmed(local)}`;
+    if (args.flags.has("--yes")) {
+      process.stderr.write(`cove: ${message}; going ahead (--yes)\n`);
+      return null;
+    }
+    if (!interactive) {
+      print({ action, confirmed: false, state: "unknown", reason: local.reason, impact: null });
+      throw new StatusError(
+        `${message}. If it is running, every live run ends and they cannot be listed. ` +
+          "Confirm with --yes; nothing was done",
+        2,
+      );
+    }
+    process.stderr.write(
+      `${message}.\nIf it is running, every live run ends; they cannot be listed.\n`,
+    );
+    if (!(await ask(`${action}? [y/N] `)))
+      throw new StatusError("not confirmed; nothing was done", 1);
+    return null;
+  }
+  const { session } = local;
   const impact = unwrap("server.impact", await session.client.call("server.impact", {}));
   if (args.flags.has("--yes")) return impact;
-  const interactive = process.stdin.isTTY === true && process.stderr.isTTY === true;
   if (!interactive) {
-    print({ action, confirmed: false, impact });
+    print({ action, confirmed: false, state: "running", impact });
     throw new StatusError(
       `${action} stops the running server: ${impact.liveRuns.length} live run(s) end. ` +
         "Confirm with --yes; nothing was done",
@@ -246,7 +318,14 @@ export async function serverInstall(args: Arguments): Promise<number> {
         );
       throw error;
     }
-    const session = await localServer(layout);
+    const local = await localServer(layout);
+    if (local.state === "unknown")
+      throw new Error(
+        `build ${installed.build} was installed and activated, but the entry ports and the ` +
+          `service were left unchanged: ${unconfirmed(local)}. Run \`cove server install\` ` +
+          "again once it answers",
+      );
+    const session = sessionOf(local);
     let running: string | null = null;
     let entry;
     let service: UnitStatus | { unavailable: string };
@@ -270,7 +349,7 @@ export async function serverInstall(args: Arguments): Promise<number> {
         warnLinger(service);
       }
     } finally {
-      if (session) await closing(session, async () => undefined);
+      await release(local);
     }
     print({
       build: installed.build,
@@ -287,7 +366,8 @@ export async function serverInstall(args: Arguments): Promise<number> {
 }
 
 // `cove server prune`: removes installed builds other than the active and the running one (D1's
-// `install --prune`; a separate subcommand because the CLI's switches are shared).
+// `install --prune`; a separate subcommand because the CLI's switches are shared). When the
+// server's state is unknown, any installed build may be the one it runs, so nothing is removed.
 export async function serverPrune(args: Arguments): Promise<number> {
   takeFlags(args, []);
   noWords(args, 2, "server prune takes no arguments");
@@ -296,9 +376,13 @@ export async function serverPrune(args: Arguments): Promise<number> {
     const keep = new Set<string>();
     const current = await currentBuild(layout);
     if (current) keep.add(current);
-    const session = await localServer(layout);
-    if (session)
-      await closing(session, async ({ client }) =>
+    const local = await localServer(layout);
+    if (local.state === "unknown")
+      throw new Error(
+        `nothing was removed: ${unconfirmed(local)}, so any installed build may be the one it runs`,
+      );
+    if (local.state === "running")
+      await closing(local.session, async ({ client }) =>
         keep.add(unwrap("server.status", await client.call("server.status", {})).buildVersion),
       );
     print({ kept: [...keep], removed: await prune(layout, keep) });
@@ -306,8 +390,15 @@ export async function serverPrune(args: Arguments): Promise<number> {
   });
 }
 
+// The build a running server runs, when it is one of this installation's; null otherwise.
+async function runningInstalledBuild(layout: InstallLayout, session: Session) {
+  const status = unwrap("server.status", await session.client.call("server.status", {}));
+  return (await installedBuilds(layout)).includes(status.buildVersion) ? status.buildVersion : null;
+}
+
 // `cove server uninstall [--yes]`: stops the service, removes its unit, the installed builds and
-// the launcher; the data directory stays (S1).
+// the launcher; the data directory stays (S1). The builds are removed only once no server of the
+// data directory runs from one of them.
 export async function serverUninstall(args: Arguments): Promise<number> {
   takeFlags(args, ["--yes"]);
   noWords(args, 2, "server uninstall takes no arguments");
@@ -315,9 +406,36 @@ export async function serverUninstall(args: Arguments): Promise<number> {
   return withLock(layout, async () => {
     const found = serviceBackend(layout);
     const backend = "unavailable" in found ? null : found.backend;
-    const session = backend?.status().registered ? await localServer(layout) : null;
-    if (session) await closing(session, (s) => confirmStop(args, s, "server uninstall"));
+    const before = await localServer(layout);
+    try {
+      // A server in the foreground keeps running: no confirmation, and its build is checked below.
+      const foreground =
+        before.state === "running" &&
+        (unwrap("server.status", await before.session.client.call("server.status", {})).service
+          ?.manager ?? "foreground") === "foreground";
+      if (!foreground) await confirmStop(args, before, "server uninstall");
+    } finally {
+      await release(before);
+    }
     await backend?.unregister();
+    const after = await localServer(layout);
+    try {
+      if (after.state === "unknown")
+        throw new Error(
+          `the service was removed, but the installed builds were kept: ${unconfirmed(after)}`,
+        );
+      // Still running after the service was removed: a server started in the foreground, which
+      // uninstall does not stop. Removing the build it runs from would break it.
+      const inUse =
+        after.state === "running" ? await runningInstalledBuild(layout, after.session) : null;
+      if (inUse)
+        throw new Error(
+          `the service was removed, but the installed builds were kept: a server started in the ` +
+            `foreground runs build ${inUse}; stop it and run \`cove server uninstall\` again`,
+        );
+    } finally {
+      await release(after);
+    }
     await removeInstallation(layout);
     print({ uninstalled: true, home: layout.home, unit: backend?.unitPath ?? null });
     return 0;
@@ -347,19 +465,23 @@ export async function serviceCommand(args: Arguments): Promise<number> {
       return 0;
     }
     if (sub === "stop") {
-      const session = await localServer(layout);
-      if (session) await closing(session, (s) => confirmStop(args, s, "server service stop"));
+      const local = await localServer(layout);
+      try {
+        await confirmStop(args, local, "server service stop");
+      } finally {
+        await release(local);
+      }
       await backend.stop();
       print(backend.status());
       return 0;
     }
     if (!(await currentBuild(layout)))
       throw new Error("nothing is installed; run `cove server install` first");
-    const session = await localServer(layout);
-    if (session) {
-      await closing(session, async () => undefined);
+    const local = await localServer(layout);
+    await release(local);
+    if (local.state === "running")
       throw new Error("a server is already running for this data directory");
-    }
+    if (local.state === "unknown") throw new Error(`not started: ${unconfirmed(local)}`);
     const previous = await rendezvousInstance(layout);
     await requestStart(layout);
     if (backend.status().registered) await backend.start();
@@ -406,16 +528,14 @@ export async function serverRestart(args: Arguments): Promise<number> {
   noWords(args, 2, "server restart takes no arguments");
   const layout = await layoutOf(args);
   return withLock(layout, async () => {
-    const session = await localServer(layout);
-    if (!session) {
-      print(await restartService(layout, null));
+    const local = await localServer(layout);
+    try {
+      const impact = await confirmStop(args, local, "server restart");
+      print({ ...(await restartService(layout, sessionOf(local))), impact });
       return 0;
+    } finally {
+      await release(local);
     }
-    return closing(session, async (s) => {
-      const impact = await confirmStop(args, s, "server restart");
-      print({ ...(await restartService(layout, s)), impact });
-      return 0;
-    });
   });
 }
 
@@ -426,18 +546,23 @@ export async function serverUpgrade(args: Arguments): Promise<number> {
   const source = flag(args, "--closure");
   const layout = await layoutOf(args);
   return withLock(layout, async () => {
-    const session = await localServer(layout);
-    const run = async (s: Session | null) => {
-      const impact = await confirmStop(args, s, "server upgrade");
+    const local = await localServer(layout);
+    try {
+      const impact = await confirmStop(args, local, "server upgrade");
       const installed = await installClosure(
         layout,
         source === undefined ? undefined : resolve(source),
       );
       await activate(layout, installed.build);
-      print({ build: installed.build, ...(await restartService(layout, s)), impact });
+      print({
+        build: installed.build,
+        ...(await restartService(layout, sessionOf(local))),
+        impact,
+      });
       return 0;
-    };
-    return session ? closing(session, run) : run(null);
+    } finally {
+      await release(local);
+    }
   });
 }
 
@@ -453,17 +578,21 @@ export async function serverStatus(args: Arguments, remote: boolean): Promise<nu
     });
   const layout = await layoutOf(args);
   const found = serviceBackend(layout);
-  const session = await localServer(layout);
-  const server = session
-    ? await closing(session, async ({ client }) =>
-        unwrap("server.status", await client.call("server.status", {})),
-      )
-    : null;
+  const local = await localServer(layout);
+  const server =
+    local.state === "running"
+      ? await closing(local.session, async ({ client }) =>
+          unwrap("server.status", await client.call("server.status", {})),
+        )
+      : null;
   print({
     home: layout.home,
     installedBuild: await currentBuild(layout),
     builds: await installedBuilds(layout),
     unit: "unavailable" in found ? found : found.backend.status(),
+    // running, stopped, or unknown with the reason (localServer).
+    serverState: local.state,
+    ...(local.state === "unknown" ? { serverError: local.reason } : {}),
     server,
   });
   return 0;

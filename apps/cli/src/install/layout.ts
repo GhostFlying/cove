@@ -20,6 +20,9 @@ export type InstallLayout = {
   readonly installDirectory: string;
   readonly current: string;
   readonly lock: string;
+  // The running server's instance lock (apps/server/src/store/database.ts: `cove.lock` beside the
+  // database, held for the server's whole life). Probed, never held (server-state.ts).
+  readonly serverLock: string;
   readonly launcher: string;
   readonly rendezvous: string;
   readonly logDirectory: string;
@@ -42,6 +45,7 @@ export function installLayout(home: string): InstallLayout {
     installDirectory,
     current: join(installDirectory, "current"),
     lock: join(installDirectory, ".lock.sqlite"),
+    serverLock: join(home, "server", "cove.lock"),
     launcher: join(home, "bin", "cove"),
     rendezvous: join(home, "server", "run", "rendezvous.json"),
     logDirectory: join(home, "server", "log"),

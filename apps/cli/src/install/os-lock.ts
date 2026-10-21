@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
-// Process-lifetime OS locks on SQLite files, for the install lock (layout.ts).
+// Process-lifetime OS locks on SQLite files, for the install lock (layout.ts) and for probing the
+// server's instance lock (server-state.ts).
 //
 // The lock is an exclusive SQLite transaction on an empty database file: a POSIX advisory lock the
 // kernel arbitrates and drops when its holder exits, however it exits. A crashed holder therefore
@@ -12,9 +14,10 @@ import { DatabaseSync } from "node:sqlite";
 // back its own transaction and closing its own connection.
 //
 // The same approach as the client credential record lock (T2, PR #161) and the server's instance
-// lock (apps/server/src/store/database.ts lockInstance). POSIX locks belong to a process: a process
-// must never open a second connection to a file it holds the lock of, since closing that
-// connection would drop the lock. A CLI command takes the install lock once.
+// lock (apps/server/src/store/database.ts lockInstance), whose file this module also probes. POSIX
+// locks belong to a process: a process must never open a second connection to a file it holds the
+// lock of, since closing that connection would drop the lock. A CLI command takes the install lock
+// once and probes the server's lock, a different file that the CLI never holds.
 
 // SQLite's primary result code for a lock that another connection holds.
 const SQLITE_BUSY = 5;
@@ -53,4 +56,14 @@ export function releaseLock(database: DatabaseSync): void {
   } finally {
     database.close();
   }
+}
+
+// Whether some process holds the exclusive lock of `path` right now. A missing file is not held
+// (and is not created: probing must not make a lock file where no holder ever made one).
+export function lockHeld(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const database = exclusive(path);
+  if (!database) return true;
+  releaseLock(database);
+  return false;
 }
