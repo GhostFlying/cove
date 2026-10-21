@@ -39,22 +39,23 @@ type Node interface {
 	// Listen opens a tailnet TCP listener on port on all of this node's
 	// Tailscale addresses.
 	Listen(port int) (net.Listener, error)
+	// StableID reports the stable node ID of the current login profile,
+	// which tailscaled persists with the state; empty if the node never
+	// finished a login. It needs no netmap, so a node that needs login
+	// reports the identity it is enrolled as.
+	StableID(ctx context.Context) (string, error)
 	// Reauth forces a new login of an already enrolled node with authKey,
 	// as `tailscale up --force-reauth --auth-key` does, and waits until that
-	// login completed: the node runs with a new node key. It reports the
-	// stable ID the node was enrolled as before (empty if it never finished
-	// a login) and the one it runs as now; the caller decides whether a
-	// change of identity is acceptable.
-	Reauth(ctx context.Context, authKey string) (ReauthResult, error)
+	// login completed: the node runs with a new node key. It returns the
+	// stable ID the login completed as; the caller decides whether a change
+	// of identity is acceptable. After an error the backend may still
+	// complete the login on its own, so the caller cannot treat an error as
+	// proof that nothing changed.
+	Reauth(ctx context.Context, authKey string) (string, error)
 	// Logout deauthorizes the node with the control plane.
 	Logout(ctx context.Context) error
 	// Close stops the node; its persisted state is kept.
 	Close() error
-}
-
-// ReauthResult is the identity before and after a completed reauth.
-type ReauthResult struct {
-	Before, After string
 }
 
 // Config configures a node.
@@ -218,47 +219,82 @@ func (n *tsnetNode) Listen(port int) (net.Listener, error) {
 	return n.srv.Listen("tcp", fmt.Sprintf(":%d", port))
 }
 
+func (n *tsnetNode) StableID(ctx context.Context) (string, error) {
+	cur, _, err := n.lc.ProfileStatus(ctx)
+	if err != nil {
+		return "", err
+	}
+	return string(cur.NodeID), nil
+}
+
 // Reauth restarts the backend with the key and starts a login, the sequence
 // of `tailscale up --force-reauth --auth-key`. tsnet itself uses
 // Server.AuthKey only for a node without state, and only forces a login
 // through the TSNET_FORCE_LOGIN environment variable, which would put the
 // decision in the environment; the local API does the same explicitly. The
 // key goes to the in-process control client and is not persisted.
-//
-// Completion needs evidence from this attempt. A Running state alone is
-// not enough: the old enrollment can be (or become) Running on its own,
-// for example from an in-flight map poll. A forced login always rotates
-// the node key, so like `tailscale up` this waits for both Running and a
-// self node with a key other than the enrolled one, and the watcher is
-// subscribed before the login starts so neither that nor an early error
-// can be missed.
-func (n *tsnetNode) Reauth(ctx context.Context, authKey string) (ReauthResult, error) {
-	cur, _, err := n.lc.ProfileStatus(ctx)
+func (n *tsnetNode) Reauth(ctx context.Context, authKey string) (string, error) {
+	return runReauth(ctx, reauthOps{
+		profileKey: func(ctx context.Context) (ipn.StateKey, error) {
+			cur, _, err := n.lc.ProfileStatus(ctx)
+			return cur.Key, err
+		},
+		storedKey: n.storedNodeKey,
+		watch: func(ctx context.Context) (func() (ipn.Notify, error), func(), error) {
+			w, err := n.lc.WatchIPNBus(ctx, 0)
+			if err != nil {
+				return nil, nil, err
+			}
+			return w.Next, func() { w.Close() }, nil
+		},
+		start: func(ctx context.Context) error { return n.lc.Start(ctx, ipn.Options{AuthKey: authKey}) },
+		login: n.lc.StartLoginInteractive,
+	})
+}
+
+// reauthOps are the local API steps of a reauth, separate so a test can
+// check their order against a fake bus.
+type reauthOps struct {
+	profileKey func(ctx context.Context) (ipn.StateKey, error)
+	storedKey  func(ipn.StateKey) (key.NodePublic, error)
+	watch      func(ctx context.Context) (next func() (ipn.Notify, error), stop func(), err error)
+	start      func(ctx context.Context) error
+	login      func(ctx context.Context) error
+}
+
+// runReauth needs completion evidence from this attempt. A Running state
+// alone is not enough: the old enrollment can be (or become) Running on its
+// own, for example from an in-flight map poll. A forced login always
+// rotates the node key, so like `tailscale up` this waits for both Running
+// and a self node with a key other than the enrolled one. The watcher is
+// subscribed before Start and the login: the bus only delivers what is
+// sent after the subscription, so subscribing later could miss the
+// completion or an early error.
+func runReauth(ctx context.Context, ops reauthOps) (string, error) {
+	k, err := ops.profileKey(ctx)
 	if err != nil {
-		return ReauthResult{}, err
+		return "", err
 	}
-	res := ReauthResult{Before: string(cur.NodeID)}
-	origKey, err := n.storedNodeKey(cur.Key)
+	origKey, err := ops.storedKey(k)
 	if err != nil {
-		return res, fmt.Errorf("reading the enrolled node key: %w", err)
+		return "", fmt.Errorf("reading the enrolled node key: %w", err)
 	}
-	w, err := n.lc.WatchIPNBus(ctx, 0)
+	next, stop, err := ops.watch(ctx)
 	if err != nil {
-		return res, err
+		return "", err
 	}
-	defer w.Close()
-	if err := n.lc.Start(ctx, ipn.Options{AuthKey: authKey}); err != nil {
-		return res, err
+	defer stop()
+	if err := ops.start(ctx); err != nil {
+		return "", err
 	}
-	if err := n.lc.StartLoginInteractive(ctx); err != nil {
-		return res, err
+	if err := ops.login(ctx); err != nil {
+		return "", err
 	}
-	self, err := waitReauth(ctx, w.Next, origKey)
+	self, err := waitReauth(ctx, next, origKey)
 	if err != nil {
-		return res, err
+		return "", err
 	}
-	res.After = string(self.StableID)
-	return res, nil
+	return string(self.StableID), nil
 }
 
 // storedNodeKey returns the public node key saved in the profile under k,

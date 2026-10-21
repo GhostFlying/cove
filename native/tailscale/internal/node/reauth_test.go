@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,5 +86,90 @@ func TestWaitReauthWithoutAStoredKey(t *testing.T) {
 		self("nClient", key.NewNode().Public())), key.NodePublic{})
 	if err != nil || got.StableID != "nClient" {
 		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+// bus models the IPN bus: a watcher receives only what is sent after it
+// subscribed, so a reauth that subscribes late misses its own completion.
+type bus struct {
+	steps []string
+	subs  []chan ipn.Notify
+}
+
+func (b *bus) send(msgs ...ipn.Notify) {
+	for _, c := range b.subs {
+		for _, m := range msgs {
+			c <- m
+		}
+	}
+}
+
+// ops returns reauth steps on b; onStart and onLogin are sent when those
+// steps run.
+func (b *bus) ops(enrolled key.NodePublic, onStart, onLogin []ipn.Notify) reauthOps {
+	return reauthOps{
+		profileKey: func(context.Context) (ipn.StateKey, error) {
+			b.steps = append(b.steps, "profile")
+			return "profile-1", nil
+		},
+		storedKey: func(k ipn.StateKey) (key.NodePublic, error) {
+			b.steps = append(b.steps, "storedKey")
+			return enrolled, nil
+		},
+		watch: func(ctx context.Context) (func() (ipn.Notify, error), func(), error) {
+			b.steps = append(b.steps, "watch")
+			c := make(chan ipn.Notify, 16)
+			b.subs = append(b.subs, c)
+			next := func() (ipn.Notify, error) {
+				select {
+				case m := <-c:
+					return m, nil
+				case <-ctx.Done():
+					return ipn.Notify{}, ctx.Err()
+				}
+			}
+			return next, func() { b.steps = append(b.steps, "stop") }, nil
+		},
+		start: func(context.Context) error {
+			b.steps = append(b.steps, "start")
+			b.send(onStart...)
+			return nil
+		},
+		login: func(context.Context) error {
+			b.steps = append(b.steps, "login")
+			b.send(onLogin...)
+			return nil
+		},
+	}
+}
+
+// The watcher is subscribed before Start and the login, so a completion or
+// an error the backend reports while either call runs is not missed.
+func TestReauthSubscribesBeforeStartingTheLogin(t *testing.T) {
+	oldKey, newKey := key.NewNode().Public(), key.NewNode().Public()
+	errMsg := "invalid key"
+	for _, c := range []struct {
+		name             string
+		onStart, onLogin []ipn.Notify
+		wantLogin        bool
+	}{
+		{name: "completes during the login", onLogin: []ipn.Notify{self("nClient", newKey), state(ipn.Running)}},
+		{name: "completes during start", onStart: []ipn.Notify{state(ipn.Running), self("nClient", newKey)}},
+		{name: "rejected during start", onStart: []ipn.Notify{{ErrMessage: &errMsg}}, wantLogin: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			b := &bus{}
+			got, err := runReauth(ctx, b.ops(oldKey, c.onStart, c.onLogin))
+			var le *LoginError
+			if c.wantLogin != errors.As(err, &le) || (!c.wantLogin && (err != nil || got != "nClient")) {
+				t.Fatalf("got %q, %v", got, err)
+			}
+			want := []string{"profile", "storedKey", "watch", "start", "login", "stop"}
+			if strings.Join(b.steps, ",") != strings.Join(want, ",") {
+				t.Fatalf("steps %v, want %v", b.steps, want)
+			}
+		})
 	}
 }

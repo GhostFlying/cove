@@ -404,9 +404,23 @@ func (d *daemon) handle(c net.Conn) {
 	ctx := d.life
 	switch req.Op {
 	case proto.OpStatus:
+		// Without an identity hold status only reads, so it shares ctl with
+		// dial setup. Settling a hold (node.Manager) changes the node, which
+		// needs the write side; holds are placed only under it, so one seen
+		// absent here cannot appear before the read side is released.
 		d.ctl.RLock()
-		st, err := d.status(ctx)
+		held := d.mgr.Held()
+		var st proto.Status
+		var err error
+		if !held {
+			st, err = d.status(ctx)
+		}
 		d.ctl.RUnlock()
+		if held {
+			d.ctl.Lock()
+			st, err = d.status(ctx)
+			d.ctl.Unlock()
+		}
 		reply(c, req, st, err)
 	case proto.OpLogin:
 		d.ctl.Lock()

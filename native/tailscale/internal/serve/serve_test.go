@@ -115,7 +115,9 @@ func startHelper(t *testing.T, fn *fakenode.Node, cfg Config) *helper {
 	}
 	var in io.Reader
 	in, h.in = io.Pipe()
-	cfg.Home = filepath.Join(root, "tsnet")
+	if cfg.Home == "" {
+		cfg.Home = filepath.Join(root, "tsnet")
+	}
 	cfg.ForwardSocket = sock
 	cfg.Build = "0.0.0-unit"
 	cfg.Start = func(node.Config, string) (node.Node, error) { return fn, nil }

@@ -29,7 +29,9 @@ type Node struct {
 	// State is reported by Status; WaitRunning succeeds once it is Running.
 	State string
 	Self  proto.NodeInfo
-	Peers map[string]Peer
+	// AuthURL is reported by Status, as for a pending interactive login.
+	AuthURL string
+	Peers   map[string]Peer
 	// BlockWait makes WaitRunning block until its context ends.
 	BlockWait bool
 	// Listen backs Listen; nil fails.
@@ -39,11 +41,16 @@ type Node struct {
 	LogoutErr error
 	// ReauthAs is the stable ID a reauth completes as; empty keeps Self's.
 	ReauthAs string
-	// ReauthErr fails a reauth.
-	ReauthErr error
-	// OnReauth, OnWait and OnLookup, if set, run when those calls start, so
-	// a test can act at a known point.
-	OnReauth, OnWait, OnLookup func()
+	// ReauthErr fails a reauth; BlockReauth makes it wait for its context
+	// and fail with the context's error.
+	ReauthErr   error
+	BlockReauth bool
+	// LateAs, if set, becomes Self's stable ID when a reauth fails: the
+	// backend completed the login as that node after all and persisted it.
+	LateAs string
+	// OnStatus, OnReauth, OnWait and OnLookup, if set, run when those calls
+	// start, so a test can act at a known point.
+	OnStatus, OnReauth, OnWait, OnLookup func()
 
 	Reauths []string
 	Closed  bool
@@ -53,10 +60,13 @@ type Node struct {
 var _ node.Node = (*Node)(nil)
 
 func (n *Node) Status(context.Context) (proto.Status, error) {
+	if n.OnStatus != nil {
+		n.OnStatus()
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	self := n.Self
-	return proto.Status{State: n.State, Self: &self}, nil
+	return proto.Status{State: n.State, AuthURL: n.AuthURL, Self: &self}, nil
 }
 
 func (n *Node) WaitRunning(ctx context.Context) error {
@@ -130,23 +140,37 @@ func (n *Node) Listen(port int) (net.Listener, error) {
 	return n.ListenFn(port)
 }
 
-func (n *Node) Reauth(ctx context.Context, key string) (node.ReauthResult, error) {
+func (n *Node) StableID(context.Context) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.Self.StableNodeID, nil
+}
+
+func (n *Node) Reauth(ctx context.Context, key string) (string, error) {
 	if n.OnReauth != nil {
 		n.OnReauth()
 	}
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.Reauths = append(n.Reauths, key)
-	if n.ReauthErr != nil {
-		return node.ReauthResult{}, n.ReauthErr
+	block, err := n.BlockReauth, n.ReauthErr
+	n.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		err = ctx.Err()
 	}
-	res := node.ReauthResult{Before: n.Self.StableNodeID, After: n.Self.StableNodeID}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if err != nil {
+		if n.LateAs != "" {
+			n.Self.StableNodeID = n.LateAs
+		}
+		return "", err
+	}
 	if n.ReauthAs != "" {
-		res.After = n.ReauthAs
 		n.Self.StableNodeID = n.ReauthAs
 	}
 	n.State = proto.StateRunning
-	return res, nil
+	return n.Self.StableNodeID, nil
 }
 
 func (n *Node) Logout(context.Context) error { return n.LogoutErr }
@@ -162,5 +186,12 @@ func (n *Node) Close() error {
 func (n *Node) SetState(s string) {
 	n.mu.Lock()
 	n.State = s
+	n.mu.Unlock()
+}
+
+// SetSelf changes the reported identity.
+func (n *Node) SetSelf(id string) {
+	n.mu.Lock()
+	n.Self.StableNodeID = id
 	n.mu.Unlock()
 }

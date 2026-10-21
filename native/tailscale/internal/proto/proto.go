@@ -77,9 +77,14 @@ const (
 	CodeAlreadyLoggedIn  = "ALREADY_LOGGED_IN"
 	CodeLoginFailed      = "LOGIN_FAILED"
 	CodeLoginTimeout     = "LOGIN_TIMEOUT"
-	// CodeIdentityChanged: a reauth completed as a different node than the
-	// enrolled one; the enrollment was restored, not replaced.
+	// CodeIdentityChanged: a login of an enrolled node ended as another
+	// node. The node is stopped and stays so until a logout; paired clients
+	// must pair again.
 	CodeIdentityChanged = "IDENTITY_CHANGED"
+	// CodeLoginUncertain: a login of an enrolled node has not finished, or
+	// did not finish and may still have completed as another node. The node
+	// serves nothing until its identity is confirmed.
+	CodeLoginUncertain  = "LOGIN_UNCERTAIN"
 	CodeNodeUnavailable = "NODE_UNAVAILABLE"
 	CodePeerNotFound    = "PEER_NOT_FOUND"
 	CodePeerMismatch    = "PEER_MISMATCH"
@@ -270,6 +275,10 @@ type Status struct {
 	Ports []int `json:"ports,omitempty"`
 	// Streams lists the dial-mode active streams.
 	Streams []StreamInfo `json:"streams,omitempty"`
+	// Hold is IDENTITY_CHANGED or LOGIN_UNCERTAIN while the node's
+	// identity is not known to be the enrolled one; the node then serves
+	// nothing (no listeners, no streams) and the first warning explains it.
+	Hold string `json:"hold,omitempty"`
 	// Warnings are human-readable notes, e.g. a logout the control plane
 	// could not confirm.
 	Warnings []string `json:"warnings,omitempty"`

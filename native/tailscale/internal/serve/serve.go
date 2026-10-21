@@ -80,9 +80,10 @@ type server struct {
 	life   context.Context
 	cancel context.CancelFunc
 
-	// ctl serializes node lifecycle operations (login, logout, setPorts,
-	// boot, shutdown) against status.
-	ctl sync.RWMutex
+	// ctl serializes node lifecycle operations (status, login, logout,
+	// setPorts, boot, shutdown). Status takes it exclusively too: it may
+	// settle an identity hold and reopen the listeners.
+	ctl sync.Mutex
 	// desired is the port set the Cove server asked for; it is reapplied
 	// whenever a node starts. listeners holds the open ones. Both are
 	// guarded by ctl.
@@ -135,6 +136,10 @@ func Run(ctx context.Context, cfg Config) error {
 		listeners: map[int]net.Listener{},
 		out:       cfg.Out,
 	}
+	// The manager places an identity hold under ctl, before the login it
+	// guards starts; the listeners close in that same step and reopen only
+	// through reconcile, once the manager reports the node usable again.
+	s.mgr.OnHold(s.closeListeners)
 	s.life, s.cancel = context.WithCancel(context.Background())
 	defer s.cancel()
 	s.ctl.Lock()
@@ -260,9 +265,9 @@ func (s *server) handle(req proto.Request) {
 	case proto.OpHello:
 		reply(nil, proto.Errorf(proto.CodeBadRequest, "hello was already sent"))
 	case proto.OpStatus:
-		s.ctl.RLock()
+		s.ctl.Lock()
 		st, err := s.status(ctx)
-		s.ctl.RUnlock()
+		s.ctl.Unlock()
 		reply(st, err)
 	case proto.OpLogin:
 		s.ctl.Lock()
@@ -300,13 +305,9 @@ func (s *server) login(ctx context.Context, req proto.Request) (proto.Status, er
 	if s.isClosing() {
 		return proto.Status{}, errShuttingDown
 	}
-	// Listeners are closed for the login and reopened by reconcile below:
-	// a reauth can complete as another node before the manager refuses and
-	// restores it, and nothing should be accepted under that identity. A
-	// Running node is refused with ALREADY_LOGGED_IN, so it keeps them.
-	if cur, err := s.mgr.Status(ctx); err != nil || cur.State != proto.StateRunning {
-		s.closeListeners()
-	}
+	// A login that could change the node's identity places a hold, which
+	// closes the listeners (OnHold) before the login starts; reconcile
+	// reopens them only if the node is usable afterwards.
 	st, err := s.mgr.Login(ctx, req.AuthKey, proto.Timeout(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
 	if lerr := s.reconcile(); err == nil && lerr != nil {
 		err = lerr
@@ -322,6 +323,11 @@ func (s *server) status(ctx context.Context) (proto.Status, error) {
 	st, err := s.mgr.Status(ctx)
 	if err != nil {
 		return st, err
+	}
+	// Status may have settled a hold, so the listeners follow it here.
+	if lerr := s.reconcile(); lerr != nil {
+		st.Warnings = append(st.Warnings, lerr.Error())
+		st = st.Bounded()
 	}
 	st.Ports = s.ports()
 	return st, nil
@@ -355,12 +361,13 @@ func (s *server) setPorts(ports []int) error {
 // reconcile opens the desired ports that are not open and closes the rest.
 // Closing a listener never touches connections it already accepted, so
 // closing the pairing port leaves established business connections alone.
-// Without a node (logged out) nothing is open; the desired set is kept and
-// applied by the next login.
+// Without a usable node (logged out, or held while its identity is not
+// confirmed) nothing is open; the desired set is kept and applied once the
+// node is usable.
 func (s *server) reconcile() error {
 	// tsnet accepts a listener before the node is Running, so a node that
 	// is still coming up or waiting for login gets its ports immediately.
-	n := s.mgr.Node()
+	n := s.mgr.Usable()
 	if n == nil {
 		s.closeListeners()
 		return nil
