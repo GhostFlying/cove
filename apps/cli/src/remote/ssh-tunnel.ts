@@ -47,7 +47,10 @@ import { RemoteError } from "./entry-types.js";
 // process: the supervisor waits for that pipe's end-of-file and then ends ssh. The pipe's write end
 // is held only by this process, so its end-of-file comes when the command closes the tunnel and
 // also when the command dies in any way, SIGKILL included; no ssh process outlives the command.
-// close() ends the pipe and waits, then signals the group (TERM, then KILL), bounded.
+// close() ends the pipe and waits, then signals the group (TERM, then KILL), bounded. When the
+// reader ends ssh it first writes why to ssh's stderr (`cove-ssh: ...`: a line on the pipe, or its
+// end-of-file or a read error with read's status and message), and an open that fails that way
+// names it, since this process never closes the pipe while it opens the tunnel.
 //
 // Readiness. ssh opens the local listener only after authentication and the host-key check; the
 // tunnel is ready when that port accepts a connection while ssh still runs, within readyTimeoutMs.
@@ -122,16 +125,24 @@ const NO_WHERE_KNOWN = ["nohostauthenticationforproxycommand", "forkafterauthent
 let rejectedKeywords = new Set<string>();
 
 // The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process
-// and fd 4 the stderr pipe, which only ssh writes to: the shell's own stderr goes to /dev/null, so
-// its job messages (bash reports the reader it kills as "Terminated") never become the error line
-// shown for ssh. ssh runs in the background with stdin from /dev/null; a reader waits for the
-// pipe's EOF and then ends ssh; the supervisor exits with ssh's status. Arguments reach ssh as
-// "$@", never through the shell's parser.
-const SUPERVISOR = [
+// and fd 4 the stderr pipe, which only ssh and the reader's `cove-ssh:` reason write to: the
+// shell's own stderr goes to /dev/null, so its job messages (bash reports the reader it kills as
+// "Terminated") never become the error line shown for ssh. ssh runs in the background with stdin
+// from /dev/null; a reader waits for the pipe's EOF and then ends ssh; the supervisor exits with
+// ssh's status. Arguments reach ssh as "$@", never through the shell's parser. Before the reader
+// ends ssh it reports why on fd 4.
+export const SUPERVISOR = [
   "exec 3<&0 4>&2 </dev/null 2>/dev/null",
   '"$@" 2>&4 &',
   "ssh_pid=$!",
-  '{ read -r _ <&3; kill -TERM "$ssh_pid" 2>/dev/null; } &',
+  // The reader ignores SIGPIPE: once this process died nobody reads fd 4, and writing the reason
+  // must not cost the kill that follows it.
+  "{ trap '' PIPE",
+  '  if read -r _ <&3 2>&4; then why="a line on the supervisor pipe"',
+  '  else why="the end of the supervisor pipe or a read error (read status $?)"; fi',
+  '  printf "cove-ssh: ending ssh after %s\\n" "$why" >&4',
+  '  kill -TERM "$ssh_pid" 2>/dev/null',
+  "} &",
   "reader_pid=$!",
   'wait "$ssh_pid"',
   "status=$?",
@@ -369,8 +380,13 @@ export async function openSshTunnel(options: SshTunnelOptions): Promise<SshTunne
       await delay(PROBE_INTERVAL_MS);
     }
     const code = await started.ended;
-    const line = lastLine(started.stderr());
-    failure = `ssh exited${code === null ? "" : ` with status ${code}`}${line ? `: ${line}` : ""}`;
+    // ssh's own last line, and the supervisor's reason when its reader ended ssh.
+    const lines = started.stderr().split(/\r?\n/);
+    const line = lastLine(lines.filter((text) => !text.startsWith("cove-ssh: ")).join("\n"));
+    const reason = lastLine(lines.filter((text) => text.startsWith("cove-ssh: ")).join("\n"));
+    failure =
+      `ssh exited${code === null ? "" : ` with status ${code}`}${line ? `: ${line}` : ""}` +
+      (reason ? ` (${reason})` : "");
     // Only a lost race for the local port is retried; nothing was sent through any attempt.
     if (!/cannot listen to port|Address already in use/i.test(started.stderr())) break;
   }
