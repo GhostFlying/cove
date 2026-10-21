@@ -276,3 +276,64 @@ test("recovery hints offer exactly the actions the server advertises, and the le
       "remove it yourself if it is not needed: `git -C <repo> branch -d <branch>`",
   ]);
 });
+
+test("an accepted continue or abandon whose outcome cannot be read still prints its receipt (#126 item 11)", async () => {
+  // The compiled ending of continue/abandon after the server accepted the write, with a client
+  // whose reads fail: stdout used to be empty although the write was accepted. The receipt is
+  // printed with `targetReadError` (no target or leftovers, which the failed read says nothing
+  // about), stderr names both operations, and the exit is 1.
+  const { finishAction } = await import("../../dist/commands/operation.js");
+  const failing = {
+    ok: false,
+    kind: "local-error",
+    error: { category: "transport", reason: "connection-closed" },
+  };
+  const client = { getOperation: async () => failing };
+  const capture = async (accepted) => {
+    const stdout = [];
+    const stderr = [];
+    const out = process.stdout.write;
+    const err = process.stderr.write;
+    process.stdout.write = (chunk) => stdout.push(String(chunk)) > 0;
+    process.stderr.write = (chunk) => stderr.push(String(chunk)) > 0;
+    let code;
+    try {
+      code = await finishAction(client, accepted, "target-1");
+    } finally {
+      process.stdout.write = out;
+      process.stderr.write = err;
+    }
+    return { code, stdout: JSON.parse(stdout.join("")), stderr: stderr.join("") };
+  };
+  // continue settled, then the target's operation.get fails.
+  const continued = {
+    operationId: "continue-1",
+    method: "operation.continue",
+    revision: 1,
+    state: "succeeded",
+  };
+  const afterContinue = await capture(continued);
+  expect(afterContinue.code).toBe(1);
+  expect(afterContinue.stdout).toEqual({
+    operation: continued,
+    targetReadError: "operation.get failed: transport connection-closed",
+  });
+  expect(afterContinue.stderr).toContain("operation.continue continue-1 was accepted");
+  expect(afterContinue.stderr).toContain("the outcome of target-1 is unknown");
+  expect(afterContinue.stderr).toContain("`cove operation get target-1`");
+  // abandon accepted while running, then polling its own state fails.
+  const abandoning = {
+    operationId: "abandon-1",
+    method: "operation.abandon",
+    revision: 0,
+    state: "running",
+  };
+  const afterAbandon = await capture(abandoning);
+  expect(afterAbandon.code).toBe(1);
+  expect(afterAbandon.stdout.operation).toEqual(abandoning);
+  expect(afterAbandon.stdout.targetReadError).toContain(
+    "operation abandon-1 was accepted, but polling its state failed",
+  );
+  expect(afterAbandon.stdout).not.toHaveProperty("target");
+  expect(afterAbandon.stderr).toContain("`cove operation get abandon-1`");
+});
