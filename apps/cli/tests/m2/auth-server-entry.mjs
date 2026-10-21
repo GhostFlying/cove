@@ -21,7 +21,11 @@ const extra = JSON.parse(process.env.COVE_TEST_SERVER_ARGS ?? "[]");
 const faults = process.env.COVE_TEST_STORE_FAULTS
   ? JSON.parse(process.env.COVE_TEST_STORE_FAULTS)
   : undefined;
-const event = (name) => process.stderr.write(`${JSON.stringify({ event: name })}\n`);
+const event = (name, fields = {}) =>
+  process.stderr.write(`${JSON.stringify({ event: name, ...fields })}\n`);
+// The secret scan's sentinel (auth-fixtures.mjs), so that server stderr is a carrier it must find.
+if (process.env.COVE_TEST_SENTINEL)
+  event("test-sentinel", { value: process.env.COVE_TEST_SENTINEL });
 const ignore = () => undefined;
 runServerProcess(
   [...process.argv.slice(2), ...extra],

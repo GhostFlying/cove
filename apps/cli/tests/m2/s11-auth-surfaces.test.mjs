@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -44,26 +44,31 @@ afterEach(async () => {
   fixture = undefined;
 });
 
+// A sampling command's output. Any failure fails the test: an empty sample proves nothing.
 function run(file, args) {
-  return new Promise((done) =>
+  return new Promise((done, fail) =>
     execFile(file, args, { env: fixture.env, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) =>
-      done(error ? "" : stdout),
+      error ? fail(new Error(`${file} ${args.join(" ")} failed: ${error.message}`)) : done(stdout),
     ),
   );
 }
 
 // What other processes could read of a CLI: every process's argv, and this one's environment.
+// The sample must have seen this CLI's argv and its environment (the fixture's sentinel is in
+// both: the command line names it, and every CLI's environment holds it), or it proves nothing.
 async function sampleProcess(pid) {
   const argv = await run(
     "ps",
     process.platform === "linux" ? ["-eww", "-o", "args="] : ["-axww", "-o", "args="],
   );
-  // The sample must have seen this CLI, or it proves nothing.
-  if (!argv.includes("remote add")) throw new Error("the process sample did not include the CLI");
+  if (!argv.includes(`remote add box --name ${fixture.sentinel}`))
+    throw new Error("the process sample did not include the CLI's argv");
   const environment =
     process.platform === "linux"
-      ? await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "")
+      ? await readFile(`/proc/${pid}/environ`, "utf8")
       : await run("ps", ["eww", "-o", "command=", "-p", String(pid)]);
+  if (!environment.includes(`COVE_TEST_SENTINEL=${fixture.sentinel}`))
+    throw new Error("the process sample did not include the CLI's environment");
   return `${argv}\n${environment}`;
 }
 
@@ -257,6 +262,7 @@ test("lost secrets are recovered by new explicit operations, and no secret leaks
   const server = await fixture.startAuthServer(serverHome);
   const secrets = new Set();
   const remember = (value) => {
+    fixture.remember(value);
     secrets.add(value);
     if (value.startsWith("cove-invite:")) secrets.add(payloadOf(value).secret);
     if (value.startsWith("cove_d1_")) secrets.add(value.split(".")[1]);
@@ -278,7 +284,7 @@ test("lost secrets are recovered by new explicit operations, and no secret leaks
     client,
     "box",
     alteredInvitation(first.invitation, { pairingPort: proxy.port }),
-    [],
+    ["--name", fixture.sentinel],
     {
       sample: async (pid) => {
         await atPair;
@@ -379,21 +385,97 @@ test("lost secrets are recovered by new explicit operations, and no secret leaks
           .replace(/\.json$/, ""),
       );
   const records = [];
-  for (const id of operationIds)
-    records.push((await fixture.cove(["operation", "get", id], { home: serverHome })).stdout);
-  expect(records.join("")).toContain("s11-rotate");
-  const credentialFile = join(client, "client", "servers", `${device.serverId}.json`);
-  const scanned = [
-    ...(await filesUnder(fixture.root)).filter(({ path }) => path !== credentialFile),
-    { path: "server stderr", bytes: Buffer.from(server.stderr()) },
-    { path: "operation records", bytes: Buffer.from(records.join("\n")) },
-  ];
-  // The database and its WAL are among the scanned files.
-  expect(scanned.some(({ path }) => /\.(db|sqlite)(-wal)?$/.test(path))).toBe(true);
-  const leaks = [];
-  for (const { path, bytes } of scanned)
-    for (const value of secrets) if (bytes.includes(Buffer.from(value))) leaks.push(path);
-  expect(leaks).toEqual([]);
-  // The token is kept on purpose in the credential file only.
-  expect(await readFile(credentialFile, "utf8")).toContain(newToken);
+  for (const id of operationIds) {
+    const shown = await fixture.cove(["operation", "get", id], { home: serverHome });
+    expect({ id, code: shown.code }).toEqual({ id, code: 0 });
+    records.push(shown.stdout);
+  }
+  const shown = records.join("\n");
+  expect(shown).toContain("s11-rotate");
+  for (const value of secrets) expect(shown).not.toContain(value);
+  // The negative control of this carrier: the invitations' operation IDs carry the sentinel.
+  expect(shown).toContain(fixture.sentinel);
+  // Everything else (the store and its WAL, logs, CLI files, server stderr, and the credential
+  // file holding exactly the new token) is the fixture's scan, which also runs at cleanup.
+  fixture.expectToken(client, device.serverId, newToken);
+  const scan = await fixture.scanSecrets();
+  expect(scan.observed).toEqual(
+    expect.arrayContaining(["store", "cli pending records", "server stderr"]),
+  );
 }, 120_000);
+
+// The negative control of the secret scan itself: a secret planted in any one carrier it reads
+// (the store, a server log file, a CLI pending record, server stderr, the credential file) makes
+// it fail naming that carrier, and so does a credential file that does not hold the current
+// token. Each plant is removed again before the next, and the clean state passes.
+test("the secret scan fails for a secret in any carrier it reads", async () => {
+  const serverHome = fixture.home("server");
+  const server = await fixture.startAuthServer(serverHome);
+  const home = fixture.home("device");
+  const device = await fixture.pairOk(home, "box", (await fixture.invite(serverHome)).invitation);
+  const credentialPath = join(home, "client", "servers", `${device.serverId}.json`);
+  const credential = await readFile(credentialPath, "utf8");
+  const token = JSON.parse(credential).token;
+  fixture.expectToken(home, device.serverId, token);
+  const spare = (await fixture.invite(serverHome)).invitation;
+  await fixture.stopServer(server);
+  expect((await fixture.scanSecrets()).observed).toEqual(
+    expect.arrayContaining(["store", "cli pending records", "server stderr"]),
+  );
+
+  const database = join(serverHome, "server", "cove.db");
+  const logs = join(serverHome, "server", "log");
+  const pending = join(home, "cli", "operations");
+  const original = await readFile(database);
+  const stderr = server.stderr;
+  const plants = [
+    {
+      carrier: "store",
+      plant: () => appendFile(database, token),
+      remove: () => writeFile(database, original),
+    },
+    {
+      carrier: "files",
+      plant: async () => {
+        await mkdir(logs, { recursive: true });
+        await writeFile(join(logs, "planted.log"), `{"token":"${token.split(".")[1]}"}`);
+      },
+      remove: () => writeFile(join(logs, "planted.log"), "{}"),
+    },
+    {
+      carrier: "cli pending records",
+      plant: async () => {
+        await mkdir(pending, { recursive: true });
+        await writeFile(join(pending, "planted.json"), JSON.stringify({ spare }));
+      },
+      remove: () => writeFile(join(pending, "planted.json"), "{}"),
+    },
+    {
+      carrier: "server stderr",
+      plant: () => void (server.stderr = () => `${stderr()}${spare}`),
+      remove: () => void (server.stderr = stderr),
+    },
+    {
+      carrier: "holds a secret other than its token",
+      plant: () =>
+        writeFile(credentialPath, credential.replace('"loopback"', `"loopback","x":"${spare}"`)),
+      remove: () => writeFile(credentialPath, credential),
+    },
+    {
+      carrier: "does not hold the current token",
+      plant: () =>
+        fixture.expectToken(
+          home,
+          device.serverId,
+          `${token.slice(0, -1)}${token.endsWith("A") ? "B" : "A"}`,
+        ),
+      remove: () => fixture.expectToken(home, device.serverId, token),
+    },
+  ];
+  for (const { carrier, plant, remove } of plants) {
+    await plant();
+    await expect(fixture.scanSecrets()).rejects.toThrow(carrier);
+    await remove();
+  }
+  await fixture.scanSecrets();
+});
