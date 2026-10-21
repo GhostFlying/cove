@@ -1,5 +1,7 @@
 import { resolve } from "node:path";
 import {
+  hostPath,
+  isRemote,
   optionalIntegerFlag,
   print,
   takeFlags,
@@ -41,7 +43,9 @@ export async function run(args: Arguments): Promise<number> {
       );
     // A path is resolved here so that the request names one absolute directory; rebuilding the
     // same command from the same directory produces the same intent for a reused operation ID.
-    const value = sub === "set" ? resolve(args.words[3]!) : null;
+    // With --server it is the server host's path and must be absolute (m2 S13).
+    const value =
+      sub === "set" ? (isRemote() ? hostPath(args.words[3]!) : resolve(args.words[3]!)) : null;
     const expectedRevision = optionalIntegerFlag(args, "--expected-revision");
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {

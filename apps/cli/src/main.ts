@@ -2,6 +2,7 @@
 import { readdir } from "node:fs/promises";
 import {
   parseArguments,
+  selectTarget,
   StatusError,
   SWITCHES,
   UsageError,
@@ -15,6 +16,11 @@ interface CommandModule {
   readonly usage: string;
   // The group is one command without subcommands, so `cove <group>` alone runs it.
   readonly standalone?: boolean;
+  // Commands that act on this host only and never on a paired server (m2 D11): true for the
+  // whole group, or a predicate of the subcommand. Omitted: every command of the group accepts
+  // --server, except `server`, whose module does not say (it is local-only until its owner, T3,
+  // exports this to open the commands a remote device may use).
+  readonly localOnly?: boolean | ((subcommand: string | undefined) => boolean);
   run(args: Arguments): Promise<number>;
 }
 
@@ -22,6 +28,11 @@ const COMMANDS = new URL("./commands/", import.meta.url);
 const GROUP = /^[a-z][a-z0-9-]*$/;
 const OPERATION_ID_NOTE = `Every write command accepts --operation-id ID; the request is saved under <home>/cli before it is
 sent, and \`cove operation resend ID\` sends exactly that request again to the same server.`;
+
+const TARGET_NOTE = `--server ALIAS (or $COVE_SERVER) sends a command to a server paired with \`cove remote add\`,
+over its default entry or the one --via names; a failed entry is reported, never replaced by
+another. With --server, path arguments are absolute paths on the server's host and are sent as
+given. Commands that act on this host only (server, remote) do not take --server.`;
 
 async function groups(): Promise<string[]> {
   return (await readdir(COMMANDS))
@@ -47,7 +58,10 @@ async function usage(group?: string): Promise<string> {
     : await Promise.all((await groups()).map(async (name) => (await load(name)).usage));
   const text = sections.join("\n");
   const note = text.includes("--operation-id") ? `\n\n${OPERATION_ID_NOTE}` : "";
-  return `usage: cove [--home DIR] [--rendezvous PATH] <command>\n\n${text}${note}`;
+  return (
+    "usage: cove [--home DIR] [--rendezvous PATH | --server ALIAS [--via ssh|tsnet]] <command>\n\n" +
+    `${text}${note}\n\n${TARGET_NOTE}`
+  );
 }
 
 // A usage error inside a known group: the usage printed with it is that group's.
@@ -107,6 +121,16 @@ async function run(argv: readonly string[]): Promise<number> {
   // group is a whole command by itself (`cove status`).
   if (rest.length === 0 && !module.standalone)
     throw new GroupUsageError(`missing ${group} command`, group);
+  const localOnly =
+    typeof module.localOnly === "function"
+      ? module.localOnly(rest[0])
+      : (module.localOnly ?? group === "server");
+  try {
+    selectTarget(args, localOnly);
+  } catch (error) {
+    if (error instanceof UsageError) throw new GroupUsageError(error.message, group);
+    throw error;
+  }
   try {
     return await module.run(args);
   } catch (error) {
