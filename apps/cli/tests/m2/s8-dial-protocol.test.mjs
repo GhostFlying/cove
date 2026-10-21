@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, lstat, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -13,12 +13,14 @@ import {
   removeRoot,
   runCove,
   shortRoot,
+  socketOf,
 } from "./tsnet-fixtures.mjs";
 
 // m2 S8 (D14), the CLI's side of the dial-socket protocol against a scripted daemon
 // (tsnet-fake-dial.mjs), for the answers a real daemon on a test tailnet cannot be made to give:
 // a daemon of an incompatible local protocol that carries streams, one of a compatible other
-// build with streams, identity holds after a login, a logout the control plane did not confirm,
+// build with streams, a daemon slow to greet or never answering a stop (the one start deadline),
+// identity holds after a login, a logout the control plane did not confirm,
 // and a server node address that answers WhoIs as another node. The real daemon's own behavior
 // is covered by s8-dial-daemon and s8-tsnet-tailnet.
 
@@ -62,9 +64,20 @@ async function runningDaemon(settings) {
     env: { ...env, COVE_TEST_FAKE_DIAL: daemonConfig },
     stdio: "ignore",
   });
-  daemons.push(child);
-  await waitFor("the fake daemon", async () => (await daemonHello(home)) !== null, 10_000);
-  return (await daemonHello(home)).pid;
+  const exited = new Promise((done) => child.once("exit", done));
+  daemons.push({ child, exited });
+  // The wrapper execs the fake, so its PID is the daemon's. Waiting for the socket rather than a
+  // hello keeps a fake that is slow to greet from delaying the test.
+  await waitFor(
+    "the fake daemon",
+    () =>
+      lstat(socketOf(home)).then(
+        () => true,
+        () => false,
+      ),
+    10_000,
+  );
+  return child.pid;
 }
 
 beforeEach(async () => {
@@ -80,8 +93,12 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // The test's own fakes first: one may be scripted never to answer a stop.
+  for (const { child, exited } of daemons.splice(0)) {
+    child.kill("SIGKILL");
+    await exited;
+  }
   await endDaemon(home);
-  for (const child of daemons.splice(0)) child.kill("SIGKILL");
   await removeRoot(root);
 });
 
@@ -116,6 +133,38 @@ test("a compatible daemon of another build with active streams is used with a wa
   expect(JSON.parse(result.stdout).daemon).toEqual({ pid, build: "0.0.0-old", protocol: 1 });
   expect(alive(pid)).toBe(true);
   expect((await events()).map((event) => event.op)).toEqual(["status"]);
+}, 60_000);
+
+test("a delayed hello and a stop that is never answered share the one 10 s start deadline", async () => {
+  // An idle daemon of another build that is slow to greet and never answers the replacement stop.
+  await configure({ build: "0.0.0-new", protocol: 1 });
+  const pid = await runningDaemon({
+    build: "0.0.0-old",
+    protocol: 1,
+    delays: { hello: 4_000, stop: 60_000 },
+  });
+  const result = await tsnet("status");
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("did not become ready within 10 s");
+  expect(result.stderr).toContain("ENTRY_UNAVAILABLE");
+  // The stop got what was left of the deadline after the hello, not a fresh budget of its own.
+  expect(result.elapsedMs).toBeGreaterThanOrEqual(9_500);
+  expect(result.elapsedMs).toBeLessThan(11_000);
+  expect((await events()).map((event) => event.op)).toEqual(["stop"]);
+  expect(alive(pid)).toBe(true);
+}, 60_000);
+
+test("a hello that never comes in time ends the command at the deadline", async () => {
+  // Every hello takes longer than one attempt may wait; daemons the CLI starts find the socket
+  // taken and exit 75, as for a held lock.
+  await configure({ build: "b1", protocol: 1 });
+  await runningDaemon({ build: "b1", protocol: 1, delays: { hello: 7_000 } });
+  const result = await tsnet("status");
+  expect(result.code).toBe(1);
+  expect(result.stderr).toContain("did not become ready within 10 s");
+  expect(result.elapsedMs).toBeGreaterThanOrEqual(9_500);
+  expect(result.elapsedMs).toBeLessThan(11_000);
+  expect(await events()).toEqual([]);
 }, 60_000);
 
 test("identity holds after a login are reported, not success", async () => {

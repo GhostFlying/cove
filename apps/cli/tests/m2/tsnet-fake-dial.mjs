@@ -19,9 +19,12 @@ import { join } from "node:path";
 //     "dialForward": PORT,               a successful dial forwards to 127.0.0.1:PORT
 //     "dialPeer": "nodeID",              the peer a successful dial reports
 //     "delayMs": N,                      wait before answering a request
+//     "delays": { "<op>": N },           wait before answering that request (hello included)
 //     "events": "/path" }                one JSON line per request: { op, authKey: bool, force,
 //                                        bytesBeforeAnswer }; never the key itself
-// It keeps no lock: a scenario runs one fake daemon per home.
+// It keeps no lock. In its place, a fake started while another one answers connections on the
+// socket exits 75, as a real daemon that lost the lock does, so the CLI's start loop sees the
+// same outcomes.
 
 const config = () => JSON.parse(readFileSync(process.env.COVE_TEST_FAKE_DIAL, "utf8"));
 const [command, ...args] = process.argv.slice(2);
@@ -36,7 +39,17 @@ const home = args[args.indexOf("--home") + 1];
 const run = join(home, "run");
 mkdirSync(run, { recursive: true, mode: 0o700 });
 const sock = join(run, "dial.sock");
+const owned = await new Promise((done) => {
+  const probe = connect(sock);
+  probe.once("connect", () => {
+    probe.destroy();
+    done(true);
+  });
+  probe.once("error", () => done(false));
+});
+if (owned) process.exit(75);
 rmSync(sock, { force: true });
+const wait = (ms) => (ms ? new Promise((done) => setTimeout(done, ms)) : undefined);
 
 const record = (event) => {
   const { events } = config();
@@ -59,6 +72,8 @@ const server = createServer((socket) => {
       const settings = config();
       if (stage === "hello") {
         stage = "request";
+        await wait(settings.delays?.hello);
+        if (socket.destroyed) return;
         reply(socket, {
           ok: true,
           result: {
@@ -72,13 +87,16 @@ const server = createServer((socket) => {
         continue;
       }
       stage = request.op === "dial" ? "stream" : "done";
-      if (settings.delayMs) await new Promise((done) => setTimeout(done, settings.delayMs));
+      await wait(settings.delayMs);
       record({
         op: request.op,
         authKey: typeof request.authKey === "string",
         force: request.force === true,
         bytesBeforeAnswer: buffer.length,
       });
+      // A request held this long (or forever) after it was recorded as received.
+      await wait(settings.delays?.[request.op]);
+      if (socket.destroyed) return;
       if (request.op === "stop") {
         server.close();
         rmSync(sock, { force: true });
