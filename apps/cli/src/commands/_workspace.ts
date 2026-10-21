@@ -11,7 +11,7 @@ import {
   type TabRecord,
   type TaskRecord,
 } from "@cove/protocol/workspace";
-import { hostPath, print, unwrap, UsageError } from "./_common.js";
+import { hostPath, isRemote, print, unwrap, UsageError } from "./_common.js";
 
 // Helpers shared by `cove task` and `cove mount` (M1 T3a).
 
@@ -59,8 +59,14 @@ export function isPathArgument(value: string): boolean {
 }
 
 // A path argument as the server should see it: `~` and `~/...` (left unexpanded when quoted) are
-// the user's home directory, and a relative path is made absolute (hostPath).
+// the user's home directory, and a relative path is made absolute (hostPath). With --server
+// (m2 S13) neither applies: this host's home and directory are not the server host's, so `~` is a
+// usage error like a relative path, and an absolute path is sent as given.
 export function argumentPath(value: string): string {
+  if (value.startsWith("~") && isRemote())
+    throw new UsageError(
+      `${value} starts with ~: with --server, paths are absolute paths on the server's host`,
+    );
   if (value === "~") return homedir();
   // Only the prefix is replaced. join() would normalize the rest lexically, and `..` after a
   // symlink means something else than that (`~/link/../x` is the parent of the link's target).
@@ -319,6 +325,7 @@ export async function resolveMountSpecs(
   specs: readonly ParsedMountSpec[],
 ): Promise<MountSpec[]> {
   if (!specs.some((spec) => "lookup" in spec)) return specs as MountSpec[];
+  if (isRemote()) return resolveRemoteMountSpecs(client, specs);
   await requireGit();
   const targets = new Map<string, { commonDir: string; topLevel: string }>();
   for (const spec of specs) {
@@ -351,6 +358,32 @@ export async function resolveMountSpecs(
       repoId: repo.repoId,
       ...(spec.name === undefined ? {} : { name: spec.name }),
       ...(found.topLevel === repo.path ? {} : { path: spec.lookup }),
+    };
+  });
+}
+
+// resolveMountSpecs with --server (m2 S13). The path is on the server's host, where this CLI
+// cannot run Git, so only the path of a registered clone itself is resolved, by exact equality with
+// the path the server reports; any other path is refused before anything is sent, pointing at the
+// REPO_ID,path=PATH form, which the server checks itself.
+async function resolveRemoteMountSpecs(
+  client: Client,
+  specs: readonly ParsedMountSpec[],
+): Promise<MountSpec[]> {
+  const repos = await listRepos(client);
+  return specs.map((spec): MountSpec => {
+    if (!("lookup" in spec)) return spec;
+    const repo = repos.find((candidate) => candidate.path === spec.lookup);
+    if (!repo)
+      throw new Error(
+        `--checkout ${spec.lookup} is not the path of a registered clone on the server; ` +
+          `${nothingSent}. With --server, name another working tree of a clone as ` +
+          "--checkout REPO_ID,path=PATH (`cove repo list` shows the clones)",
+      );
+    return {
+      source: "checkout",
+      repoId: repo.repoId,
+      ...(spec.name === undefined ? {} : { name: spec.name }),
     };
   });
 }

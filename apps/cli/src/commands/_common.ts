@@ -2,7 +2,9 @@ import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import type { CallOutcome, Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
-import { openSession, type Session } from "../session.js";
+import { ALIAS_PATTERN } from "../remote/credentials.js";
+import type { Via } from "../remote/entries.js";
+import { openRemoteSession, openSession, type Session } from "../session.js";
 
 // Shared CLI plumbing for the command modules. A module named `<group>.ts` in this directory
 // serves `cove <group> ...` (main.ts discovers it); modules whose names start with `_` are helpers.
@@ -26,8 +28,11 @@ export interface Arguments {
   readonly command: string[] | undefined;
 }
 
-// Options every command accepts: where the data directory and the server rendezvous are.
-export const GLOBAL_FLAGS = ["--home", "--rendezvous"] as const;
+// Options every command accepts: where the data directory and the server rendezvous are, and
+// which paired server a command addresses (m2 D11): `--server ALIAS` (or COVE_SERVER) and the
+// entry `--via ssh|tsnet` (otherwise the alias's fixed default entry). Commands that only act on
+// this host refuse --server (main.ts `localOnly`).
+export const GLOBAL_FLAGS = ["--home", "--rendezvous", "--server", "--via"] as const;
 
 // Flags that take no value. main.ts answers --help before a command runs.
 export const SWITCHES: ReadonlySet<string> = new Set([
@@ -76,12 +81,60 @@ export function flagValues(args: Arguments, name: string): string[] {
   return args.flags.get(name) ?? [];
 }
 
-// The path the server should inspect. A relative path is made absolute against this command's
-// directory without normalizing it: `..` after a symlink means something else than lexical
-// normalization says, and the server resolves the real path (and drops a trailing slash) itself.
-// Rebuilding the command from the same directory produces the same intent.
+// The paired server this command addresses, or null for the local server (m2 D11). Set once by
+// main.ts (selectTarget) before the command runs; path arguments depend on it (hostPath).
+export type RemoteTarget = { readonly alias: string; readonly via?: Via };
+let remoteTarget: RemoteTarget | null = null;
+
+// Chooses the target from --server, then COVE_SERVER, and checks --via. `localOnly`: the command
+// acts on this host only (server setup, the client's own pairing records), so --server is refused
+// and COVE_SERVER does not apply; such a command reads --via itself if it has a use for it.
+export function selectTarget(args: Arguments, localOnly: boolean): RemoteTarget | null {
+  const flagged = flag(args, "--server");
+  const via = flag(args, "--via");
+  if (via !== undefined && via !== "ssh" && via !== "tsnet")
+    throw new UsageError("--via is ssh or tsnet");
+  if (localOnly) {
+    if (flagged !== undefined)
+      throw new UsageError("this command acts on this host only; --server does not apply");
+    remoteTarget = null;
+    return null;
+  }
+  const alias = flagged ?? (process.env.COVE_SERVER || undefined);
+  if (alias === undefined) {
+    if (via !== undefined) throw new UsageError("--via needs --server (or COVE_SERVER)");
+    remoteTarget = null;
+    return null;
+  }
+  if (!ALIAS_PATTERN.test(alias))
+    throw new UsageError("a server alias is 1-64 of a-z, 0-9, '.', '_' or '-'");
+  if (flag(args, "--rendezvous") !== undefined)
+    throw new UsageError("--rendezvous names a local server; it cannot be combined with --server");
+  remoteTarget = { alias, ...(via ? { via: via as Via } : {}) };
+  return remoteTarget;
+}
+
+// Whether this command addresses a paired server rather than the local one.
+export function isRemote(): boolean {
+  return remoteTarget !== null;
+}
+
+// The path the server should inspect.
+//
+// Local mode (M1): a relative path is made absolute against this command's directory without
+// normalizing it: `..` after a symlink means something else than lexical normalization says, and
+// the server resolves the real path (and drops a trailing slash) itself. Rebuilding the command
+// from the same directory produces the same intent.
+//
+// Remote mode (m2 D11, S13): the path is the execution host's, and this host's directory says
+// nothing about that one, so only an absolute path is accepted and it is sent exactly as given;
+// a relative one is a usage error before anything is saved or sent.
 export function hostPath(path: string): string {
   if (isAbsolute(path)) return path;
+  if (remoteTarget)
+    throw new UsageError(
+      `${path} is relative: with --server, paths are absolute paths on the server's host`,
+    );
   const cwd = process.cwd();
   return cwd.endsWith(sep) ? `${cwd}${path}` : `${cwd}${sep}${path}`;
 }
@@ -207,14 +260,19 @@ export function requireSucceeded(operation: OperationRecord): OperationRecord {
   throw new Error(`${operation.method} ${operation.operationId} ${operation.state}${reason}`);
 }
 
+// Runs `action` with a session to the command's target: the local server of the rendezvous, or
+// the paired server selectTarget chose, over its selected entry.
 export async function withSession<T>(
   args: Arguments,
   action: (session: Session) => Promise<T>,
 ): Promise<T> {
-  const session = await openSession(rendezvousPath(args));
+  const session = remoteTarget
+    ? await openRemoteSession(homeDirectory(args), remoteTarget.alias, remoteTarget.via)
+    : await openSession(rendezvousPath(args));
   try {
     return await action(session);
   } finally {
     session.client.dispose();
+    await session.close?.();
   }
 }

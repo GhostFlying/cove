@@ -5,7 +5,9 @@ import type { RunRecord } from "@cove/protocol/rpc";
 import type { Session } from "../session.js";
 import {
   flag,
+  hostPath,
   integerFlag,
+  isRemote,
   one,
   print,
   requireSucceeded,
@@ -58,7 +60,12 @@ export async function run(args: Arguments): Promise<number> {
       cols: integerFlag(args, "--cols", 80),
       rows: integerFlag(args, "--rows", 24),
     };
-    const cwd = resolve(flag(args, "--cwd") ?? process.cwd());
+    // With --server the directory is the server host's (m2 S13): an explicit absolute --cwd, sent
+    // as given; this host's directory means nothing there.
+    const given = flag(args, "--cwd");
+    if (isRemote() && given === undefined)
+      throw new UsageError("with --server, terminal create needs --cwd with an absolute path");
+    const cwd = isRemote() ? hostPath(given!) : resolve(given ?? process.cwd());
     const operationId = operationIdFor(args);
     // The execution precondition names the instance this command was built against; a resend
     // after a restart keeps it (`cove operation resend`), while rebuilding the command against the
