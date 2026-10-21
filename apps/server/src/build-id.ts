@@ -5,20 +5,25 @@ import { fileURLToPath } from "node:url";
 import { formatBuildId } from "@cove/protocol/bootstrap";
 
 // The build identity of this Cove build (m2 D1, D12; format in protocol bootstrap.ts):
-// `<root package version>+<16 hex>`, where the digest is a SHA-256 over every compiled file of the
-// Cove workspace packages (`apps/*/dist`, `packages/*/dist`) and the lockfile, by relative path.
-// The server and the CLI of one build compute it over the same files, so they agree, and any
-// change to compiled code or locked dependencies gives a new ID. It is computed at run time
+// `<root package version>+<16 hex>`, where the digest is a SHA-256, by relative path, over every
+// compiled file of the Cove workspace packages (`apps/*/dist`, `packages/*/dist`), each such
+// package's manifest (its `exports`, `bin` and dependencies decide what runs) and the lockfile.
+// The server and the CLI of one build compute it over the same files, so they agree, and a change
+// to compiled code, a manifest or a locked dependency gives a new ID. It is computed at run time
 // rather than stamped by a build step, so every way of building (root `pnpm build`, a package's
 // `tsc -b`) yields an honest ID and no build script has to run first.
 //
 // Excluded: type declarations, source maps and tsbuildinfo, which do not change behavior, and
-// symbolic links (node_modules links are not part of a dist tree anyway). Native addons are not
-// hashed; they are rebuilt per machine and identified by the Node ABI instead.
+// symbolic links (node_modules links are not part of a dist tree anyway). Not covered at all: the
+// Node binary, native addons (better-sqlite3, node-pty) and other binaries the build runs, which
+// are rebuilt or installed per machine. Two checkouts with the same ID can therefore still differ
+// in those; the ID tells builds apart for diagnostics and the D12 warning, nothing more.
 //
-// A layout without a workspace root (an install closure T3 has not defined yet) yields
-// UNIDENTIFIED_BUILD rather than failing startup: builds then compare equal, which only loses
-// the D12 warning, never a refusal.
+// This runtime scan is the development fallback. An installed Cove (m2 T3, D1) is to carry an
+// identity stamped at installation over its complete closure, which takes precedence over this
+// scan once T3 provides it. Until then, and for a layout without a workspace root,
+// UNIDENTIFIED_BUILD is reported rather than failing startup: builds then compare equal, which
+// only loses the D12 warning, never a refusal.
 export const UNIDENTIFIED_BUILD = "unidentified";
 const EXCLUDED = /(?:\.d\.ts|\.d\.mts|\.map|\.tsbuildinfo)$/;
 
@@ -44,9 +49,11 @@ export function computeBuildId(root: string): string {
     const parent = join(root, group);
     if (!existsSync(parent)) continue;
     for (const entry of readdirSync(parent, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
       const dist = join(parent, entry.name, "dist");
-      if (entry.isDirectory() && existsSync(dist) && lstatSync(dist).isDirectory())
-        distFiles(dist, files);
+      if (existsSync(dist) && lstatSync(dist).isDirectory()) distFiles(dist, files);
+      const manifest = join(parent, entry.name, "package.json");
+      if (existsSync(manifest) && lstatSync(manifest).isFile()) files.push(manifest);
     }
   }
   const lockfile = join(root, "pnpm-lock.yaml");
