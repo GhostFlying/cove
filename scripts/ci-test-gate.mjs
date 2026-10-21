@@ -243,7 +243,7 @@ export const requiredSuites = [
     file: "packages/protocol/tests/workspace-contract.test.mjs",
     minimumTests: 11,
   },
-  { project: "protocol", file: "packages/protocol/tests/auth-contract.test.mjs", minimumTests: 8 },
+  { project: "protocol", file: "packages/protocol/tests/auth-contract.test.mjs", minimumTests: 9 },
   {
     project: "server",
     file: "apps/server/tests/author/runtime-admission.test.mjs",
@@ -278,7 +278,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/secret-boundary.test.mjs",
-    minimumTests: 10,
+    minimumTests: 17,
   },
   { project: "server", file: "apps/server/tests/author/build-id.test.mjs", minimumTests: 3 },
   {

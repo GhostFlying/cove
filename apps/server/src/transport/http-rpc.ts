@@ -10,12 +10,12 @@ import {
   type BootstrapFailure,
 } from "@cove/protocol/bootstrap";
 import { boundedJsonStructure } from "@cove/protocol/terminal";
-import { ERROR_CODES, type DomainError } from "@cove/protocol/errors";
+import { DomainErrorSchema, ERROR_CODES, type DomainError } from "@cove/protocol/errors";
 import {
   classifyRpcEnvelope,
   composeRpcResponse,
   rpcHttpSuccessStatus,
-  validateRpcResultForCall,
+  parseRpcResultForCall,
   STANDARD_RPC_ERRORS,
   STANDARD_RPC_MESSAGES,
   type RpcId,
@@ -140,6 +140,9 @@ export async function rpcBody(
   bytes: Uint8Array,
   buffers: RpcBuffers = rpcBuffers(core),
   principal?: Principal,
+  // The dispatch of each call; tests substitute a handler behind the real secret boundary
+  // (rpc/dispatch.ts callHandler) to exercise this serialization.
+  route: typeof dispatchLocalRpc = dispatchLocalRpc,
 ): Promise<{ status: number; body?: string }> {
   let value: unknown;
   let parseFailed = false;
@@ -171,7 +174,7 @@ export async function rpcBody(
     if (item.kind === "notification") {
       if (item.params !== null) {
         try {
-          await dispatchLocalRpc(core, item.method as RpcMethod, item.params, principal);
+          await route(core, item.method as RpcMethod, item.params, principal);
         } catch {
           // Notifications execute without emitting success or failure replies.
         }
@@ -182,12 +185,22 @@ export async function rpcBody(
     if (item.kind === "error") response = item.response;
     else {
       try {
-        const result = await dispatchLocalRpc(core, item.method, item.params, principal);
-        if (isDomainFailure(result)) response = domain(item.id, result.error);
-        else
-          response = validateRpcResultForCall(item.method, item.params, result)
-            ? { jsonrpc: "2.0" as const, id: item.id, result }
+        const result = await route(core, item.method, item.params, principal);
+        if (isDomainFailure(result)) {
+          // Likewise a refusal is sent as its schema parsed it.
+          const error = DomainErrorSchema.safeParse(result.error);
+          response = error.success
+            ? domain(item.id, error.data)
             : standard(item.id, STANDARD_RPC_ERRORS.internal);
+        } else {
+          // The parsed result is what is sent: a member the schema strips never reaches the
+          // wire, whatever the handler's object held.
+          const parsed = parseRpcResultForCall(item.method, item.params, result);
+          response =
+            parsed !== null
+              ? { jsonrpc: "2.0" as const, id: item.id, result: parsed }
+              : standard(item.id, STANDARD_RPC_ERRORS.internal);
+        }
       } catch {
         response = standard(item.id, STANDARD_RPC_ERRORS.internal);
       }

@@ -1,10 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
-import { ERROR_CODES } from "@cove/protocol/errors";
+import { ERROR_CODES, domainError } from "@cove/protocol/errors";
+import { canonicalWriteIntent } from "@cove/protocol/rpc";
 import { callHandler, dispatchRpc } from "../../dist/rpc/dispatch.js";
 import { rpcBody } from "../../dist/transport/http-rpc.js";
-import { executeSecretWrite } from "../../dist/operations/database-operations.js";
+import {
+  executeDatabaseWriteCommitted,
+  executeSecretWrite,
+  recordedWrite,
+} from "../../dist/operations/database-operations.js";
+import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
+import { ConfigService, sqliteConfigState } from "../../dist/store/config.js";
 import { nextEntryConfig } from "../../dist/store/config-rules.js";
+import { Store } from "../../dist/store/database.js";
+import { prepareHome } from "../../dist/store/home.js";
+import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/identity.js";
+import { SqliteReceiptBackend } from "../../dist/store/operations.js";
+import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
+import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
 
 // m2 T0: the principal and the secret boundary of the dispatch layer ("秘密与操作记录的分界"),
 // the secret-returning database write and the entry configuration rules.
@@ -163,6 +179,73 @@ describe("dispatch secret boundary", () => {
   });
 });
 
+describe("HTTP answers behind the secret boundary", () => {
+  // One HTTP call whose method is served by `handler` behind the real boundary (callHandler).
+  async function answer(method, params, handler) {
+    const bytes = encoder.encode(JSON.stringify({ jsonrpc: "2.0", id: "q1", method, params }));
+    const route = (routed, name, validated, principal) =>
+      callHandler(handler, routed, name, validated, principal ?? owner);
+    const { body } = await rpcBody(core, bytes, undefined, undefined, route);
+    return { body, parsed: JSON.parse(body) };
+  }
+  const login = { operationId: "o1", secrets: { authKey } };
+  const loginUrl = "https://login.example/a/1234567890";
+
+  it("refuses a refusal whose details carry an input secret", async () => {
+    const run = { serverId: "s1", relayInstanceId: "i1", runId: authKey };
+    const { body, parsed } = await answer("server.tsnet.login", login, () => ({
+      error: domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, { runs: [run] }),
+    }));
+    expect(parsed.error.code).toBe(-32603);
+    expect(body).not.toContain(authKey);
+  });
+
+  it("refuses a misplaced nested secret and undeclared output secret keys", async () => {
+    const operation = record("server.tsnet.login", { secretDelivery: "first-response-only" });
+    const token = `cove_d1_dev-1.${"T".repeat(43)}`;
+    const nested = await answer("auth.device.rotate", { operationId: "o1" }, () => ({
+      operation: { ...record("auth.device.rotate"), result: { secrets: { token } } },
+    }));
+    expect(nested.parsed.error.code).toBe(-32603);
+    expect(nested.body).not.toContain(token);
+    const extra = await answer("server.tsnet.login", login, () => ({
+      operation,
+      secrets: { loginUrl, authKey },
+    }));
+    expect(extra.parsed.error.code).toBe(-32603);
+    expect(extra.body).not.toContain(authKey);
+    // The exact declaration passes, with its secret beside the record.
+    const exact = await answer("server.tsnet.login", login, () => ({
+      operation,
+      secrets: { loginUrl },
+    }));
+    expect(exact.parsed.result).toEqual({ operation, secrets: { loginUrl } });
+  });
+
+  it("serializes the schema-parsed result, never the handler's object", async () => {
+    const operation = record("auth.invite.cancel", { inviteId: "inv-1" });
+    const { body, parsed } = await answer(
+      "auth.invite.cancel",
+      { operationId: "o1", inviteId: "inv-1" },
+      () => ({ operation: { ...operation, internal: "server-only-note" }, debug: "x" }),
+    );
+    expect(parsed.result).toEqual({ operation });
+    expect(body).not.toContain("server-only-note");
+    expect(body).not.toContain("debug");
+  });
+
+  it("finds a secret that JSON escapes", async () => {
+    const quoted = 'tskey-"quoted\\key-1234567890';
+    const { body, parsed } = await answer(
+      "server.tsnet.login",
+      { operationId: "o1", secrets: { authKey: quoted } },
+      () => ({ operation: record("server.tsnet.login"), note: `copied ${quoted}` }),
+    );
+    expect(parsed.error.code).toBe(-32603);
+    expect(body).not.toContain("quoted");
+  });
+});
+
 describe("executeSecretWrite", () => {
   // Receipts that commit the first request and answer later ones from the stored record.
   function receipts() {
@@ -217,6 +300,46 @@ describe("executeSecretWrite", () => {
     expect(backend.lookups.join()).not.toContain("cove-invite");
   });
 
+  it("refuses missing or malformed output secrets before anything is looked up", async () => {
+    const backend = receipts();
+    const context = { serverId: "s1", receipts: backend, encodeUtf8 };
+    for (const secrets of [{ invitation: "not-an-invitation" }, {}])
+      await expect(
+        executeSecretWrite(
+          context,
+          "owner-1",
+          "auth.invite.create",
+          { operationId: "o1" },
+          apply,
+          secrets,
+        ),
+      ).rejects.toThrow(/cannot return these secrets/);
+    expect(backend.lookups).toEqual([]);
+    expect(backend.stored.size).toBe(0);
+  });
+
+  it("hands the call's secret values to the receipt transaction and fails on its refusal", async () => {
+    const requests = [];
+    const backend = {
+      ...receipts(),
+      write: async (request) => (requests.push(request), { secretRefused: true }),
+    };
+    const context = { serverId: "s1", receipts: backend, encodeUtf8 };
+    const loginUrl = "https://login.example/a/1234567890";
+    await expect(
+      executeSecretWrite(
+        context,
+        "owner-1",
+        "server.tsnet.login",
+        { operationId: "o1" },
+        apply,
+        { loginUrl },
+        { authKey },
+      ),
+    ).rejects.toThrow(/would hold a secret/);
+    expect(requests[0].secrets).toEqual([loginUrl, authKey]);
+  });
+
   it("refuses params that still carry secrets and undeclared secrets", async () => {
     const context = { serverId: "s1", receipts: receipts(), encodeUtf8 };
     await expect(
@@ -244,6 +367,71 @@ describe("executeSecretWrite", () => {
         {},
       ),
     ).rejects.toThrow(/cannot return these secrets/);
+  });
+});
+
+describe("durable secret boundary", () => {
+  const directories = [];
+  const stores = [];
+  afterEach(async () => {
+    for (const store of stores.splice(0)) await store.close();
+    await Promise.all(
+      directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+    );
+  });
+
+  it("rolls back a write whose record would hold a secret, leaving nothing to read or replay", async () => {
+    const path = await mkdtemp(join(tmpdir(), "cove-secret-store-"));
+    directories.push(path);
+    const layout = await prepareHome(join(path, "home"));
+    const store = await Store.open({
+      databasePath: layout.databasePath,
+      backupDirectory: layout.backupDirectory,
+    });
+    stores.push(store);
+    await loadOrCreateIdentity(store);
+    const bytes = new RuntimeRetainedBytes(M0_LIMITS.runtimeBytes, 1024 * 1024);
+    const composition = new RuntimeComposition("server", "instance", { ...M0_LIMITS }, bytes);
+    await recordInstanceStart(store, "instance", 1);
+    const receipts = new OperationReceipts(
+      composition,
+      encodeUtf8,
+      new SqliteReceiptBackend(store, "instance", () => 1),
+    );
+    const config = new ConfigService({
+      home: "/home/owner/.cove",
+      serverId: "server",
+      receipts,
+      state: sqliteConfigState(store),
+      encodeUtf8,
+    });
+    const context = { serverId: "server", receipts, encodeUtf8 };
+    // A secret that a schema-valid record field holds: here the operation ID, which every record
+    // of the operation names.
+    const secret = "op-secret-1234567890abcdef";
+    const params = { operationId: secret, patch: { workspaceRoot: "/srv/work" } };
+    const apply = { name: "config.set", args: { patch: { workspaceRoot: "/srv/work" }, at: 1 } };
+    await expect(
+      executeDatabaseWriteCommitted(context, "p", "config.set", params, apply, [secret]),
+    ).rejects.toThrow(/would hold a secret/);
+    // Neither the receipt nor the change was stored: a query and a resend find nothing to return.
+    const key = { serverId: "server", principalId: "p", operationId: secret };
+    expect(await receipts.get(key)).toBeNull();
+    expect(await recordedWrite(context, "p", "config.set", params)).toBeNull();
+    expect((await config.record()).revision).toBe(0);
+    const request = {
+      key,
+      canonicalIntent: canonicalWriteIntent("config.set", params, encodeUtf8),
+      method: "config.set",
+      apply,
+    };
+    expect(await receipts.write({ ...request, secrets: [secret] })).toEqual({
+      secretRefused: true,
+    });
+    expect(await receipts.get(key)).toBeNull();
+    // The same write without that secret commits: the refusal was the secret check alone.
+    expect(await receipts.write(request)).toMatchObject({ committed: true });
+    receipts.dispose();
   });
 });
 
