@@ -106,9 +106,12 @@ async function fakeGit(script, version = "2.45.0") {
   return directory;
 }
 
-// Shell text answering `git ... version` (the last argument) with `version`.
+// Shell text answering `git ... version` (the last argument) with `version`, and
+// `git ... --exec-path` with the script's own directory, as a Git that is itself the Git that runs
+// does (findGit then caches its verdict).
 const reportsVersion = (version) =>
-  `for last; do :; done\nif [ "$last" = version ]; then echo 'git version ${version}'; exit 0; fi\n`;
+  `for last; do :; done\nif [ "$last" = version ]; then echo 'git version ${version}'; exit 0; fi\n` +
+  `if [ "$last" = --exec-path ]; then dirname "$0"; exit 0; fi\n`;
 
 function whichGit() {
   return new Promise((done, fail) =>
@@ -452,6 +455,44 @@ describe("repository queries", () => {
     );
     expect(await readHead(path)).toEqual({ kind: "unavailable" });
     expect(await runGit(["status"], { cwd: path })).toEqual({ kind: "failed", reason: "spawn" });
+  });
+
+  // #144 item 1: a git on PATH that runs another one (Apple's /usr/bin/git, an xcrun shim that
+  // runs the selected Xcode's or Command Line Tools' git) can switch to an older Git while the
+  // shim stays the same file. Its verdict is not cached: the selection is checked every time.
+  it("checks the version again when the git a shim selects changed", async () => {
+    const root = await temporary();
+    const calls = join(root, "calls.log");
+    const selected = async (name, version) => {
+      const directory = join(root, name);
+      await mkdir(directory);
+      await writeFile(
+        join(directory, "git"),
+        `#!/bin/sh\n${reportsVersion(version)}echo "${name} $*" >> '${calls}'\necho ${name}\n`,
+      );
+      await chmod(join(directory, "git"), 0o755);
+      return directory;
+    };
+    const current = await selected("current", "2.45.0");
+    const older = await selected("older", "2.44.2");
+    const selection = join(root, "selection");
+    await writeFile(selection, current);
+    const shim = join(root, "shim");
+    await mkdir(shim);
+    await writeFile(join(shim, "git"), `#!/bin/sh\nexec "$(cat '${selection}')/git" "$@"\n`);
+    await chmod(join(shim, "git"), 0o755);
+    process.env.PATH = `${shim}:${savedEnv.PATH}`;
+    expect(await runGit(["status"], { cwd: root })).toMatchObject({
+      kind: "exited",
+      stdout: "current\n",
+    });
+    await writeFile(selection, older);
+    expect(await findGit()).toMatchObject({ kind: "too-old", version: "2.44.2" });
+    expect(await runGit(["status"], { cwd: root })).toEqual({ kind: "failed", reason: "spawn" });
+    // Only `version` (and `--exec-path`) reached the older Git.
+    expect((await readFile(calls, "utf8")).trim().split("\n")).toEqual([
+      "current --no-pager -c core.fsmonitor=false status",
+    ]);
   });
 
   // A relative PATH entry names a different file in each working directory, so no single version

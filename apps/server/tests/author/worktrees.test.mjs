@@ -404,6 +404,7 @@ describe("recorded Git steps", () => {
     await writeFile(
       join(bin, "git"),
       `#!/bin/sh\nfor last; do :; done\n[ "$last" = version ] && { echo "git version 2.45.0"; exit 0; }\n` +
+        `[ "$last" = --exec-path ] && { dirname "$0"; exit 0; }\n` +
         `trap "" TERM\necho $$ > "${join(root, "git.pid")}"\n` +
         `/bin/sleep 60 &\necho $! > "${join(root, "child.pid")}"\nwait\nwait\n`,
     );

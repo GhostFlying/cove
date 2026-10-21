@@ -95,7 +95,9 @@ tend 等脚本依赖的 JSON 输出、错误 kind 与退出码见 [Shepherd/tend
 运行 server 与 CLI 的机器需要 **Git 2.45 及以上**。Cove 让 Git 不为缺失的对象联系远端（`GIT_NO_LAZY_FETCH`），
 这个变量从 Git 2.45 才有，更早的 Git 会静默忽略它，在 partial clone 中读取缺失的对象时就可能联网 fetch，
 即使请求了 `--no-fetch`。因此 server 在启动时检查 `PATH` 上的 `git`，版本过旧、缺失或不报版本时不启动并说明原因；
-此后每条 Git 命令都只运行通过检查的那个可执行文件（文件被替换时重新检查，`PATH` 中的相对路径项不搜索），
+此后每条 Git 命令都只运行通过检查的那个可执行文件（文件被替换时重新检查，`PATH` 中的相对路径项不搜索；
+转交给另一个 Git 的文件，例如 Apple 的 xcrun shim `/usr/bin/git` 或包装脚本，其 `--exec-path` 下的 `git`
+不是它自己，每条命令前都重新检查版本，因此切换 Xcode 选择后也不会运行旧 Git），
 仍不满足时请求以 `GIT_UNAVAILABLE` 拒绝。macOS 上 Apple 的 Xcode Command Line Tools 自带的 Git
 （`/usr/bin/git`）可能早于 2.45，需要把更新的 Git（例如 Homebrew 的）放在 `PATH` 中它之前，并用
 `git version` 核对。

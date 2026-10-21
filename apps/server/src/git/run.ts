@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import { access, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -76,71 +76,122 @@ export type GitExecutable =
   | { kind: "too-old"; path: string; version: string }
   | { kind: "unknown"; path: string };
 
-// Answers of the version check, by the identity of the file that gave them. A verdict holds only
-// for the exact file that gave it: replacing it (a package upgrade or removal, another PATH) gives
-// a new identity, which is checked again. Bounded: the server sees a handful of identities in its
-// life, and dropping the map only costs a repeated `git version`.
-const VERIFIED = new Map<string, Promise<GitExecutable>>();
+// What the first check of a file learned: its version verdict, and whether the file is itself the
+// Git that runs (`direct`) or hands each command to another one.
+type Verification = { git: GitExecutable; direct: boolean };
+
+// Checks, by the identity of the file that gave them. A verdict holds only for the exact file that
+// gave it: replacing it (a package upgrade or removal, another PATH) gives a new identity, which
+// is checked again. Bounded: the server sees a handful of identities in its life, and dropping the
+// map only costs a repeated check.
+const VERIFIED = new Map<string, Promise<Verification>>();
 const VERIFIED_LIMIT = 16;
 
 // The first `git` on `env.PATH` and whether Cove may run it. Resolved for every command, so the
-// answer follows PATH and the file it names; the version is asked once per file identity
-// (VERIFIED). Only absolute PATH entries are searched: the shell would resolve a relative or empty
-// entry against each command's working directory, so one query could reach a different Git than
-// the one checked here. `timeoutMs` bounds this caller's wait for the version check
-// (waitAtMost). A file replaced between this check
-// and the command's exec is a residual window: it takes the owner's own concurrent change, and
-// the next command checks the new file.
+// answer follows PATH and the file it names. Only absolute PATH entries are searched: the shell
+// would resolve a relative or empty entry against each command's working directory, so one query
+// could reach a different Git than the one checked here.
+//
+// The version is asked once per file identity (VERIFIED) only for a file that is itself the Git
+// that runs. Some files on PATH are not: Apple's /usr/bin/git is an xcrun shim that runs the git
+// of whichever Xcode or Command Line Tools are selected (xcode-select, DEVELOPER_DIR), and a
+// wrapper script runs whatever it names. Their version can change while the file stays the same
+// (another selection, an Xcode update), so a cached verdict could let an older Git run. Telling
+// them apart: the first check also asks `<path> --exec-path`, the directory of the Git that
+// actually runs, where Git installs its own `git`. When that is the same file as `path` (device
+// and inode, after symlinks: Homebrew, distribution and Xcode-internal Gits), the verdict is
+// cached. Otherwise, or when there is no usable answer, the file is treated as handing off, and
+// its version is asked again before every command (one extra `git version`). Cove still runs
+// `path` itself, the file the shell runs, so a wrapper keeps working as it does for the owner.
+// A selection changed between that check and the command's exec is a residual window, like a
+// file replaced in between: it takes the owner's own concurrent change, and the next command
+// checks again.
+//
+// `timeoutMs` bounds this caller's wait for the check (waitAtMost).
 export async function findGit(
   env: NodeJS.ProcessEnv = process.env,
   timeoutMs: number = GIT_TIMEOUT_MS,
 ): Promise<GitExecutable> {
+  const started = performance.now();
   for (const entry of (env.PATH ?? "").split(":")) {
     if (!isAbsolute(entry)) continue;
     // Appended as the shell's lookup does, not join()ed: join resolves `..` lexically, while the
     // kernel resolves it after following symlinks, so for `/var/../usr/bin` with /var a symlink
     // join would name another file than the one the shell runs.
     const path = `${entry}/git`;
+    let found: Stats;
     let identity: string;
     try {
-      const found = await stat(path);
+      found = await stat(path);
       if (!found.isFile()) continue;
       await access(path, constants.X_OK);
       identity = `${path}\0${found.dev}:${found.ino}:${found.size}:${found.mtimeMs}:${found.ctimeMs}`;
     } catch {
       continue;
     }
-    const known = VERIFIED.get(identity);
-    if (known) return waitAtMost(known, timeoutMs, path);
-    const checked = gitVersion(path, env, timeoutMs);
-    if (VERIFIED.size >= VERIFIED_LIMIT) VERIFIED.clear();
-    VERIFIED.set(identity, checked);
-    // No usable answer proves nothing about the file: it is asked again next time.
-    void checked.then((result) => {
-      if (result.kind === "unknown" && VERIFIED.get(identity) === checked)
-        VERIFIED.delete(identity);
-    });
-    return checked;
+    let check = VERIFIED.get(identity);
+    const startedHere = !check;
+    if (!check) {
+      const checking = verify(path, found, env, timeoutMs);
+      check = checking;
+      if (VERIFIED.size >= VERIFIED_LIMIT) VERIFIED.clear();
+      VERIFIED.set(identity, checking);
+      // No usable answer proves nothing about the file: it is asked again next time.
+      void checking.then((result) => {
+        if (result.git.kind === "unknown" && VERIFIED.get(identity) === checking)
+          VERIFIED.delete(identity);
+      });
+    }
+    const verified = await waitAtMost(check, timeoutMs);
+    if (!verified) return { kind: "unknown", path };
+    // The check this call started is the fresh answer; a handing-off file is asked again by
+    // every later call.
+    if (verified.direct || startedHere) return verified.git;
+    return gitVersion(path, env, Math.floor(timeoutMs - (performance.now() - started)));
   }
   return { kind: "missing" };
 }
 
 // A check in flight is shared, and its own deadline is the one of the caller that started it. A
-// caller that joins it waits only until its own `timeoutMs` (then it has no answer: `unknown`,
-// which runGit reports as a timeout); the check runs on for the callers still waiting, and its
-// verdict is kept as usual. A verdict already known resolves at once.
-function waitAtMost(
-  check: Promise<GitExecutable>,
-  timeoutMs: number,
-  path: string,
-): Promise<GitExecutable> {
+// caller that joins it waits only until its own `timeoutMs` (then it has no answer: null, which
+// findGit reports as `unknown` and runGit as a timeout); the check runs on for the callers still
+// waiting, and its verdict is kept as usual. A verdict already known resolves at once.
+function waitAtMost<T>(check: Promise<T>, timeoutMs: number): Promise<T | null> {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve({ kind: "unknown", path }), timeoutMs);
+    const timer = setTimeout(() => resolve(null), timeoutMs);
     void check.then((result) => {
       clearTimeout(timer);
       resolve(result);
     });
   });
+}
+
+// The first check of a file: its version, and whether `<path> --exec-path`/git is the file itself
+// (see findGit). Both are asked at once, under the same deadline.
+async function verify(
+  path: string,
+  found: Stats,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<Verification> {
+  const [git, execPath] = await Promise.all([
+    gitVersion(path, env, timeoutMs),
+    supervised(path, ["--exec-path"], {
+      cwd: "/",
+      timeoutMs,
+      maxOutputBytes: 4096,
+      env: gitEnvironment(env),
+    }),
+  ]);
+  const directory =
+    execPath.kind === "exited" && execPath.code === 0 ? execPath.stdout.replace(/\n$/, "") : "";
+  if (!isAbsolute(directory) || directory.includes("\n")) return { git, direct: false };
+  try {
+    const own = await stat(`${directory}/git`);
+    return { git, direct: own.dev === found.dev && own.ino === found.ino };
+  } catch {
+    return { git, direct: false };
+  }
 }
 
 // `<path> version`, which reads no repository and runs nothing configured. It runs under the
