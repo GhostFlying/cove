@@ -288,7 +288,7 @@ func startServe(t *testing.T, tn *tailnet, root, hostname string) *serveProc {
 		defer close(s.exited)
 		br := bufio.NewReader(stdout)
 		for {
-			line, err := proto.ReadFrame(br, 1<<20)
+			line, err := proto.ReadFrame(br, proto.MaxFrameBytes)
 			if err != nil {
 				return
 			}
@@ -503,7 +503,7 @@ func (s *session) roundTrip(t *testing.T, req proto.Request) proto.Response {
 	if err := proto.WriteFrame(s.conn, req); err != nil {
 		t.Fatalf("%s: %v", req.Op, err)
 	}
-	line, err := proto.ReadFrame(s.br, 1<<20)
+	line, err := proto.ReadFrame(s.br, proto.MaxFrameBytes)
 	if err != nil {
 		t.Fatalf("%s response: %v", req.Op, err)
 	}

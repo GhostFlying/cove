@@ -8,7 +8,7 @@
 // toolchain behind our back. Builds are static (CGO_ENABLED=0) and reproducible
 // (-trimpath), and tests use the same feature tags as the shipped binary.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -84,6 +84,9 @@ export const omittedFeatures = Object.freeze([
   "webclient",
 ]);
 
+export const buildIdPattern = /^[A-Za-z0-9.+_-]{1,128}$/;
+const testBuildId = "0.0.0-e2e+tsnet_test.1";
+
 export const buildTags = omittedFeatures.map((feature) => `ts_omit_${feature}`).join(",");
 
 export function pinnedGoVersion() {
@@ -150,7 +153,14 @@ function build(args) {
   }
   const out = resolve(flags.out ?? defaultOutput(goos, goarch));
   const ldflags = ["-s", "-w"];
-  if (flags.build) ldflags.push(`-X ${buildVar}=${flags.build}`);
+  if (flags.build !== undefined) {
+    // One token of safe characters: it is spliced into -ldflags unquoted and must match
+    // proto.ValidBuild, which the binary enforces at startup.
+    if (!buildIdPattern.test(flags.build)) {
+      throw new Error(`--build must match ${buildIdPattern}: ${JSON.stringify(flags.build)}`);
+    }
+    ldflags.push(`-X ${buildVar}=${flags.build}`);
+  }
   run(
     checkedGo(),
     [
@@ -188,21 +198,27 @@ function test(args) {
   const dir = mkdtempSync(join(tmpdir(), "cove-tsnet-test-"));
   try {
     const bin = join(dir, "cove-tsnet");
-    build(["--out", bin]);
+    // An injected build identity lets the tests check that version and hello echo it.
+    build(["--out", bin, "--build", testBuildId]);
     checkFormatted(go);
     run(go, ["vet", "-tags", buildTags, "./..."], goEnv({ CGO_ENABLED: "0" }));
     const packages = args.some((arg) => arg.startsWith("./")) ? [] : ["./..."];
     run(
       go,
       ["test", "-tags", buildTags, ...args, ...packages],
-      goEnv({ CGO_ENABLED: "0", COVE_TSNET_BIN: bin }),
+      goEnv({ CGO_ENABLED: "0", COVE_TSNET_BIN: bin, COVE_TSNET_BUILD: testBuildId }),
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare real paths: import.meta.url has symlinks resolved, so a script reached through a
+// symlinked directory (macOS /tmp, for one) would otherwise do nothing and exit 0.
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+if (invokedDirectly) {
   const [command, ...rest] = process.argv.slice(2);
   try {
     if (command === "build") build(rest);
