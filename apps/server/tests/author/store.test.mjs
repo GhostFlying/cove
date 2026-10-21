@@ -140,6 +140,8 @@ describe("store opening, migrations and the data directory lock", () => {
       .map((row) => row.name)
       .sort();
     expect(tables).toEqual([
+      "auth_devices",
+      "auth_invitations",
       "binding_conversions",
       "bindings",
       "config",
