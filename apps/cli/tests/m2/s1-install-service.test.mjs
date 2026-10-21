@@ -238,7 +238,11 @@ test("an installed service outlives the installing shell, refuses an older schem
       `'${process.execPath}' '${cli}' --home '${home}' server install --closure '${closure.dir}' > '${output}' 2> '${output}.err'; echo done >> '${output}.done'; exec sleep 600`,
     );
     await waitFor("the install to finish", async () => existsSync(`${output}.done`), 180_000);
-    const installed = JSON.parse(await readFile(output, "utf8"));
+    const printed = await readFile(output, "utf8");
+    // A failed install prints nothing on stdout; its reason is on stderr.
+    if (!printed.trim())
+      throw new Error(`the install failed: ${await readFile(`${output}.err`, "utf8")}`);
+    const installed = JSON.parse(printed);
     expect(installed).toMatchObject({
       build: closure.build,
       activated: true,

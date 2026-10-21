@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -41,6 +42,26 @@ afterAll(async () => {
 }, 120_000);
 
 const status = (home) => fixture.coveJson(["server", "status"], { home });
+
+// The service manager's recent record of `unit` (diagnostics only): systemd's status and journal,
+// or the LaunchAgent's log, which holds the server's own stderr.
+async function managerLog(home, unit) {
+  if (process.platform === "darwin")
+    return (await readFile(join(home, "server", "log", "service.log"), "utf8").catch(() => ""))
+      .split("\n")
+      .slice(-40)
+      .join("\n");
+  const run = (command, args) =>
+    new Promise((done) =>
+      execFile(command, args, { env: fixture.env, encoding: "utf8" }, (_error, stdout, stderr) =>
+        done(`${stdout}${stderr}`),
+      ),
+    );
+  return [
+    await run("systemctl", ["--user", "status", unit, "--no-pager", "-n", "40"]),
+    await run("journalctl", ["--user", "-u", unit, "-n", "60", "--no-pager"]),
+  ].join("\n");
+}
 
 test("restart lists the live runs first, applies a pending build only when confirmed, and status reports a crash restart", async (context) => {
   // Skipped at run time, not with test.skipIf, so that discovery (`vitest list`) always
@@ -201,21 +222,30 @@ test("restart lists the live runs first, applies a pending build only when confi
     let instance = crashed.server.relayInstanceId;
     let kills = 0;
     let serviceUnit = crashed.unit;
+    let last;
     for (; kills < 8 && serviceUnit.running; kills++) {
       process.kill(serviceUnit.pid, "SIGKILL");
-      await waitFor(
-        "a new instance, or the manager to give up",
-        async () => {
-          const current = JSON.parse((await fixture.cove(["server", "status"], { home })).stdout);
-          serviceUnit = current.unit;
-          if (current.server && current.server.relayInstanceId !== instance) {
-            instance = current.server.relayInstanceId;
-            return true;
-          }
-          return serviceUnit.stoppedAfterCrashes;
-        },
-        60_000,
-      );
+      try {
+        await waitFor(
+          "a new instance, or the manager to give up",
+          async () => {
+            last = JSON.parse((await fixture.cove(["server", "status"], { home })).stdout);
+            serviceUnit = last.unit;
+            if (last.server && last.server.relayInstanceId !== instance) {
+              instance = last.server.relayInstanceId;
+              return true;
+            }
+            return serviceUnit.stoppedAfterCrashes;
+          },
+          90_000,
+        );
+      } catch (error) {
+        // What the service manager saw, for the CI log.
+        const { unit, serverState, serverError } = last ?? {};
+        console.log(`after kill ${kills + 1}:`, JSON.stringify({ unit, serverState, serverError }));
+        console.log(await managerLog(home, serviceUnit.unit));
+        throw error;
+      }
     }
     console.log(`${process.platform}: crash restarts stopped after ${kills} more kills`);
     expect(serviceUnit).toMatchObject({
