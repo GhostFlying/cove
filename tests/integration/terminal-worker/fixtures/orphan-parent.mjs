@@ -1,5 +1,6 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { publishReceipt } from "./publish-receipt.mjs";
 import {
   childPipe,
   composeWorkerReceipt,
@@ -43,7 +44,7 @@ try {
   start = await receipt(join(directory, "start.json"), "orphan child receipt");
   if (start.nonce !== nonce || !psIdentity(start.pid)?.includes(nonce))
     throw Error("orphan child identity unverified");
-  writeFileSync(
+  publishReceipt(
     join(directory, "launch.json"),
     JSON.stringify(
       composeWorkerReceipt(h, {
@@ -83,7 +84,7 @@ try {
   } catch (cleanupError) {
     cleanupErrors.push(cleanupError);
   }
-  writeFileSync(
+  publishReceipt(
     join(directory, "launcher-failure.json"),
     JSON.stringify(
       {

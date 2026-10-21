@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
+import { publishReceipt } from "./publish-receipt.mjs";
 
 const [mode, nonce, receiptDir, ackPath] = process.argv.slice(2);
 if (!mode || !nonce || !receiptDir) process.exit(64);
@@ -16,7 +16,7 @@ try {
 } catch {
   /* The parent also checks the resize result. */
 }
-writeFileSync(
+publishReceipt(
   `${receiptDir}/start.json`,
   JSON.stringify({ mode, nonce, pid: process.pid, ppid: process.ppid, windowSize }),
 );
@@ -25,7 +25,7 @@ process.on("SIGHUP", () => process.exit(0));
 if (mode === "interactive") {
   const initial = Buffer.from([0x41, 0x00, 0x80, 0xff, 0xe2, 0x82, 0xac]);
   process.stdout.write(initial, (error) => {
-    writeFileSync(
+    publishReceipt(
       `${receiptDir}/initial-emission.json`,
       JSON.stringify({
         nonce,
@@ -58,7 +58,7 @@ if (mode === "interactive") {
     } catch {
       /* The parent also checks the resize result. */
     }
-    writeFileSync(
+    publishReceipt(
       `${receiptDir}/finish.json`,
       JSON.stringify({
         nonce,
@@ -90,7 +90,7 @@ if (mode === "interactive") {
   const control = createConnection(ackPath);
   const fail = (reason) => {
     callbackError = reason;
-    writeFileSync(
+    publishReceipt(
       `${receiptDir}/emission-failure.json`,
       JSON.stringify({ nonce, pid: process.pid, scheduled, emitted, acknowledged, callbackError }),
     );
@@ -100,7 +100,7 @@ if (mode === "interactive") {
     if (callbackError || scheduled >= total) return;
     if (scheduled === 64 * 1024 && !stallRecorded) {
       stallRecorded = true;
-      writeFileSync(
+      publishReceipt(
         `${receiptDir}/stall.json`,
         JSON.stringify({ nonce, pid: process.pid, scheduled, acknowledged }),
       );
@@ -126,7 +126,7 @@ if (mode === "interactive") {
   const advance = () => {
     if (!callbackDone || !ackDone || callbackError) return;
     if (acknowledged === total / chunkBytes) {
-      writeFileSync(
+      publishReceipt(
         `${receiptDir}/finish.json`,
         JSON.stringify({
           nonce,

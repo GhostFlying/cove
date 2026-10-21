@@ -1,5 +1,6 @@
-import { closeSync, openSync, readSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import { constants } from "node:fs";
+import { publishReceipt } from "./publish-receipt.mjs";
 
 const [nonce, fifoPath, receiptPath] = process.argv.slice(2);
 if (!nonce || !fifoPath || !receiptPath || !process.send) process.exit(64);
@@ -19,7 +20,7 @@ process.on("message", (message) => {
     chunks.push(Buffer.from(buffer.subarray(0, count)));
   }
   closeSync(fd);
-  writeFileSync(
+  publishReceipt(
     receiptPath,
     JSON.stringify({ nonce, pid: process.pid, total, hex: Buffer.concat(chunks).toString("hex") }),
   );

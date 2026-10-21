@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { publishReceipt } from "./publish-receipt.mjs";
 
 const [nonce, receiptPath] = process.argv.slice(2);
 if (!nonce || !receiptPath || !process.send) process.exit(64);
@@ -12,7 +12,7 @@ process.on("message", (message) => {
     chunks.push(Buffer.from(chunk));
   });
   process.stdin.once("end", () => {
-    writeFileSync(
+    publishReceipt(
       receiptPath,
       JSON.stringify({
         nonce,

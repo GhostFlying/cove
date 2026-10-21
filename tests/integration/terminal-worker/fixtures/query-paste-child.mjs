@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { publishReceipt } from "./publish-receipt.mjs";
 
 const [nonce, receiptDir] = process.argv.slice(2);
 if (!nonce || !receiptDir) process.exit(64);
@@ -10,7 +10,7 @@ process.on("SIGHUP", () => process.exit(0));
 const expected = Buffer.from("\u001b[0n");
 const received = [];
 let phase = "automatic";
-writeFileSync(
+publishReceipt(
   join(receiptDir, "start.json"),
   JSON.stringify({ nonce, pid: process.pid, ppid: process.ppid }),
 );
@@ -22,7 +22,7 @@ process.stdin.on("data", (part) => {
   if (phase === "automatic") {
     if (!bytes.subarray(0, expected.length).equals(expected)) process.exit(65);
     phase = "user";
-    writeFileSync(
+    publishReceipt(
       join(receiptDir, "automatic.json"),
       JSON.stringify({
         nonce,
@@ -34,7 +34,7 @@ process.stdin.on("data", (part) => {
   }
   if (bytes.length < expected.length * 2) return;
   const user = bytes.subarray(expected.length);
-  writeFileSync(
+  publishReceipt(
     join(receiptDir, "finish.json"),
     JSON.stringify({
       nonce,
