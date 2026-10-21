@@ -202,6 +202,18 @@ export async function submitWrite<M extends WriteRpcMethod>(
   // refusal that lists the live runs in its details).
   onFailure?: (outcome: Exclude<CallOutcome<unknown>, { ok: true }>) => void,
 ): Promise<OperationRecord> {
+  return settle(session.client, await acceptWrite(args, session, method, params, onFailure));
+}
+
+// submitWrite without the settling: the record as the server accepted it, for a command that must
+// still print it when polling its state afterwards fails (operation continue/abandon).
+export async function acceptWrite<M extends WriteRpcMethod>(
+  args: Arguments,
+  session: Session,
+  method: M,
+  params: Record<string, unknown> & { operationId: string },
+  onFailure?: (outcome: Exclude<CallOutcome<unknown>, { ok: true }>) => void,
+): Promise<OperationRecord> {
   const pending: PendingOperation = {
     version: 1,
     serverId: session.record.serverId,
@@ -219,7 +231,7 @@ export async function submitWrite<M extends WriteRpcMethod>(
   const outcome = await session.client.call(method, saved.params as never);
   if (!outcome.ok) onFailure?.(outcome);
   const accepted = unwrap(method, outcome);
-  return settle(session.client, (accepted as { operation: OperationRecord }).operation);
+  return (accepted as { operation: OperationRecord }).operation;
 }
 
 // The common ending of a write command: print the settled record, failing unless it succeeded.
