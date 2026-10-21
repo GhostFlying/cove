@@ -38,14 +38,15 @@ export async function run(args: Arguments): Promise<number> {
   const sub = args.words[1];
   if (sub === "register") {
     takeFlags(args, ["--name", "--operation-id"]);
-    const path = one(args, "clone path");
+    // Validated before connecting: a path that is a usage error sends nothing at all.
+    const path = hostPath(one(args, "clone path"));
     const displayName = flag(args, "--name");
     const operationId = operationIdFor(args);
     return withSession(args, async (session) => {
       printSucceeded(
         await submitWrite(args, session, "repo.register", {
           operationId,
-          path: hostPath(path),
+          path,
           ...(displayName === undefined ? {} : { displayName }),
         }),
       );
