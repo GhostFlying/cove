@@ -77,15 +77,18 @@ const (
 	CodeAlreadyLoggedIn  = "ALREADY_LOGGED_IN"
 	CodeLoginFailed      = "LOGIN_FAILED"
 	CodeLoginTimeout     = "LOGIN_TIMEOUT"
-	CodeNodeUnavailable  = "NODE_UNAVAILABLE"
-	CodePeerNotFound     = "PEER_NOT_FOUND"
-	CodePeerMismatch     = "PEER_MISMATCH"
-	CodeDialFailed       = "DIAL_FAILED"
-	CodeActiveStreams    = "ACTIVE_STREAMS"
-	CodeTooManyStreams   = "TOO_MANY_STREAMS"
-	CodeShuttingDown     = "SHUTTING_DOWN"
-	CodeListenFailed     = "LISTEN_FAILED"
-	CodeInternal         = "INTERNAL"
+	// CodeIdentityChanged: a reauth completed as a different node than the
+	// enrolled one; the enrollment was restored, not replaced.
+	CodeIdentityChanged = "IDENTITY_CHANGED"
+	CodeNodeUnavailable = "NODE_UNAVAILABLE"
+	CodePeerNotFound    = "PEER_NOT_FOUND"
+	CodePeerMismatch    = "PEER_MISMATCH"
+	CodeDialFailed      = "DIAL_FAILED"
+	CodeActiveStreams   = "ACTIVE_STREAMS"
+	CodeTooManyStreams  = "TOO_MANY_STREAMS"
+	CodeShuttingDown    = "SHUTTING_DOWN"
+	CodeListenFailed    = "LISTEN_FAILED"
+	CodeInternal        = "INTERNAL"
 )
 
 // Request is a client-to-daemon frame. Fields that an operation does not use

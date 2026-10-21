@@ -97,6 +97,64 @@ func TestLoginWithKeyReauthorizesAnEnrolledNode(t *testing.T) {
 	}
 }
 
+// A reauth that completes as another node (a key of another tailnet, say)
+// is refused: the enrolled state is put back and the node restarted from
+// it, still needing login.
+func TestReauthAsAnotherNodeRestoresTheEnrollment(t *testing.T) {
+	dir := enrolled(t)
+	statePath := filepath.Join(dir, "tailscaled.state")
+	if err := os.WriteFile(statePath, []byte(`{"enrolled":"nClient"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var nodes []*fakenode.Node
+	m := node.NewManager(node.Config{StateDir: dir}, func(node.Config, string) (node.Node, error) {
+		fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"}}
+		if len(nodes) == 0 {
+			fn.ReauthAs = "nOther"
+			// tailscaled rewrites the profile as the other node.
+			fn.OnReauth = func() { os.WriteFile(statePath, []byte(`{"enrolled":"nOther"}`), 0o600) }
+		}
+		nodes = append(nodes, fn)
+		return fn, nil
+	})
+	m.Boot()
+	_, err := m.Login(context.Background(), "tskey-test-0000", 5*time.Second)
+	var pe *proto.Error
+	if !errors.As(err, &pe) || pe.Code != proto.CodeIdentityChanged ||
+		!strings.Contains(pe.Message, "nOther") || !strings.Contains(pe.Message, "nClient") {
+		t.Fatalf("got %v", err)
+	}
+	if b, _ := os.ReadFile(statePath); string(b) != `{"enrolled":"nClient"}` {
+		t.Fatalf("state after a refused reauth: %s", b)
+	}
+	if fi, err := os.Stat(statePath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("restored state mode: %v %v", fi.Mode(), err)
+	}
+	if len(nodes) != 2 || !nodes[0].Closed || nodes[1].Closed {
+		t.Fatalf("the node that changed identity was not replaced by the restored one: %d nodes", len(nodes))
+	}
+	st, err := m.Status(context.Background())
+	if err != nil || st.State != proto.StateNeedsLogin || st.Self.StableNodeID != "nClient" {
+		t.Fatalf("status after a refused reauth: %+v %v", st, err)
+	}
+}
+
+func TestFailedReauthKeepsTheEnrollment(t *testing.T) {
+	dir := enrolled(t)
+	fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"},
+		ReauthErr: &node.LoginError{Message: "invalid key tskey-test-0000"}}
+	m := node.NewManager(node.Config{StateDir: dir}, func(node.Config, string) (node.Node, error) { return fn, nil })
+	m.Boot()
+	_, err := m.Login(context.Background(), "tskey-test-0000", 5*time.Second)
+	var pe *proto.Error
+	if !errors.As(err, &pe) || pe.Code != proto.CodeLoginFailed || strings.Contains(pe.Message, "tskey-test-0000") {
+		t.Fatalf("got %v", err)
+	}
+	if !node.HasState(dir) || fn.Closed {
+		t.Fatal("a failed reauth dropped the enrollment")
+	}
+}
+
 func TestFailedFreshLoginReportsStateCleanupFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
