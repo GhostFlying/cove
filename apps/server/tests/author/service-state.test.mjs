@@ -1,6 +1,9 @@
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../../dist/store/database.js";
 import { prepareHome } from "../../dist/store/home.js";
@@ -11,6 +14,7 @@ import {
   CRASH_RESTART_BUDGET,
   CrashRestartBudgetError,
   crashRestartsOverBudget,
+  hostBootId,
   installedBuild,
   recordServiceStart,
   START_REQUEST,
@@ -258,4 +262,54 @@ describe("crash restart budget (launchd)", () => {
       checkCrashRestartBudget(store, { manager: "launchd-agent", lastStart: "manual" }),
     ).resolves.toBeUndefined();
   });
+
+  // A startup that fails after the budget check (here: the business port is taken, so listen
+  // fails after the worker started) is not an orderly stop. Started again and again as launchd
+  // would, every start after the first is a crash restart, and the sixth one stops the loop.
+  it("counts startups that fail after the budget check as crashes", async (context) => {
+    // Skipped at run time so that discovery always counts it (the CI gate refuses a skipped test).
+    if (hostBootId() === null) context.skip("this host's boot ID cannot be read");
+    const home = join(await temporary(), "home");
+    const taken = createServer();
+    await new Promise((done) => taken.listen(0, "127.0.0.1", done));
+    try {
+      const argv = [
+        ...["--mode", "m0-local", "--host", "127.0.0.1", "--port", String(taken.address().port)],
+        ...["--rendezvous", join(home, "server", "run", "rendezvous.json"), "--home", home],
+        ...["--service", "launchd-agent"],
+      ];
+      const starts = [];
+      for (let index = 0; index < CRASH_RESTART_BUDGET.restarts + 2; index++) {
+        const { code, stderr } = await serverProcess(argv);
+        starts.push({
+          code,
+          exhausted: stderr.includes('"event":"crash-restart-budget-exhausted"'),
+        });
+      }
+      expect(starts).toEqual([
+        ...Array.from({ length: CRASH_RESTART_BUDGET.restarts + 1 }, () => ({
+          code: 1,
+          exhausted: false,
+        })),
+        { code: 0, exhausted: true },
+      ]);
+    } finally {
+      await new Promise((done) => taken.close(done));
+    }
+  }, 120_000);
 });
+
+// Runs the compiled server once, as a service manager would start it, until it exits.
+function serverProcess(argv) {
+  return new Promise((done, fail) =>
+    execFile(
+      process.execPath,
+      [fileURLToPath(new URL("../../dist/entry/main.js", import.meta.url)), ...argv],
+      { encoding: "utf8", timeout: 60_000 },
+      (error, _stdout, stderr) =>
+        error && typeof error.code !== "number"
+          ? fail(error)
+          : done({ code: error?.code ?? 0, stderr }),
+    ),
+  );
+}

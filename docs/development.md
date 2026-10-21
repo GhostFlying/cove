@@ -287,7 +287,8 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
   `sudo loginctl enable-linger $USER`（CLI 只提示，不执行 sudo）。没有 systemd user 的主机继续用前台 `cove server start`。
 - 崩溃重启有上限：systemd 单元 300 秒内最多启动 5 次；launchd 没有这种上限，由 server 自己计数，300 秒内第 6 次崩溃重启时
   记录一次有序停止并以 0 退出（launchd 不再重启），在 `service.log` 写明原因。两种情况下 `cove server service status`
-  显示 `stoppedAfterCrashes: true`，`cove server service start` 重新开始计数。server 来不及读到计数就崩溃时（闭包无法加载、
+  显示 `stoppedAfterCrashes: true`，`cove server service start` 重新开始计数。通过计数检查后才失败的启动（worker 启动、
+  监听端口、发布 rendezvous）不记录有序停止，下一次启动仍算崩溃重启。server 来不及读到计数就崩溃时（闭包无法加载、
   数据目录无法打开），launchd 仍会每 5 秒（ThrottleInterval）重启它，没有上限。
 - 停止与重启的后果：systemd 用默认的 `KillMode=control-group`，停止或重启服务会结束 cgroup 内全部进程，**包括在 Cove
   终端里用 `nohup`、tmux 等脱离的进程**，前台 `cove server start` 则不会。macOS 上由 launchd 停止或重启 server（`bootout`）时，

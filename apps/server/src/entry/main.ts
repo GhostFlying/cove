@@ -520,8 +520,14 @@ export async function startLocalEntry(
     }
     storeFailedNow();
   });
+  // `orderly` records this instance's stop (instanceStopCall), which tells the next start that this
+  // one did not crash (service-state.ts startReason). A startup that failed is not an orderly stop:
+  // under launchd the next start must count as a crash restart, or a server failing after the
+  // crash restart budget check (worker launch, listen, rendezvous) would be restarted every
+  // ThrottleInterval without bound, each start looking like a login. A startup interrupted by a
+  // stop signal is an orderly stop and is recorded as one.
   let closing: Promise<void> | undefined;
-  const close = (): Promise<void> =>
+  const closeWith = (orderly: boolean): Promise<void> =>
     (closing ??= (async () => {
       let failed = false;
       try {
@@ -552,7 +558,7 @@ export async function startLocalEntry(
               ...(local.runs
                 ? [local.runs.stoppedWithServerCall(instance, receipt?.status === "exited")]
                 : []),
-              instanceStopCall(instance, Date.now()),
+              ...(orderly ? [instanceStopCall(instance, Date.now())] : []),
             ]);
           } catch {
             // A failed store was already reported (the store-failed event, exit status 1); its
@@ -564,6 +570,7 @@ export async function startLocalEntry(
       if (failed || receipt?.status !== "exited")
         throw new Error("Local entry cleanup unverifiable");
     })());
+  const close = (): Promise<void> => closeWith(true);
   const interrupted = (): void => {
     if (shutdown?.signal?.aborted) throw new LocalEntryStartupError("interrupted", "unverifiable");
   };
@@ -614,7 +621,7 @@ export async function startLocalEntry(
   } catch (error) {
     let cleanup: "verified" | "unverifiable" = "verified";
     try {
-      await close();
+      await closeWith(shutdown?.signal?.aborted === true);
     } catch {
       cleanup = "unverifiable";
     }
