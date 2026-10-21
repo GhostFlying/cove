@@ -18,7 +18,14 @@ specified in [PROTOCOL.md](PROTOCOL.md). M2 T4 and T5b wire the CLI and server t
 pnpm tsnet:build                       # host binary in native/tailscale/dist/<goos>-<goarch>/cove-tsnet
 node scripts/tsnet-build.mjs build --goos linux --goarch arm64 --build <id>
 pnpm tsnet:test                        # go vet + go test, including the end-to-end tests
+node scripts/tsnet-build.mjs testcontrol --out PATH   # test-only: the test tailnet command
 ```
+
+`cove-tsnet-testcontrol` (`cmd/cove-tsnet-testcontrol`, package `internal/testnet`) runs the same
+test tailnet the end-to-end tests use, for tests outside this module (the CLI's tsnet scenarios):
+it prints the control URL, the test auth key and the environment nodes need as one JSON line and
+exits at stdin's end-of-file. It is built only by the `testcontrol` command into the path given, never
+by `build`, so it is not in `dist/` or in an installed runtime closure.
 
 Builds are static (`CGO_ENABLED=0`), `-trimpath`, stripped, and compiled with the feature tags in
 `scripts/tsnet-build.mjs`. Tests use the same tags. `dist/` is ignored; binaries are not committed.

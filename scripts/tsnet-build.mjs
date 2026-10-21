@@ -2,6 +2,7 @@
 //
 //   node scripts/tsnet-build.mjs build [--goos darwin|linux] [--goarch arm64|amd64] [--build ID] [--out PATH]
 //   node scripts/tsnet-build.mjs test [go test args...]
+//   node scripts/tsnet-build.mjs testcontrol --out PATH
 //
 // The Go binary is taken from COVE_GO, else `go` on PATH, and must report exactly the
 // version on go.mod's `go` line: GOTOOLCHAIN=local stops Go from downloading another
@@ -213,6 +214,24 @@ function test(args) {
   }
 }
 
+// The test tailnet command (cmd/cove-tsnet-testcontrol) for tests outside the Go module, such as
+// the CLI's tsnet scenarios. Test-only: it is built only here, into the path the caller names,
+// never by `build`, so it is not part of dist/ or of an installed runtime closure. Same tags as
+// cove-tsnet, so the tailnet it runs matches the one the Go end-to-end tests use.
+function testcontrol(args) {
+  const flags = parseFlags(args);
+  if (flags.out === undefined || Object.keys(flags).length !== 1) {
+    throw new Error("usage: tsnet-build.mjs testcontrol --out PATH");
+  }
+  const out = resolve(flags.out);
+  run(
+    checkedGo(),
+    ["build", "-trimpath", "-tags", buildTags, "-o", out, "./cmd/cove-tsnet-testcontrol"],
+    goEnv({ CGO_ENABLED: "0" }),
+  );
+  console.log(`${out} (test control plane)`);
+}
+
 // Compare real paths: import.meta.url has symlinks resolved, so a script reached through a
 // symlinked directory (macOS /tmp, for one) would otherwise do nothing and exit 0.
 const invokedDirectly =
@@ -223,7 +242,8 @@ if (invokedDirectly) {
   try {
     if (command === "build") build(rest);
     else if (command === "test") test(rest);
-    else throw new Error("usage: tsnet-build.mjs build|test [options]");
+    else if (command === "testcontrol") testcontrol(rest);
+    else throw new Error("usage: tsnet-build.mjs build|test|testcontrol [options]");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

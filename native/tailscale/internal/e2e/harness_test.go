@@ -11,14 +11,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,17 +27,12 @@ import (
 	"time"
 
 	"github.com/GhostFlying/cove/native/tailscale/internal/proto"
-	"tailscale.com/derp/derpserver"
-	"tailscale.com/net/stun/stuntest"
-	"tailscale.com/tailcfg"
+	"github.com/GhostFlying/cove/native/tailscale/internal/testnet"
 	"tailscale.com/tstest/integration/testcontrol"
-	"tailscale.com/types/key"
-	"tailscale.com/types/logger"
-	"tailscale.com/types/nettype"
 )
 
 // testAuthKey is accepted only by the in-process test control server.
-const testAuthKey = "tskey-auth-cove-e2e-not-a-real-key-0123456789"
+const testAuthKey = testnet.AuthKey
 
 func binary(t *testing.T) string {
 	t.Helper()
@@ -59,70 +51,18 @@ type tailnet struct {
 	control    *testcontrol.Server
 }
 
-// newTailnet starts a test control plane. With requireKey it rejects every
-// registration without testAuthKey; testcontrol applies that to
-// re-registrations of known nodes too (real control does not), so a tailnet
-// that restarts nodes from saved state accepts any key instead.
+// newTailnet starts a test control plane (internal/testnet). With requireKey
+// it rejects every registration without testAuthKey; testcontrol applies
+// that to re-registrations of known nodes too (real control does not), so a
+// tailnet that restarts nodes from saved state accepts any key instead.
 func newTailnet(t *testing.T, requireKey bool) *tailnet {
 	t.Helper()
-	derpMap := runDERPAndSTUN(t)
-	control := &testcontrol.Server{
-		DERPMap:        derpMap,
-		DNSConfig:      &tailcfg.DNSConfig{Proxied: true},
-		MagicDNSDomain: "tail-scale.ts.net",
-		Logf:           logger.Discard,
-	}
-	if requireKey {
-		control.RequireAuthKey = testAuthKey
-	}
-	control.HTTPTestServer = httptest.NewUnstartedServer(control)
-	control.HTTPTestServer.Start()
-	t.Cleanup(control.HTTPTestServer.Close)
-	return &tailnet{controlURL: control.HTTPTestServer.URL, control: control}
-}
-
-// runDERPAndSTUN starts a loopback DERP relay and STUN server. It mirrors
-// tstest/integration.RunDERPAndSTUN, which cannot be imported here because
-// that package depends on Tailscale features cove-tsnet compiles out.
-func runDERPAndSTUN(t *testing.T) *tailcfg.DERPMap {
-	t.Helper()
-	d := derpserver.New(key.NewNode(), logger.Discard)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	tn, err := testnet.Start(requireKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpsrv := httptest.NewUnstartedServer(derpserver.Handler(d))
-	httpsrv.Listener.Close()
-	httpsrv.Listener = ln
-	httpsrv.Config.ErrorLog = logger.StdLogger(logger.Discard)
-	httpsrv.Config.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
-	httpsrv.StartTLS()
-	stunAddr, stunCleanup := stuntest.ServeWithPacketListener(t, nettype.Std{})
-	t.Cleanup(func() {
-		httpsrv.CloseClientConnections()
-		httpsrv.Close()
-		d.Close()
-		stunCleanup()
-	})
-	return &tailcfg.DERPMap{
-		Regions: map[tailcfg.DERPRegionID]*tailcfg.DERPRegion{
-			1: {
-				RegionID:   1,
-				RegionCode: "test",
-				Nodes: []*tailcfg.DERPNode{{
-					Name:             "t1",
-					RegionID:         1,
-					HostName:         "127.0.0.1",
-					IPv4:             "127.0.0.1",
-					IPv6:             "none",
-					STUNPort:         stunAddr.Port,
-					DERPPort:         ln.Addr().(*net.TCPAddr).Port,
-					InsecureForTests: true,
-					STUNTestIP:       "127.0.0.1",
-				}},
-			},
-		},
-	}
+	t.Cleanup(tn.Close)
+	return &tailnet{controlURL: tn.ControlURL, control: tn.Control}
 }
 
 // shortDir returns a fresh directory with a short path: Unix socket paths
