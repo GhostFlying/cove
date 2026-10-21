@@ -27,7 +27,10 @@ import {
 // Startup races use cove-tsnet's test pause points (`--debug-pause-at`, PROTOCOL.md): a daemon this
 // test starts stops itself (SIGSTOP) holding the lock, either before it listens (`locked`: a race
 // winner that is not ready yet) or after it unlinked its socket while exiting (`unlinked`). The test
-// then continues or kills it while a CLI command waits inside its start deadline.
+// then continues or kills it while a CLI command waits inside its start deadline. `remote tsnet
+// stop` starts nothing, and says "no daemon" only when the lock is free: a daemon holding it at
+// `locked`, or one stopped by SIGSTOP that accepts but never answers, is waited for and then
+// stopped or reported as unknown.
 
 let builds;
 let root;
@@ -155,6 +158,46 @@ test("when no daemon becomes ready within the deadline the command fails with EN
   expect(result.elapsedMs).toBeGreaterThanOrEqual(10_000);
   expect(result.elapsedMs).toBeLessThan(20_000);
   expect(alive(stuck.pid)).toBe(true);
+}, 60_000);
+
+test("stop waits for a daemon that holds the lock before it listens, and stops it once it answers", async () => {
+  const starting = await pausedAt("locked");
+  // No socket yet, but the lock is held: not "no daemon".
+  await expect(lstat(socketOf(home))).rejects.toMatchObject({ code: "ENOENT" });
+  const stopping = runCove(env, home, ["remote", "tsnet", "stop"]);
+  await new Promise((done) => setTimeout(done, 1_500));
+  starting.child.kill("SIGCONT");
+  const result = await stopping;
+  expect(result.code).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    running: false,
+    stopped: { pid: starting.pid, build: CURRENT_BUILD },
+  });
+  expect(await starting.exited).toEqual({ code: 0, signal: null });
+}, 60_000);
+
+test("stop fails with the state unknown when a daemon accepts but does not answer, and stops it later", async () => {
+  const daemon = spawnDaemon(builds.current, home, null);
+  started.push(daemon);
+  await waitFor("the daemon", async () => (await daemonHello(home))?.pid === daemon.pid, 10_000);
+  // Stopped by a signal: the socket still accepts connections, but nothing answers the hello.
+  daemon.child.kill("SIGSTOP");
+  const unknown = await runCove(env, home, ["remote", "tsnet", "stop"]);
+  expect(unknown.code).toBe(1);
+  expect(unknown.stdout).toBe("");
+  expect(unknown.stderr).toContain("did not answer within 10 s");
+  expect(unknown.stderr).toContain("nothing was stopped");
+  expect(unknown.elapsedMs).toBeLessThan(13_000);
+  expect(alive(daemon.pid)).toBe(true);
+
+  daemon.child.kill("SIGCONT");
+  const stopped = await runCoveJson(env, home, ["remote", "tsnet", "stop"]);
+  expect(stopped).toMatchObject({ running: false, stopped: { pid: daemon.pid } });
+  expect(await daemon.exited).toEqual({ code: 0, signal: null });
+  // With the lock free, stop says so at once.
+  const none = await runCove(env, home, ["remote", "tsnet", "stop"]);
+  expect(JSON.parse(none.stdout)).toEqual({ running: false });
+  expect(none.elapsedMs).toBeLessThan(5_000);
 }, 60_000);
 
 test("an idle daemon of another build is replaced by the current build; stop never starts one", async () => {

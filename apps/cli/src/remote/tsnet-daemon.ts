@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   closeSync,
+  existsSync,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -70,6 +71,7 @@ const BACKOFF_MAX_MS = 400;
 const CONNECT_TIMEOUT_MS = 2_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 15_000;
+const OWNED_MIN_TIMEOUT_MS = 500;
 export const MAX_FRAME_BYTES = 64 * 1024;
 // sockaddr_un.sun_path is 104 bytes on macOS (108 on Linux), including the terminator.
 const MAX_SOCKET_PATH_BYTES = 103;
@@ -557,18 +559,80 @@ function diagnostics(home: string, from: number | undefined): string {
   return tail ? `; its output (${logPath(home)}):\n${tail}` : `; see ${logPath(home)}`;
 }
 
-// The running daemon, without starting one: null when none answers. For `remote tsnet stop`,
-// which must not start a daemon only to stop it, and which stops whatever build runs.
+// Whether a daemon holds the lock of `home` right now (`cove-tsnet dial-owned`, PROTOCOL.md
+// "Ownership probe"), asked of the executable this CLI would start. It creates nothing and starts
+// nothing. Throws DaemonUnavailable when it cannot tell.
+async function daemonOwned(binary: string, home: string, deadline: number): Promise<boolean> {
+  const answer = await new Promise<string | Error>((resolve) => {
+    execFile(
+      binary,
+      ["dial-owned", "--home", tsnetHome(home)],
+      {
+        // At least a short while even at the deadline: the last look at the lock decides between
+        // "no daemon" and "unknown".
+        timeout: Math.max(
+          OWNED_MIN_TIMEOUT_MS,
+          Math.min(deadline - Date.now(), CONNECT_TIMEOUT_MS),
+        ),
+        maxBuffer: 1024,
+        encoding: "utf8",
+      },
+      (error, stdout) => resolve(error ?? stdout.trim()),
+    );
+  });
+  if (answer === "owned") return true;
+  if (answer === "free") return false;
+  throw new DaemonUnavailable(
+    "cannot tell whether a tsnet dial daemon runs: `cove-tsnet dial-owned` " +
+      (answer instanceof Error
+        ? `failed (${printable(answer.message.split("\n")[0])})`
+        : `answered ${printable(answer, 64)}`),
+  );
+}
+
+// The running daemon, without starting one, for `remote tsnet stop` (which must not start a
+// daemon only to stop it, and stops whatever build runs): its connection after hello, or null
+// when no daemon runs. Throws DaemonUnavailable when that cannot be established in time.
+//
+// A failed connect or an unanswered hello is not proof that no daemon runs: a daemon holds the
+// lock with no socket while it starts (before it listens) and while it exits (after it unlinked
+// the socket), and one that is busy or stopped can accept a connection and not answer. Only the
+// lock decides, so "no daemon" is reported only when no hello came and the lock is free. While
+// the lock is held the probe waits, within one deadline, for the owner's socket and hello; a
+// daemon that exits meanwhile frees the lock, and one that becomes ready is returned.
 export async function probeDaemon(home: string): Promise<Daemon | null> {
-  const sock = socketPath(home);
-  if (Buffer.byteLength(sock) > MAX_SOCKET_PATH_BYTES) return null;
+  const deadline = Date.now() + START_DEADLINE_MS;
+  // A daemon refuses a directory whose socket path is too long, so none can run there.
+  if (Buffer.byteLength(socketPath(home)) > MAX_SOCKET_PATH_BYTES) return null;
+  // Every daemon creates its lock file before anything else; without one, none ever ran here.
+  if (!existsSync(join(tsnetHome(home), "run", "lock"))) return null;
+  let current: { path: string; identity: BinaryIdentity } | undefined;
   try {
-    lstatSync(sock);
+    current = await beforeDeadline(currentBinary(), deadline, "identifying cove-tsnet");
   } catch {
-    return null;
+    // A daemon that answers can still be stopped; asking about the lock needs the executable.
   }
-  const { identity } = await currentBinary().catch(() => ({
-    identity: { build: "unknown", protocol: DIAL_PROTOCOL },
-  }));
-  return attempt(home, identity.build, Date.now() + HELLO_TIMEOUT_MS);
+  let backoff = BACKOFF_MIN_MS;
+  for (;;) {
+    const reached = existsSync(socketPath(home))
+      ? await attempt(home, current?.identity.build ?? "unknown", deadline)
+      : null;
+    if (reached) return reached;
+    if (!current)
+      throw new DaemonUnavailable(
+        "no tsnet dial daemon answered, and without a usable cove-tsnet executable this CLI " +
+          "cannot tell whether one runs",
+      );
+    if (!(await daemonOwned(current.path, home, deadline))) return null;
+    if (deadline - Date.now() <= 0)
+      throw new DaemonUnavailable(
+        `a tsnet dial daemon owns ${tsnetHome(home)} but did not answer within ` +
+          `${START_DEADLINE_MS / 1000} s; whether it is running or exiting is unknown, and ` +
+          "nothing was requested of it",
+      );
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(backoff, Math.max(1, deadline - Date.now()))),
+    );
+    backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
+  }
 }

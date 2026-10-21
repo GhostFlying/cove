@@ -273,9 +273,15 @@ async function logout(home: string, force: boolean): Promise<number> {
   return 0;
 }
 
-// Stops the running daemon of whatever build; never starts one.
+// Stops the running daemon of whatever build; never starts one. `running: false` without
+// `stopped` is reported only when the daemon lock was free (probeDaemon); a daemon that holds it
+// but does not answer in time makes the command fail with its state unknown.
 async function stop(home: string, force: boolean): Promise<number> {
-  const daemon = await probeDaemon(home);
+  const daemon = await probeDaemon(home).catch((error: unknown) => {
+    if (error instanceof DaemonUnavailable)
+      throw new Error(`${error.message} (ENTRY_UNAVAILABLE); nothing was stopped`);
+    throw error;
+  });
   if (!daemon) {
     print({ running: false });
     return 0;
