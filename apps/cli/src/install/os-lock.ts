@@ -27,16 +27,23 @@ function busy(error: unknown): boolean {
   return typeof code === "number" && (code & 0xff) === SQLITE_BUSY;
 }
 
-// Takes the exclusive lock of `path` without waiting; null when another process holds it. The
-// file is created owner-only when missing.
+// Takes the exclusive lock of `path`; null when another process holds it. The file is created
+// owner-only when missing.
 export async function tryExclusiveLock(path: string): Promise<DatabaseSync | null> {
   // Created 0600 before SQLite opens it, which would otherwise create it with the umask's mode.
   await (await open(path, "a", 0o600)).close();
   return exclusive(path);
 }
 
+// How long an attempt waits for SQLite's own lock steps. Not zero: two attempts that overlap meet
+// each other's short-lived locks (the pragma reads the file under a shared lock, BEGIN EXCLUSIVE
+// passes through a pending one), and without waiting each can see the other's and give up, so
+// that contenders for a free lock are all refused. A lock that a process holds is still refused
+// after this wait; nothing waits for a holder to finish.
+const ATTEMPT_MS = 250;
+
 function exclusive(path: string): DatabaseSync | null {
-  const database = new DatabaseSync(path, { timeout: 0 });
+  const database = new DatabaseSync(path, { timeout: ATTEMPT_MS });
   try {
     // No rollback journal file: an exclusive transaction otherwise creates `<path>-journal`, which
     // a holder killed mid-transaction would leave behind. The pragma itself can meet the lock.
