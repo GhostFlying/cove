@@ -63,6 +63,31 @@ async function managerLog(home, unit) {
   ].join("\n");
 }
 
+// The service manager's own record of having had to force the server's stop since `sinceMs`:
+// systemd's stop timeout and the SIGKILL that follows it. Under launchd, whose log does not reach
+// the test, the restart's duration (below) stands for it.
+async function stopEscalations(unit, sinceMs) {
+  if (process.platform === "darwin") return [];
+  const journal = await new Promise((done, fail) =>
+    execFile(
+      "journalctl",
+      [
+        "--user",
+        "-u",
+        unit,
+        "--since",
+        `@${Math.floor(sinceMs / 1000)}`,
+        "--no-pager",
+        "-o",
+        "cat",
+      ],
+      { env: fixture.env, encoding: "utf8" },
+      (error, stdout, stderr) => (error ? fail(new Error(`journalctl: ${stderr}`)) : done(stdout)),
+    ),
+  );
+  return journal.split("\n").filter((line) => /timed out|SIGKILL|result 'timeout'/i.test(line));
+}
+
 test("restart lists the live runs first, applies a pending build only when confirmed, and status reports a crash restart", async (context) => {
   // Skipped at run time, not with test.skipIf, so that discovery (`vitest list`) always
   // counts it; the CI gate refuses a skipped test, and CI sets the variable.
@@ -161,10 +186,21 @@ test("restart lists the live runs first, applies a pending build only when confi
     expect((await status(home)).server.relayInstanceId).toBe(first.relayInstanceId);
 
     // Confirmed: same server, new instance, the new build; the runs ended and were not re-run.
+    const { unit: serviceBefore } = await status(home);
+    const restartedAt = Date.now();
     const restarted = await fixture.coveJson(["server", "restart", "--yes"], {
       home,
       timeoutMs: SLOW,
     });
+    // The server stopped in order, within the manager's stop timeout (TimeoutStopSec, ExitTimeOut:
+    // 30 s); a forced stop would let a client that kept its connection open (the restarting CLI
+    // itself) hold up the shutdown unnoticed.
+    const restartMs = Date.now() - restartedAt;
+    console.log(`${process.platform} restart took ${restartMs} ms`);
+    expect({
+      withinStopTimeout: restartMs < 30_000,
+      escalations: await stopEscalations(serviceBefore.unit, restartedAt),
+    }).toEqual({ withinStopTimeout: true, escalations: [] });
     expect(restarted).toMatchObject({
       serverId: first.serverId,
       previousRelayInstanceId: first.relayInstanceId,
