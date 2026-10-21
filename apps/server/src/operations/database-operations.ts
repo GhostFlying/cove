@@ -2,7 +2,9 @@ import { domainError, type DomainError } from "@cove/protocol/errors";
 import {
   SECRETS_MEMBER,
   canonicalWriteIntent,
+  checkedOutputSecrets,
   secretFields,
+  secretStrings,
   type OperationReceiptKey,
   type OperationRecord,
   type WriteRpcMethod,
@@ -104,6 +106,7 @@ export async function executeDatabaseWriteCommitted(
   method: WriteRpcMethod,
   params: Record<string, unknown> & { operationId: string },
   apply: DatabaseWriteApply,
+  secrets?: readonly string[],
 ): Promise<{ outcome: DatabaseWriteOutcome; committed: boolean }> {
   const answer = (outcome: DatabaseWriteOutcome) => ({ outcome, committed: false });
   const intent = canonicalWriteIntent(method, params, context.encodeUtf8);
@@ -119,28 +122,41 @@ export async function executeDatabaseWriteCommitted(
   if (found.kind !== "reserve") return answer({ error: domainError("BUSY") });
   const preparation = await context.receipts.prepare(key, intent);
   if (!preparation) return answer({ error: domainError("BUSY") });
+  let result: Awaited<ReturnType<OperationReceipts["write"]>>;
   try {
-    const result = await context.receipts.write({ key, canonicalIntent: intent, method, apply });
-    if ("error" in result) return answer(result);
-    // The flag stays inside the server: the client's record is the operation alone.
-    return { outcome: { operation: result.operation }, committed: result.committed === true };
+    result = await context.receipts.write({
+      key,
+      canonicalIntent: intent,
+      method,
+      apply,
+      ...(secrets && secrets.length > 0 ? { secrets } : {}),
+    });
   } catch (error) {
     return answer({ error: storeFailureError(error) });
   } finally {
     preparation.cancel();
   }
+  // Rolled back, nothing stored: a defect of the write, reported as an internal error.
+  if ("secretRefused" in result) throw new Error(`A ${method} record would hold a secret`);
+  if ("error" in result) return answer(result);
+  // The flag stays inside the server: the client's record is the operation alone.
+  return { outcome: { operation: result.operation }, committed: result.committed === true };
 }
 
 // A database write whose live answer carries output secrets (auth.invite.create, auth.device.rotate;
 // m2 "秘密与操作记录的分界"). The apply stores only what may be kept (a hash of the secret, the
-// references the record shows), and the record never holds the secret itself. `secrets` is
-// returned beside the record by the call that committed the operation and by no other: a resend,
-// or a request that finds the receipt of an identical one, answers with the record alone, so a
-// lost secret is never handed out again; recovery is a new explicit operation (cancel and
-// re-invite, or rotate again with the old token).
+// references the record shows), and the record never holds the secret itself: the receipt
+// transaction refuses, and rolls back, a record in which any output or input secret of the call
+// appears. `secrets` is returned beside the record by the call that committed the operation and
+// by no other: a resend, or a request that finds the receipt of an identical one, answers with the
+// record alone, so a lost secret is never handed out again; recovery is a new explicit operation
+// (cancel and re-invite, or rotate again with the old token).
 //
-// `params` are the dispatch layer's params, which never hold `secrets`; one that does is a
-// caller defect and is refused before anything is looked up, so no receipt can be keyed on it.
+// The output secrets are checked against the method's declaration before anything is looked up
+// or written: a missing or malformed secret would otherwise commit an operation whose only
+// delivery is lost for good. `params` are the dispatch layer's params, which never hold
+// `secrets`; one that does is a caller defect and is refused the same way, so no receipt can be
+// keyed on it. `inputSecrets` are the call's own (RpcCall `secrets`).
 export async function executeSecretWrite<S extends Record<string, string>>(
   context: DatabaseWriteContext,
   principalId: string,
@@ -148,12 +164,12 @@ export async function executeSecretWrite<S extends Record<string, string>>(
   params: Record<string, unknown> & { operationId: string },
   apply: DatabaseWriteApply,
   secrets: S,
+  inputSecrets?: Record<string, unknown>,
 ): Promise<{ operation: OperationRecord; secrets?: S } | { error: DomainError }> {
-  const declared = secretFields(method).output;
   if (
     Object.hasOwn(params, SECRETS_MEMBER) ||
-    declared.length === 0 ||
-    Object.keys(secrets).some((key) => !declared.includes(key))
+    secretFields(method).output.length === 0 ||
+    !checkedOutputSecrets(method, secrets)
   )
     throw new Error(`${method} cannot return these secrets`);
   const { outcome, committed } = await executeDatabaseWriteCommitted(
@@ -162,6 +178,7 @@ export async function executeSecretWrite<S extends Record<string, string>>(
     method,
     params,
     apply,
+    [...secretStrings(secrets), ...secretStrings(inputSecrets ?? {})],
   );
   if ("error" in outcome || !committed) return outcome;
   return { operation: outcome.operation, secrets };

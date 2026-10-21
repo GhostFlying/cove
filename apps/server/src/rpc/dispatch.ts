@@ -1,7 +1,11 @@
 import { domainError } from "@cove/protocol/errors";
 import {
   RPC_METHODS,
+  checkedOutputSecrets,
+  holdsSecret,
   isWriteRpcMethod,
+  nestedSecretsMember,
+  secretStrings,
   splitSecrets,
   type RpcDomain,
   type RpcMethod,
@@ -46,38 +50,39 @@ const RPC_HANDLERS: { readonly [D in RpcDomain]: RpcHandler<D> } = Object.freeze
   tsnet,
 });
 
-// Every string inside a secrets object, for the leak check below. The schemas make every secret
-// at least 16 characters long, so a short value cannot match ordinary result text by chance.
-function secretValues(secrets: Record<string, unknown> | undefined, into: string[]): void {
-  for (const value of Object.values(secrets ?? {}))
-    if (typeof value === "string" && value.length >= 16) into.push(value);
-}
-
-// The secret boundary of a result (m2 "秘密与操作记录的分界"). Only a method that declares output
-// secrets may answer with a `secrets` member, and only beside its record; any other `secrets` is
-// dropped. Then no part of the answer outside that member may contain a secret of this call,
-// input or output: such an answer is a defect of its handler (the record it shows is the one it
-// stored), so it is refused with an internal error rather than sent. Stored records are already
-// stripped of undeclared members by their schema (checkedReceiptRecord); this check also covers
-// a secret copied into a declared field.
+// The secret boundary of an answer (m2 "秘密与操作记录的分界"). Only a write that declares
+// output secrets may answer with a top-level `secrets` member, and that member must be exactly a
+// valid instance of its declaration; any other top-level `secrets` is dropped. Outside that
+// member, no decoded string of the answer, a refusal's details included, may contain a secret of
+// this call (input or output), and no `secrets` member may sit deeper in it. Such an answer is a
+// defect of its handler, so it is refused with an internal error rather than sent. The durable
+// half of the boundary is the receipt transaction (store/sql/receipts.ts), which refuses to store
+// a record holding a secret, so a refused answer leaves nothing that a later operation.get or
+// resend could return.
 function guardSecrets(
   method: RpcMethod,
   result: RpcHandlerResult,
   inputSecrets: Record<string, unknown> | undefined,
 ): RpcHandlerResult {
-  if (!result || typeof result !== "object" || Array.isArray(result) || "error" in result)
+  const inputs = secretStrings(inputSecrets ?? {});
+  if (!result || typeof result !== "object" || Array.isArray(result) || "error" in result) {
+    if (holdsSecret(result, inputs))
+      throw new Error(`A ${method} refusal holds a secret of its request`);
     return result;
-  const { value, secrets } = splitSecrets(result as Record<string, unknown>);
-  const declared = RPC_METHODS[method].secrets.output.length > 0;
-  const kept = declared && isWriteRpcMethod(method) && secrets ? secrets : undefined;
-  const values: string[] = [];
-  secretValues(inputSecrets, values);
-  secretValues(kept, values);
-  if (values.length > 0) {
-    const text = JSON.stringify(value);
-    if (values.some((secret) => text.includes(secret)))
-      throw new Error(`A ${method} result outside its secrets member holds a secret`);
   }
+  const { value, secrets } = splitSecrets(result as Record<string, unknown>);
+  let kept: Record<string, string> | undefined;
+  if (RPC_METHODS[method].secrets.output.length > 0 && isWriteRpcMethod(method) && secrets) {
+    const checked = checkedOutputSecrets(method, secrets);
+    if (!checked) throw new Error(`A ${method} result has undeclared or invalid secrets`);
+    kept = checked;
+  }
+  // Only a method with secrets can misplace one; other answers skip the walk.
+  const fields = RPC_METHODS[method].secrets;
+  if (fields.input.length + fields.output.length > 0 && nestedSecretsMember(value))
+    throw new Error(`A ${method} result holds a misplaced secrets member`);
+  if (holdsSecret(value, [...inputs, ...secretStrings(kept ?? {})]))
+    throw new Error(`A ${method} result outside its secrets member holds a secret`);
   return kept ? { ...value, secrets: kept } : value;
 }
 

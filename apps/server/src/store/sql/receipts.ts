@@ -1,6 +1,7 @@
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import {
   OperationRecordSchema,
+  holdsSecret,
   type OperationReceiptKey,
   type OperationRecord,
   type StoredReceipt,
@@ -197,7 +198,12 @@ export const receiptOperations = {
       limits,
       encodeUtf8,
     );
-    if (!succeeded || !replace(db, key, 0, succeeded, args.at)) throw busy;
+    if (!succeeded) throw busy;
+    // The durable secret boundary (m2 "秘密与操作记录的分界"): checked on the record about to be
+    // stored, inside the transaction, so a record holding a secret rolls back together with the
+    // change and leaves no receipt to be read or replayed later.
+    if (holdsSecret(succeeded, args.secrets ?? [])) throw new Rollback({ secretRefused: true });
+    if (!replace(db, key, 0, succeeded, args.at)) throw busy;
     return { operation: succeeded, committed: true };
   },
 };

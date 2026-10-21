@@ -208,18 +208,31 @@ export function validateRpcResultForCall(
   params: unknown,
   result: unknown,
 ): boolean {
+  return parseRpcResultForCall(method, params, result) !== null;
+}
+
+// The result of a call as its schema parsed it (unknown members stripped), when it is a valid
+// answer to that call; null otherwise. A server serializes this parsed value, never the object
+// its handler returned, so a member the schema does not declare never reaches the wire.
+export function parseRpcResultForCall(
+  method: RpcMethod,
+  params: unknown,
+  result: unknown,
+): unknown | null {
   const call = validateRpcMethodParams(method, params);
   const response = composeRpcMethodResult(method, result);
-  if (!call || !response) return false;
+  if (!call || !response) return null;
   if (method === "terminal.get")
     return sameRunRef(
       (call.params as { run: RunRef }).run,
       (response as { record: { run: RunRef } }).record.run,
-    );
+    )
+      ? response
+      : null;
   if (isWriteRpcMethod(method) || method === "operation.get") {
     const input = call.params as { operationId: string };
     if ((response as { operation: OperationRecord }).operation.operationId !== input.operationId)
-      return false;
+      return null;
   }
   if (method === "terminal.create" || method === "terminal.stop") {
     // The execution precondition belongs to the original operation: a historical record keeps
@@ -227,11 +240,11 @@ export function validateRpcResultForCall(
     const input = call.params as { expectedRelayInstanceId: string; run?: RunRef };
     const operation = (response as { operation: OperationRecord }).operation;
     if (operation.run && operation.run.relayInstanceId !== input.expectedRelayInstanceId)
-      return false;
+      return null;
     if (method === "terminal.stop" && (!operation.run || !sameRunRef(input.run!, operation.run)))
-      return false;
+      return null;
   }
-  return true;
+  return response;
 }
 
 function sorted(value: unknown): unknown | null {
@@ -355,7 +368,12 @@ export {
   RPC_METHODS,
   RPC_DOMAINS,
   SECRETS_MEMBER,
+  MIN_SECRET_LENGTH,
   WRITE_RPC_METHODS,
+  checkedOutputSecrets,
+  holdsSecret,
+  nestedSecretsMember,
+  secretStrings,
   OperationRecordSchema,
   RunRecordSchema,
   WorkerStatusSchema,

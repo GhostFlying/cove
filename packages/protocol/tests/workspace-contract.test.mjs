@@ -397,7 +397,14 @@ test("the largest schema-valid operation records fit the receipt budget", () => 
   // Every mount failed with the longest error kind and the longest ID.
   const domain = {
     ...common,
-    method: longest(WRITE_RPC_METHODS.filter((method) => !method.startsWith("terminal."))),
+    // M1 writes: an M2 record stores only its own small projection (auth-contract.test.mjs).
+    method: longest(
+      WRITE_RPC_METHODS.filter(
+        (method) =>
+          !method.startsWith("terminal.") &&
+          !["auth", "entry", "tsnet"].includes(RPC_METHODS[method].domain),
+      ),
+    ),
     result: {
       resource: { kind: "config", id: id(40), revision: max },
       workspaceRevision: max,

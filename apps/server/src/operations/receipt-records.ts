@@ -18,8 +18,13 @@ export type DatabaseWriteOutcome = { operation: OperationRecord } | { error: Dom
 // the in-transaction recheck found the receipt of an identical request that committed first. A
 // domain whose write is followed by work outside the database (an entry on disk) does that work
 // only for its own commit; a resend must not repeat it.
+// `secretRefused` is a defect, never an answer: the record the write produced held one of the
+// request's secrets, so the transaction rolled back and nothing was stored (DatabaseWriteRequest
+// `secrets`).
 export type DatabaseWriteResult =
-  { operation: OperationRecord; committed?: true } | { error: DomainError };
+  | { operation: OperationRecord; committed?: true }
+  | { error: DomainError }
+  | { secretRefused: true };
 
 // The limits a stored record must respect.
 export type ReceiptLimits = { serverId: string; operationRecordBytes: number };
@@ -58,4 +63,8 @@ export type DatabaseWriteRequest = {
   canonicalIntent: string;
   method: WriteRpcMethod;
   apply: DatabaseWriteApply;
+  // The secret values of the request, input and output (executeSecretWrite). The transaction
+  // refuses to store a record in which any of them appears, so a secret can never become part of
+  // what operation.get or a resend returns, however the write built its result.
+  secrets?: readonly string[];
 };

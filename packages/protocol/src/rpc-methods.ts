@@ -94,6 +94,30 @@ function storedDetailsAllowed(value: z.infer<typeof OperationRecordFieldsSchema>
     (value.method === "binding.delete" && details.runs.length <= W.M1_LIMITS.storedErrorRuns)
   );
 }
+// The result fields each M2 write may store (m2 "秘密与操作记录的分界"): a fixed, secret-free
+// projection of references, so a handler cannot park a secret in some schema-valid string field
+// of a record (a target operation ID, a run reference) that operation.get and a resend would then
+// return for as long as the record is kept. An M2 record never references a run, and the M2
+// fields appear in M2 records only. A later task that needs another field extends this table
+// through the protocol's single writer.
+const M2_RECORD_RESULT_KEYS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "auth.invite.create": ["inviteId", "expiresAtMs", "secretDelivery"],
+  "auth.invite.cancel": ["inviteId"],
+  "auth.device.rename": ["deviceId"],
+  "auth.device.revoke": ["deviceId", "unclosedConnections"],
+  "auth.device.rotate": ["deviceId", "expiresAtMs", "secretDelivery"],
+  "entry.set": ["resource", "appliesAfterRestart"],
+  "server.tsnet.login": ["secretDelivery"],
+  "server.tsnet.logout": [],
+});
+function m2ProjectionHolds(value: z.infer<typeof OperationRecordFieldsSchema>): boolean {
+  const keys = Object.keys(value.result ?? {});
+  const allowed = Object.hasOwn(M2_RECORD_RESULT_KEYS, value.method)
+    ? M2_RECORD_RESULT_KEYS[value.method]
+    : undefined;
+  if (!allowed) return keys.every((key) => !(M2_RESULT_KEYS as readonly string[]).includes(key));
+  return value.run === undefined && keys.every((key) => allowed.includes(key));
+}
 export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) => {
   const terminal = TERMINAL_OPERATION_METHODS.has(value.method);
   const keys = Object.keys(value.result ?? {});
@@ -102,6 +126,7 @@ export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) 
     (!terminal || !!value.run) &&
     keys.every((key) => terminalKeys.includes(key) === terminal) &&
     storedDetailsAllowed(value) &&
+    m2ProjectionHolds(value) &&
     (!value.run || !value.result?.run || sameRunRef(value.run, value.result.run))
   );
 });
@@ -484,6 +509,87 @@ export function splitSecrets<T extends Record<string, unknown>>(
         ? (secrets as Record<string, unknown>)
         : undefined,
   };
+}
+
+// Every M2 write has its record projection, and only M2 writes do.
+const M2_DOMAINS: readonly RpcDomain[] = ["auth", "entry", "service", "tsnet"];
+for (const [method, spec] of Object.entries(RPC_METHODS))
+  if (
+    (spec.class === "write" && M2_DOMAINS.includes(spec.domain)) !==
+    Object.hasOwn(M2_RECORD_RESULT_KEYS, method)
+  )
+    throw new Error(`The record projection of ${method} is missing or misplaced`);
+
+// Every secret schema requires at least this many characters, so a secret never matches
+// ordinary short text (an ID, a state name) by chance in the checks below.
+export const MIN_SECRET_LENGTH = 16;
+
+// The strings of a value that may be secrets, at any depth.
+export function secretStrings(value: unknown): string[] {
+  const found: string[] = [];
+  const pending: unknown[] = [value];
+  while (pending.length > 0) {
+    const next = pending.pop();
+    if (typeof next === "string") {
+      if (next.length >= MIN_SECRET_LENGTH) found.push(next);
+    } else if (next && typeof next === "object") pending.push(...Object.values(next));
+  }
+  return found;
+}
+
+// Whether any decoded string of `value` (a member name or a string value, at any depth) contains
+// one of `secrets`. It inspects the values themselves, not their JSON text: a secret holding `"`
+// or `\` is escaped in JSON and would escape a search of the serialized form.
+export function holdsSecret(value: unknown, secrets: readonly string[]): boolean {
+  if (secrets.length === 0) return false;
+  const pending: unknown[] = [value];
+  const hit = (text: string) => secrets.some((secret) => text.includes(secret));
+  while (pending.length > 0) {
+    const next = pending.pop();
+    if (typeof next === "string") {
+      if (hit(next)) return true;
+    } else if (next && typeof next === "object") {
+      for (const [key, member] of Object.entries(next)) {
+        if (hit(key)) return true;
+        pending.push(member);
+      }
+    }
+  }
+  return false;
+}
+
+// Whether a value has a `secrets` member below its top level. Secrets belong only to the
+// top-level member of a request or result; one nested anywhere else is misplaced.
+export function nestedSecretsMember(value: unknown): boolean {
+  const pending: unknown[] = Object.values(value && typeof value === "object" ? value : {});
+  while (pending.length > 0) {
+    const next = pending.pop();
+    if (next && typeof next === "object") {
+      if (!Array.isArray(next) && Object.hasOwn(next, SECRETS_MEMBER)) return true;
+      pending.push(...Object.values(next));
+    }
+  }
+  return false;
+}
+
+// The output secrets of `method` when `secrets` is exactly a valid instance of its declared
+// output secrets: only declared keys, each value valid. null otherwise, including a member the
+// schema would silently strip, so a defect is refused rather than half-delivered.
+export function checkedOutputSecrets(
+  method: RpcMethod,
+  secrets: unknown,
+): Record<string, string> | null {
+  const member = (RPC_METHODS[method].result as { shape?: Record<string, z.ZodType> }).shape?.[
+    SECRETS_MEMBER
+  ];
+  if (!member || !secrets || typeof secrets !== "object" || Array.isArray(secrets)) return null;
+  const parsed = member.safeParse(secrets);
+  if (!parsed.success || !parsed.data) return null;
+  const data = parsed.data as Record<string, string>;
+  const keys = Object.keys(secrets);
+  return keys.length === Object.keys(data).length && keys.every((key) => Object.hasOwn(data, key))
+    ? data
+    : null;
 }
 
 export function isWriteRpcMethod(method: string): method is WriteRpcMethod {

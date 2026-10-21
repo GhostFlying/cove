@@ -39,7 +39,10 @@ import {
   RPC_METHODS,
   WRITE_RPC_METHODS,
   canonicalWriteIntent,
+  checkedOutputSecrets,
   composeRpcMethodResult,
+  holdsSecret,
+  nestedSecretsMember,
   secretFields,
   splitSecrets,
   validateOperationRecord,
@@ -259,36 +262,64 @@ test("a record never stores a secret, and an M2 record fits its budget", () => {
       encoder,
     ),
   ).toBeNull();
+  // Each M2 write stores a fixed projection: no run reference, no field of another method, and
+  // the M2 fields in no M1 record, so no schema-valid string field is left to park a secret in.
+  for (const extra of [
+    { run: { serverId: "s1", relayInstanceId: "i1", runId: "tskey-auth-k1234567890" } },
+    { result: { ...record.result, resource: { kind: "config", id: "entry", revision: 1 } } },
+    { result: { ...record.result, deviceId: "dev-1" } },
+  ])
+    expect(validateOperationRecord({ ...record, ...extra }, encoder)).toBeNull();
+  expect(
+    validateOperationRecord(
+      { ...record, method: "config.set", result: { inviteId: "inv-1" } },
+      encoder,
+    ),
+  ).toBeNull();
+  // The largest record of every M2 write fits the budget.
   const max = Number.MAX_SAFE_INTEGER;
   const id = (length) => "x".repeat(length);
-  const largest = {
-    operationId: id(128),
-    method: "server.tsnet.logout",
-    revision: max,
-    state: "requires_attention",
-    run: { serverId: id(128), relayInstanceId: id(128), runId: id(128) },
-    result: {
-      resource: { kind: "config", id: id(40), revision: max },
-      workspaceRevision: max,
-      inviteId: id(40),
-      deviceId: id(40),
-      expiresAtMs: max,
-      secretDelivery: "first-response-only",
-      unclosedConnections: 65_536,
-      appliesAfterRestart: true,
-    },
-    progress: {
-      completedSteps: Array.from({ length: 8 }, () => id(32)),
-      remainingEffects: Array.from({ length: 8 }, () => id(32)),
-      recoveryActions: ["continue", "abandon"],
-    },
-    error: domainError("OPERATION_HISTORY_EXPIRED", "unknown"),
+  const values = {
+    resource: { kind: "config", id: id(40), revision: max },
+    inviteId: id(40),
+    deviceId: id(40),
+    expiresAtMs: max,
+    secretDelivery: "first-response-only",
+    unclosedConnections: 65_536,
+    appliesAfterRestart: true,
   };
-  expect(validateOperationRecord(largest, encoder)).toEqual(largest);
-  expect(encoder(JSON.stringify(largest)).byteLength).toBeLessThanOrEqual(
-    M0_LIMITS.operationRecordBytes,
+  const projections = {
+    "auth.invite.create": ["inviteId", "expiresAtMs", "secretDelivery"],
+    "auth.invite.cancel": ["inviteId"],
+    "auth.device.rename": ["deviceId"],
+    "auth.device.revoke": ["deviceId", "unclosedConnections"],
+    "auth.device.rotate": ["deviceId", "expiresAtMs", "secretDelivery"],
+    "entry.set": ["resource", "appliesAfterRestart"],
+    "server.tsnet.login": ["secretDelivery"],
+    "server.tsnet.logout": [],
+  };
+  for (const [method, keys] of Object.entries(projections)) {
+    const largest = {
+      operationId: id(128),
+      method,
+      revision: max,
+      state: "requires_attention",
+      result: Object.fromEntries(keys.map((key) => [key, values[key]])),
+      progress: {
+        completedSteps: Array.from({ length: 8 }, () => id(32)),
+        remainingEffects: Array.from({ length: 8 }, () => id(32)),
+        recoveryActions: ["continue", "abandon"],
+      },
+      error: domainError("OPERATION_HISTORY_EXPIRED", "unknown"),
+    };
+    expect(validateOperationRecord(largest, encoder)).toEqual(largest);
+    expect(encoder(JSON.stringify(largest)).byteLength).toBeLessThanOrEqual(
+      M0_LIMITS.operationRecordBytes,
+    );
+  }
+  expect(Object.keys(projections)).toEqual(
+    WRITE_RPC_METHODS.filter((method) => /^(auth|entry|server\.tsnet)\./.test(method)),
   );
-  expect(WRITE_RPC_METHODS).toContain("server.tsnet.logout");
 });
 
 test("M2 schemas bound third-party and operator input", () => {
@@ -340,4 +371,29 @@ test("M2 schemas bound third-party and operator input", () => {
   expect(
     EntrySetParamsSchema.safeParse({ operationId: "o", patch: { businessPort: 80 } }).success,
   ).toBe(false);
+});
+
+test("secret checks inspect decoded values and exact output declarations", () => {
+  // A secret with characters JSON escapes is still found: the check reads values, not JSON.
+  const quoted = 'tskey-"quoted\\key-1234567890';
+  expect(JSON.stringify({ note: quoted }).includes(quoted)).toBe(false);
+  expect(holdsSecret({ a: [{ note: `x${quoted}y` }] }, [quoted])).toBe(true);
+  expect(holdsSecret({ [quoted]: 1 }, [quoted])).toBe(true);
+  expect(holdsSecret({ note: "tskey-other-1234567890" }, [quoted])).toBe(false);
+  // A secrets member belongs to the top level only.
+  expect(nestedSecretsMember({ secrets: {}, operation: { id: "o1" } })).toBe(false);
+  expect(nestedSecretsMember({ operation: { result: { secrets: { token: "t" } } } })).toBe(true);
+  // Output secrets are exactly the declaration: every value valid, no other member.
+  const loginUrl = "https://login.example/a/1234567890";
+  expect(checkedOutputSecrets("server.tsnet.login", { loginUrl })).toEqual({ loginUrl });
+  for (const invalid of [
+    { loginUrl, authKey: "tskey-auth-k1234567890" },
+    { loginUrl: "http://login.example/a/1234567890" },
+    {},
+  ])
+    expect(checkedOutputSecrets("server.tsnet.login", invalid)).toBeNull();
+  expect(
+    checkedOutputSecrets("auth.invite.create", { invitation: "not-an-invitation" }),
+  ).toBeNull();
+  expect(checkedOutputSecrets("auth.invite.cancel", { invitation: "x" })).toBeNull();
 });
