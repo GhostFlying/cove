@@ -32,13 +32,13 @@ function run(command, args, options) {
 
 // The closure build runs pnpm, Go and the closure's smoke check, never Cove against a data
 // directory. It keeps the operator's HOME so that pnpm and Go find their stores and caches.
-function buildEnv(root) {
-  return isolatedEnv(join(root, "build-home"), { HOME: homedir() });
+function buildEnv(root, extra = {}) {
+  return isolatedEnv(join(root, "build-home"), { HOME: homedir(), ...extra });
 }
 
-async function closureCommand(root, args) {
+async function closureCommand(root, args, extraEnv = {}) {
   const result = await run(process.execPath, [closureScript, ...args], {
-    env: buildEnv(root),
+    env: buildEnv(root, extraEnv),
     timeout: 600_000,
   });
   if (result.code !== 0)
@@ -51,13 +51,14 @@ export function buildClosure(root, name = "closure") {
   return closureCommand(root, ["build", "--out", join(root, name)]);
 }
 
-// Another build: a copy of `source` without its stamp, changed by `change(dir)`, sealed again.
-export async function closureVariant(root, source, name, change) {
+// Another build: a copy of `source` without its stamp, changed by `change(dir)`, sealed again
+// (with `env` added to the sealing environment, which builds cove-tsnet).
+export async function closureVariant(root, source, name, change, env = {}) {
   const dir = join(root, name);
   await cp(source, dir, { recursive: true, verbatimSymlinks: true });
   await rm(join(dir, "cove-install.json"));
   await change(dir);
-  return { dir, ...(await closureCommand(root, ["seal", dir])) };
+  return { dir, ...(await closureCommand(root, ["seal", dir], env)) };
 }
 
 // A build whose server stops at the previous database schema: its last migration is removed, as

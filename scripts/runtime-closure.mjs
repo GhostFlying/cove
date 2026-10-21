@@ -15,15 +15,20 @@
 // and `cove server install` refuses it.
 //
 // Identity. The build ID is computed over the assembled closure itself (every file but the stamp
-// and cove-tsnet: the pnpm deploy output, the Node binary, the native addons) plus the inputs of
-// cove-tsnet (its Go sources, the pinned Go version and its build tags), and then cove-tsnet is
-// built with `--build <ID>`. The binary cannot be part of the digest it embeds, so its inputs stand
-// for it; its build is reproducible (-trimpath, static). The stamp also records a digest of the
-// final contents, cove-tsnet included, which `cove server install --closure` checks before it
-// installs a copy. Two checkouts of one commit at different paths get different IDs: pnpm names
-// its virtual store entries of workspace packages after their source paths. That only costs a
-// second install directory, never a wrong match.
+// and cove-tsnet: the pnpm deploy output, the Node binary, the native addons) plus cove-tsnet as
+// built with a fixed placeholder ID, and then cove-tsnet is built again with `--build <ID>`. The
+// final binary cannot be part of the digest it embeds; the placeholder build stands for it. It is
+// the same build but for the ID string (scripts/tsnet-build.mjs, reproducible: -trimpath, static),
+// so it reflects every input that shapes the binary: the Go sources and toolchain, the build
+// flags and tags of the build script, GOAMD64/GOARM64 and the rest of the Go environment, and the
+// VCS information Go embeds (the commit, and whether the checkout was modified). Listing those
+// inputs instead would silently miss any that a later Go or build script adds. The stamp also
+// records a digest of the final contents, cove-tsnet included, which `cove server install
+// --closure` checks before it installs a copy. Two checkouts of one commit at different paths get
+// different IDs: pnpm names its virtual store entries of workspace packages after their source
+// paths. That only costs a second install directory, never a wrong match.
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -39,7 +44,6 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildTags, moduleDir, pinnedGoVersion } from "./tsnet-build.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const closureModule = join(root, "apps/cli/dist/install/closure.js");
@@ -227,25 +231,23 @@ function smoke(closure) {
   if (seen.pty !== 7 || !seen.sqlite) fail(`closure smoke check failed: ${output}`);
 }
 
-// The cove-tsnet inputs, standing for the binary in the build ID: its Go sources and module
-// files, the pinned Go version and the feature tags.
-function tsnetInputs(hash) {
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory() && !(dir === moduleDir && entry.name === "dist")) walk(path);
-      else if (entry.isFile()) files.push(relative(moduleDir, path).split("\\").join("/"));
-    }
-  };
-  walk(moduleDir);
-  files.sort();
-  hash.update(`T\0${pinnedGoVersion()}\0${buildTags}\0`);
-  for (const file of files) {
-    const bytes = readFileSync(join(moduleDir, file));
-    hash.update(`${Buffer.byteLength(file)}\0${file}\0${bytes.length}\0`);
-    hash.update(bytes);
-  }
+function buildTsnet(build, out) {
+  run(process.execPath, [
+    join(root, "scripts/tsnet-build.mjs"),
+    "build",
+    "--build",
+    build,
+    "--out",
+    out,
+  ]);
+}
+
+// cove-tsnet built with a placeholder ID of the final ID's length, standing for the final binary
+// in the build ID (see the header). Returns its SHA-256.
+function tsnetIdentity(closure, packageVersion) {
+  const out = join(closure, "bin", "cove-tsnet");
+  buildTsnet(`${packageVersion}+${"0".repeat(16)}`, out);
+  return createHash("sha256").update(readFileSync(out)).digest("hex");
 }
 
 async function seal(dir) {
@@ -276,17 +278,10 @@ async function seal(dir) {
     fail(`cannot read the schema version of ${migrations}`);
 
   const hash = await lib.closureDigest(closure, new Set([lib.INSTALL_STAMP, "bin/cove-tsnet"]));
-  tsnetInputs(hash);
+  hash.update(`T\0${tsnetIdentity(closure, manifest.packageVersion)}\0`);
   const digest = hash.digest("hex");
   const build = `${manifest.packageVersion}+${digest.slice(0, 16)}`;
-  run(process.execPath, [
-    join(root, "scripts/tsnet-build.mjs"),
-    "build",
-    "--build",
-    build,
-    "--out",
-    join(closure, "bin", "cove-tsnet"),
-  ]);
+  buildTsnet(build, join(closure, "bin", "cove-tsnet"));
   const reported = capture(join(closure, "bin", "cove-tsnet"), ["version"]);
   if (!reported.includes(`build=${build} `)) fail(`cove-tsnet reports ${reported.trim()}`);
   const stamp = {

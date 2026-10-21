@@ -15,6 +15,7 @@ import {
 } from "../../dist/install/closure.js";
 import {
   buildClosure,
+  closureVariant,
   expectedManager,
   liveRuns,
   olderSchemaVariant,
@@ -189,6 +190,26 @@ test("the sealed closure holds every runtime part and runs alone, with no Node o
   }
   expect(await exited).toBe(0);
 }, 120_000);
+
+test("the build ID covers how cove-tsnet was built, not only its sources", async () => {
+  // Sealed again unchanged: the same ID (the cove-tsnet build is reproducible).
+  const again = await closureVariant(fixture.root, closure.dir, "closure-again", async () => {});
+  expect(again.build).toBe(closure.build);
+  // The same closure and Go sources, with another instruction set level in the Go environment
+  // (the build script passes it through): another cove-tsnet binary, so another build.
+  const level = process.arch === "arm64" ? { GOARM64: "v8.1" } : { GOAMD64: "v2" };
+  const tuned = await closureVariant(
+    fixture.root,
+    closure.dir,
+    "closure-tuned",
+    async () => {},
+    level,
+  );
+  expect(tuned.build).not.toBe(closure.build);
+  expect(await sha256(join(tuned.dir, "bin/cove-tsnet"))).not.toBe(
+    await sha256(join(closure.dir, "bin/cove-tsnet")),
+  );
+}, 600_000);
 
 async function sha256(path) {
   try {
