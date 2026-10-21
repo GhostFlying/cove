@@ -44,6 +44,15 @@ const admissionFailureBodies = new Map<BootstrapFailure["kind"], string>(
   admissionFailureKinds.map((kind) => [kind, JSON.stringify(bootstrapFailure(kind))]),
 );
 
+// Whether the request target is in origin form (RFC 9112 §3.2.1), the only form a Cove client
+// sends. The router matches an absolute-form target (`POST http://evil.example/bootstrap`) by its
+// path alone, and the server would then judge only the Host header, while a proxy or browser in
+// front may have acted on the target's own authority. Such a target, and `*`, is malformed before
+// any admission decision: only a target starting with `/` reaches the Host and Origin rules.
+export function originFormTarget(request: FastifyRequest): boolean {
+  return request.raw.url?.startsWith("/") === true;
+}
+
 export function sendHttpAdmissionFailure(
   reply: FastifyReply,
   kind: AdmissionKind,
@@ -276,7 +285,9 @@ export function registerHttpRpc(
   });
   for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc, LOCAL_PATHS.terminal]) {
     app.options(path, (request, reply) => {
-      const result = admission.http("OPTIONS", path, headers(request), 0);
+      const result = originFormTarget(request)
+        ? admission.http("OPTIONS", path, headers(request), 0)
+        : "malformed";
       if (result !== "accepted") return sendHttpAdmissionFailure(reply, result, headers(request));
       cors(request, reply);
       return reply
@@ -412,7 +423,9 @@ export function registerHttpRpc(
               ? admission.budgets.bootstrapBytes
               : admission.budgets.rpcRequestBytes,
           onRequest: (request, reply, done) => {
-            const result = admission.http("POST", path, headers(request), 0);
+            const result = originFormTarget(request)
+              ? admission.http("POST", path, headers(request), 0)
+              : "malformed";
             if (result !== "accepted") {
               sendHttpAdmissionFailure(reply, result, headers(request));
               return;
