@@ -14,7 +14,7 @@ import {
   type ServerRecord,
 } from "../remote/credentials.js";
 import type { Via } from "../remote/entries.js";
-import { parseInvitation, redeemInvitation } from "../remote/pairing.js";
+import { pairedRecord, parseInvitation, redeemInvitation } from "../remote/pairing.js";
 import { cliBuildVersion } from "../session.js";
 import { flag, homeDirectory, print, takeFlags, UsageError, type Arguments } from "./_common.js";
 import { run as runTsnet, usage as tsnetUsage } from "./_remote_tsnet.js";
@@ -31,8 +31,10 @@ stdin is not a terminal; the invitation is never accepted as an argument. The cl
 kept in <home>/client/servers/<serverId>.json (0600). A lost pairing answer is not retried:
 create a new invitation and pair again; \`cove auth device list\` shows the device the lost
 attempt left as never-connected, and \`cove auth device revoke\` removes it. remote remove
-forgets the server on this client only; revoke the device on the server as well. Only the
-loopback entry (a server on this host) is available in this build.`;
+forgets the server on this client only; revoke the device on the server as well. Without --via,
+remote add pairs with a server on this host (loopback) and also records the invitation's SSH
+entry; with --via ssh it pairs through the invitation's SSH target, which ssh must already know
+(known_hosts), and records only that entry. The tsnet entry is not available in this build.`;
 
 // These commands manage this client's own records; they never address a server with --server.
 export const localOnly = true;
@@ -107,16 +109,8 @@ async function add(args: Arguments): Promise<number> {
         `run \`cove remote remove ${existing.alias}\` first. The invitation was not used`,
     );
   const result = await redeemInvitation(payload, deviceName, via, cliBuildVersion());
-  const record: ServerRecord = {
-    version: 1,
-    alias: name,
-    serverId: result.serverId,
-    deviceId: result.deviceId,
-    token: result.token,
-    defaultEntry: "loopback",
-    entries: { loopback: { port: result.businessPort } },
-    pairedAtMs: Date.now(),
-  };
+  // The entries this pairing reached and the invitation's (remote/pairing.ts pairedRecord).
+  const record = pairedRecord(name, payload, result, via);
   try {
     await saveServer(home, record);
   } catch {
