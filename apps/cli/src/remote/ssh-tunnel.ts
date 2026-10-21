@@ -225,6 +225,20 @@ function delay(ms: number): Promise<"timeout"> {
   return new Promise((resolve) => setTimeout(() => resolve("timeout"), ms));
 }
 
+// `promise`, or "timeout" after `ms`. The timer is cleared either way, so a wait that ended does
+// not keep the process alive.
+async function within<T>(promise: Promise<T>, ms: number): Promise<T | "timeout"> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), ms))),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 type Resolved = { code: number | null; stdout: string; stderr: string };
 
 function resolveConfig(args: string[]): Promise<Resolved> {
@@ -299,7 +313,7 @@ export async function resolvedPins(target: string): Promise<string[]> {
 async function stop({ child, ended }: Started): Promise<void> {
   const running = () => child.exitCode === null && child.signalCode === null;
   child.stdin?.end();
-  if ((await Promise.race([ended, delay(CLOSE_GRACE_MS)])) !== "timeout" || !running()) return;
+  if ((await within(ended, CLOSE_GRACE_MS)) !== "timeout" || !running()) return;
   const signal = (name: NodeJS.Signals) => {
     try {
       if (running() && child.pid !== undefined) process.kill(-child.pid, name);
@@ -308,9 +322,9 @@ async function stop({ child, ended }: Started): Promise<void> {
     }
   };
   signal("SIGTERM");
-  if ((await Promise.race([ended, delay(KILL_GRACE_MS)])) !== "timeout") return;
+  if ((await within(ended, KILL_GRACE_MS)) !== "timeout") return;
   signal("SIGKILL");
-  await Promise.race([ended, delay(KILL_GRACE_MS)]);
+  await within(ended, KILL_GRACE_MS);
 }
 
 // Opens a tunnel to `remotePort` on the target host. A failure is a RemoteError
