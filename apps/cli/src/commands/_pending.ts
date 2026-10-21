@@ -34,6 +34,16 @@ import {
 // record cannot be resent, since the request it saved is incomplete; `resend` refuses it locally
 // and the operator runs the original command again (`operation get` still reads its outcome).
 // The fingerprint excludes secrets, so the saved params still identify the operation.
+//
+// Retention (m2 D13, #97): a saved record expires PENDING_RETENTION_MS after it was saved, as the
+// server's receipts do after they end. An expired record is never sent again: `resend` refuses it
+// locally, and a command reusing its operation ID is refused before sending. A request that old
+// may have been executed, recorded and since cleared by the server (which then answers
+// OPERATION_HISTORY_EXPIRED), or never have arrived, in which case sending it now would execute a
+// month-old intent as new work. The record stays on disk; `operation get` still asks the server.
+// Age is measured on this machine's wall clock against savedAtMs: a clock that went back only makes
+// a record look younger, so it never expires one early; a record saved "in the future" of the
+// current clock waits until the clock passes savedAtMs plus the retention.
 export type PendingOperation = {
   readonly version: 1;
   readonly serverId: string;
@@ -42,6 +52,20 @@ export type PendingOperation = {
   readonly omittedSecrets?: readonly string[];
   readonly savedAtMs: number;
 };
+
+export const PENDING_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Whether a saved record is past its retention at `now`.
+export function pendingExpired(pending: PendingOperation, now: number = Date.now()): boolean {
+  return now - pending.savedAtMs >= PENDING_RETENTION_MS;
+}
+
+function expiredDescription(pending: PendingOperation): string {
+  return (
+    `the saved request for operation ${pending.params.operationId} was saved at ` +
+    `${new Date(pending.savedAtMs).toISOString()} and expired after 30 days`
+  );
+}
 
 function pendingDirectory(home: string): string {
   return join(home, "cli", "operations");
@@ -74,6 +98,7 @@ async function loadPending(home: string, operationId: string): Promise<PendingOp
     !OpaqueIdSchema.safeParse(parsed.serverId).success ||
     !isWriteRpcMethod(parsed.method) ||
     parsed.params?.operationId !== operationId ||
+    !Number.isSafeInteger(parsed.savedAtMs) ||
     Object.hasOwn(parsed.params, "secrets") ||
     (parsed.omittedSecrets !== undefined &&
       (!Array.isArray(parsed.omittedSecrets) ||
@@ -86,10 +111,15 @@ async function loadPending(home: string, operationId: string): Promise<PendingOp
   return parsed;
 }
 
-// The saved request of an operation ID, for `operation resend`: refused when its secrets were
-// omitted. Only field names are printed, never a value.
+// The saved request of an operation ID, for `operation resend`: refused when it expired or when its
+// secrets were omitted. Only field names are printed, never a value.
 export async function readPending(home: string, operationId: string): Promise<PendingOperation> {
   const parsed = await loadPending(home, operationId);
+  if (pendingExpired(parsed))
+    throw new Error(
+      `${expiredDescription(parsed)}, so it is never sent again; nothing was sent ` +
+        `(\`cove operation get ${operationId}\` shows what the server recorded)`,
+    );
   if (parsed.omittedSecrets?.length)
     throw new Error(
       `operation ${operationId} carried secrets (${parsed.omittedSecrets.join(", ")}) that are ` +
@@ -284,6 +314,12 @@ export async function acceptWrite<M extends WriteRpcMethod>(
       `operation ${params.operationId} already has a saved request with another server, method ` +
         `or parameters; nothing was sent. Use a fresh --operation-id for this request ` +
         `(\`cove operation resend ${params.operationId}\` sends the saved one)`,
+    );
+  // An earlier command's record past its retention is never sent again (see PendingOperation).
+  if (saved !== pending && pendingExpired(saved))
+    throw new Error(
+      `${expiredDescription(saved)}; nothing was sent. Use a fresh --operation-id for this ` +
+        `request (\`cove operation get ${params.operationId}\` shows what the server recorded)`,
     );
   // The secrets are not part of the intent, but whether a request has them decides whether its
   // saved record may be resent. A reused ID whose secret fields differ from the saved record's
