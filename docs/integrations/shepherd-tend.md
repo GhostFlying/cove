@@ -331,7 +331,7 @@ PENDING：
   给 `--server` 时为用法错误（2），且不受 `COVE_SERVER` 影响。
 - `--server` 模式下路径参数是 server 主机上的路径：相对路径或以 `~` 开头时以 2 退出，不写待定记录也不发送；绝对路径原样发送。
   `terminal create` 必须给出绝对的 `--cwd`；`--checkout PATH` 只匹配 server 报告的已注册 clone 路径，其余以 1 退出并提示
-  `REPO_ID,path=PATH`。本机模式保持原行为。
+  `REPO_ID,path=PATH`。`mount delete-worktree PATH` 在 `--server` 模式下以 2 退出且不发送，须给 `<taskId> <mountId>`。本机模式保持原行为。
 - `cove auth invite create [--ttl-minutes N]` 输出 `{ operation, invitation }`；邀请只在首次响应中出现，以同一 `--operation-id`
   重发时只输出记录并以 1 退出。另有 `auth invite list/cancel`、`auth device list [--include-revoked]/rename/revoke`。
   `auth device revoke` 等被撤销设备的连接关闭后才返回；有连接未在期限内关闭时仍输出记录（`result.unclosedConnections`
