@@ -37,6 +37,10 @@ type Node interface {
 	// Listen opens a tailnet TCP listener on port on all of this node's
 	// Tailscale addresses.
 	Listen(port int) (net.Listener, error)
+	// Reauth forces a new login of an already enrolled node with authKey,
+	// as `tailscale up --force-reauth --auth-key` does. It returns once the
+	// login has started; WaitRunning reports the outcome.
+	Reauth(ctx context.Context, authKey string) error
 	// Logout deauthorizes the node with the control plane.
 	Logout(ctx context.Context) error
 	// Close stops the node; its persisted state is kept.
@@ -202,6 +206,19 @@ func (n *tsnetNode) WhoIs(ctx context.Context, addr string) (proto.NodeInfo, err
 
 func (n *tsnetNode) Listen(port int) (net.Listener, error) {
 	return n.srv.Listen("tcp", fmt.Sprintf(":%d", port))
+}
+
+// Reauth restarts the backend with the key and then starts a login. tsnet
+// itself uses Server.AuthKey only for a node without state, and only forces
+// a login through the TSNET_FORCE_LOGIN environment variable, which would
+// put the decision (and nothing else) in the environment; the local API does
+// the same thing explicitly. The key goes to the in-process control client
+// and is not persisted.
+func (n *tsnetNode) Reauth(ctx context.Context, authKey string) error {
+	if err := n.lc.Start(ctx, ipn.Options{AuthKey: authKey}); err != nil {
+		return err
+	}
+	return n.lc.StartLoginInteractive(ctx)
 }
 
 func (n *tsnetNode) Logout(ctx context.Context) error { return n.lc.Logout(ctx) }
