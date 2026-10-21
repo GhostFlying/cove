@@ -655,10 +655,14 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   理由是运维而非安全：远程登出 tsnet 可能切断调用者所用的入口，auth key 也不应经网络传给 server。
   配对兑换不是 RPC，走配对监听且不留操作记录（D6）。安装与启停服务是本机 CLI 动作，不是 RPC。
 - 秘密只放在 params 或 result 的嵌套成员 `secrets` 中，方法表逐方法声明其键，模块加载时与 schema 核对。
-  分派层在构造指纹、规范化参数与操作记录之前移除输入秘密，单独交给处理器；结果中声明的 `secrets`
-  之外任何位置出现秘密值都视为内部错误。输出秘密只在真正提交该写操作的那次调用中返回，
-  同 operationId 的重复提交与 `operation.get` 都读不到。CLI 的待定记录只保存被省略的秘密字段名，
-  这样的记录不能重发：`operation resend` 在本地拒绝且不发送，需重新执行原命令。
+  分派层在构造指纹、规范化参数与操作记录之前移除输入秘密，单独交给处理器。回答（含拒绝的 details）中
+  顶层 `secrets` 之外任何解码后的字符串含有本次调用的秘密、更深处出现 `secrets` 成员、或顶层 `secrets`
+  不恰好符合声明（多出的键、无效的值）时，都视为内部错误；HTTP 发送的是 schema 解析后的结果。
+  回执事务在写入前检查即将保存的记录，含有秘密就整体回滚，不留回执；M2 写的记录只保存按方法固定的
+  引用字段，不带 run。输出秘密在写入前按声明校验，只在真正提交该写操作的那次调用中返回，
+  同 operationId 的重复提交与 `operation.get` 都读不到。CLI 先按方法 schema 校验请求（解析会去掉或改变字段
+  即拒绝，不写盘也不发送），待定记录只保存被省略的秘密字段名，这样的记录不能重发：`operation resend`
+  在本地拒绝且不发送，需重新执行原命令；同一 operationId 以不同的秘密字段重用时同样拒绝。
 - 凭据：`Authorization: Bearer` 与终端 WS 的 `secret` 接受两种形式，二者互不重叠：
   本机秘密（43–256 个 base64url 字符，只出现在 rendezvous 文件中）与设备 token
   `cove_d1_<deviceId>.<43 个 base64url 字符>`。凭据正确但设备已撤销时为 `DEVICE_REVOKED`（HTTP 401，WS 以 policy 关闭），
@@ -666,6 +670,8 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
 - 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
   `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
 - `buildVersion` 为 `<根 package 版本>+<16 位十六进制>`：运行时对 `apps/*/dist`、`packages/*/dist` 中的编译产物
-  （不含 `.d.ts`、`.map`、`.tsbuildinfo`）与 `pnpm-lock.yaml` 按相对路径计算 SHA-256，取前 16 位，每个进程缓存一次。
-  server 与 CLI 对同一构建得到同一值；找不到 workspace 根目录时为 `unidentified`。它只用于诊断与版本提示，
-  不参与兼容判定；runtime 与 worker 之间的 pipe 仍报 `0.0.0`，因为二者总来自同一构建。
+  （不含 `.d.ts`、`.map`、`.tsbuildinfo`）、这些 package 的 `package.json` 与 `pnpm-lock.yaml` 按相对路径计算 SHA-256，
+  取前 16 位，每个进程缓存一次。server 与 CLI 对同一构建得到同一值；找不到 workspace 根目录时为 `unidentified`。
+  Node 本体、native addon 与其他二进制不在其中。这是开发时的后备：安装版（m2 T3、D1）在安装时为完整闭包写入标识，
+  提供后优先于运行时计算。它只用于诊断与版本提示，不参与兼容判定；runtime 与 worker 之间的 pipe 仍报 `0.0.0`，
+  因为二者总来自同一构建。
