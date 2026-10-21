@@ -180,7 +180,7 @@ describe("Git runner", () => {
   // A git that forks without exec: the forked descendant inherits stdout and stderr. Each case
   // must settle promptly (not when the descendant would close the pipes) and end the descendant.
   // (Separate tests rather than it.each: the CI gate counts each `it` once at discovery.)
-  // Returns the run's result, whether it settled within 3 s (the descendant lives for 30 s),
+  // Returns the run's result, whether it settled promptly (the descendant lives for 30 s),
   // whether the descendant ended, and how many signals this process sent by number while the
   // run was in progress (none may be: a group or PID may be reused once Node has reaped git).
   // A descendant that outlives the check (an escaped one) is killed here; the test started it.
@@ -203,12 +203,37 @@ describe("Git runner", () => {
       kills.mockRestore();
       childKills.mockRestore();
     }
-    const prompt = Date.now() - started < 3_000;
-    const pid = Number(await readFile(pidFile, "utf8"));
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("no descendant PID recorded");
+    // A run that timed out is prompt if it settled within 3 s of its deadline, any other within
+    // 3 s of its start: either way well before the descendant would close the pipes.
+    const timedOut = result.kind === "failed" && result.reason === "timeout";
+    const prompt = Date.now() - started < (timedOut ? options.timeoutMs : 0) + 3_000;
+    const pid = await recordedPid(pidFile, result);
     const descendantEnded = await ended(pid);
     if (!descendantEnded) process.kill(pid, "SIGKILL");
     return { result, prompt, descendantEnded, numericSignals };
+  }
+
+  // The PID the descendant wrote to `pidFile`, waiting up to 5 s for it. The descendant writes it
+  // itself, and a run that settles at its deadline or on an overflow does not wait for that write:
+  // an escaped descendant that has left the group survives the group kill and records its PID
+  // only after the run has settled (#110). A file that never appears means the descendant was
+  // killed before it recorded anything, so the case did not run as designed: that fails, with the
+  // run's result for diagnosis, rather than counting as an ended descendant.
+  async function recordedPid(pidFile, result) {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const text = await readFile(pidFile, "utf8").catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      });
+      const pid = Number(text);
+      if (text.trim() !== "" && Number.isSafeInteger(pid) && pid > 0) return pid;
+      if (Date.now() > deadline)
+        throw new Error(
+          `no descendant PID recorded in 5 s; the run gave ${JSON.stringify(result)}`,
+        );
+      await new Promise((done) => setTimeout(done, 20));
+    }
   }
 
   // Starts `command` in a new session, so it leaves the run's process group, then waits until it
@@ -308,7 +333,9 @@ describe("Git runner", () => {
   // bounded; one holding the pipes turns the run into a timeout at the deadline.
   it("bounds a run whose escaped descendant holds the pipes, without containing it", async () => {
     const script = escaped("sleep 30");
-    expect(await forkingRun(script, { timeoutMs: 1_000 })).toEqual({
+    // The descendant has to escape before the deadline for this case to run as designed; a 1 s
+    // deadline raced its start under load and killed it in the group first (#110).
+    expect(await forkingRun(script, { timeoutMs: 5_000 })).toEqual({
       result: { kind: "failed", reason: "timeout" },
       prompt: true,
       descendantEnded: false,
@@ -318,7 +345,10 @@ describe("Git runner", () => {
 
   it("completes a run whose escaped descendant closed its output, without containing it", async () => {
     const script = escaped("sleep 30", "</dev/null >/dev/null 2>&1");
-    expect(await forkingRun(script, { timeoutMs: 1_000 })).toEqual({
+    // The deadline only backstops a regression here: this run must settle when git exits, which
+    // `prompt` checks. A 1 s deadline raced the descendant's own start under load, killing it in
+    // the group before it escaped and recorded its PID (#110).
+    expect(await forkingRun(script, { timeoutMs: 10_000 })).toEqual({
       result: { kind: "exited", code: 0, stdout: "done\n", stderr: "" },
       prompt: true,
       descendantEnded: false,
