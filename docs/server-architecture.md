@@ -124,6 +124,8 @@ M2 已实现（[D1](milestones/m2.md#d1-安装目录布局选-a)、[D2](mileston
 `cove server install` 把一次构建的完整运行闭包（含固定版本的 Node、原生模块与 `cove-tsnet`）装到 `<home>/install/<build>/`，
 `current` 原子切换，服务单元只引用 `current`；macOS 用 LaunchAgent，Linux 用 systemd user unit（默认 `KillMode`，需 linger）。
 安装新版本不替换运行中的 server，`cove server restart` 先列出将结束的 run 与平台后果（`server.impact`），确认后才执行；
+连不上但仍持有实例锁的 server 视为可能在运行，不当作已停止（不跳过确认，prune 不删 build）。
+崩溃重启有上限：systemd 用单元的启动次数限制，launchd 下由 server 按启动记录计数，超出后有序停止并以 0 退出。
 用法与回退步骤见[开发说明](development.md#m2-安装与用户服务t3)。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。
 
