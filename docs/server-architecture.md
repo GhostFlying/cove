@@ -89,6 +89,9 @@ Host 若已有系统 Tailscale，可通过受限的 Tailnet 入口接入，不�
 首期不提供裸 LAN/公网明文直连；配对入口同样只在上述安全边界内开放。
 已选择 HTTP + WebSocket；提供一致的认证、协议握手和状态同步，具体分工见 [通信载体](relay-protocol.md#41-通信载体已选择-http--websocket)。
 监听范围需要显式配置，不因网络故障自动扩大到公网或其他接口。
+已实现（[M2 D3](milestones/m2.md#d3-本机入口与稳定端口选-a)）：本机入口是固定的 loopback 业务端口与配对端口，存于 server 的入口配置，
+`cove server install` 时选定，经 `cove server entry set` 修改并在下次启动时生效；SSH 转发到同一业务端口。
+server 的监听集合（`apps/server/src/network/listeners.ts`）统一启动与关闭 loopback 业务、配对与 tsnet 入口。
 
 ### 内置 Tailscale
 
@@ -117,6 +120,11 @@ Desktop 退出、崩溃或更新不能隐式重启 server。服务入口与运�
 Desktop 更新时会被替换的临时路径或开发 checkout；具体安装和服务管理方式后续选型。
 M1 仍从仓库构建产物前台运行（`cove server start`），稳定安装目录与服务管理留给 M2
 （[M1 D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)）。
+M2 已实现（[D1](milestones/m2.md#d1-安装目录布局选-a)、[D2](milestones/m2.md#d2-服务管理器与各平台的运行保证macos-launchagentlinux-systemd-user--linger停止清理用默认值)）：
+`cove server install` 把一次构建的完整运行闭包（含固定版本的 Node、原生模块与 `cove-tsnet`）装到 `<home>/install/<build>/`，
+`current` 原子切换，服务单元只引用 `current`；macOS 用 LaunchAgent，Linux 用 systemd user unit（默认 `KillMode`，需 linger）。
+安装新版本不替换运行中的 server，`cove server restart` 先列出将结束的 run 与平台后果（`server.impact`），确认后才执行；
+用法与回退步骤见[开发说明](development.md#m2-安装与用户服务t3)。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。
 
 Server 独立启动，可按目标 OS 集成为后台服务。即使没有客户端或没有 PTY，也不因空闲退出。
