@@ -71,7 +71,8 @@ responses can arrive out of order; on the dial socket it is optional.
 | `ALREADY_LOGGED_IN` | `login` while the node is Running; log out first.                              |
 | `LOGIN_FAILED`      | The control plane rejected the login (message is redacted of the key).         |
 | `LOGIN_TIMEOUT`     | Login did not finish within the request's timeout.                             |
-| `IDENTITY_CHANGED`  | A reauth completed as another node; the enrollment was restored, not replaced. |
+| `IDENTITY_CHANGED`  | A login of an enrolled node ended as another node; it is stopped until logout. |
+| `LOGIN_UNCERTAIN`   | A login of an enrolled node did not finish and may still have completed.       |
 | `NODE_UNAVAILABLE`  | The node did not reach Running in time, or its local API failed.               |
 | `PEER_NOT_FOUND`    | No peer with the requested stable node ID is visible in the netmap.            |
 | `PEER_MISMATCH`     | The connected address answered WhoIs as a different node, or WhoIs failed.     |
@@ -99,6 +100,7 @@ Returned by `status`, `login`, `logout` and `setPorts`:
   },
   "ports": [7443],
   "streams": [],
+  "hold": "IDENTITY_CHANGED",
   "warnings": [],
   "remoteLogoutConfirmed": true
 }
@@ -110,7 +112,42 @@ the node failed to start (`warnings` says why). `authURL` is present while an in
 pending; whoever opens it can attach the node to their tailnet, so it is returned only to the
 requesting owner and never logged. Names come from the control plane and are display data; only
 `stableNodeID` identifies a node. `remoteLogoutConfirmed` appears only in a `logout` result (see
-`logout` below).
+`logout` below). `hold` is present while the node's identity is not known to be the enrolled one
+(see [Identity hold](#identity-hold)); its value is `IDENTITY_CHANGED` or `LOGIN_UNCERTAIN`, the
+first warning explains it, and for `IDENTITY_CHANGED` `self.stableNodeID` is the node's current
+identity.
+
+### Identity hold
+
+Paired clients pin the server node's stable ID, so a login of an enrolled node (one whose state
+records a stable ID) must not quietly end as another node, for example with a key of another
+tailnet. From the moment such a login starts until its outcome is known and is the enrolled
+identity, the node is held: serve has no listeners open and dial refuses streams with the hold's
+code. The outcome is reported as it is:
+
+- The login completed as the enrolled node: success; the hold ends and listeners reopen.
+- It completed as another node: `IDENTITY_CHANGED`. The node is stopped. The message names the
+  enrolled and the current stable ID and says that paired clients must pair again. Status reports
+  `hold: "IDENTITY_CHANGED"` with the current ID until a `logout`. To recover, log out, log in with
+  the intended key, then pair the clients again. `login` keeps failing with `IDENTITY_CHANGED`
+  until then.
+- It did not finish (rejected, timed out, cancelled): `LOGIN_UNCERTAIN`, with the underlying
+  error in the message. The backend can still complete a login after the attempt gave up (it keeps
+  retrying a failing control connection), so the node is stopped and nothing can complete later in
+  this process. The next `status` or `login` restarts the node from its state and reads the
+  persisted identity: the enrolled one ends the hold, another one turns it into
+  `IDENTITY_CHANGED`, and if the node cannot start or answer, the hold stays `LOGIN_UNCERTAIN`.
+- An interactive login (no `authKey`) of an enrolled node is held from the start, and `login`
+  reports `hold: "LOGIN_UNCERTAIN"` with the `authURL`. `status` ends the hold once the node is
+  Running as the enrolled identity, and reports `IDENTITY_CHANGED` if it runs as another.
+
+Rollback is deliberately not attempted. Putting back an earlier copy of the state cannot cover a
+crash between the login and the copy, or a login the backend completes after the attempt timed
+out, so it would report a restored enrollment that may not hold. The safety net is the client's
+stable-ID pinning: a client never accepts a server node other than the one it paired with, and
+every connection still needs a Cove device token, so an unexpected identity costs availability
+(clients pair again), not access. The hold lives in the process; after a crash during a login the
+restarted helper serves as whatever identity was persisted, and the pinning covers that window.
 
 ## Secrets and output
 
@@ -222,14 +259,13 @@ shutdown) fails with `SHUTTING_DOWN` without acting; a second `stop` does too. O
   fails, the error message says so. With `authKey` and existing state (an enrolled node that needs
   login again, for example after its key expired) it forces a reauthentication of that node with
   the key, as `tailscale up --force-reauth --auth-key` does, and waits until that login completed:
-  the node is Running with a new node key (Running alone can come from the old enrollment). On
-  failure its state is kept. The node must keep its stable ID: if the login completes as another
-  node (a key of another tailnet, say), the request fails with `IDENTITY_CHANGED`, the enrolled
-  state is restored and the node restarted from it, still needing login; using that key takes an
-  explicit `logout` and `login`, and the other node may remain in that tailnet's admin console.
-  Without `authKey` it starts an interactive login
-  and returns as soon as `authURL` is known (or the node is Running); the CLI shows the URL and
-  polls `status`. `ALREADY_LOGGED_IN` if Running.
+  the node is Running with a new node key (Running alone can come from the old enrollment). The
+  state is never rewritten or restored by the helper; the node is held while the outcome is
+  unknown and the result is success, `IDENTITY_CHANGED` or `LOGIN_UNCERTAIN` (see
+  [Identity hold](#identity-hold)). Without `authKey` it starts an interactive login and returns as
+  soon as `authURL` is known (or the node is Running); the CLI shows the URL and polls `status`.
+  `ALREADY_LOGGED_IN` if Running. While a hold other than an interactive login remains, `login`
+  first tries to settle it and fails with the hold's code if it cannot.
 - `logout` and `stop` with open streams and no `force` fail with `ACTIVE_STREAMS` and change
   nothing. With `force` they close the streams first. `logout` then deauthorizes the node with the
   control plane (10 s bound) and deletes `<home>/state`. The local logout is never blocked: if the
@@ -281,9 +317,11 @@ request must be `hello`.
 `setPorts` is declarative: it sets the full list of tailnet TCP ports to listen on (business port,
 plus the pairing port while an invitation is open). The list is kept and reapplied whenever a node
 starts (restored state or login), so after a restart the server sends it once. Closing a port never
-affects connections already accepted on it. While logged out nothing listens, and a `login` of a
-node that is not Running closes the listeners until it finishes, so nothing is accepted while a
-reauth could complete as another node. `logout` closes every listener and every connection.
+affects connections already accepted on it. While logged out or held (see
+[Identity hold](#identity-hold)) nothing listens; the hold closes the listeners in the same step
+that starts the login, and they reopen only when `login`, `status` or `setPorts` finds the node
+usable again. `status` therefore takes the same lock as `login`. `logout` closes every listener and
+every connection.
 
 ### Forwarded connections
 
