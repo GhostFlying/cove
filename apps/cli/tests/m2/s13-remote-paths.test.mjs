@@ -1,4 +1,5 @@
-import { mkdir, readdir, stat, symlink } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { registeredRemote } from "../m1/s3-worktree-remotes.mjs";
@@ -16,6 +17,7 @@ let serverHome;
 let client;
 let clientCwd;
 let serverRepo;
+let server;
 
 beforeEach(async () => {
   fixture = await createAuthFixture();
@@ -24,7 +26,7 @@ beforeEach(async () => {
   // A same-named clone that exists only in the client's tree.
   await fixture.gitRepo("client-tree/work/repo");
   clientCwd = join(fixture.root, "client-tree", "work");
-  await fixture.startAuthServer(serverHome);
+  server = await fixture.startAuthServer(serverHome);
   client = fixture.home("client-tree/home");
   await fixture.pairOk(client, "box", (await fixture.invite(serverHome)).invitation);
 });
@@ -50,20 +52,23 @@ async function serverRepos() {
   return (await fixture.coveJson(["repo", "list"], { home: serverHome })).repos;
 }
 
+// Commands whose path argument is a usage error with --server.
+const USAGE_ERRORS = [
+  ["repo", "register", "repo"],
+  ["repo", "register", "./repo"],
+  ["repo", "register", "~/repo"],
+  // A bare word is a repo ID (M1); a path argument starts with /, . or ~ or holds a /.
+  ["task", "create", "T", "--checkout", "./repo"],
+  ["task", "create", "T", "--checkout", "repo/sub,name=x"],
+  ["task", "create", "T", "--checkout", "~"],
+  ["task", "create", "T", "--checkout", "~/repo"],
+  ["config", "set", "workspaceRoot", "workspaces"],
+  ["terminal", "create", "--", "/bin/true"],
+  ["terminal", "create", "--cwd", "repo", "--", "/bin/true"],
+];
+
 test("relative and ~ paths are usage errors with --server, and nothing is saved or sent", async () => {
-  for (const args of [
-    ["repo", "register", "repo"],
-    ["repo", "register", "./repo"],
-    ["repo", "register", "~/repo"],
-    // A bare word is a repo ID (M1); a path argument starts with /, . or ~ or holds a /.
-    ["task", "create", "T", "--checkout", "./repo"],
-    ["task", "create", "T", "--checkout", "repo/sub,name=x"],
-    ["task", "create", "T", "--checkout", "~"],
-    ["task", "create", "T", "--checkout", "~/repo"],
-    ["config", "set", "workspaceRoot", "workspaces"],
-    ["terminal", "create", "--", "/bin/true"],
-    ["terminal", "create", "--cwd", "repo", "--", "/bin/true"],
-  ]) {
+  for (const args of USAGE_ERRORS) {
     const result = await remote(args);
     expect({ args, code: result.code }).toEqual({ args, code: 2 });
     expect(result.stdout).toBe("");
@@ -149,4 +154,37 @@ test("delete-worktree by path is refused with --server and resolves nothing on t
   const deleted = await remote(["mount", "delete-worktree", task.taskId, mount.mountId, "--yes"]);
   expect(deleted.code).toBe(0);
   await expect(stat(mount.path)).rejects.toThrow("ENOENT");
+});
+
+// The usage errors are found before the CLI connects: with the server stopped and the paired
+// loopback entry pointing at a listener that records every connection, each still exits 2 and
+// nothing connects, so no HTTP or WebSocket request was sent.
+test("path usage errors exit 2 before connecting, with the server unreachable", async () => {
+  await fixture.stopServer(server);
+  const connections = [];
+  const recorder = createServer((socket) => {
+    connections.push(socket.remoteAddress);
+    socket.destroy();
+  });
+  await new Promise((done) => recorder.listen(0, "127.0.0.1", done));
+  try {
+    const { serverId } = (await fixture.coveJson(["remote", "list"], { home: client })).servers[0];
+    const path = join(client, "client", "servers", `${serverId}.json`);
+    const record = JSON.parse(await readFile(path, "utf8"));
+    record.entries.loopback.port = recorder.address().port;
+    await writeFile(path, JSON.stringify(record), { mode: 0o600 });
+    // The recorder is reachable: a command that does connect is seen.
+    expect((await remote(["status"])).code).not.toBe(0);
+    expect(connections.length).toBeGreaterThan(0);
+    connections.length = 0;
+    for (const args of USAGE_ERRORS) {
+      const result = await remote(args);
+      expect({ args, code: result.code }).toEqual({ args, code: 2 });
+      expect(result.stderr).toMatch(/absolute|--cwd/);
+    }
+    expect(connections).toEqual([]);
+    expect(await pendingRecords()).toEqual([]);
+  } finally {
+    await new Promise((done) => recorder.close(done));
+  }
 });
