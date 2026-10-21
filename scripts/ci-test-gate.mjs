@@ -203,6 +203,7 @@ export const requiredSuites = [
   { project: "cli", file: "apps/cli/tests/client-lifetime.test.mjs", minimumTests: 3 },
   { project: "client", file: "packages/client/tests/connection-rpc.test.mjs", minimumTests: 66 },
   { project: "client", file: "packages/client/tests/compiled-client.test.mjs", minimumTests: 4 },
+  { project: "client", file: "packages/client/tests/credentials.test.mjs", minimumTests: 3 },
   {
     project: "client",
     file: "packages/client/tests/terminal-budgets-preview.test.mjs",
