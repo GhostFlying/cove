@@ -7,10 +7,8 @@
 
 - M0 实施于 2026-09-26 获批；2026-10-15 用户批准 M0 退出与 M1 进入，并对 M1 的 D1–D10 作出决定
   （[M1](milestones/m1.md)）。
-- **M1 实施已完成**，等待用户的真实使用试用与 M1 阶段 review。M1 退出与 M2 进入都需要用户明确许可；
-  完成 M1 不授权开始 M2。
-- 2026-10-21 用户批准 M1 退出与 M2 规划。M2 计划草案见 [M2](milestones/m2.md)，D1–D13 待用户决策；
-  用户批准计划之前不开始 M2 实施。
+- **M1 已退出**：用户于 2026-10-21 批准 M1 退出，并只批准 M2 规划。M2 计划草案见 [M2](milestones/m2.md)（PR #142），
+  D1–D13 待用户决策；用户批准计划与决策之前不开始任何 M2 实施。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
 - 威胁模型：单用户，经认证的用户是受信任的所有者；不防范其自我攻击，判据是不丢数据
@@ -18,7 +16,7 @@
 
 ## Main
 
-- M1 的最后一个实现 PR 是 #131（T5），main 为 `ea4fe84`；T6（本文档更新）随后合入。
+- main 为 `ee1f0cc`：M1 的最后一个实现 PR 是 #131（T5），之后合入了 T6 文档与试用修复（#134、#136、#137、#139、#141）。
 - 已实现的范围（[M1 交付范围](milestones/m1.md#交付范围)）：
   - 持久 server 身份与 SQLite 存储（数据库在专用 worker thread 中执行，D5/D6），操作记录跨重启去重；
   - repo 注册；task/workspace（入口目录与挂载清单 `cove-workspace.json`）；checkout 与托管 worktree 挂载、
@@ -31,20 +29,13 @@
 - 用法：[开发说明 · M1 本机试用与 CLI 用法](development.md#m1-本机试用与-cli-用法)；
   tend 可用的接口：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)（PENDING 为空）。
 
-## 如何试用 M1
+## 本机运行（M2 安装能力合入之前）
 
-1. 在一个单独的 checkout（不是正在开发的 worktree，D7）中按开发说明构建：冻结安装、`pnpm native:prepare`、
+1. 在一个单独的 checkout（不是正在开发的 worktree，M1 D7）中按开发说明构建：冻结安装、`pnpm native:prepare`、
    `pnpm build`；用 `node apps/cli/dist/main.js` 作为 `cove`。
 2. `cove server init`（可选 `--workspace-root DIR`），再 `cove server start --harness` 前台运行；
-   数据目录默认 `~/.cove`，一次性试用可用 `--home DIR`，其他命令带同一个 `--home`。
-3. 按 [M1 试用清单](milestones/m1.md#验收场景)（场景表之后的五项）操作：
-   - 注册两个真实仓库；调查 task 挂载已有 checkout，在入口启动 Claude Code、Codex 或 TraeX，只读地搜索、
-     读取、`git status`；
-   - 两仓 task 各建新 worktree，在 agent 中修改并提交，确认分支与提交只在对应 worktree；
-   - 调查 task 转到独立 worktree（先结束使用该 checkout 的 run），旧 run 仍指向原位置，新 run 在新 worktree；
-   - 有 agent 运行时重启 server：显示为会话中断而非存活；`tab reopen` 后用 agent 自己的 resume 继续（只作观察）；
-   - 在 harness 中接入 tab 的 run，确认 M0 终端链路照常。
-4. 试用发现的问题修复后，再提交 M1 阶段 review。
+   数据目录默认 `~/.cove`，一次性使用可用 `--home DIR`，其他命令带同一个 `--home`。
+   用法见[开发说明](development.md#m1-本机试用与-cli-用法)。
 
 ## 保留的用户决定
 
@@ -77,8 +68,8 @@
 
 ## 下一步
 
-1. 用户试用 M1（见上文），协调者跟进试用中发现的问题。
-2. 用户 review M1 阶段；在用户明确许可前不开始 M1 退出或 M2 的任何工作。
+1. 用户 review M2 计划（PR #142）并对 D1–D13 作出决定。
+2. 计划获批后按 [M2 任务拆分](milestones/m2.md#任务拆分) 派发；在此之前不开始 M2 实施。
 
 ## 环境
 
