@@ -264,14 +264,15 @@ class LaunchAgent implements ServiceBackend {
 // ---- Linux systemd user unit -------------------------------------------------------------------
 
 // systemd's own quoting: inside double quotes a backslash and a quote are escaped; `%` starts a
-// specifier and `$` a variable in ExecStart, so both are doubled.
+// specifier and `$` a variable in ExecStart, so both are doubled. The replacements are functions
+// because a replacement string gives `$` a meaning of its own ("$$" inserts a single `$`).
 function systemdWord(value: string, variables: boolean): string {
   const escaped = value
-    .replaceAll("\\", "\\\\")
-    .replaceAll('"', '\\"')
-    .replaceAll("%", "%%")
-    .replaceAll("\n", "\\n");
-  return `"${variables ? escaped.replaceAll("$", "$$") : escaped}"`;
+    .replaceAll("\\", () => "\\\\")
+    .replaceAll('"', () => '\\"')
+    .replaceAll("%", () => "%%")
+    .replaceAll("\n", () => "\\n");
+  return `"${variables ? escaped.replaceAll("$", () => "$$") : escaped}"`;
 }
 
 // KillMode is left at its default, control-group (D2): stopping or restarting ends every process

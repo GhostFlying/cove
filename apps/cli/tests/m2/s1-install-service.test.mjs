@@ -205,7 +205,9 @@ test("an installed service outlives the installing shell, refuses an older schem
   // Skipped at run time, not with test.skipIf, so that discovery (`vitest list`) always
   // counts it; the CI gate refuses a skipped test, and CI sets the variable.
   if (!serviceTests) context.skip("COVE_TEST_SERVICE_MANAGER=1 is not set");
-  const home = fixture.home("installed");
+  // `$`, `%` and a space in the data directory's path: the unit must keep them literal (systemd
+  // would otherwise expand $HOME and %h, and the server would not find its data directory).
+  const home = fixture.home("installed $HOME %h");
   const failures = [];
   try {
     // The install runs in a shell that is its own process group, as a terminal or SSH session.
@@ -230,10 +232,13 @@ test("an installed service outlives the installing shell, refuses an older schem
       (await readStamp(closure.dir)).contentsSha256,
     );
 
-    // The unit references the installation only through `current`.
+    // The unit references the installation only through `current` (a systemd unit holds the path
+    // escaped; that the service started with this data directory proves the escaping).
     const unit = await readFile(installed.service.unitPath, "utf8");
-    expect(unit).toContain(join(home, "install", "current", "bin", "node"));
-    expect(unit).not.toContain(join(home, "install", closure.build));
+    expect(unit).toContain(
+      join(process.platform === "darwin" ? home : "", "install", "current", "bin", "node"),
+    );
+    expect(unit).not.toContain(join("install", closure.build));
     expect(unit).not.toContain(repositoryRoot);
     expect(unit).not.toContain(closure.dir);
 
