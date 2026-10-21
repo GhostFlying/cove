@@ -1,10 +1,21 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdir,
+  readdir,
+  readFile,
+  readlink,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "../m1/fixtures.mjs";
+import { waitFor } from "../recording-view.mjs";
+import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installClosure } from "../../dist/install/installer.js";
 import { installLayout } from "../../dist/install/layout.js";
@@ -17,6 +28,8 @@ import { systemdUnit } from "../../dist/install/service.js";
 // - a server that holds its data directory but does not answer is never taken for a stopped one:
 //   the commands that would stop it ask for confirmation without an impact list, and prune keeps
 //   every build, since any of them may be the one it runs;
+// - an upgrade reads the server's state again after installing, right before its restart: a
+//   server that started meanwhile is asked about;
 // - the systemd unit escapes `$` and `%` in paths;
 // - an installed build is reused only when its contents are the closure's.
 
@@ -200,6 +213,68 @@ test("a server that holds the data directory but does not answer is never taken 
     serverState: "stopped",
     server: null,
   });
+}, 120_000);
+
+// A closure in miniature whose `bin/node`, which activation runs for the schema check, stops at a
+// gate: it creates `reached`, waits until `gate` exists, then reports a supported schema.
+async function gatedClosure(dir, build, reached, gate) {
+  await mkdir(join(dir, "bin"), { recursive: true });
+  await writeFile(
+    join(dir, "bin", "node"),
+    `#!/bin/sh\n: > '${reached}'\nwhile [ ! -e '${gate}' ]; do sleep 0.1; done\n` +
+      `echo '{"database":0,"supported":1000}'\n`,
+    { mode: 0o755 },
+  );
+  await writeFile(
+    join(dir, INSTALL_STAMP),
+    JSON.stringify(stampFor(build, await contentsDigest(dir))),
+  );
+}
+
+test("an upgrade asks again when a server started while it installed", async () => {
+  const home = await dataDirectory("upgrade-race");
+  const closure = join(fixture.root, "closure-gated");
+  const reached = join(fixture.root, "schema-check-reached");
+  const gate = join(fixture.root, "schema-check-gate");
+  await gatedClosure(closure, BUILD_A, reached, gate);
+  let server;
+  let leftover;
+  try {
+    // No server runs when the upgrade begins, so it needs no confirmation then.
+    const upgrade = fixture.cove(["server", "upgrade", "--closure", closure], {
+      home,
+      timeoutMs: 60_000,
+    });
+    await waitFor("the upgrade to reach its schema check", () => existsSync(reached));
+    server = await fixture.startServer(home);
+    const { relayInstanceId } = (await fixture.coveJson(["server", "status"], { home })).server;
+    await writeFile(gate, "");
+
+    // A server runs by the time of the restart: asked about, refused without --yes or a
+    // terminal, and left running; the new build stays installed and active.
+    const refused = await upgrade;
+    expect(refused.code).toBe(2);
+    expect(JSON.parse(refused.stdout)).toMatchObject({
+      action: "server upgrade",
+      build: BUILD_A,
+      confirmed: false,
+      state: "running",
+      impact: { liveRuns: [] },
+    });
+    expect(refused.stderr).toContain(
+      `build ${BUILD_A} was installed and activated, but the server was not restarted`,
+    );
+    expect(await fixture.serverRuns(server)).toBe(true);
+    expect((await fixture.coveJson(["server", "status"], { home })).server).toMatchObject({
+      relayInstanceId,
+    });
+    expect(await readlink(join(home, "install", "current"))).toBe(BUILD_A);
+  } finally {
+    if (server) await fixture.stopServer(server);
+    // Only an upgrade that went ahead regardless would have registered a service.
+    leftover = await removeService(fixture, home);
+  }
+  expect(leftover).toBeNull();
 }, 120_000);
 
 test("the systemd unit keeps `$` and `%` in paths literal", () => {
