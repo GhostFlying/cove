@@ -393,7 +393,7 @@ func (d *daemon) dial(ctx context.Context, c net.Conn, br *bufio.Reader, req pro
 		return
 	}
 	d.cfg.Logf("dial: stream %s opened to %s port %d", s.info.ID, want, req.Port)
-	pipe.Join(c, br, peerConn)
+	pipe.Join(c, br, peerConn, 0)
 	d.cfg.Logf("dial: stream %s closed", s.info.ID)
 }
 

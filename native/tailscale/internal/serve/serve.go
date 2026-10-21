@@ -5,7 +5,9 @@
 //
 // The control channel is the process's stdin/stdout, so the auth key can
 // only arrive from the supervising server and the helper exits when that
-// server goes away (stdin EOF).
+// server goes away (stdin EOF). On any exit the lifetime context is
+// cancelled first, so a pending login returns at once; queued requests are
+// refused; and handlers are drained before the node is closed.
 package serve
 
 import (
@@ -33,12 +35,21 @@ const (
 	logoutControlTimeout = 10 * time.Second
 	whoIsTimeout         = 5 * time.Second
 	forwardDialTimeout   = 5 * time.Second
-	// maxConns bounds forwarded connections across all ports. The Cove
-	// server applies its own, tighter unauthenticated-connection budget;
-	// this only keeps the helper's file descriptors bounded.
-	maxConns = 512
-	maxPorts = 16
+	drainTimeout         = 15 * time.Second
+	// DefaultMaxConns bounds forwarded connections across all ports. The
+	// Cove server applies its own, tighter unauthenticated-connection
+	// budget; this only keeps the helper's file descriptors bounded.
+	DefaultMaxConns = 512
+	// DefaultForwardGrace is how long a tailnet peer may keep sending after
+	// the Cove server closed its side of a forwarded connection. Without the
+	// bound, a peer that never sends again would hold the connection (and a
+	// unit of the budget) forever after the server rejected it.
+	DefaultForwardGrace = 10 * time.Second
 )
+
+// ErrControlChannel reports that the control channel ended abnormally
+// (truncated frame, oversized frame, I/O error) rather than by a clean EOF.
+var ErrControlChannel = errors.New("control channel failed")
 
 // Config configures serve mode.
 type Config struct {
@@ -56,11 +67,18 @@ type Config struct {
 	Logf          func(format string, args ...any)
 	In            io.Reader
 	Out           io.Writer
+	// MaxConns and ForwardGrace default to DefaultMaxConns and
+	// DefaultForwardGrace; tests lower them.
+	MaxConns     int
+	ForwardGrace time.Duration
 }
 
 type server struct {
 	cfg Config
 	mgr *node.Manager
+
+	life   context.Context
+	cancel context.CancelFunc
 
 	// ctl serializes node lifecycle operations (login, logout, setPorts,
 	// boot, shutdown) against status.
@@ -74,17 +92,28 @@ type server struct {
 	outMu sync.Mutex
 	out   io.Writer
 
-	connMu sync.Mutex
-	conns  int
-
-	wg sync.WaitGroup
+	mu       sync.Mutex
+	closing  bool
+	handlers sync.WaitGroup
+	conns    int
 }
 
-// Run serves until stdin reaches EOF or ctx ends. Node state is kept on
-// exit; only an explicit logout deletes it.
+// Run serves until stdin reaches EOF or ctx ends, returning nil. It returns
+// an error wrapping ErrControlChannel if the control channel ended
+// abnormally. Node state is kept on exit; only an explicit logout deletes
+// it.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.MaxConns <= 0 {
+		cfg.MaxConns = DefaultMaxConns
+	}
+	if cfg.ForwardGrace <= 0 {
+		cfg.ForwardGrace = DefaultForwardGrace
+	}
+	if !proto.ValidBuild(cfg.Build) {
+		return fmt.Errorf("invalid build identifier %q", cfg.Build)
 	}
 	if err := fsutil.EnsurePrivateDir(cfg.Home); err != nil {
 		return err
@@ -106,6 +135,8 @@ func Run(ctx context.Context, cfg Config) error {
 		listeners: map[int]net.Listener{},
 		out:       cfg.Out,
 	}
+	s.life, s.cancel = context.WithCancel(context.Background())
+	defer s.cancel()
 	s.ctl.Lock()
 	go func() {
 		defer s.ctl.Unlock()
@@ -118,21 +149,37 @@ func Run(ctx context.Context, cfg Config) error {
 		br := bufio.NewReader(cfg.In)
 		for {
 			req, err := proto.ReadRequest(br)
-			if err != nil {
-				var pe *proto.Error
-				if errors.As(err, &pe) {
-					s.write(proto.Fail(req, pe))
-					continue
+			var pe *proto.Error
+			switch {
+			case err == nil:
+				select {
+				case frames <- req:
+				case <-s.life.Done():
+					return
 				}
-				readErr <- err
+			case errors.As(err, &pe):
+				// A complete line that is not a valid request: the stream is
+				// still in sync, so answer and continue.
+				s.write(proto.Fail(req, pe))
+			case errors.Is(err, proto.ErrFrameTooLarge):
+				// The rest of the oversized line is unread and cannot be
+				// trusted to resynchronize; answer, then end the channel.
+				s.write(proto.Fail(req, err))
+				readErr <- fmt.Errorf("%w: frame exceeds %d bytes", ErrControlChannel, proto.MaxFrameBytes)
+				return
+			case errors.Is(err, io.EOF):
+				readErr <- nil
+				return
+			default:
+				readErr <- fmt.Errorf("%w: %v", ErrControlChannel, err)
 				return
 			}
-			frames <- req
 		}
 	}()
 
 	helloSeen, helloProtocol := false, 0
 	var reason string
+	var result error
 loop:
 	for {
 		select {
@@ -140,9 +187,9 @@ loop:
 			reason = "signal"
 			break loop
 		case err := <-readErr:
-			reason = "control channel closed"
-			if !errors.Is(err, io.EOF) {
-				reason = "control channel error: " + err.Error()
+			reason, result = "control channel closed", err
+			if err != nil {
+				reason = err.Error()
 			}
 			break loop
 		case req := <-frames:
@@ -162,28 +209,46 @@ loop:
 					"client protocol %d, helper protocol %d", helloProtocol, proto.Version)))
 				continue
 			}
-			s.wg.Add(1)
+			s.mu.Lock()
+			s.handlers.Add(1)
+			s.mu.Unlock()
 			go func() {
-				defer s.wg.Done()
-				s.handle(ctx, req)
+				defer s.handlers.Done()
+				s.handle(req)
 			}()
 		}
 	}
 	cfg.Logf("serve: shutting down (%s)", reason)
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	s.cancel()
+	if !waitTimeout(&s.handlers, drainTimeout) {
+		cfg.Logf("serve: handlers still running after %v; closing anyway", drainTimeout)
+	}
 	s.ctl.Lock()
 	s.closeListeners()
 	s.mgr.Close()
 	s.ctl.Unlock()
-	return nil
+	return result
 }
 
 func (s *server) write(resp proto.Response) {
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
-	proto.WriteFrame(s.out, resp)
+	proto.WriteResponse(s.out, resp)
 }
 
-func (s *server) handle(ctx context.Context, req proto.Request) {
+func (s *server) isClosing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closing
+}
+
+var errShuttingDown = proto.Errorf(proto.CodeShuttingDown, "helper is shutting down")
+
+func (s *server) handle(req proto.Request) {
+	ctx := s.life
 	reply := func(result any, err error) {
 		if err != nil {
 			s.write(proto.Fail(req, err))
@@ -201,32 +266,25 @@ func (s *server) handle(ctx context.Context, req proto.Request) {
 		reply(st, err)
 	case proto.OpLogin:
 		s.ctl.Lock()
-		timeout := defaultLoginTimeout
-		if req.TimeoutMs > 0 {
-			timeout = min(time.Duration(req.TimeoutMs)*time.Millisecond, maxLoginTimeout)
-		}
-		before := s.mgr.Node()
-		st, err := s.mgr.Login(ctx, req.AuthKey, timeout)
-		if s.mgr.Node() != before {
-			// A key login replaces the node object; listeners of the old
-			// node are dead and are reopened on the new one.
-			s.closeListeners()
-		}
-		if lerr := s.reconcile(); err == nil && lerr != nil {
-			err = lerr
-		}
-		st.Ports = s.ports()
+		st, err := s.login(ctx, req)
 		s.ctl.Unlock()
 		reply(st, err)
 	case proto.OpLogout:
 		s.ctl.Lock()
-		s.closeListeners()
-		st, err := s.mgr.Logout(ctx, logoutControlTimeout)
+		var st proto.Status
+		err := error(errShuttingDown)
+		if !s.isClosing() {
+			s.closeListeners()
+			st, err = s.mgr.Logout(ctx, logoutControlTimeout)
+		}
 		s.ctl.Unlock()
 		reply(st, err)
 	case proto.OpSetPorts:
 		s.ctl.Lock()
-		err := s.setPorts(req.Ports)
+		err := error(errShuttingDown)
+		if !s.isClosing() {
+			err = s.setPorts(req.Ports)
+		}
 		var st proto.Status
 		if err == nil {
 			st, err = s.status(ctx)
@@ -238,7 +296,28 @@ func (s *server) handle(ctx context.Context, req proto.Request) {
 	}
 }
 
+func (s *server) login(ctx context.Context, req proto.Request) (proto.Status, error) {
+	if s.isClosing() {
+		return proto.Status{}, errShuttingDown
+	}
+	before := s.mgr.Node()
+	st, err := s.mgr.Login(ctx, req.AuthKey, proto.Timeout(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
+	if s.mgr.Node() != before {
+		// A key login replaced the node object; listeners of the old node
+		// are dead and are reopened on the new one.
+		s.closeListeners()
+	}
+	if lerr := s.reconcile(); err == nil && lerr != nil {
+		err = lerr
+	}
+	st.Ports = s.ports()
+	return st, err
+}
+
 func (s *server) status(ctx context.Context) (proto.Status, error) {
+	if s.isClosing() {
+		return proto.Status{}, errShuttingDown
+	}
 	st, err := s.mgr.Status(ctx)
 	if err != nil {
 		return st, err
@@ -257,8 +336,8 @@ func (s *server) ports() []int {
 }
 
 func (s *server) setPorts(ports []int) error {
-	if len(ports) > maxPorts {
-		return proto.Errorf(proto.CodeBadRequest, "at most %d ports", maxPorts)
+	if len(ports) > proto.MaxPorts {
+		return proto.Errorf(proto.CodeBadRequest, "at most %d ports", proto.MaxPorts)
 	}
 	want := slices.Clone(ports)
 	slices.Sort(want)
@@ -323,19 +402,19 @@ func (s *server) acceptLoop(n node.Node, port int, ln net.Listener) {
 		if err != nil {
 			return
 		}
-		s.connMu.Lock()
-		if s.conns >= maxConns {
-			s.connMu.Unlock()
+		s.mu.Lock()
+		if s.closing || s.conns >= s.cfg.MaxConns {
+			s.mu.Unlock()
 			c.Close()
 			continue
 		}
 		s.conns++
-		s.connMu.Unlock()
+		s.mu.Unlock()
 		go func() {
 			defer func() {
-				s.connMu.Lock()
+				s.mu.Lock()
 				s.conns--
-				s.connMu.Unlock()
+				s.mu.Unlock()
 			}()
 			s.forward(n, port, c)
 		}()
@@ -346,12 +425,12 @@ func (s *server) acceptLoop(n node.Node, port int, ln net.Listener) {
 // identity is attached for display and audit only; the Cove server still
 // requires a device token on the connection.
 func (s *server) forward(n node.Node, port int, c net.Conn) {
-	hdr := proto.ForwardHeader{Protocol: proto.Version, Port: port, RemoteAddr: c.RemoteAddr().String()}
-	ctx, cancel := context.WithTimeout(context.Background(), whoIsTimeout)
+	hdr := proto.ForwardHeader{Protocol: proto.Version, Port: port, RemoteAddr: proto.Truncate(c.RemoteAddr().String())}
+	ctx, cancel := context.WithTimeout(s.life, whoIsTimeout)
 	who, err := n.WhoIs(ctx, hdr.RemoteAddr)
 	cancel()
 	if err != nil {
-		hdr.WhoIsError = err.Error()
+		hdr.WhoIsError = proto.Truncate(err.Error())
 	} else {
 		hdr.Peer = &who
 	}
@@ -361,15 +440,33 @@ func (s *server) forward(n node.Node, port int, c net.Conn) {
 		c.Close()
 		return
 	}
+	uc.SetWriteDeadline(time.Now().Add(forwardDialTimeout))
 	if err := proto.WriteFrame(uc, hdr); err != nil {
 		uc.Close()
 		c.Close()
 		return
 	}
+	uc.SetWriteDeadline(time.Time{})
 	peerID := "unknown"
 	if hdr.Peer != nil {
 		peerID = hdr.Peer.StableNodeID
 	}
 	s.cfg.Logf("serve: connection on port %d from %s", port, peerID)
-	pipe.Join(uc, uc, c)
+	// The Cove server (uc) is the trusted side: once it closes, the tailnet
+	// peer gets ForwardGrace to finish before the connection is torn down.
+	pipe.Join(uc, uc, c, s.cfg.ForwardGrace)
+}
+
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
