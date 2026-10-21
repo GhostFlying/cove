@@ -23,9 +23,41 @@ import { waitFor } from "../recording-view.mjs";
 // temporary root, and cleanup ends every process the scenario created. Servers start through
 // auth-server-entry.mjs with an advertised SSH target fixture (`user@example.test`), since
 // `cove server start` passes no server flags yet. Nothing here reads a real data directory.
+//
+// The secret scan (m2 S11, "秘密与操作记录的分界"). Every scenario's cleanup first scans what it
+// left behind for every secret it was issued, before anything is removed: each invitation and
+// token a CLI printed or a test client received, the tokens in the credential files, and the
+// secret parts of both. The carriers are every file under the scenario's root (the store and its
+// WAL, receipts included, server logs, CLI pending records) and every server's stderr. Credential
+// files are checked separately: their exact schema, the expected current token where a scenario
+// set it (`expectToken`), and no other remembered secret. A harmless sentinel proves the carriers
+// are read: it is the operation ID prefix of every `invite` (so the store and the CLI pending
+// records hold it), it is printed by auth-server-entry.mjs (server stderr), and it is in every
+// CLI's environment (process samples, S11). The scan must find it in each carrier class it
+// applies to, through the same check that must find no secret: the negative control.
 
 export const SERVER_ENTRY = resolve(import.meta.dirname, "auth-server-entry.mjs");
 export const SSH_TARGET = "user@example.test";
+
+const INVITATION_PATTERN = /cove-invite:v1:[A-Za-z0-9_-]+/g;
+const TOKEN_PATTERN = /cove_d1_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}/g;
+const CREDENTIAL_FILE = /\/client\/servers\/[^/]+\.json$/;
+const CREDENTIAL_KEYS = "alias,defaultEntry,deviceId,entries,pairedAtMs,serverId,token,version";
+
+// The carrier class of a scanned file.
+function carrierOf(path) {
+  if (/\/server\/cove\.db(-wal|-shm)?$/.test(path)) return "store";
+  if (/\/cli\/operations\//.test(path)) return "cli pending records";
+  return "files";
+}
+
+// Every [carrier, value] where a carrier holds one of `values`.
+function hits(carriers, values) {
+  const found = [];
+  for (const { carrier, name, bytes } of carriers)
+    for (const value of values) if (bytes.includes(Buffer.from(value))) found.push([carrier, name]);
+  return found;
+}
 
 export async function createAuthFixture() {
   const base = await createM1Fixture();
@@ -33,6 +65,26 @@ export async function createAuthFixture() {
   delete base.env.COVE_SERVER;
   const sockets = [];
   const proxies = [];
+  const servers = [];
+  const secrets = new Set();
+  const expectedTokens = new Map();
+  const sentinel = `covesentinel${randomBytes(6).toString("hex")}`;
+  base.env.COVE_TEST_SENTINEL = sentinel;
+  let invitations = 0;
+  // A secret and the secret part it carries, which must not leak on its own either.
+  const remember = (value) => {
+    secrets.add(value);
+    if (value.startsWith("cove-invite:")) {
+      const secret = decodeInvitation(value)?.secret;
+      if (secret) secrets.add(secret);
+    }
+    if (value.startsWith("cove_d1_")) secrets.add(value.split(".")[1]);
+  };
+  // What a CLI printed on stdout (invitations and tokens are only ever printed there).
+  const harvest = (text) => {
+    for (const [value] of String(text).matchAll(INVITATION_PATTERN)) remember(value);
+    for (const [value] of String(text).matchAll(TOKEN_PATTERN)) remember(value);
+  };
 
   const fixture = {
     ...base,
@@ -46,11 +98,44 @@ export async function createAuthFixture() {
       base.env.COVE_TEST_SERVER_ARGS = JSON.stringify(["--ssh-target", SSH_TARGET, ...args]);
       if (storeFaults) base.env.COVE_TEST_STORE_FAULTS = JSON.stringify(storeFaults);
       try {
-        return await base.startServerEntry(SERVER_ENTRY, home);
+        const server = await base.startServerEntry(SERVER_ENTRY, home);
+        servers.push(server);
+        return server;
       } finally {
         delete base.env.COVE_TEST_SERVER_ARGS;
         delete base.env.COVE_TEST_STORE_FAULTS;
       }
+    },
+
+    sentinel,
+    remember,
+
+    // The token the credential file of `serverId` under `home` must hold when the scan runs.
+    expectToken(home, serverId, token) {
+      expectedTokens.set(join(home, "client", "servers", `${serverId}.json`), token);
+    },
+
+    async cove(args, options) {
+      const result = await base.cove(args, options);
+      harvest(result.stdout);
+      return result;
+    },
+
+    async coveJson(args, options) {
+      const value = await base.coveJson(args, options);
+      harvest(JSON.stringify(value));
+      return value;
+    },
+
+    spawnCove(args, options) {
+      const spawned = base.spawnCove(args, options);
+      return {
+        ...spawned,
+        done: spawned.done.then((result) => {
+          harvest(result.stdout);
+          return result;
+        }),
+      };
     },
 
     // Runs `cove --home H ...args` with `input` on stdin (never in argv), to completion, from
@@ -76,6 +161,7 @@ export async function createAuthFixture() {
           child.stdin.end(input);
           const sampled = sample ? await sample(child.pid) : undefined;
           const result = await done;
+          harvest(result.stdout);
           return { ...result, sampled };
         } finally {
           clearTimeout(timeout);
@@ -83,9 +169,13 @@ export async function createAuthFixture() {
       })();
     },
 
-    // `cove auth invite create` on `home`: the printed { operation, invitation }.
+    // `cove auth invite create` on `home`: the printed { operation, invitation }. Its operation ID
+    // carries the sentinel unless `args` names one.
     invite(home, args = []) {
-      return base.coveJson(["auth", "invite", "create", ...args], { home });
+      const id = args.includes("--operation-id")
+        ? []
+        : ["--operation-id", `${sentinel}-invite-${++invitations}`];
+      return fixture.coveJson(["auth", "invite", "create", ...id, ...args], { home });
     },
 
     // `cove remote add ALIAS` on `home` with `invitation` on stdin.
@@ -125,7 +215,7 @@ export async function createAuthFixture() {
         sockets.push(socket);
         return socket;
       };
-      const client = createClient({
+      const created = createClient({
         expectedServerId: record.serverId,
         expectedRelayInstanceId: record.relayInstanceId,
         buildVersion: cliBuildVersion(),
@@ -135,6 +225,20 @@ export async function createAuthFixture() {
         scheduler: createDefaultScheduler(),
         http: createNodeHttpPort(record.endpoint),
         terminal: createWebPorts({ endpoint: record.endpoint, createWebSocket }).terminal,
+      });
+      // Every output secret the client receives is remembered for the scan.
+      const client = new Proxy(created, {
+        get(target, property, receiver) {
+          const member = Reflect.get(target, property, receiver);
+          if (property !== "call")
+            return typeof member === "function" ? member.bind(target) : member;
+          return async (...args) => {
+            const outcome = await member.apply(target, args);
+            if (outcome.ok && outcome.value?.secrets)
+              for (const value of Object.values(outcome.value.secrets)) remember(value);
+            return outcome;
+          };
+        },
       });
       return { client, closes };
     },
@@ -236,10 +340,78 @@ export async function createAuthFixture() {
       return { closed: () => socket.destroyed || socket.readyState === "closed" };
     },
 
+    // The secret scan (see the top of this file). Throws an assertion error naming what failed.
+    async scanSecrets() {
+      const files = await filesUnder(base.root);
+      const failures = [];
+      const credentials = files.filter(({ path }) => CREDENTIAL_FILE.test(path));
+      const parsed = [];
+      for (const { path, bytes } of credentials) {
+        let record;
+        try {
+          record = JSON.parse(bytes.toString("utf8"));
+        } catch {
+          failures.push(`${path} is not JSON`);
+          continue;
+        }
+        const tokenShape = new RegExp(`^cove_d1_${record.deviceId}\\.[A-Za-z0-9_-]{43}$`);
+        if (
+          Object.keys(record).sort().join() !== CREDENTIAL_KEYS ||
+          record.version !== 1 ||
+          typeof record.token !== "string" ||
+          !tokenShape.test(record.token)
+        )
+          failures.push(`${path} does not have the credential schema`);
+        else if (expectedTokens.has(path) && expectedTokens.get(path) !== record.token)
+          failures.push(`${path} does not hold the current token`);
+        if (typeof record.token === "string") remember(record.token);
+        parsed.push({ path, bytes, token: record.token });
+      }
+      for (const [path] of expectedTokens)
+        if (!credentials.some((file) => file.path === path)) failures.push(`${path} is missing`);
+      const values = [...secrets];
+      for (const { path, bytes, token } of parsed) {
+        const own = typeof token === "string" ? [token, token.split(".")[1]] : [];
+        const others = values.filter((value) => !own.includes(value));
+        if (hits([{ carrier: "credential", name: path, bytes }], others).length > 0)
+          failures.push(`${path} holds a secret other than its token`);
+      }
+      const carriers = [
+        ...files
+          .filter(({ path }) => !CREDENTIAL_FILE.test(path))
+          .map(({ path, bytes }) => ({ carrier: carrierOf(path), name: path, bytes })),
+        ...servers.map((server, index) => ({
+          carrier: "server stderr",
+          name: `server ${index}`,
+          bytes: Buffer.from(server.stderr()),
+        })),
+      ];
+      for (const [carrier, name] of hits(carriers, values))
+        failures.push(`a secret is in ${carrier}: ${name}`);
+      // The negative control: the sentinel, planted in each carrier class, is found by the same
+      // check, so a secret there would have been found too.
+      const required = new Set([
+        ...(servers.length > 0 ? ["server stderr"] : []),
+        ...(invitations > 0 ? ["store", "cli pending records"] : []),
+      ]);
+      const observed = new Set(hits(carriers, [sentinel]).map(([carrier]) => carrier));
+      for (const carrier of required)
+        if (!observed.has(carrier)) failures.push(`the sentinel was not found in ${carrier}`);
+      if (failures.length > 0) throw new Error(`secret scan failed:\n${failures.join("\n")}`);
+      return { secrets: values.length, carriers: carriers.length, observed: [...observed] };
+    },
+
     async cleanup() {
+      let scan;
+      try {
+        await fixture.scanSecrets();
+      } catch (error) {
+        scan = error;
+      }
       for (const socket of sockets) socket.close();
       await Promise.all(proxies.splice(0).map((proxy) => proxy.close()));
       await base.cleanup();
+      if (scan) throw scan;
     },
   };
   return fixture;
