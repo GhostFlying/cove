@@ -400,9 +400,11 @@ describe("recorded Git steps", () => {
     // how a shell finishes a `wait` interrupted by SIGTERM (it may exit 0). On macOS a group
     // signal sent by a member sometimes misses the group leader (git/worktree.ts SUPERVISOR);
     // the leader then exits 0 once its child is killed, which this test catches when it happens.
+    // It reports a supported version, since the server runs no Git older than 2.45.
     await writeFile(
       join(bin, "git"),
-      `#!/bin/sh\ntrap "" TERM\necho $$ > "${join(root, "git.pid")}"\n` +
+      `#!/bin/sh\nfor last; do :; done\n[ "$last" = version ] && { echo "git version 2.45.0"; exit 0; }\n` +
+        `trap "" TERM\necho $$ > "${join(root, "git.pid")}"\n` +
         `/bin/sleep 60 &\necho $! > "${join(root, "child.pid")}"\nwait\nwait\n`,
     );
     await chmod(join(bin, "git"), 0o755);

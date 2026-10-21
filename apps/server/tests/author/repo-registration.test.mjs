@@ -23,7 +23,8 @@ import {
   isValidBranchName,
   readHead,
 } from "../../dist/git/repository.js";
-import { runGit } from "../../dist/git/run.js";
+import { findGit, runGit } from "../../dist/git/run.js";
+import { runGitStep } from "../../dist/git/worktree.js";
 import { OperationReceipts } from "../../dist/operations/operation-receipts.js";
 import { Store } from "../../dist/store/database.js";
 import { prepareHome } from "../../dist/store/home.js";
@@ -94,13 +95,27 @@ async function clone(root, name, { commit = true } = {}) {
 }
 
 // A directory holding a fake `git` executable; putting it first on PATH replaces git for the
-// server's runner (runGit looks git up on the PATH it passes to the child).
-async function fakeGit(script) {
+// server's runner (runGit looks git up on the PATH it passes to the child). It reports `version`
+// (the runner runs only a Git of at least 2.45 that says so) and runs `script` for every other
+// command.
+async function fakeGit(script, version = "2.45.0") {
   const directory = await temporary();
   const path = join(directory, "git");
-  await writeFile(path, `#!/bin/sh\n${script}\n`);
+  await writeFile(path, `#!/bin/sh\n${reportsVersion(version)}${script}\n`);
   await chmod(path, 0o755);
   return directory;
+}
+
+// Shell text answering `git ... version` (the last argument) with `version`.
+const reportsVersion = (version) =>
+  `for last; do :; done\nif [ "$last" = version ]; then echo 'git version ${version}'; exit 0; fi\n`;
+
+function whichGit() {
+  return new Promise((done, fail) =>
+    execFile("sh", ["-c", "command -v git"], { env: { PATH: savedEnv.PATH } }, (error, out) =>
+      error ? fail(error) : done(out.trim()),
+    ),
+  );
 }
 
 describe("Git runner", () => {
@@ -137,6 +152,8 @@ describe("Git runner", () => {
   it("reports a timeout, oversized output and a missing git as failures without an answer", async () => {
     const cwd = await temporary();
     process.env.PATH = `${await fakeGit("exec sleep 30")}:${savedEnv.PATH}`;
+    // The fake's version is checked first, outside the short deadline under test.
+    expect(await findGit()).toMatchObject({ kind: "supported" });
     const started = Date.now();
     expect(await runGit(["status"], { cwd, timeoutMs: 200 })).toEqual({
       kind: "failed",
@@ -168,6 +185,8 @@ describe("Git runner", () => {
     const cwd = await temporary();
     const pidFile = join(cwd, "descendant.pid");
     process.env.PATH = `${await fakeGit(script.replaceAll("PIDFILE", pidFile))}:${savedEnv.PATH}`;
+    // The fake's version is checked first, outside the run's deadline.
+    expect(await findGit()).toMatchObject({ kind: "supported" });
     const kills = vi.spyOn(process, "kill");
     const childKills = vi.spyOn(ChildProcess.prototype, "kill");
     const started = Date.now();
@@ -390,51 +409,67 @@ describe("repository queries", () => {
     ]);
   });
 
-  it("does not peel HEAD with a Git that cannot disable lazy fetching", async () => {
+  // #126 item 3: GIT_NO_LAZY_FETCH exists only from Git 2.45, and an older Git ignores it, so a
+  // query reading a missing object of a partial clone would fetch it. No command runs on an older
+  // Git: not readHead's peel (formerly the only guarded query), and not any other query or step.
+  it("runs no command on a Git older than 2.45", async () => {
     const root = await temporary();
     const path = await clone(root, "repo");
-    const empty = await clone(root, "empty", { commit: false });
-    const real = await new Promise((done, fail) =>
-      execFile("sh", ["-c", "command -v git"], { env: { PATH: savedEnv.PATH } }, (error, out) =>
-        error ? fail(error) : done(out.trim()),
-      ),
-    );
-    // Git 2.44 predates GIT_NO_LAZY_FETCH; every other command runs the real git.
-    const script = `for last; do :; done\nif [ "$last" = version ]; then echo 'git version 2.44.2'; exit 0; fi\nexec '${real}' "$@"`;
-    process.env.PATH = `${await fakeGit(script)}:${savedEnv.PATH}`;
-    expect([await readHead(path), await readHead(empty)]).toEqual([
-      { kind: "unavailable" },
-      { kind: "head", branch: "main", commit: null },
-    ]);
+    const real = await whichGit();
+    const calls = join(root, "calls.log");
+    process.env.PATH = `${await fakeGit(`echo "$*" >> '${calls}'\nexec '${real}' "$@"`, "2.44.2")}:${savedEnv.PATH}`;
+    expect(await findGit()).toMatchObject({ kind: "too-old", version: "2.44.2" });
+    expect(await runGit(["status"], { cwd: path })).toEqual({ kind: "failed", reason: "spawn" });
+    expect(await readHead(path)).toEqual({ kind: "unavailable" });
+    expect(await inspectRepository(path)).toEqual({ kind: "unavailable" });
+    let recorded = false;
+    expect(
+      await runGitStep(["status"], {
+        cwd: path,
+        timeoutMs: 5_000,
+        record: async () => {
+          recorded = true;
+        },
+      }),
+    ).toEqual({ kind: "not-started" });
+    expect(recorded).toBe(false);
+    // Only `version` was asked; nothing else reached the old Git.
+    await expect(readFile(calls, "utf8")).rejects.toThrow("ENOENT");
   });
 
-  it("checks the Git version where the peel would run", async () => {
+  // The verdict belongs to the file that gave it: a Git replaced in place (an upgrade or a
+  // downgrade under the same path) is asked again before its next command.
+  it("checks the Git version again once the git on PATH changed", async () => {
     const root = await temporary();
     const path = await clone(root, "repo");
-    const real = await new Promise((done, fail) =>
-      execFile("sh", ["-c", "command -v git"], { env: { PATH: savedEnv.PATH } }, (error, out) =>
-        error ? fail(error) : done(out.trim()),
-      ),
+    const real = await whichGit();
+    const bin = await fakeGit(`exec '${real}' "$@"`);
+    process.env.PATH = `${bin}:${savedEnv.PATH}`;
+    expect(await readHead(path)).toMatchObject({ kind: "head", branch: "main" });
+    await writeFile(
+      join(bin, "git"),
+      `#!/bin/sh\n${reportsVersion("2.44.2 (replaced)")}exec '${real}' "$@"\n`,
     );
-    // A relative PATH entry: from `/` it names nothing, so the real (supported) git answers there;
-    // inside the clone it names a Git 2.44 that would ignore GIT_NO_LAZY_FETCH. The fake logs
-    // every call and otherwise runs the real git.
+    expect(await readHead(path)).toEqual({ kind: "unavailable" });
+    expect(await runGit(["status"], { cwd: path })).toEqual({ kind: "failed", reason: "spawn" });
+  });
+
+  // A relative PATH entry names a different file in each working directory, so no single version
+  // check could cover it: it is not searched, and the git of the next absolute entry runs.
+  it("does not run a git found through a relative PATH entry", async () => {
+    const root = await temporary();
+    const path = await clone(root, "repo");
     const bin = "cove-test-old-git-bin";
     const calls = join(root, "calls.log");
     await mkdir(join(path, bin));
     await writeFile(
       join(path, bin, "git"),
-      `#!/bin/sh\necho "$*" >> '${calls}'\nfor last; do :; done\nif [ "$last" = version ]; then echo 'git version 2.44.2'; exit 0; fi\nexec '${real}' "$@"\n`,
+      `#!/bin/sh\necho "$*" >> '${calls}'\n${reportsVersion("2.44.2")}exit 1\n`,
     );
     await chmod(join(path, bin, "git"), 0o755);
     process.env.PATH = `${bin}:${savedEnv.PATH}`;
-    const result = await readHead(path);
-    const log = await readFile(calls, "utf8");
-    expect({
-      result,
-      versionAskedInClone: log.split("\n").some((line) => line.endsWith(" version")),
-      peeled: log.includes("^{commit}"),
-    }).toEqual({ result: { kind: "unavailable" }, versionAskedInClone: true, peeled: false });
+    expect(await readHead(path)).toMatchObject({ kind: "head", branch: "main" });
+    await expect(readFile(calls, "utf8")).rejects.toThrow("ENOENT");
   });
 
   it("ignores an inherited GIT_DIR and resolves a linked worktree to its clone", async () => {

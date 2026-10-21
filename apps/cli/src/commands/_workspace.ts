@@ -205,8 +205,10 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-// `--path-format=absolute` (rev-parse) first appeared in Git 2.31.
-const GIT_MINIMUM: readonly [number, number] = [2, 31];
+// Cove requires Git 2.45 or later (apps/server/src/git/run.ts MINIMUM_GIT): an older Git
+// silently ignores GIT_NO_LAZY_FETCH, which these lookups set too. (`--path-format=absolute`, used
+// below, needs 2.31.)
+const GIT_MINIMUM: readonly [number, number] = [2, 45];
 // Registered clones inspected at once: a lookup must not start one process per registration.
 const GIT_CONCURRENCY = 8;
 

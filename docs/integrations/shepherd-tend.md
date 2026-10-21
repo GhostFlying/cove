@@ -210,7 +210,7 @@ CLI 试用可用性（PR #134，合入于 `fe0fc13`；只改 CLI，协议与 ser
 - `--checkout PATH[,name=N]`（`task create`、`mount add`）：第一个逗号之前的部分以 `/`、`.`、`~` 开头或含 `/` 时为路径，
   否则仍是 repo ID。CLI 经 `repo.list` 与 PATH 的 Git 公共目录找出所属的已注册 repo，再发送
   `{repoId}`（PATH 在 clone 本身中）或 `{repoId, path}`（其他 worktree），与 `REPO_ID[,path=]` 相同；
-  不属于任何已注册 repo 时不保存、不发送，以 1 退出。CLI 需要本机 `git`（2.31 及以上），以与 server 相同的环境白名单运行
+  不属于任何已注册 repo 时不保存、不发送，以 1 退出。CLI 需要本机 `git`（2.31 及以上；#143 起为 2.45，见 §3），以与 server 相同的环境白名单运行
   （继承的 `GIT_DIR`、`GIT_WORK_TREE` 等不生效），已注册 clone 至多 8 个同时检查；`git` 缺失、版本过旧、执行失败
   （含资源不足）与“不是仓库”“未注册”各有不同的 stderr 提示，都以 1 退出且不发送。`~` 只替换家目录前缀，
   `..` 在跟随符号链接之后生效。
@@ -273,6 +273,13 @@ PENDING：
   读到的本操作记录（轮询本身失败时可能仍为 `running`），`targetReadError` 是失败原因；不带 `target` 与
   `leftovers`，因为失败的读取说明不了它们。stderr 写明本操作已受理、目标结果未知，并给出两者的
   `cove operation get <id>`；不要重发任一操作。
+- Git 下限提高到 **2.45**（`GIT_NO_LAZY_FETCH` 从 2.45 才有，更早的 Git 静默忽略它，partial clone 中读取缺失对象时
+  可能联网 fetch，`--no-fetch` 也拦不住）。server 启动时检查自己 `PATH` 上的 `git`：缺失、早于 2.45 或不报版本时
+  不启动，`cove server start` 以非 0 退出，stderr 为 `cove-server: git <版本> is too old: Cove requires Git 2.45 or later; ...`
+  之类的说明（此前只有读取 checkout 的 HEAD 时拒绝旧 Git，表现为 `GIT_UNAVAILABLE`）。运行中 `PATH` 上的 `git`
+  变为不满足要求时，需要 Git 的请求以 `GIT_UNAVAILABLE` 拒绝（未接受）。CLI 自己的 `--checkout PATH` 查找同样要求
+  2.45，过旧时提示 `git <主.次> is too old for --checkout PATH, which needs Git 2.45 or later`，不发送并以 1 退出。
+  macOS 上 Xcode Command Line Tools 的 `/usr/bin/git` 可能早于 2.45，需把更新的 Git（如 Homebrew 的）放在 `PATH` 前面。
 
 PLANNED：
 
@@ -338,3 +345,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `fe0fc13`；#136（未合入）                  | 新增 PENDING #136：`slug` 保留标题的文字与大小写（至多 48 个码位，为空时为 `task`），入口目录 `<slug>-<短 ID>`；默认分支 `cove/<slug>` 因此可能不是 ASCII，已存在（本地或远端跟踪，不区分大小写）时加 `-2`…`-100` 后缀，显式 `--branch` 不加；已有 task 不迁移；`mount convert` 失败时的 stderr 提示改为重新执行 `cove mount convert <taskId> <mountId>`（此前的 `cove mount retry` 对 checkout 返回 `INVALID_ARGUMENT`）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | 2026-10-21 | main `9638501`（PR #134、#136）；#141（未合入） | 基准改为 main `9638501`；#134 与 #136 的 PENDING 项改为 AVAILABLE（§2），注明各项引入的提交，接口与此前 PENDING 的说明相同；新增 PENDING #141：挂载结果的 `branch` 与 `leftovers[].branch`、遗留占住路径时 `mount retry`/`mount convert` 改为受理并先删除遗留（Git 仍拒绝时为 `MOUNT_NAME_CONFLICT` 并给出遗留）、默认分支后缀按 Unicode 大小写折叠、子分支与含 `/` 的远端判断、相对路径 worktree 能 ready、存储拒绝时转为 `requires_attention`、步骤记录填满后 abandon 仍能完成                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | 2026-10-21 | main `ee1f0cc`；#143（未合入）                  | 新增 PENDING #143：`operation continue/abandon` 受理后读取失败时输出 `{ operation, targetReadError }` 并以 1 退出（此前 stdout 为空）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-10-21 | main `ee1f0cc`；#143（未合入）                  | PENDING #143 增加 Git 2.45 下限：server 在 Git 缺失、过旧或不报版本时不启动并说明原因，运行中变为不满足时请求为 `GIT_UNAVAILABLE`；`--checkout PATH` 的 CLI 查找由 2.31 提高到 2.45                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |

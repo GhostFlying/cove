@@ -92,6 +92,14 @@ tend 等脚本依赖的 JSON 输出、错误 kind 与退出码见 [Shepherd/tend
 按 [D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)，server 从仓库构建产物前台运行；
 试用时用一个单独的 checkout 构建，不在正在开发的 worktree 中运行。
 
+运行 server 与 CLI 的机器需要 **Git 2.45 及以上**。Cove 让 Git 不为缺失的对象联系远端（`GIT_NO_LAZY_FETCH`），
+这个变量从 Git 2.45 才有，更早的 Git 会静默忽略它，在 partial clone 中读取缺失的对象时就可能联网 fetch，
+即使请求了 `--no-fetch`。因此 server 在启动时检查 `PATH` 上的 `git`，版本过旧、缺失或不报版本时不启动并说明原因；
+此后每条 Git 命令都只运行通过检查的那个可执行文件（文件被替换时重新检查，`PATH` 中的相对路径项不搜索），
+仍不满足时请求以 `GIT_UNAVAILABLE` 拒绝。macOS 上 Apple 的 Xcode Command Line Tools 自带的 Git
+（`/usr/bin/git`）可能早于 2.45，需要把更新的 Git（例如 Homebrew 的）放在 `PATH` 中它之前，并用
+`git version` 核对。
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm native:prepare
@@ -137,7 +145,7 @@ cove server start --harness               # 前台运行；打印 harness 页面
   再发送与 `REPO_ID` 写法相同的请求（clone 本身不带 `path=`，其他 worktree 带 `path=`）；不属于任何已注册 repo 时
   不发送并以 1 退出。第一个逗号之前的部分以 `/`、`.`、`~` 开头或含 `/` 时是路径，否则是 repo ID（ID 从不如此），
   因此当前目录写 `.`，名为 `foo` 的子目录写 `./foo`。`~` 只替换为家目录前缀，`..` 在跟随符号链接之后才生效。
-  这一查找需要本机 Git 2.31 及以上，且不受继承的 `GIT_DIR` 等环境变量影响；Git 缺失、版本过旧或执行失败时
+  这一查找需要本机 Git 2.45 及以上（同上），且不受继承的 `GIT_DIR` 等环境变量影响；Git 缺失、版本过旧或执行失败时
   各有提示，同样不发送。
 - `--worktree REPO_ID[,name=NAME][,branch=BRANCH][,base=REF][,no-fetch]`：在 `<入口>/<NAME>` 新建托管 worktree，
   分支默认 `cove/<slug>`，slug 保留标题的文字与大小写（如 `cove/转换测试`、`cove/Fix-bug`）；该分支已在本地或远端

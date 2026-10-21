@@ -256,7 +256,11 @@ test("--checkout PATH tells a missing, too old or failing git apart from an unre
     });
   for (const [script, message] of [
     [null, "git was not found on PATH; --checkout PATH needs it"],
-    ['echo "git version 2.30.9"\n', "git 2.30 is too old for --checkout PATH"],
+    // Cove requires Git 2.45; 2.44 passed the lookups' earlier 2.31 floor.
+    [
+      'echo "git version 2.44.2"\n',
+      "git 2.44 is too old for --checkout PATH, which needs Git 2.45",
+    ],
     [`case "$*" in *rev-parse*) kill -9 $$ ;; esac\nexec "${git}" "$@"\n`, "git rev-parse in "],
   ]) {
     const result = await withGit(script, attempt);

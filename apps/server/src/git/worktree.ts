@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { processStartIdentity } from "../store/processes.js";
-import { gitEnvironment, runGit, signalGroupAndLeader, type GitRunResult } from "./run.js";
+import { findGit, gitEnvironment, runGit, signalGroupAndLeader, type GitRunResult } from "./run.js";
 
 // The Git side of managed worktree creation (docs/milestones/m1.md T3b, D1): fetching the source
 // remote, resolving the base, the creation and removal steps and the queries a continue or an
@@ -91,12 +91,14 @@ export type StepResult =
 //    Each signal also names the leader (the shell that becomes git) by PID, because on macOS a
 //    group signal sent by a member does not reliably reach the session leader (see
 //    signalGroupAndLeader in git/run.ts).
-// 3. `exec git` keeps the PID, so the recorded identity stays the process's, and Node receives
-//    git's own exit status.
+// 3. `exec` of git keeps the PID, so the recorded identity stays the process's, and Node receives
+//    git's own exit status. Git is the executable findGit verified (git/run.ts), passed as the
+//    first argument, so a step never runs a Git older than MINIMUM_GIT.
 // Bytes are read with dd, one byte per read(2), so a byte meant for the watcher is never consumed
 // by the first read. On macOS a read of a freshly inherited pipe occasionally fails once with
 // EBADF (git/run.ts); dd then exits non-zero and the read is retried for about 5 s.
 const SUPERVISOR = [
+  "cove_git=$1; shift",
   "exec 3<&0 0</dev/null",
   "n=0",
   "until g=$(/bin/dd bs=1 count=1 <&3 2>/dev/null); do n=$((n + 1)); " +
@@ -107,7 +109,7 @@ const SUPERVISOR = [
     `case "$c" in t) ${signalGroupAndLeader("TERM")} ;; k) ${signalGroupAndLeader("KILL")} ;; ` +
     '"") exit 0 ;; esac; done) ' +
     "</dev/null >/dev/null 2>&1 &",
-  'exec git "$@" 3<&-',
+  'exec "$cove_git" "$@" 3<&-',
 ].join("\n");
 
 const GLOBAL_OPTIONS = ["--no-pager", "-c", "core.fsmonitor=false"] as const;
@@ -134,11 +136,15 @@ export async function runGitStep(
   args: readonly string[],
   options: StepOptions,
 ): Promise<StepResult> {
+  // Without a supported Git nothing is started (see runGit).
+  const env = options.env ?? gitEnvironment();
+  const git = await findGit(env);
+  if (git.kind !== "supported") return { kind: "not-started" };
   let child: ChildProcess;
   try {
-    child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", ...GLOBAL_OPTIONS, ...args], {
+    child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", git.path, ...GLOBAL_OPTIONS, ...args], {
       cwd: options.cwd,
-      env: options.env ?? gitEnvironment(),
+      env,
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       detached: true,

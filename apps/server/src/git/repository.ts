@@ -5,8 +5,8 @@ import { runGit, type GitRunResult } from "./run.js";
 
 // Read-only Git queries about a clone (M1 T2): its top level, common directory, bareness and
 // HEAD. Nothing here writes to a repository: the commands are rev-parse, worktree list,
-// symbolic-ref, check-ref-format and version, run through runGit with optional locks and lazy
-// fetching disabled.
+// symbolic-ref and check-ref-format, run through runGit with optional locks and lazy fetching
+// disabled (runGit runs only a Git of at least MINIMUM_GIT, 2.45, which honours the latter).
 //
 // Real-path rule (docs/milestones/m1.md S1): every path this module returns is a real path
 // (symlinks resolved, no trailing slash), so one clone has one spelling however the operator
@@ -264,36 +264,17 @@ export async function inspectRepository(
 // - `unresolved`: HEAD names an object, but it is not available locally (a partial clone's missing
 //   object, a corrupt repository) or does not peel to a commit (a ref pointing at a blob, tree or
 //   a tag of one). Distinct from unborn: there is something there, but no commit to use.
-// - `unavailable`: Git gave no answer, or is older than 2.45.
+// - `unavailable`: Git gave no answer (including when no supported Git is on PATH, see run.ts).
 //
 // Peeling opens objects, and in a partial clone opening a missing object would fetch it from the
 // promisor remote (running repository-configured transports and writing to the clone).
-// GIT_NO_LAZY_FETCH (run.ts) prevents that from Git 2.45; older Git ignores it, so readHead
-// refuses to peel there and reports `unavailable`.
+// GIT_NO_LAZY_FETCH (run.ts) prevents that; an older Git would ignore it, so runGit runs none
+// older than 2.45 (MINIMUM_GIT), for this query and every other.
 export type HeadState =
   | { kind: "head"; branch: string | null; commit: string | null }
   | { kind: "unresolved"; branch: string | null }
   | { kind: "not-repository" }
   | { kind: "unavailable" };
-
-const NO_LAZY_FETCH_GIT = [2, 45] as const;
-
-// Whether the git that runs in `cwd` honours GIT_NO_LAZY_FETCH; null when Git gave no usable
-// answer. It must be asked in the same directory (and, through runGit, with the same environment)
-// as the command it guards: a relative PATH entry or a directory-sensitive wrapper can select a
-// different git in another directory. Not cached: the git on PATH can change while the server
-// runs.
-async function gitHonoursNoLazyFetch(cwd: string): Promise<boolean | null> {
-  const result = await runGit(["version"], { cwd });
-  if (result.kind === "failed" || result.code !== 0) return null;
-  const match = /^git version (\d+)\.(\d+)/.exec(result.stdout);
-  if (!match) return null;
-  const [major, minor] = [Number(match[1]), Number(match[2])];
-  return (
-    major > NO_LAZY_FETCH_GIT[0] ||
-    (major === NO_LAZY_FETCH_GIT[0] && minor >= NO_LAZY_FETCH_GIT[1])
-  );
-}
 
 function exitedWith(
   result: GitRunResult,
@@ -305,9 +286,7 @@ function exitedWith(
 const OBJECT_ID = /^[0-9a-f]{40,64}$/;
 
 export async function readHead(workTree: string): Promise<HeadState> {
-  // The version check and the two ref reads open no object, so they are safe on any Git.
-  const [supported, symbolic, named] = await Promise.all([
-    gitHonoursNoLazyFetch(workTree),
+  const [symbolic, named] = await Promise.all([
     runGit(["symbolic-ref", "--quiet", "HEAD"], { cwd: workTree }),
     runGit(["rev-parse", "--quiet", "--verify", "HEAD"], { cwd: workTree }),
   ]);
@@ -322,7 +301,6 @@ export async function readHead(workTree: string): Promise<HeadState> {
     return { kind: "unavailable" };
   const branch = ref === undefined ? null : ref.startsWith("refs/heads/") ? ref.slice(11) : ref;
   if (id === undefined) return { kind: "head", branch, commit: null };
-  if (supported !== true) return { kind: "unavailable" };
   // Peel the object ID read above (not HEAD again, which may have moved meanwhile). Any refusal
   // here, in a directory already shown to be a repository, means the object is missing or does
   // not peel to a commit.

@@ -1,4 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { constants } from "node:fs";
+import { access, stat } from "node:fs/promises";
+import { isAbsolute, join } from "node:path";
+import { performance } from "node:perf_hooks";
 
 // One bounded Git subprocess. Every Git command of the server goes through here so that none of
 // them can hang a request or grow without limit:
@@ -11,9 +15,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 //   GIT_CEILING_DIRECTORIES or GIT_CONFIG_* inherited from whoever started the server would
 //   otherwise silently redirect the query to another repository or configuration;
 // - repository configuration cannot make a read-only query run programs or contact a remote:
-//   lazy fetching of missing objects from a promisor remote is disabled (GIT_NO_LAZY_FETCH, Git
-//   2.45+; readHead, the only query that reads objects, refuses an older Git) and the file-system
-//   monitor hook is off (core.fsmonitor);
+//   lazy fetching of missing objects from a promisor remote is disabled (GIT_NO_LAZY_FETCH) and
+//   the file-system monitor hook is off (core.fsmonitor);
+// - only a Git that honours GIT_NO_LAZY_FETCH is ever run (see findGit): an older Git ignores the
+//   variable silently, and in a partial clone reading a missing object would then fetch it from
+//   the remote, even for a query that asked for no fetch;
 // - messages are forced to the C locale, so the few stderr texts the caller classifies are stable;
 // - stdout and stderr are capped, and the whole run has a deadline (see runGit for which
 //   processes are ended and why completion is bounded).
@@ -22,7 +28,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 // GIT_CONFIG_{GLOBAL,SYSTEM,NOSYSTEM} switches) is still read: safe.directory and similar trust
 // settings must apply to the server's queries exactly as they do to the user's own git.
 //
-// Supported Git: 2.36 or later (`git worktree list -z`, repository.ts); readHead needs 2.45.
+// Supported Git: 2.45 or later, the first with GIT_NO_LAZY_FETCH (MINIMUM_GIT). Every command
+// here and in git/worktree.ts runs the executable findGit resolved and verified, never `git` looked
+// up again by the shell, so no later query can reach an older Git. The server checks it at startup
+// too (entry/main.ts), so an unsupported Git is reported at once rather than as GIT_UNAVAILABLE.
 
 export const GIT_TIMEOUT_MS = 10_000;
 export const GIT_OUTPUT_BYTES = 1024 * 1024;
@@ -54,6 +63,96 @@ export function gitEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.
     // run repository-configured transport commands (core.sshCommand, remote helpers).
     GIT_NO_LAZY_FETCH: "1",
   };
+}
+
+export const MINIMUM_GIT = [2, 45] as const;
+
+// The `git` the server runs. `supported`: an executable that reported a version of at least
+// MINIMUM_GIT. `missing`: no PATH entry has one. `too-old`: it reported an older version.
+// `unknown`: it gave no usable version (it failed, timed out, or printed something else).
+export type GitExecutable =
+  | { kind: "supported"; path: string; version: string }
+  | { kind: "missing" }
+  | { kind: "too-old"; path: string; version: string }
+  | { kind: "unknown"; path: string };
+
+// Answers of the version check, by the identity of the file that gave them. A verdict holds only
+// for the exact file that gave it: replacing it (a package upgrade or removal, another PATH) gives
+// a new identity, which is checked again. Bounded: the server sees a handful of identities in its
+// life, and dropping the map only costs a repeated `git version`.
+const VERIFIED = new Map<string, Promise<GitExecutable>>();
+const VERIFIED_LIMIT = 16;
+
+// The first `git` on `env.PATH` and whether Cove may run it. Resolved for every command, so the
+// answer follows PATH and the file it names; the version is asked once per file identity
+// (VERIFIED). Only absolute PATH entries are searched: the shell would resolve a relative or empty
+// entry against each command's working directory, so one query could reach a different Git than
+// the one checked here. `timeoutMs` bounds the version check. A file replaced between this check
+// and the command's exec is a residual window: it takes the owner's own concurrent change, and
+// the next command checks the new file.
+export async function findGit(
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<GitExecutable> {
+  for (const entry of (env.PATH ?? "").split(":")) {
+    if (!isAbsolute(entry)) continue;
+    const path = join(entry, "git");
+    let identity: string;
+    try {
+      const found = await stat(path);
+      if (!found.isFile()) continue;
+      await access(path, constants.X_OK);
+      identity = `${path}\0${found.dev}:${found.ino}:${found.size}:${found.mtimeMs}:${found.ctimeMs}`;
+    } catch {
+      continue;
+    }
+    const known = VERIFIED.get(identity);
+    if (known) return known;
+    const checked = gitVersion(path, env, timeoutMs);
+    if (VERIFIED.size >= VERIFIED_LIMIT) VERIFIED.clear();
+    VERIFIED.set(identity, checked);
+    // No usable answer proves nothing about the file: it is asked again next time.
+    void checked.then((result) => {
+      if (result.kind === "unknown" && VERIFIED.get(identity) === checked)
+        VERIFIED.delete(identity);
+    });
+    return checked;
+  }
+  return { kind: "missing" };
+}
+
+// `<path> version`, which reads no repository and runs nothing configured. It runs under the
+// same supervision as every other command (see runGit), so a Git that hangs, floods its output or
+// leaves helpers behind cannot hold the check past its deadline either.
+async function gitVersion(
+  path: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<GitExecutable> {
+  const result = await supervised(path, ["version"], {
+    cwd: "/",
+    timeoutMs,
+    maxOutputBytes: 4096,
+    env: gitEnvironment(env),
+  });
+  const match =
+    result.kind === "exited" && result.code === 0
+      ? /^git version ((\d+)\.(\d+)\S*)/.exec(result.stdout)
+      : null;
+  if (!match) return { kind: "unknown", path };
+  const [major, minor] = [Number(match[2]), Number(match[3])];
+  const supported = major > MINIMUM_GIT[0] || (major === MINIMUM_GIT[0] && minor >= MINIMUM_GIT[1]);
+  return { kind: supported ? "supported" : "too-old", path, version: match[1]! };
+}
+
+// What an unsupported Git means to the operator, without its path. Server startup reports it.
+export function describeUnsupportedGit(git: Exclude<GitExecutable, { kind: "supported" }>): string {
+  const required = `Cove requires Git ${MINIMUM_GIT.join(".")} or later`;
+  // Apple's Command Line Tools Git (/usr/bin/git) can be older than that.
+  const fix = "put a newer git (such as Homebrew's) first on PATH";
+  if (git.kind === "missing") return `git was not found on PATH; ${required}`;
+  if (git.kind === "too-old") return `git ${git.version} is too old: ${required}; ${fix}`;
+  return `git did not report its version; ${required}`;
 }
 
 // Options placed before every command. core.fsmonitor names a program in the repository's own
@@ -103,12 +202,14 @@ export function signalGroupAndLeader(signal: "TERM" | "KILL"): string {
 // treating that as end of file would kill git mid-query. A read error is therefore retried for
 // about 5 s; if it persists, the group is killed anyway, so the run fails (as `signal`) rather
 // than leaving the group running. cat and sleep are named by path so that PATH cannot change them.
+// Its first argument is the Git executable findGit verified.
 const SUPERVISOR = [
+  "cove_git=$1; shift",
   "exec 3<&0 0</dev/null",
   "(n=0; until /bin/cat <&3 >/dev/null; do n=$((n + 1)); " +
     `[ "$n" -ge 50 ] && break; /bin/sleep 0.1; done; ${signalGroupAndLeader("KILL")}) ` +
     "</dev/null >/dev/null 2>&1 &",
-  'exec git "$@" 3<&-',
+  'exec "$cove_git" "$@" 3<&-',
 ].join("\n");
 
 // Runs git once. Process group and completion bounds:
@@ -144,16 +245,37 @@ const SUPERVISOR = [
 //   and settle on `close`, which then follows promptly unless an escaped descendant holds the
 //   pipes; the deadline then settles the run as a timeout.
 //
-// If `exec` fails (no git on PATH, not executable), the shell exits 127 or 126. The Git commands
-// Cove runs never exit with those statuses themselves (Git uses 0, 1, 128 and 129), so both are
-// reported as `spawn`.
-export function runGit(args: readonly string[], options: GitRunOptions): Promise<GitRunResult> {
-  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+// No supported Git (findGit: missing, older than MINIMUM_GIT, or no version) is reported as
+// `spawn`, and nothing is run. If `exec` fails (the file went away), the shell exits 127 or 126.
+// The Git commands Cove runs never exit with those statuses themselves (Git uses 0, 1, 128 and
+// 129), so both are reported as `spawn` too. The version check, when one is needed, is part of
+// the run's deadline.
+export async function runGit(
+  args: readonly string[],
+  options: GitRunOptions,
+): Promise<GitRunResult> {
+  const started = performance.now();
+  const deadlineMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+  const git = await findGit(options.env ?? process.env, deadlineMs);
+  const timeoutMs = Math.floor(deadlineMs - (performance.now() - started));
+  // A version check that used up the deadline is a timeout, like any other unanswered command.
+  if (timeoutMs <= 0) return { kind: "failed", reason: "timeout" };
+  if (git.kind !== "supported") return { kind: "failed", reason: "spawn" };
+  return supervised(git.path, args, { ...options, timeoutMs });
+}
+
+// One supervised run of the executable `git` (see runGit).
+function supervised(
+  git: string,
+  args: readonly string[],
+  options: GitRunOptions & { timeoutMs: number },
+): Promise<GitRunResult> {
+  const timeoutMs = options.timeoutMs;
   const maxBytes = options.maxOutputBytes ?? GIT_OUTPUT_BYTES;
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", ...GLOBAL_OPTIONS, ...args], {
+      child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-git", git, ...GLOBAL_OPTIONS, ...args], {
         cwd: options.cwd,
         env: options.env ?? gitEnvironment(),
         stdio: ["pipe", "pipe", "pipe"],
