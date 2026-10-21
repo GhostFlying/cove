@@ -11,9 +11,11 @@ export type DeviceConnection = {
   close(): void;
   // Resolves once the connection is physically closed.
   readonly closed: Promise<void>;
-  // The principal object of the request, for an HTTP request: a device revoking itself keeps the
-  // request that carries the revocation, so that it gets its answer.
+  // For an HTTP request: the principal object of the request and a promise resolved once its
+  // answer was sent (or the request ended without one). A device revoking itself closes its
+  // connections only after the request carrying the revocation was answered (auth/service.ts).
   readonly owner?: object;
+  readonly answered?: Promise<void>;
 };
 
 export class DeviceConnections {
@@ -37,13 +39,18 @@ export class DeviceConnections {
     return this.byDevice.get(deviceId)?.size ?? 0;
   }
 
-  // Closes every connection of the device but `except`'s, then waits up to `waitMs` for them to
-  // close. The number still open when the wait ended: the revocation reports it rather than
-  // claiming success (D8).
-  async closeDevice(deviceId: string, waitMs: number, except?: object): Promise<number> {
-    const targets = [...(this.byDevice.get(deviceId) ?? [])].filter(
-      (connection) => except === undefined || connection.owner !== except,
-    );
+  // Resolves once the request of `owner` (an HTTP request's principal object) was answered;
+  // at once when no such request is registered.
+  answered(deviceId: string, owner: object): Promise<void> {
+    for (const connection of this.byDevice.get(deviceId) ?? [])
+      if (connection.owner === owner) return connection.answered ?? connection.closed;
+    return Promise.resolve();
+  }
+
+  // Closes every connection of the device, then waits up to `waitMs` for them to close. The number
+  // still open when the wait ended: the revocation reports it rather than claiming success (D8).
+  async closeDevice(deviceId: string, waitMs: number): Promise<number> {
+    const targets = [...(this.byDevice.get(deviceId) ?? [])];
     for (const connection of targets) {
       try {
         connection.close();

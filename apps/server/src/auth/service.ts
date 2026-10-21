@@ -302,9 +302,14 @@ export class AuthService {
   // connections are closed in the same synchronous step (connections.ts explains why none can
   // slip between); then the revocation waits, bounded, for them to close. Operations the device
   // had already had accepted go on and keep their records, which any other principal can read;
-  // runs it started keep running. A device revoking itself keeps the request carrying the
-  // revocation so it gets this answer. The live answer counts the connections still open after the
+  // runs it started keep running. The live answer counts the connections still open after the
   // wait (unclosedConnections), so the caller never mistakes it for a confirmed close.
+  //
+  // A device revoking itself is refused everywhere at once like any other, but its connections
+  // are closed only once the request carrying the revocation has been answered (bounded by the
+  // same wait): the client's other channel (its terminal WebSocket) closing first would end the
+  // client's session before the HTTP answer arrived, and the caller would be told the outcome is
+  // unknown with no way left to read it. Such an answer cannot report how the closes went.
   async revokeDevice(
     principal: Principal,
     params: { operationId: string; deviceId: string },
@@ -318,11 +323,22 @@ export class AuthService {
     );
     if ("error" in outcome || outcome.operation.state !== "succeeded") return outcome;
     this.devices.markRevoked(params.deviceId);
-    const unclosed = await this.connections.closeDevice(
-      params.deviceId,
-      REVOCATION_WAIT_MS,
-      principal,
-    );
+    if (principal.kind === "device" && principal.deviceId === params.deviceId) {
+      const answered = this.connections.answered(params.deviceId, principal);
+      void (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          answered,
+          new Promise<void>((done) => (timer = setTimeout(done, REVOCATION_WAIT_MS))),
+        ]);
+        clearTimeout(timer);
+        const unclosed = await this.connections.closeDevice(params.deviceId, REVOCATION_WAIT_MS);
+        this.log({ event: "device-revoked", deviceId: params.deviceId, unclosed });
+        await this.reconcile();
+      })().catch(() => undefined);
+      return outcome;
+    }
+    const unclosed = await this.connections.closeDevice(params.deviceId, REVOCATION_WAIT_MS);
     this.log({ event: "device-revoked", deviceId: params.deviceId, unclosed });
     await this.reconcile();
     if (unclosed === 0) return outcome;
