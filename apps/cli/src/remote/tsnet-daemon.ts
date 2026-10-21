@@ -1,0 +1,534 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import {
+  chmodSync,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  statSync,
+  writeSync,
+} from "node:fs";
+import { connect, type Socket } from "node:net";
+import { join } from "node:path";
+import {
+  binaryIdentity,
+  DIAL_PROTOCOL,
+  tsnetBinaryPath,
+  type BinaryIdentity,
+} from "./tsnet-binary.js";
+import { readTsnetConfig } from "./tsnet-config.js";
+
+// The CLI side of the per-user `cove-tsnet dial` daemon (m2 D14; the socket protocol is
+// native/tailscale/PROTOCOL.md). The daemon owns the client's tailnet node in
+// `<home>/tsnet-client/`; every tsnet command reaches it over `<home>/tsnet-client/run/dial.sock`
+// (0600 in a 0700 directory: whoever can connect is the owner, D7) and asks for one thing per
+// connection: `hello`, then at most one request (status, login, logout, stop, or dial, after which
+// the connection is the raw stream).
+//
+// Start and readiness (D14 "崩溃恢复与启动竞争"). Ownership is decided by the daemon's kernel lock
+// on `run/lock`, not by whether the socket file exists: a daemon can hold the lock with no socket
+// (starting, or idle-exiting after it unlinked the socket and before the lock is released), and a
+// socket file can exist with no daemon behind it (after SIGKILL). The CLI therefore never treats a
+// lost start race as proof that a ready daemon is coming. Within one total deadline (10 s) it loops:
+// connect to the socket and exchange `hello`; on any failure (no socket, refused, closed before the
+// hello answer, which is how a daemon that just decided to exit idle answers) start a detached
+// daemon unless one this command started is still running, back off briefly, and try again. A
+// started daemon that exits with 75 lost the lock to another one and only means "someone else
+// holds it right now"; one that exits 1 or 2 failed for a reason it wrote to its log (bad
+// permissions, a socket path that is too long), which retrying cannot fix, so that ends the loop at
+// once. When the deadline passes the command fails with ENTRY_UNAVAILABLE and the daemon's log
+// tail, and nothing was requested of any daemon. This loop is the only retry: it runs before any
+// request is sent. Once a request has been sent (a login, or a stream whose bytes reach the
+// server) a broken connection is reported as such and never repeated.
+//
+// Versions (D14 "升级与版本不符"). "The current build" is the build of the executable this CLI
+// would start (`cove-tsnet version`), since that is what replacing a daemon produces. After the
+// hello:
+// - same build: use it;
+// - another build and no active streams: ask it to `stop` (frozen across versions, so any daemon
+//   can be replaced) and go round the loop, which starts the current build. The daemon unlinks its
+//   socket before it answers, so the reconnect never reaches the exiting daemon; while it still
+//   holds the lock a new daemon exits 75 and the loop simply goes on;
+// - another build with active streams: it is never replaced while it carries someone's work. With
+//   the same local protocol the command uses it and warns on stderr; with another protocol the
+//   command fails with the streams listed and the way out (wait, or `remote tsnet stop --yes`).
+// A stream that appears between the hello and the stop makes the stop fail with ACTIVE_STREAMS and
+// change nothing; the loop then sees the stream in the next hello.
+//
+// The daemon is started detached (its own session, stdin and stdout on /dev/null, stderr appended
+// to `run/dial.log`), so it outlives the command and is not part of the terminal's job; it exits by
+// itself after its idle timeout (D14; `remote tsnet config`). It writes only stream IDs, stable node
+// IDs and ports to its log, never an auth key or login URL (it runs without --verbose).
+
+const START_DEADLINE_MS = 10_000;
+const BACKOFF_MIN_MS = 25;
+const BACKOFF_MAX_MS = 400;
+const CONNECT_TIMEOUT_MS = 2_000;
+const HELLO_TIMEOUT_MS = 5_000;
+const STOP_TIMEOUT_MS = 15_000;
+export const MAX_FRAME_BYTES = 64 * 1024;
+// sockaddr_un.sun_path is 104 bytes on macOS (108 on Linux), including the terminator.
+const MAX_SOCKET_PATH_BYTES = 103;
+const LOG_ROTATE_BYTES = 1 << 20;
+const DIAGNOSTIC_BYTES = 2_000;
+
+export type StreamInfo = {
+  readonly id: string;
+  readonly stableNodeID: string;
+  readonly port: number;
+  readonly label?: string;
+  readonly startedAt: string;
+};
+
+export type Hello = {
+  readonly protocol: number;
+  readonly build: string;
+  readonly mode: string;
+  readonly pid: number;
+  readonly streams: readonly StreamInfo[];
+};
+
+// An error answer of the daemon to a request.
+export class DialError extends Error {
+  constructor(
+    readonly code: string,
+    readonly detail: string,
+    readonly streams: readonly StreamInfo[] = [],
+  ) {
+    super(`${detail} (${code})`);
+  }
+}
+
+// No usable daemon could be reached; nothing was requested of any daemon.
+export class DaemonUnavailable extends Error {}
+
+// Text from the daemon (its messages may quote the control plane) reduced to bounded printable
+// ASCII before it is shown.
+export function printable(text: unknown, limit = 512): string {
+  return String(text)
+    .replace(/[^\x20-\x7e]/g, "?")
+    .slice(0, limit);
+}
+
+export function describeStreams(streams: readonly StreamInfo[]): string {
+  return streams
+    .map(
+      (stream) =>
+        `${printable(stream.id, 64)} to ${printable(stream.stableNodeID, 64)}:${stream.port}` +
+        (stream.label ? ` (${printable(stream.label, 64)})` : "") +
+        ` since ${printable(stream.startedAt, 40)}`,
+    )
+    .join("; ");
+}
+
+export function tsnetHome(home: string): string {
+  return join(home, "tsnet-client");
+}
+
+export function socketPath(home: string): string {
+  return join(tsnetHome(home), "run", "dial.sock");
+}
+
+function logPath(home: string): string {
+  return join(tsnetHome(home), "run", "dial.log");
+}
+
+// Creates `path` owner-only, or narrows this user's existing directory to 0700. A symlink or
+// another user's directory is refused; the daemon makes the same checks.
+function ownerOnlyDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const info = lstatSync(path);
+  if (!info.isDirectory() || info.uid !== process.getuid?.())
+    throw new DaemonUnavailable(`${path} is not a directory owned by this user`);
+  if ((info.mode & 0o777) !== 0o700) chmodSync(path, 0o700);
+}
+
+// ---------------------------------------------------------------------------------------------
+// One connection to the daemon: newline-delimited JSON frames, then possibly raw bytes.
+
+export class Channel {
+  private buffer: Buffer = Buffer.alloc(0);
+  private waiter: (() => void) | undefined;
+  private closed = false;
+  private readonly onData = (chunk: Buffer) => {
+    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
+    this.waiter?.();
+  };
+  private readonly onEnd = () => {
+    this.closed = true;
+    this.waiter?.();
+  };
+
+  constructor(readonly socket: Socket) {
+    socket.on("data", this.onData);
+    socket.on("end", this.onEnd);
+    socket.on("close", this.onEnd);
+    socket.on("error", this.onEnd);
+  }
+
+  write(frame: unknown): void {
+    this.socket.write(`${JSON.stringify(frame)}\n`);
+  }
+
+  // The next frame, parsed. Rejects when the connection ends first, the frame is too long or
+  // invalid, or `timeoutMs` passes; the connection is then destroyed.
+  async read(timeoutMs: number): Promise<unknown> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const end = this.buffer.indexOf(0x0a);
+      if (end >= 0) {
+        if (end > MAX_FRAME_BYTES) break;
+        const line = this.buffer.subarray(0, end).toString("utf8");
+        this.buffer = this.buffer.subarray(end + 1);
+        try {
+          return JSON.parse(line) as unknown;
+        } catch {
+          break;
+        }
+      }
+      if (this.buffer.length > MAX_FRAME_BYTES || this.closed) break;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, remaining);
+        this.waiter = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      this.waiter = undefined;
+    }
+    this.socket.destroy();
+    throw new ChannelBroken();
+  }
+
+  // Sends `request` and reads its answer: the result, or a DialError.
+  async request(request: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    this.write(request);
+    return answerOf(await this.read(timeoutMs));
+  }
+
+  // Hands the connection over as a raw stream: frame parsing stops, and the bytes that arrived
+  // after the last frame (the first stream bytes, if the peer already sent some) are returned to
+  // be delivered first. The socket is paused until its new reader resumes it.
+  detach(): Buffer {
+    this.socket.off("data", this.onData);
+    this.socket.off("end", this.onEnd);
+    this.socket.off("close", this.onEnd);
+    this.socket.off("error", this.onEnd);
+    this.socket.pause();
+    const rest = this.buffer;
+    this.buffer = Buffer.alloc(0);
+    return rest;
+  }
+
+  close(): void {
+    this.socket.destroy();
+  }
+}
+
+// The connection ended, or answered with something that is not a frame, before an answer came.
+export class ChannelBroken extends Error {
+  constructor() {
+    super("the connection to the dial daemon ended before it answered");
+  }
+}
+
+function answerOf(frame: unknown): unknown {
+  const answer = frame as {
+    ok?: unknown;
+    result?: unknown;
+    error?: { code?: unknown; message?: unknown; streams?: unknown };
+  } | null;
+  if (answer && answer.ok === true) return answer.result ?? {};
+  if (answer && answer.ok === false && typeof answer.error?.code === "string")
+    throw new DialError(
+      printable(answer.error.code, 64),
+      printable(answer.error.message ?? ""),
+      Array.isArray(answer.error.streams) ? (answer.error.streams as StreamInfo[]) : [],
+    );
+  throw new ChannelBroken();
+}
+
+function connectSocket(path: string, timeoutMs: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ path, allowHalfOpen: true });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("connect timed out"));
+    }, timeoutMs);
+    socket.once("connect", () => {
+      clearTimeout(timer);
+      socket.removeAllListeners("error");
+      resolve(socket);
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      socket.destroy();
+      reject(error);
+    });
+  });
+}
+
+function parseHello(value: unknown): Hello | null {
+  const hello = value as Partial<Hello> | null;
+  if (
+    !hello ||
+    typeof hello.protocol !== "number" ||
+    typeof hello.build !== "string" ||
+    typeof hello.pid !== "number" ||
+    !Array.isArray(hello.streams)
+  )
+    return null;
+  return { mode: String(hello.mode), ...hello } as Hello;
+}
+
+// Connects once and exchanges hello: the open channel and the daemon's hello, or null when no
+// daemon answered (nothing listens, or it closed the connection unanswered).
+async function attempt(
+  home: string,
+  build: string,
+  timeoutMs: number,
+): Promise<{ channel: Channel; hello: Hello } | null> {
+  let socket: Socket;
+  try {
+    socket = await connectSocket(socketPath(home), Math.min(timeoutMs, CONNECT_TIMEOUT_MS));
+  } catch {
+    return null;
+  }
+  const channel = new Channel(socket);
+  try {
+    const hello = parseHello(
+      await channel.request(
+        { op: "hello", protocol: DIAL_PROTOCOL, build },
+        Math.min(timeoutMs, HELLO_TIMEOUT_MS),
+      ),
+    );
+    if (hello && hello.mode === "dial") return { channel, hello };
+  } catch {
+    // Closed unanswered or answered with an error: no usable daemon on this connection.
+  }
+  channel.close();
+  return null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The current build and daemon start.
+
+let current: Promise<{ path: string; identity: BinaryIdentity }> | undefined;
+
+// The executable this CLI starts and its build, read once per command.
+export function currentBinary(): Promise<{ path: string; identity: BinaryIdentity }> {
+  current ??= (async () => {
+    const path = tsnetBinaryPath();
+    if (path === null)
+      throw new DaemonUnavailable(
+        "this Cove build has no cove-tsnet executable (an installed Cove ships bin/cove-tsnet; " +
+          "a development checkout builds it with `pnpm tsnet:build`)",
+      );
+    const identity = await binaryIdentity(path);
+    if (identity.protocol !== DIAL_PROTOCOL)
+      throw new DaemonUnavailable(
+        `${path} speaks local protocol ${identity.protocol}; this CLI speaks ${DIAL_PROTOCOL}`,
+      );
+    return { path, identity };
+  })();
+  return current;
+}
+
+type Started = { child: ChildProcess; exit?: { code: number | null; signal: string | null } };
+
+// The daemon's log: appended to by every daemon this user starts, rotated once it grows past
+// LOG_ROTATE_BYTES. Returns the descriptor and where this start's output begins.
+function openLog(home: string): { fd: number; offset: number } {
+  const path = logPath(home);
+  try {
+    if (statSync(path).size > LOG_ROTATE_BYTES) renameSync(path, `${path}.1`);
+  } catch {
+    // No log yet.
+  }
+  const fd = openSync(path, "a", 0o600);
+  const offset = fstatSync(fd).size;
+  writeSync(
+    fd,
+    `cove: starting cove-tsnet dial for cove pid ${process.pid} at ${new Date().toISOString()}\n`,
+  );
+  return { fd, offset };
+}
+
+function readLogTail(home: string, from: number): string {
+  try {
+    const fd = openSync(logPath(home), "r");
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(from, size - DIAGNOSTIC_BYTES);
+      const buffer = Buffer.alloc(Math.max(0, size - start));
+      readSync(fd, buffer, 0, buffer.length, start);
+      return buffer
+        .toString("utf8")
+        .replace(/[^\x20-\x7e\n]/g, "?")
+        .trim();
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+async function startDaemon(
+  home: string,
+  binary: string,
+): Promise<{ started: Started; logFrom: number }> {
+  const config = await readTsnetConfig(home);
+  const args = [
+    "dial",
+    "--home",
+    tsnetHome(home),
+    "--idle-timeout",
+    `${config.idleTimeoutSeconds}s`,
+  ];
+  // Development and test only (the CLI scenarios' test control plane); unset in real use, where
+  // the node talks to Tailscale's control plane.
+  const controlUrl = process.env.COVE_TSNET_CONTROL_URL;
+  if (controlUrl) args.push("--control-url", controlUrl);
+  const log = openLog(home);
+  try {
+    const child = spawn(binary, args, {
+      detached: true,
+      stdio: ["ignore", "ignore", log.fd],
+      cwd: "/",
+    });
+    const started: Started = { child };
+    child.once("exit", (code, signal) => (started.exit = { code, signal }));
+    child.once("error", () => (started.exit = { code: 1, signal: null }));
+    child.unref();
+    return { started, logFrom: log.offset };
+  } finally {
+    closeSync(log.fd);
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Opening a daemon connection.
+
+export type OpenOptions = {
+  // Total start deadline (D14: 10 s).
+  readonly deadlineMs?: number;
+};
+
+export type Daemon = { readonly channel: Channel; readonly hello: Hello };
+
+const warned = new Set<string>();
+
+function warnOnce(key: string, text: string): void {
+  if (warned.has(key)) return;
+  warned.add(key);
+  process.stderr.write(`cove: warning: ${text}\n`);
+}
+
+// A connection to a ready daemon of an acceptable build, after its hello, on which the caller
+// sends exactly one request. Starts the daemon if needed and replaces an idle one of another
+// build (see the top of this file). Throws DaemonUnavailable when the deadline passes or the
+// running daemon cannot be used; nothing was requested of any daemon then.
+export async function openDaemon(home: string, options: OpenOptions = {}): Promise<Daemon> {
+  const { path: binary, identity } = await currentBinary();
+  const sock = socketPath(home);
+  if (Buffer.byteLength(sock) > MAX_SOCKET_PATH_BYTES)
+    throw new DaemonUnavailable(
+      `the dial socket path ${sock} is longer than ${MAX_SOCKET_PATH_BYTES} bytes; use a shorter --home`,
+    );
+  ownerOnlyDirectory(home);
+  ownerOnlyDirectory(tsnetHome(home));
+  ownerOnlyDirectory(join(tsnetHome(home), "run"));
+
+  const deadline = Date.now() + (options.deadlineMs ?? START_DEADLINE_MS);
+  let started: Started | undefined;
+  let logFrom: number | undefined;
+  let backoff = BACKOFF_MIN_MS;
+  let replaced: string | undefined;
+  for (;;) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    const reached = await attempt(home, identity.build, remaining);
+    if (reached) {
+      const { channel, hello } = reached;
+      if (hello.build === identity.build) return reached;
+      if (hello.streams.length === 0) {
+        // Idle and another build: replace it. The stop is refused (ACTIVE_STREAMS) if a stream
+        // started since the hello, and then nothing changed; either way, go round again.
+        try {
+          await channel.request({ op: "stop" }, Math.min(STOP_TIMEOUT_MS, Math.max(remaining, 1)));
+          replaced = hello.build;
+        } catch {
+          // Refused or cut short: the next hello tells what runs now.
+        }
+        channel.close();
+        continue;
+      }
+      if (hello.protocol === DIAL_PROTOCOL) {
+        warnOnce(
+          `build:${hello.build}`,
+          `the tsnet dial daemon (pid ${hello.pid}) runs build ${printable(hello.build, 128)}, ` +
+            `not ${identity.build}; it is kept because it has ${hello.streams.length} active ` +
+            "stream(s), and is replaced once it is idle",
+        );
+        return reached;
+      }
+      channel.close();
+      throw new DaemonUnavailable(
+        `the tsnet dial daemon (pid ${hello.pid}) runs build ${printable(hello.build, 128)} with ` +
+          `local protocol ${hello.protocol}, which this CLI (protocol ${DIAL_PROTOCOL}) cannot use, ` +
+          `and it has active streams, so it was not replaced: ${describeStreams(hello.streams)}. ` +
+          "Wait for them to end, or end them with `cove remote tsnet stop --yes`",
+      );
+    }
+    // No daemon answered. Start one unless the one this command started is still running (it may
+    // be about to listen); a started daemon that failed outright ends the loop.
+    if (started?.exit && started.exit.code !== null && started.exit.code !== 75)
+      throw new DaemonUnavailable(
+        `cove-tsnet dial exited with status ${started.exit.code}` + diagnostics(home, logFrom),
+      );
+    if (!started || started.exit) {
+      const start = await startDaemon(home, binary);
+      started = start.started;
+      logFrom ??= start.logFrom;
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(backoff, Math.max(1, deadline - Date.now()))),
+    );
+    backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
+  }
+  throw new DaemonUnavailable(
+    `the tsnet dial daemon did not become ready within ${(options.deadlineMs ?? START_DEADLINE_MS) / 1000} s` +
+      (replaced
+        ? ` (an idle daemon of build ${printable(replaced, 128)} was stopped to be replaced)`
+        : "") +
+      diagnostics(home, logFrom),
+  );
+}
+
+function diagnostics(home: string, from: number | undefined): string {
+  if (from === undefined) return "";
+  const tail = readLogTail(home, from);
+  return tail ? `; its output (${logPath(home)}):\n${tail}` : `; see ${logPath(home)}`;
+}
+
+// The running daemon, without starting one: null when none answers. For `remote tsnet stop`,
+// which must not start a daemon only to stop it, and which stops whatever build runs.
+export async function probeDaemon(home: string): Promise<Daemon | null> {
+  const sock = socketPath(home);
+  if (Buffer.byteLength(sock) > MAX_SOCKET_PATH_BYTES) return null;
+  try {
+    lstatSync(sock);
+  } catch {
+    return null;
+  }
+  const { identity } = await currentBinary().catch(() => ({
+    identity: { build: "unknown", protocol: DIAL_PROTOCOL },
+  }));
+  return attempt(home, identity.build, HELLO_TIMEOUT_MS);
+}

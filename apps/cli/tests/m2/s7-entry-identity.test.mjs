@@ -202,12 +202,13 @@ test("an unreachable selected entry fails with the entries and --via, and the ot
     home: client,
   });
   expect(viaSsh.serverId).toBeTruthy();
-  // tsnet is a placeholder until T4: unavailable, nothing sent, nothing else tried.
+  // This record has no tsnet entry (the invitation named none): unavailable, nothing sent,
+  // nothing else tried. The tsnet entry itself is s7-tsnet-entry's.
   const tsnet = await fixture.cove(["--server", "box", "--via", "tsnet", "status"], {
     home: client,
   });
   expect(tsnet.code).not.toBe(0);
-  expect(tsnet.stderr).toContain("the tsnet entry is not available in this build");
+  expect(tsnet.stderr).toContain("box has no tsnet entry; nothing was sent");
   expect(tsnet.stderr).toContain("ENTRY_UNAVAILABLE");
 }, 120_000);
 

@@ -30,8 +30,9 @@ export function parseInvitation(text: string): InvitationPayload {
 }
 
 // Redeems an invitation: reach its pairing listener over the chosen entry (loopback without `via`,
-// or the invitation's SSH target through a tunnel to its pairing port), whose channel checks its
-// peer while it opens (the SSH host key), check that the server there is the invitation's
+// the invitation's SSH target through a tunnel to its pairing port, or its tsnet node's pairing
+// port through this client's node), whose channel checks its peer while it opens (the SSH host
+// key, the tsnet node's stable ID), check that the server there is the invitation's
 // (serverId) before anything secret is sent, then submit the secret and this device's name. A
 // refusal is one answer for every reason (expired, redeemed, cancelled, wrong secret); a lost
 // answer is not retried (D6): the operator creates a new invitation. The entry (an SSH tunnel)
@@ -41,8 +42,9 @@ export async function redeemInvitation(
   deviceName: string,
   via: Via | undefined,
   buildVersion: string,
+  home: string,
 ): Promise<PairingRedeemResult> {
-  const entry = await openPairingEntry(payload, via);
+  const entry = await openPairingEntry(payload, via, home);
   try {
     return await redeemOver(entry.endpoint, payload, deviceName, buildVersion);
   } finally {
@@ -110,11 +112,14 @@ async function redeemOver(
 // The credential record of a redeemed invitation (D5, D11). Its entries are the ones this pairing
 // reached and the invitation's own:
 // - paired over loopback (no `via`): the loopback business port, which is the default, and the
-//   invitation's SSH target, if any, at the same business port on that host;
+//   invitation's SSH target and tsnet node, if any, at the same business port on that host;
 // - paired over SSH: that SSH target only, which is the default (the client is on another host,
-//   so the server's loopback port is not reachable as this host's).
-// Every entry is verified again on each use (the SSH host key, then the serverId), not trusted
-// because it was recorded. tsnet entries are T4's.
+//   so the server's loopback port is not reachable as this host's);
+// - paired over tsnet: the invitation's tsnet node only, which is the default, at the business
+//   port: the server's tailnet node serves the business port at the same number as its loopback
+//   port (an interface requirement on the server's tsnet wiring, m2 T5b).
+// Every entry is verified again on each use (the SSH host key or the tsnet node's stable ID, then
+// the serverId), not trusted because it was recorded.
 export function pairedRecord(
   alias: string,
   payload: InvitationPayload,
@@ -124,6 +129,8 @@ export function pairedRecord(
 ): ServerRecord {
   const port = result.businessPort;
   const ssh = payload.entries.ssh ? { ssh: { target: payload.entries.ssh.target, port } } : {};
+  const node = payload.entries.tsnet;
+  const tsnet = node ? { tsnet: { nodeId: node.nodeId, name: node.name, port } } : {};
   const base = {
     version: 1 as const,
     alias,
@@ -138,6 +145,12 @@ export function pairedRecord(
       defaultEntry: "ssh",
       entries: { ssh: { target: payload.entries.ssh.target, port } },
     };
-  if (via !== undefined) throw new Error(`pairing over ${via} is not available in this build`);
-  return { ...base, defaultEntry: "loopback", entries: { loopback: { port }, ...ssh } };
+  if (via === "tsnet" && node)
+    return {
+      ...base,
+      defaultEntry: "tsnet",
+      entries: { tsnet: { nodeId: node.nodeId, name: node.name, port } },
+    };
+  if (via !== undefined) throw new Error(`the invitation names no ${via} entry`);
+  return { ...base, defaultEntry: "loopback", entries: { loopback: { port }, ...ssh, ...tsnet } };
 }

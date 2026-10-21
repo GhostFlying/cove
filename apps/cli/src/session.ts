@@ -130,7 +130,7 @@ export async function openRemoteSession(
       "ENTRY_UNAVAILABLE",
       `no paired server is named ${alias} (\`cove remote list\`); nothing was sent`,
     );
-  const entry = await openEntry(server, via);
+  const entry = await openEntry(server, via, home);
   try {
     const identity = await verifiedIdentity(server, entry, cliBuildVersion());
     if (identity.buildVersion !== cliBuildVersion())

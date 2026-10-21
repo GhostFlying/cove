@@ -34,7 +34,9 @@ attempt left as never-connected, and \`cove auth device revoke\` removes it. rem
 forgets the server on this client only; revoke the device on the server as well. Without --via,
 remote add pairs with a server on this host (loopback) and also records the invitation's SSH
 entry; with --via ssh it pairs through the invitation's SSH target, which ssh must already know
-(known_hosts), and records only that entry. The tsnet entry is not available in this build.`;
+(known_hosts), and records only that entry; with --via tsnet it pairs through the invitation's
+tsnet node from this client's own node (\`cove remote tsnet login\` first), and records only that
+entry.`;
 
 // These commands manage this client's own records; they never address a server with --server.
 export const localOnly = true;
@@ -108,7 +110,7 @@ async function add(args: Arguments): Promise<number> {
       `this client is already paired with that server as ${existing.alias}; ` +
         `run \`cove remote remove ${existing.alias}\` first. The invitation was not used`,
     );
-  const result = await redeemInvitation(payload, deviceName, via, cliBuildVersion());
+  const result = await redeemInvitation(payload, deviceName, via, cliBuildVersion(), home);
   // The entries this pairing reached and the invitation's (remote/pairing.ts pairedRecord).
   const record = pairedRecord(name, payload, result, via);
   try {

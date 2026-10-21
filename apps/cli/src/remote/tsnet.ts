@@ -1,25 +1,255 @@
+import { createServer, type Server, type Socket } from "node:net";
 import type { InvitationPayload } from "@cove/protocol/auth";
 import type { ServerRecord } from "./credentials.js";
 import { RemoteError, type OpenedEntry } from "./entry-types.js";
+import {
+  Channel,
+  ChannelBroken,
+  DaemonUnavailable,
+  DialError,
+  openDaemon,
+  printable,
+} from "./tsnet-daemon.js";
 
-// The tsnet entry (m2 D9, D14): a placeholder that T4 replaces with the client tsnet node (the
-// resident `cove-tsnet dial` process, which checks the server node's stable ID before it forwards).
-// Until then both the entry of a paired server and the pairing over tsnet are unavailable, and
-// nothing is sent. T4 keeps these signatures: entries.ts selects through them. The opened entry's
-// endpoint can be the dial process's local loopback port as it is: the server accepts any
-// loopback literal Host (user decision 2026-10-22), so no Host rewriting is needed.
+// The tsnet entry (m2 D9, D14): this client's own tailnet node, run by the per-user
+// `cove-tsnet dial` daemon (tsnet-daemon.ts), reaches the server's tailnet node.
+//
+// Peer check. Every stream is requested for the server node's stable ID recorded at pairing (the
+// invitation's), never a name. The daemon resolves that ID in its netmap, connects, and keeps the
+// connection only if WhoIs on the connected address reports the same stable ID; otherwise it
+// refuses the stream (PEER_MISMATCH) and nothing is forwarded. The CLI also checks the peer the
+// daemon reports. A stream that passed is the channel's peer check, as the host key is for SSH;
+// entries.ts verifiedIdentity checks the serverId over it next, and only then is the token (or the
+// invitation secret) sent.
+//
+// Endpoint. The client packages speak HTTP and WebSocket to an origin, so the entry is a listener
+// on 127.0.0.1 whose every accepted connection is bridged to a new stream (each HTTP request and
+// each terminal WebSocket is one connection). The server accepts any loopback literal as Host
+// (user decision 2026-10-22), so bytes pass unchanged. Stream handoff: the stream's bytes are
+// forwarded only after the daemon's dial answer was read and the peer checked; until then the
+// bytes the local client already wrote stay in the local socket, and a failed dial sends nothing.
+// The first stream is opened while the entry opens, so that a failure (not logged in, peer not
+// found, PEER_MISMATCH, the node held after an identity change) is reported with its reason and
+// before anything is sent; the first local connection uses it.
+//
+// Retries. Opening a stream retries only what happens before the stream exists: the daemon start
+// loop (tsnet-daemon.ts), and a dial refused with SHUTTING_DOWN (the daemon was stopping; nothing
+// was dialed), within one deadline. Once bytes flow, a broken stream is a broken connection for
+// the client, which never repeats a request on its own (M1 operation records).
+//
+// The tailnet port is the one the record names (the business port, which the server's tailnet node
+// serves at the same number as its loopback port), and for pairing the invitation's pairing port.
 
-function unavailable(what: string): RemoteError {
-  return new RemoteError(
-    "ENTRY_UNAVAILABLE",
-    `the tsnet entry is not available in this build; ${what}`,
+const DIAL_TIMEOUT_MS = 15_000;
+const DIAL_ANSWER_MARGIN_MS = 5_000;
+const OPEN_DEADLINE_MS = 10_000;
+
+type Target = {
+  readonly nodeId: string;
+  readonly port: number;
+  // Shown in the daemon's stream list (`remote tsnet status`, a refused logout); at most 64 bytes.
+  readonly label: string;
+};
+
+type Stream = { readonly socket: Socket; readonly first: Buffer };
+
+function label(text: string): string {
+  return Buffer.from(text, "utf8").subarray(0, 64).toString("utf8").replace(/�$/, "");
+}
+
+// Why a dial failed, for the operator.
+function dialFailure(error: DialError, target: Target): string {
+  const node = `server node ${target.nodeId}`;
+  switch (error.code) {
+    case "NOT_LOGGED_IN":
+      return "this client's tsnet node is not logged in (`cove remote tsnet login`)";
+    case "IDENTITY_CHANGED":
+    case "LOGIN_UNCERTAIN":
+      return (
+        `this client's tsnet node is held after a login (${error.code}: ${error.detail}); ` +
+        "see `cove remote tsnet status`"
+      );
+    case "PEER_NOT_FOUND":
+      return `no node with the stable ID of ${node} is visible on this client's tailnet`;
+    case "PEER_MISMATCH":
+      return (
+        `the tailnet address of ${node} answered as another node (PEER_MISMATCH: ${error.detail}); ` +
+        "the stream was refused"
+      );
+    case "DIAL_FAILED":
+      return `${node} did not accept a connection on port ${target.port} (${error.detail})`;
+    default:
+      return `the tsnet dial daemon refused the stream (${error.code}: ${error.detail})`;
+  }
+}
+
+// One verified stream to `target`: the raw socket after the daemon's answer, with the stream bytes
+// that came with the answer. Throws RemoteError; nothing was sent to the server then.
+async function openStream(home: string, target: Target, unsent: string): Promise<Stream> {
+  const deadline = Date.now() + OPEN_DEADLINE_MS;
+  for (;;) {
+    let channel: Channel;
+    try {
+      ({ channel } = await openDaemon(home, {
+        deadlineMs: Math.max(1, deadline - Date.now()),
+      }));
+    } catch (error) {
+      if (error instanceof DaemonUnavailable)
+        throw new RemoteError("ENTRY_UNAVAILABLE", `${error.message}; ${unsent}`);
+      throw error;
+    }
+    let answer: unknown;
+    try {
+      answer = await channel.request(
+        {
+          op: "dial",
+          target: { stableNodeID: target.nodeId },
+          port: target.port,
+          label: target.label,
+          timeoutMs: DIAL_TIMEOUT_MS,
+        },
+        DIAL_TIMEOUT_MS + DIAL_ANSWER_MARGIN_MS,
+      );
+    } catch (error) {
+      channel.close();
+      // The daemon was stopping (a concurrent `remote tsnet stop`) and dialed nothing, or the
+      // connection ended before an answer: no stream bytes were forwarded either way, so the
+      // stream may be requested again while the deadline lasts.
+      const again =
+        (error instanceof DialError && error.code === "SHUTTING_DOWN") ||
+        error instanceof ChannelBroken;
+      if (again && Date.now() < deadline) continue;
+      if (error instanceof DialError)
+        throw new RemoteError("ENTRY_UNAVAILABLE", `${dialFailure(error, target)}; ${unsent}`);
+      throw new RemoteError(
+        "ENTRY_UNAVAILABLE",
+        `the tsnet dial daemon did not answer the stream request; ${unsent}`,
+      );
+    }
+    const peer = (answer as { peer?: { stableNodeID?: unknown } } | null)?.peer?.stableNodeID;
+    if (peer !== target.nodeId) {
+      channel.close();
+      throw new RemoteError(
+        "ENTRY_UNAVAILABLE",
+        `the tsnet dial daemon reported peer ${printable(peer, 64)} for server node ` +
+          `${target.nodeId}; the stream was refused; ${unsent}`,
+      );
+    }
+    const first = channel.detach();
+    return { socket: channel.socket, first };
+  }
+}
+
+// Joins a local connection and a stream, half-closes included: each side's end is passed on, and
+// a side that fails or fully closes ends the other.
+function splice(local: Socket, stream: Stream): void {
+  const remote = stream.socket;
+  if (stream.first.length) local.write(stream.first);
+  local.pipe(remote);
+  remote.pipe(local);
+  remote.resume();
+  const destroyBoth = () => {
+    local.destroy();
+    remote.destroy();
+  };
+  local.on("error", destroyBoth);
+  remote.on("error", destroyBoth);
+  local.on("close", () => remote.destroy());
+  remote.on("close", () => {
+    if (!local.destroyed) local.end();
+  });
+}
+
+async function openBridge(home: string, target: Target, unsent: string): Promise<OpenedEntry> {
+  let pending: Stream | undefined = await openStream(home, target, unsent);
+  const sockets = new Set<Socket>();
+  const server: Server = createServer({ allowHalfOpen: true, pauseOnConnect: true }, (local) => {
+    sockets.add(local);
+    local.on("close", () => sockets.delete(local));
+    local.on("error", () => local.destroy());
+    const ready = pending && !pending.socket.destroyed ? Promise.resolve(pending) : undefined;
+    pending = undefined;
+    // A later connection gets its own stream; if that fails nothing is forwarded and the local
+    // connection is closed, which the client reports as a failed request.
+    (ready ?? openStream(home, target, unsent)).then(
+      (stream) => {
+        sockets.add(stream.socket);
+        stream.socket.on("close", () => sockets.delete(stream.socket));
+        if (local.destroyed) {
+          stream.socket.destroy();
+          return;
+        }
+        splice(local, stream);
+        local.resume();
+      },
+      () => local.destroy(),
+    );
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+  } catch {
+    pending?.socket.destroy();
+    throw new RemoteError(
+      "ENTRY_UNAVAILABLE",
+      `cannot open a local port for the tsnet entry; ${unsent}`,
+    );
+  }
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : 0;
+  return {
+    kind: "tsnet",
+    endpoint: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        pending?.socket.destroy();
+        pending = undefined;
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+// The tsnet entry of a paired server: streams to its recorded node and business port.
+export async function openTsnetEntry(record: ServerRecord, home: string): Promise<OpenedEntry> {
+  const entry = record.entries.tsnet;
+  if (!entry)
+    throw new RemoteError(
+      "ENTRY_UNAVAILABLE",
+      `${record.alias} has no tsnet entry; nothing was sent`,
+    );
+  return openBridge(
+    home,
+    {
+      nodeId: entry.nodeId,
+      port: entry.port,
+      label: label(`${record.alias} (cove pid ${process.pid})`),
+    },
+    "nothing was sent",
   );
 }
 
-export async function openTsnetEntry(_record: ServerRecord): Promise<OpenedEntry> {
-  throw unavailable("nothing was sent");
-}
-
-export async function openTsnetPairing(_payload: InvitationPayload): Promise<OpenedEntry> {
-  throw unavailable("the invitation was not sent");
+// The pairing listener of an invitation over tsnet: streams to the invitation's server node and
+// pairing port.
+export async function openTsnetPairing(
+  payload: InvitationPayload,
+  home: string,
+): Promise<OpenedEntry> {
+  const entry = payload.entries.tsnet;
+  if (!entry)
+    throw new RemoteError(
+      "ENTRY_UNAVAILABLE",
+      "the invitation names no tsnet entry; the invitation was not sent",
+    );
+  return openBridge(
+    home,
+    {
+      nodeId: entry.nodeId,
+      port: payload.pairingPort,
+      label: label(`pairing (cove pid ${process.pid})`),
+    },
+    "the invitation was not sent",
+  );
 }
