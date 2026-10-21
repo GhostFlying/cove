@@ -64,8 +64,10 @@ test("a client pairs, calls business methods, and every unusable invitation gets
 
   // E expires first (the shortest lifetime); L outlives it so the listener stays open to answer
   // the expired redemption, then expires itself and closes the listener.
-  const expiring = await fixture.invite(serverHome, ["--ttl-minutes", "1"]);
+  // Taken before the invitation exists: the server stamps its expiry after this, so the lifetime
+  // measured below can only be longer than the server's, never shorter by the CLI's exit time.
   const created = Date.now();
+  const expiring = await fixture.invite(serverHome, ["--ttl-minutes", "1"]);
   expect(expiring.operation.state).toBe("succeeded");
   expect(expiring.operation.result).toMatchObject({ secretDelivery: "first-response-only" });
   const payload = payloadOf(expiring.invitation);
