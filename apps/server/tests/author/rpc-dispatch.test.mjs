@@ -6,7 +6,19 @@ import { dispatchRpc } from "../../dist/rpc/dispatch.js";
 import { rpcBody } from "../../dist/transport/http-rpc.js";
 
 const encoder = new TextEncoder();
-const unimplemented = new Set(["config", "repo", "task", "mount", "tab", "binding"]);
+const unimplemented = new Set([
+  "config",
+  "repo",
+  "task",
+  "mount",
+  "tab",
+  "binding",
+  // M2 T0 placeholders (auth: T1, entry and service: T3, tsnet: T5b).
+  "auth",
+  "entry",
+  "service",
+  "tsnet",
+]);
 
 // The initial domain modules touch no services; the existing ones see only what they call.
 function fakeCore(extra = {}) {

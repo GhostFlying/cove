@@ -1,4 +1,5 @@
 import { isAbsolute, normalize } from "node:path";
+import type { EntrySettings } from "@cove/protocol/auth";
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import { HostPathSchema } from "@cove/protocol/workspace";
 import type { OperationResultData } from "../operations/receipt-records.js";
@@ -46,5 +47,39 @@ export function nextConfig(
   return {
     next,
     result: { resource: { kind: "config", id: "server", revision: next.revision } },
+  };
+}
+
+// Entry configuration (m2 D3, D10; entry.set). Pure like nextConfig, so that the store operation
+// T3 adds and any probe apply the same change. The protocol schema already bounds each field;
+// these are the rules across fields and revisions.
+export type EntryConfigState = { revision: number } & EntrySettings;
+export type EntryConfigSetArgs = { expectedRevision?: number; patch: Partial<EntrySettings> };
+
+// Settings the running server reads only when it starts. The SSH target is read when an
+// invitation is created, so it applies at once.
+const RESTART_FIELDS = ["businessPort", "pairingPort", "tsnetHostname"] as const;
+
+export function nextEntryConfig(
+  current: EntryConfigState,
+  args: EntryConfigSetArgs,
+): { next: EntryConfigState; result: OperationResultData } | { error: DomainError } {
+  if (args.expectedRevision !== undefined && args.expectedRevision !== current.revision)
+    return { error: domainError("REVISION_CONFLICT") };
+  if (current.revision === Number.MAX_SAFE_INTEGER)
+    return { error: domainError("COUNTER_EXHAUSTED") };
+  const next: EntryConfigState = { ...current, revision: current.revision + 1 };
+  for (const key of ["businessPort", "pairingPort", "sshTarget", "tsnetHostname"] as const)
+    if (args.patch[key] !== undefined) Object.assign(next, { [key]: args.patch[key] });
+  // Pairing has a listener of its own (D6); one port cannot serve both.
+  if (next.businessPort !== null && next.businessPort === next.pairingPort)
+    return { error: domainError("INVALID_ARGUMENT") };
+  const restart = RESTART_FIELDS.some((key) => next[key] !== current[key]);
+  return {
+    next,
+    result: {
+      resource: { kind: "config", id: "entry", revision: next.revision },
+      ...(restart ? { appliesAfterRestart: true as const } : {}),
+    },
   };
 }

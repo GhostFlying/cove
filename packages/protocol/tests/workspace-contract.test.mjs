@@ -83,6 +83,20 @@ const validParams = {
   "binding.convert": { operationId: "o1", taskId: "task-1", mountId: "m1" },
   "binding.delete": { operationId: "o1", taskId: "task-1", mountId: "m1", confirmed: true },
   "binding.list": { taskId: "task-1", mountId: "m1" },
+  // M2 (auth-contract.test.mjs covers them in detail).
+  "auth.invite.create": { operationId: "o1" },
+  "auth.invite.list": {},
+  "auth.invite.cancel": { operationId: "o1", inviteId: "inv-1" },
+  "auth.device.list": {},
+  "auth.device.rename": { operationId: "o1", deviceId: "dev-1", name: "laptop" },
+  "auth.device.revoke": { operationId: "o1", deviceId: "dev-1" },
+  "auth.device.rotate": { operationId: "o1" },
+  "entry.get": {},
+  "entry.set": { operationId: "o1", patch: { sshTarget: "devbox" } },
+  "server.impact": {},
+  "server.tsnet.login": { operationId: "o1" },
+  "server.tsnet.status": {},
+  "server.tsnet.logout": { operationId: "o1" },
 };
 
 test("the method table classifies every M1 method and names its server module", () => {
@@ -104,7 +118,13 @@ test("the method table classifies every M1 method and names its server module", 
     // Every write needs an operation ID and returns an operation record.
     const { operationId: _omit, ...withoutId } = validParams[method];
     expect(validateRpcMethodParams(method, withoutId)).toBeNull();
-    expect(RPC_METHODS[method].result).toBe(RPC_METHODS["terminal.create"].result);
+    // A write with output secrets adds only its optional `secrets` member to the shared result.
+    const { result, secrets } = RPC_METHODS[method];
+    expect(
+      secrets.output.length === 0
+        ? result === RPC_METHODS["terminal.create"].result
+        : Object.keys(result.shape).join() === "operation,secrets",
+    ).toBe(true);
     expect(RPC_METHODS[method].scope).toBe("server");
   }
   // Only live terminal reads and server status stay bound to the current relay instance.

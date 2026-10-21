@@ -1,7 +1,10 @@
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import {
+  SECRETS_MEMBER,
   canonicalWriteIntent,
+  secretFields,
   type OperationReceiptKey,
+  type OperationRecord,
   type WriteRpcMethod,
 } from "@cove/protocol/rpc";
 import { StoreUnavailableError } from "../store/store-errors.js";
@@ -126,4 +129,40 @@ export async function executeDatabaseWriteCommitted(
   } finally {
     preparation.cancel();
   }
+}
+
+// A database write whose live answer carries output secrets (auth.invite.create, auth.device.rotate;
+// m2 "秘密与操作记录的分界"). The apply stores only what may be kept (a hash of the secret, the
+// references the record shows), and the record never holds the secret itself. `secrets` is
+// returned beside the record by the call that committed the operation and by no other: a resend,
+// or a request that finds the receipt of an identical one, answers with the record alone, so a
+// lost secret is never handed out again; recovery is a new explicit operation (cancel and
+// re-invite, or rotate again with the old token).
+//
+// `params` are the dispatch layer's params, which never hold `secrets`; one that does is a
+// caller defect and is refused before anything is looked up, so no receipt can be keyed on it.
+export async function executeSecretWrite<S extends Record<string, string>>(
+  context: DatabaseWriteContext,
+  principalId: string,
+  method: WriteRpcMethod,
+  params: Record<string, unknown> & { operationId: string },
+  apply: DatabaseWriteApply,
+  secrets: S,
+): Promise<{ operation: OperationRecord; secrets?: S } | { error: DomainError }> {
+  const declared = secretFields(method).output;
+  if (
+    Object.hasOwn(params, SECRETS_MEMBER) ||
+    declared.length === 0 ||
+    Object.keys(secrets).some((key) => !declared.includes(key))
+  )
+    throw new Error(`${method} cannot return these secrets`);
+  const { outcome, committed } = await executeDatabaseWriteCommitted(
+    context,
+    principalId,
+    method,
+    params,
+    apply,
+  );
+  if ("error" in outcome || !committed) return outcome;
+  return { operation: outcome.operation, secrets };
 }
