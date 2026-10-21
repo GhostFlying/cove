@@ -318,11 +318,16 @@ test("a request Git cannot answer is refused as GIT_UNAVAILABLE, not as a non-re
   const clone = await fixture.gitRepo("clones/eta");
   const plain = join(fixture.root, "plain");
   await mkdir(plain);
-  // The server finds this `git` first on its PATH; its output exceeds the server's bound, so no
-  // Git query gets an answer. Only the server is started with it.
+  // The server finds this `git` first on its PATH; it reports a supported version, but every
+  // other output exceeds the server's bound, so no Git query gets an answer. Only the server is
+  // started with it.
   const fake = join(fixture.root, "fake-bin");
   await mkdir(fake);
-  await writeFile(join(fake, "git"), "#!/bin/sh\nexec yes\n", { mode: 0o755 });
+  await writeFile(
+    join(fake, "git"),
+    '#!/bin/sh\nfor last; do :; done\n[ "$last" = version ] && { echo "git version 2.45.0"; exit 0; }\nexec yes\n',
+    { mode: 0o755 },
+  );
   const path = fixture.env.PATH;
   fixture.env.PATH = `${fake}:${path}`;
   try {
@@ -342,5 +347,32 @@ test("a request Git cannot answer is refused as GIT_UNAVAILABLE, not as a non-re
   expect(unanswered.code).toBe(notRepo.code);
   // The plain directory exists, so only Git could tell; it is not misreported as a non-repository.
   await refused(["repo", "register", plain], home, "GIT_UNAVAILABLE");
+  expect(await repos(home)).toEqual([]);
+});
+
+// #126 item 3: Cove does not support Git older than 2.45 (GIT_NO_LAZY_FETCH, which keeps a query
+// from fetching a partial clone's missing objects, exists only from 2.45). A server whose git is
+// older does not start, and says why, before it opens the data directory.
+test("a server whose git is older than 2.45 refuses to start and says why", async () => {
+  const home = fixture.home("home");
+  const fake = join(fixture.root, "old-git-bin");
+  await mkdir(fake);
+  await writeFile(
+    join(fake, "git"),
+    '#!/bin/sh\nfor last; do :; done\n[ "$last" = version ] && { echo "git version 2.44.2"; exit 0; }\nexit 1\n',
+    { mode: 0o755 },
+  );
+  const path = fixture.env.PATH;
+  fixture.env.PATH = `${fake}:${path}`;
+  try {
+    await expect(fixture.startServer(home)).rejects.toThrow(
+      "git 2.44.2 is too old: Cove requires Git 2.45 or later; put a newer git (such as " +
+        "Homebrew's) first on PATH",
+    );
+  } finally {
+    fixture.env.PATH = path;
+  }
+  // Nothing was opened: a server with a supported git starts on the same data directory.
+  await fixture.startServer(home);
   expect(await repos(home)).toEqual([]);
 });

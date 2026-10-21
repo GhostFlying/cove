@@ -27,6 +27,7 @@ import { StoreError, type Store, type StoreOptions } from "../store/database.js"
 import { instanceStopCall, recordInstanceStart } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
 import { RunLog } from "../store/runs.js";
+import { describeUnsupportedGit, findGit } from "../git/run.js";
 import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
 import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
@@ -228,7 +229,7 @@ export function createLocalApplication(
 
 export class LocalEntryStartupError extends Error {
   constructor(
-    readonly category: "store" | "worker" | "listen" | "rendezvous" | "interrupted",
+    readonly category: "store" | "worker" | "listen" | "rendezvous" | "interrupted" | "git",
     readonly cleanup: "verified" | "unverifiable",
     // A safe description (no paths or secrets) of a store refusal, such as a data directory in
     // use by another server or a database schema newer than this build.
@@ -254,6 +255,13 @@ async function openLocalApplication(
 ) {
   const options = validateLocalOptions(input);
   if (options.home === undefined) return { local: createLocalApplication(options), store: null };
+  // Cove does not run a Git older than 2.45 (git/run.ts MINIMUM_GIT). Every Git command enforces
+  // that by itself, so this check adds no guarantee; it makes an unsupported Git a clear startup
+  // failure, before the data directory is opened, instead of GIT_UNAVAILABLE on every request
+  // that needs Git. The server's own PATH decides, as for its later commands.
+  const git = await findGit();
+  if (git.kind !== "supported")
+    throw new LocalEntryStartupError("git", "verified", describeUnsupportedGit(git));
   let persistence;
   try {
     persistence = await openPersistence(options.home, Date.now, hooks?.store);

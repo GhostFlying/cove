@@ -949,11 +949,13 @@ describe("checkout identity", () => {
       await chmod(dotGit, 0o755);
     }
     expect(await states(env, taskId)).toEqual(["ready"]);
-    // A safe.directory refusal (Git's dubious-ownership message, from a git first on PATH).
+    // A safe.directory refusal (Git's dubious-ownership message, from a git first on PATH, which
+    // reports a supported version: the server runs no Git older than 2.45).
     const bin = await temporary();
     await writeFile(
       join(bin, "git"),
-      "#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '$PWD'\" >&2\nexit 128\n",
+      '#!/bin/sh\nfor last; do :; done\n[ "$last" = version ] && { echo "git version 2.45.0"; exit 0; }\n' +
+        "echo \"fatal: detected dubious ownership in repository at '$PWD'\" >&2\nexit 128\n",
       { mode: 0o755 },
     );
     process.env.PATH = `${bin}:${savedPath}`;
