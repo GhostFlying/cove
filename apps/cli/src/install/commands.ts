@@ -51,7 +51,7 @@ async function withLock<T>(layout: InstallLayout, action: () => Promise<T>): Pro
   try {
     return await action();
   } finally {
-    await release();
+    release();
   }
 }
 

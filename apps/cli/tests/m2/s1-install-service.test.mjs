@@ -321,7 +321,8 @@ test("an installed service outlives the installing shell, refuses an older schem
       registered: false,
       running: false,
     });
-    expect(await readdir(join(home, "install"))).toEqual([]);
+    // Only the install lock's file stays: a lock file is never removed (os-lock.ts).
+    expect(await readdir(join(home, "install"))).toEqual([".lock.sqlite"]);
     expect(existsSync(join(home, "bin", "cove"))).toBe(false);
     expect(existsSync(database)).toBe(true);
     expect((await fixture.coveJson(["server", "init"], { home })).serverId).toBe(serverId);
