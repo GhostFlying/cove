@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,19 @@ func TestDialProtocolHandling(t *testing.T) {
 		s.hello.PID != d.cmd.Process.Pid || s.hello.Streams == nil {
 		t.Fatalf("hello: %+v", s.hello)
 	}
+	// The build identity injected at link time is echoed exactly by hello
+	// and by the version command.
+	if want := os.Getenv("COVE_TSNET_BUILD"); want != "" {
+		if s.hello.Build != want {
+			t.Fatalf("hello build %q, want %q", s.hello.Build, want)
+		}
+		out, err := execBinary(t, "version").Output()
+		if err != nil || string(out) != fmt.Sprintf("cove-tsnet build=%s protocol=%d\n", want, proto.Version) {
+			t.Fatalf("version: %q %v", out, err)
+		}
+	} else if os.Getenv("CI") != "" {
+		t.Fatal("COVE_TSNET_BUILD is not set; run through scripts/tsnet-build.mjs test")
+	}
 
 	// A client of another protocol version still gets the frozen hello, is
 	// refused everything else, and can still stop the daemon.
@@ -118,8 +132,14 @@ func TestDialProtocolHandling(t *testing.T) {
 
 	// Oversized frames are rejected, not buffered.
 	s3 := connectRaw(t, d.sock)
-	big := strings.Repeat("x", proto.MaxFrameBytes+10)
-	wantCode(t, s3.roundTrip(t, proto.Request{Op: proto.OpHello, Label: big}), proto.CodeBadRequest)
+	// (Written raw: WriteFrame itself refuses to send an oversized frame.)
+	big := `{"op":"hello","label":"` + strings.Repeat("x", proto.MaxFrameBytes+10) + `"}` + "\n"
+	go s3.conn.Write([]byte(big))
+	s3.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	line, err := proto.ReadFrame(s3.br, proto.MaxFrameBytes)
+	if err != nil || !strings.Contains(string(line), proto.CodeBadRequest) {
+		t.Fatalf("oversized hello: %q %v", line, err)
+	}
 
 	// Without a logged-in node every dial fails before touching the network.
 	_, resp := openStream(t, d.sock, "nSomeNodeCNTRL", 443, "")

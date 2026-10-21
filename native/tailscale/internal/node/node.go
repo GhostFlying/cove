@@ -119,7 +119,7 @@ func (n *tsnetNode) Status(ctx context.Context) (proto.Status, error) {
 		}
 		out.Self = &info
 	}
-	return out, nil
+	return out.Bounded(), nil
 }
 
 func (n *tsnetNode) WaitRunning(ctx context.Context) error {
@@ -176,7 +176,7 @@ func (n *tsnetNode) LookupPeer(ctx context.Context, stableNodeID string) (proto.
 		if ip == "" {
 			return info, "", fmt.Errorf("peer %s has no Tailscale address", stableNodeID)
 		}
-		return info, ip, nil
+		return info.Bounded(), ip, nil
 	}
 	return proto.NodeInfo{}, "", ErrPeerNotFound
 }
@@ -197,7 +197,7 @@ func (n *tsnetNode) WhoIs(ctx context.Context, addr string) (proto.NodeInfo, err
 	if who.UserProfile != nil {
 		info.LoginName = who.UserProfile.LoginName
 	}
-	return info, nil
+	return info.Bounded(), nil
 }
 
 func (n *tsnetNode) Listen(port int) (net.Listener, error) {
