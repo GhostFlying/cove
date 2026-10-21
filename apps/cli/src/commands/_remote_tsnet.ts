@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { TsnetAuthKeySchema } from "@cove/protocol/auth";
+import { checkTsnetOverrides } from "../remote/tsnet-binary.js";
 import { parseIdleTimeout, readTsnetConfig, writeTsnetConfig } from "../remote/tsnet-config.js";
 import {
   DaemonUnavailable,
@@ -322,6 +323,9 @@ export async function run(args: Arguments): Promise<number> {
     throw new UsageError("remote tsnet takes one of login, status, logout, stop, config");
   if (flag(args, "--via") !== undefined) throw new UsageError("--via applies to remote add only");
   const home = homeDirectory(args);
+  // Before any input is read (a login's auth key) or a process started: an installed Cove refuses
+  // the development and test overrides instead of ignoring them (tsnet-binary.ts).
+  checkTsnetOverrides();
   switch (sub) {
     case "login":
       takeFlags(args, []);

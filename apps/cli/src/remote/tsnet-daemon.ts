@@ -18,6 +18,8 @@ import {
   binaryIdentity,
   DIAL_PROTOCOL,
   tsnetBinaryPath,
+  tsnetControlUrl,
+  TsnetBinaryError,
   type BinaryIdentity,
 } from "./tsnet-binary.js";
 import { readTsnetConfig } from "./tsnet-config.js";
@@ -352,18 +354,25 @@ let current: Promise<{ path: string; identity: BinaryIdentity }> | undefined;
 // The executable this CLI starts and its build, read once per command.
 export function currentBinary(): Promise<{ path: string; identity: BinaryIdentity }> {
   current ??= (async () => {
-    const path = tsnetBinaryPath();
-    if (path === null)
-      throw new DaemonUnavailable(
-        "this Cove build has no cove-tsnet executable (an installed Cove ships bin/cove-tsnet; " +
-          "a development checkout builds it with `pnpm tsnet:build`)",
-      );
-    const identity = await binaryIdentity(path);
-    if (identity.protocol !== DIAL_PROTOCOL)
-      throw new DaemonUnavailable(
-        `${path} speaks local protocol ${identity.protocol}; this CLI speaks ${DIAL_PROTOCOL}`,
-      );
-    return { path, identity };
+    try {
+      const path = tsnetBinaryPath();
+      if (path === null)
+        throw new DaemonUnavailable(
+          "this Cove build has no cove-tsnet executable (an installed Cove ships bin/cove-tsnet; " +
+            "a development checkout builds it with `pnpm tsnet:build`)",
+        );
+      const identity = await binaryIdentity(path);
+      if (identity.protocol !== DIAL_PROTOCOL)
+        throw new DaemonUnavailable(
+          `${path} speaks local protocol ${identity.protocol}; this CLI speaks ${DIAL_PROTOCOL}`,
+        );
+      return { path, identity };
+    } catch (error) {
+      // A rejected override or an executable that does not identify itself: no daemon can be
+      // used, and nothing was started.
+      if (error instanceof TsnetBinaryError) throw new DaemonUnavailable(error.message);
+      throw error;
+    }
   })();
   return current;
 }
@@ -420,9 +429,9 @@ async function startDaemon(
     "--idle-timeout",
     `${config.idleTimeoutSeconds}s`,
   ];
-  // Development and test only (the CLI scenarios' test control plane); unset in real use, where
-  // the node talks to Tailscale's control plane.
-  const controlUrl = process.env.COVE_TSNET_CONTROL_URL;
+  // Development and test only (the CLI scenarios' test control plane, tsnet-binary.ts); unset in
+  // real use, where the node talks to Tailscale's control plane.
+  const controlUrl = tsnetControlUrl();
   if (controlUrl) args.push("--control-url", controlUrl);
   const log = openLog(home);
   try {
