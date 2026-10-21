@@ -109,6 +109,23 @@ func startProbe(t *testing.T, tn *tailnet) *tsnet.Server {
 // the Cove test port.
 var probePorts = []int{22, 80, 443, 5252, 7001, 8080, 41641}
 
+// waitDialRunning polls status until a restored node is Running; the
+// daemon answers before its node has finished starting.
+func waitDialRunning(t *testing.T, sock string) proto.Status {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		st := dialStatus(t, sock)
+		if st.State == proto.StateRunning && st.Self != nil {
+			return st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("node did not reach Running: %+v", st)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // waitStreams waits until the daemon reports n active streams; a stream
 // ends once both of its directions have closed.
 func waitStreams(t *testing.T, sock string, n int) {
@@ -385,9 +402,9 @@ func TestDialDaemonLifecycle(t *testing.T) {
 	}
 
 	// Idle exit, again with the restored node.
-	d3 := startDial(t, tn, home, "--idle-timeout", "1s")
-	if st := dialStatus(t, d3.sock); st.Self == nil || st.Self.StableNodeID != cli.StableNodeID {
-		t.Fatalf("identity after restart: %+v", st)
+	d3 := startDial(t, tn, home, "--idle-timeout", "2s")
+	if st := waitDialRunning(t, d3.sock); st.Self.StableNodeID != cli.StableNodeID {
+		t.Fatalf("identity after restart: %+v", st.Self)
 	}
 	if code := d3.wait(20 * time.Second); code != 0 {
 		t.Fatalf("idle daemon exit code %d", code)
