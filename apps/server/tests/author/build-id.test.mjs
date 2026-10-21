@@ -46,6 +46,14 @@ describe("build ID", () => {
     expect(computeBuildId(root)).not.toBe(before);
   });
 
+  it("changes with a package manifest alone", async () => {
+    await write("apps/server/package.json", JSON.stringify({ bin: { "cove-server": "./a.js" } }));
+    const first = computeBuildId(root);
+    // Only the manifest changes: its exports or bin decide what runs.
+    await write("apps/server/package.json", JSON.stringify({ bin: { "cove-server": "./b.js" } }));
+    expect(computeBuildId(root)).not.toBe(first);
+  });
+
   it("ignores declarations, source maps and build info", async () => {
     const first = computeBuildId(root);
     await write("apps/server/dist/entry/main.d.ts", "export {};\n");
