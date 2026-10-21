@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { readdir, readFile, rm } from "node:fs/promises";
 import { createServer, request } from "node:http";
-import { connect } from "node:net";
+import { connect, createServer as createTcpServer } from "node:net";
 import { join, resolve } from "node:path";
 import { createClient } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec, createWebPorts } from "@cove/client/web-ports";
@@ -36,11 +36,15 @@ import { waitFor } from "../recording-view.mjs";
 // CLI's environment (process samples, S11). The scan must find it in each carrier class it
 // applies to, through the same check that must find no secret: the negative control.
 //
-// Tokens are remembered when they are issued or observed, not only at cleanup (#159): a token a
-// test client receives, and every token a CLI command saved in a credential file of its home,
-// read when the command ends and, while a background command runs, every 20 ms. Pairing and CLI
-// rotation never print the token, so a token superseded by a later rotation would otherwise
-// never be known to the scan; secret-scan-superseded.test.mjs is the negative control.
+// Tokens are remembered when they are issued or observed, not only at cleanup (#159). Pairing and
+// CLI rotation never print the token, so a token superseded by a later rotation would otherwise
+// never be known to the scan. Remembered are a token a test client receives, every token in a
+// credential file of a command's home when the command ends (one command saves at most one token,
+// so this covers commands that run one after another), and every token in an answer that passes
+// a test proxy, read before the proxy forwards it: pairingProxy, tokenTap, and test relays through
+// tokenReader. Commands that rotate concurrently must reach the server through one of those: the
+// files alone would miss a token saved and overwritten while both ran. There is no timed
+// sampling. secret-scan-superseded.test.mjs holds the negative controls.
 
 export const SERVER_ENTRY = resolve(import.meta.dirname, "auth-server-entry.mjs");
 export const SSH_TARGET = "user@example.test";
@@ -91,6 +95,16 @@ export async function createAuthFixture() {
     for (const [value] of String(text).matchAll(INVITATION_PATTERN)) remember(value);
     for (const [value] of String(text).matchAll(TOKEN_PATTERN)) remember(value);
   };
+  // A reader of one byte stream (a proxied connection's answers): every token in it is remembered,
+  // also one split across chunks.
+  const tokenReader = () => {
+    let tail = "";
+    return (chunk) => {
+      const text = tail + chunk.toString("latin1");
+      for (const [value] of text.matchAll(TOKEN_PATTERN)) remember(value);
+      tail = text.slice(-128);
+    };
+  };
   // Every token in a credential file of `home` now. A file being replaced is read as it is; an
   // unreadable or partial one is read again at the next observation.
   const observe = async (home) => {
@@ -131,6 +145,42 @@ export async function createAuthFixture() {
 
     sentinel,
     remember,
+    tokenReader,
+
+    // A TCP proxy to 127.0.0.1:targetPort that forwards the bytes unchanged and remembers every
+    // token in the server's answers before passing them on. A client record pointed at it
+    // (`entries.loopback.port`) has every token it is issued remembered, whatever the timing.
+    async tokenTap(targetPort) {
+      const connections = new Set();
+      const server = createTcpServer((client) => {
+        const upstream = connect({ host: "127.0.0.1", port: targetPort });
+        const read = tokenReader();
+        connections.add(client).add(upstream);
+        client.on("data", (chunk) => upstream.write(chunk));
+        upstream.on("data", (chunk) => {
+          read(chunk);
+          client.write(chunk);
+        });
+        for (const [a, b] of [
+          [client, upstream],
+          [upstream, client],
+        ]) {
+          a.on("close", () => b.destroy());
+          a.on("error", () => b.destroy());
+        }
+      });
+      await new Promise((done) => server.listen(0, "127.0.0.1", done));
+      const tap = {
+        port: server.address().port,
+        close: () =>
+          new Promise((done) => {
+            for (const connection of connections) connection.destroy();
+            server.close(() => done());
+          }),
+      };
+      proxies.push(tap);
+      return tap;
+    },
 
     // The token the credential file of `serverId` under `home` must hold when the scan runs.
     expectToken(home, serverId, token) {
@@ -157,19 +207,14 @@ export async function createAuthFixture() {
       }
     },
 
+    // A background command. A token it saves that a concurrent command overwrites before this
+    // one ends is not in any file afterwards: such commands reach the server through a proxy
+    // that remembers tokens (see the top of the file).
     spawnCove(args, options) {
       const spawned = base.spawnCove(args, options);
-      // A background command can save a token that a concurrent one supersedes before this one
-      // ends (credential-lock.test.mjs), so its home is observed while it runs as well.
-      let observing = Promise.resolve();
-      const poll = setInterval(() => {
-        observing = observing.then(() => observe(options?.home));
-      }, 20);
       return {
         ...spawned,
         done: spawned.done.then(async (result) => {
-          clearInterval(poll);
-          await observing;
           await observe(options?.home);
           harvest(result.stdout);
           return result;
@@ -309,6 +354,8 @@ export async function createAuthFixture() {
               const body = [];
               answer.on("data", (chunk) => body.push(chunk));
               answer.on("end", () => {
+                // The issued token is remembered before the answer is forwarded or dropped.
+                tokenReader()(Buffer.concat(body));
                 if (req.url === "/pair" && mode === "drop") {
                   res.socket.destroy();
                   return;

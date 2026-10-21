@@ -41,6 +41,8 @@ afterEach(async () => {
 // A TCP relay to the server's business port. The server accepts its port in Host as a loopback
 // literal, so bytes pass unchanged. While `hold` is set it keeps back every connection whose
 // request names auth.device.rotate: it records it in `held` and forwards it only on `release()`.
+// Every token in the server's answers is remembered for the secret scan before it is passed on:
+// the concurrent rotations here save tokens that a later one overwrites.
 async function businessRelay(targetPort) {
   const held = [];
   const sockets = new Set();
@@ -51,6 +53,7 @@ async function businessRelay(targetPort) {
     const upstream = connect({ host: "127.0.0.1", port: targetPort });
     sockets.add(upstream);
     let parked = null;
+    const read = fixture.tokenReader();
     client.on("data", (chunk) => {
       const text = chunk.toString("latin1");
       const bytes = chunk;
@@ -64,7 +67,10 @@ async function businessRelay(targetPort) {
         });
       } else upstream.write(bytes);
     });
-    upstream.on("data", (chunk) => client.write(chunk));
+    upstream.on("data", (chunk) => {
+      read(chunk);
+      client.write(chunk);
+    });
     client.on("close", () => upstream.destroy());
     upstream.on("close", () => client.destroy());
     client.on("error", () => upstream.destroy());
