@@ -192,10 +192,15 @@ test("the pairing listener exists only with an open invitation and is bounded", 
     ...overrides,
   });
 
-  // Only the two POST paths, with the listener's own Host and no browser headers.
+  // Only the two POST paths, with a loopback IP literal Host (any port: user decision 2026-10-22)
+  // and no browser headers. A domain Host, which DNS rebinding needs, and `localhost` are refused.
   for (const [path, headers] of [
     ["/rpc", {}],
     ["/pair", { host: `localhost:${port}` }],
+    ["/pair", { host: `evil.example:${port}` }],
+    ["/pair", { host: "127.0.0.1:bad" }],
+    ["/pair", { host: "127.0.0.1:65536" }],
+    ["/pair", { host: "127.0.0.1:50123", origin: "http://127.0.0.1:50123" }],
     ["/pair", { origin: "http://example.test" }],
     ["/pair", { "sec-fetch-site": "cross-site" }],
   ]) {
@@ -206,8 +211,9 @@ test("the pairing listener exists only with an open invitation and is bounded", 
   expect((await post(port, "/pair", "x".repeat(5000))).status).toBe(413);
   expect((await post(port, "/pair", "{not json")).status).toBe(400);
   expect((await post(port, "/pair", { ...redeem(), extra: 1 })).status).toBe(400);
-  // The identity answer is the pre-auth identity only.
-  const identity = await post(port, "/bootstrap", {
+  // The identity answer is the pre-auth identity only, also under the Host an SSH -L forward
+  // presents (its own local port) or the IPv6 loopback literal.
+  const bootstrap = {
     type: "cove-bootstrap",
     bootstrapVersion: BOOTSTRAP_VERSION,
     protocolVersion: PROTOCOL_VERSION,
@@ -215,8 +221,12 @@ test("the pairing listener exists only with an open invitation and is bounded", 
     capabilities: [...REQUIRED_CAPABILITIES],
     profiles: [PROFILE],
     encodings: [BASELINE_ENCODING],
-  });
-  expect(identity.json).toMatchObject({ type: "cove-bootstrap-identity", serverId });
+  };
+  for (const headers of [{}, { host: "127.0.0.1:50123" }, { host: `[::1]:${port}` }]) {
+    const identity = await post(port, "/bootstrap", bootstrap, headers);
+    expect(identity.status).toBe(200);
+    expect(identity.json).toMatchObject({ type: "cove-bootstrap-identity", serverId });
+  }
 
   // A connection cap: idle connections beyond it are not served.
   const sockets = await Promise.all(

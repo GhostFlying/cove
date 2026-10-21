@@ -322,11 +322,23 @@ export type AdmissionRequest = {
   capacityAvailable: boolean;
 };
 
+// The Host a loopback server accepts (user decision 2026-10-22): any loopback IP literal with a
+// port in 1..65535, not only the server's own bound authority. The Host check is a pre-auth defense
+// against DNS rebinding, and a rebinding request always carries a domain-name Host, never a literal
+// loopback IP. The server cannot tell traffic forwarded by a local tunnel (an SSH -L forward
+// arrives with the tunnel's local port in Host) from local traffic anyway; trust comes from the
+// token or local secret every business request needs. `localhost` stays refused: rebinding cannot
+// produce it, but browsers treat it differently from the literals, so it is not widened here.
+export function isLoopbackLiteralHost(host: string): boolean {
+  const match = /^(?:127\.0\.0\.1|\[::1\]):([1-9][0-9]{0,4})$/.exec(host);
+  return match !== null && Number(match[1]) <= 65_535;
+}
+
 // Transport verifies the secret; this predicate only consumes its authenticated verdict.
 export function evaluateAdmission(input: AdmissionRequest): AdmissionKind {
   if (
     !/^(?:127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$/.test(input.boundAuthority) ||
-    input.host !== input.boundAuthority
+    !isLoopbackLiteralHost(input.host)
   )
     return "forbidden";
   if (
@@ -388,7 +400,7 @@ export function evaluateWsUpgrade(input: {
   if (
     input.path !== LOCAL_PATHS.terminal ||
     !/^(?:127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$/.test(input.boundAuthority) ||
-    input.host !== input.boundAuthority ||
+    !isLoopbackLiteralHost(input.host) ||
     (input.origin !== undefined &&
       (input.origin === "null" || !input.allowedOrigins.includes(input.origin)))
   )

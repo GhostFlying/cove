@@ -429,6 +429,10 @@ JSON-RPC 2.0 定义关联 ID、结果/错误、通知和 batch，不替代 Cove 
   notification 无论成功或失败都不返回 JSON-RPC response；其写方法仍需合法 operationId 和授权。
   Cove 客户端的重要写操作不得使用 notification，以便及时获取操作回执。
 - 身份来自认证层，不信任 params 中的 deviceId/userId；凭据不放进 RPC payload 或诊断日志。
+- loopback 入口（业务端口、终端 WS 与配对监听）的 Host 须为 loopback IP 字面量 `127.0.0.1:<端口>` 或 `[::1]:<端口>`，
+  端口 1–65535，不要求等于 server 自己的端口；域名 Host（含 `localhost`）与格式错误的 Host 一律拒绝，Origin 规则不变
+  （用户决定 2026-10-22，此前为恰等于绑定地址）。Host 校验只是认证前对 DNS rebinding 的防线，rebinding 请求必然带域名
+  Host；server 本就无法区分本机流量与经 SSH `-L` 等本机隧道转发的流量，信任来自每个业务请求必需的 token 或本机秘密。
 - 每次调用声明 `Cove-Protocol`；服务端先完成认证和协议检查，再解码并分发业务调用。
   握手结果不能成为后续 HTTP 请求跳过检查的理由。
 - 版本不匹配通过稳定 bootstrap 错误格式返回，包含支持版本及 recovery 提示；不需要读懂当前业务 envelope。

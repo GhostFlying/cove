@@ -317,6 +317,8 @@ HTTP JSON-RPC、业务事件 WS、终端 WS 和 HTTP 文件传输保持原有契
 普通 SSH 端口转发后的 HTTP 请求不自动携带原始 SSH 用户身份；Tailscale 节点身份也不等同于
 Cove 应用设备身份。因此业务请求仍校验 Cove 设备 token，撤销同时失效活跃连接和传输权限。
 设备 token 的生成、存储、重试兑换和失效传播细节在实现设计中确定；不为首期引入 JWT 或客户端证书。
+转发请求的 Host 是隧道本地端口，server 因此接受任何 loopback IP 字面量 Host，只拒绝域名 Host（用户决定 2026-10-22，
+见 [relay-protocol §11.1](relay-protocol.md)），客户端不需要改写 Host 的中继。
 
 通道必须保护到 Cove 所在主机；经 subnet router 或 SSH 跳板后再明文跨主机转发，不自动满足这个条件。
 系统 Tailscale 模式不能仅根据来源属于 100.64.0.0/10 判断可信；代理提供的身份信息只能来自受控入口，
