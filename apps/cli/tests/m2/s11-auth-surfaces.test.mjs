@@ -83,11 +83,16 @@ function run(file, args) {
 
 // What other processes could read of a CLI: every process's argv, and this one's environment.
 async function sampleProcess(pid) {
-  const argv = await run("/bin/ps", ["-axww", "-o", "args="]);
+  const argv = await run(
+    "ps",
+    process.platform === "linux" ? ["-eww", "-o", "args="] : ["-axww", "-o", "args="],
+  );
+  // The sample must have seen this CLI, or it proves nothing.
+  if (!argv.includes("remote add")) throw new Error("the process sample did not include the CLI");
   const environment =
     process.platform === "linux"
       ? await readFile(`/proc/${pid}/environ`, "utf8").catch(() => "")
-      : await run("/bin/ps", ["eww", "-o", "command=", "-p", String(pid)]);
+      : await run("ps", ["eww", "-o", "command=", "-p", String(pid)]);
   return `${argv}\n${environment}`;
 }
 
@@ -153,6 +158,12 @@ test("credentials that do not authenticate are refused on HTTP and WebSocket wit
       for (const value of forbidden) expect(text).not.toContain(value);
     expect(ws.messages.join("").includes("DEVICE_REVOKED")).toBe(name === "revoked");
   }
+  // A browser (it sends an Origin) gets no identity without credentials.
+  const browser = await post(port, "/bootstrap", bootstrapRequest(server), {
+    origin: `http://127.0.0.1:${port}`,
+  });
+  expect(browser.status).not.toBe(200);
+  expect(browser.raw).not.toContain(server.record.serverId);
   // The pre-auth identity holds these fields and nothing more.
   const anonymous = await post(port, "/bootstrap", bootstrapRequest(server));
   expect(Object.keys(anonymous.json).sort()).toEqual(
