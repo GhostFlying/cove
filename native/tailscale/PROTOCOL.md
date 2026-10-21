@@ -13,7 +13,9 @@ sync.
   and of the application build.
 - The **build** is a string identifying the binary: the value injected by
   `scripts/tsnet-build.mjs build --build <id>`, otherwise `dev+<git revision>[-dirty]`. Equal builds
-  are the same program.
+  are the same program. A build is 1–128 characters of `[A-Za-z0-9.+_-]`, so it is one token that
+  `hello` and `cove-tsnet version` echo exactly; the build script rejects any other `--build`, and a
+  binary linked with an invalid value reports `invalid`.
 - **Frozen surface.** These never change in any future version, so a client of any version can
   identify, list and replace a daemon of any other version: the framing below, the `hello` request
   and result, the `streams` entries (`id`, `stableNodeID`, `port`, `label`, `startedAt`), the
@@ -22,8 +24,26 @@ sync.
 
 ## Framing
 
-Every control message is one JSON object on one line, terminated by `\n`, at most 65,536 bytes.
-Unknown fields are ignored. Longer frames are rejected with `BAD_REQUEST`.
+Every control message is one JSON object on one line, terminated by `\n`, at most 65,536 bytes
+excluding the terminator, in both directions. Unknown fields are ignored. A longer incoming frame is
+rejected with `BAD_REQUEST`; the dial daemon then closes the connection, and serve ends its control
+channel (see below), because the rest of the line cannot be trusted to resynchronize.
+
+`cove-tsnet` never writes a longer frame. Every variable field is bounded so that the largest
+possible response, with worst-case JSON escaping (a `<` becomes six bytes), still fits; the unit
+tests serialize those worst cases. Should a response ever exceed the limit anyway, an `INTERNAL`
+error is sent in its place. The bounds:
+
+| Field                                           | Bound                                                  |
+| ----------------------------------------------- | ------------------------------------------------------ |
+| `id`                                            | 64 bytes; longer is `BAD_REQUEST`                      |
+| `target.stableNodeID`                           | 1–64 ASCII letters and digits; otherwise `BAD_REQUEST` |
+| `label`                                         | 64 bytes; longer is `BAD_REQUEST`                      |
+| open streams                                    | 64 per daemon; more is `TOO_MANY_STREAMS`              |
+| `ports`                                         | 16; more is `BAD_REQUEST`                              |
+| `build`                                         | 128 bytes of `[A-Za-z0-9.+_-]`                         |
+| error `message`, `authURL`, names, `whoIsError` | 512 bytes, truncated at a UTF-8 boundary               |
+| `warnings`, `tailscaleIPs`                      | 4 and 8 entries; peer stable IDs truncated to 64 bytes |
 
 Request:
 
@@ -56,8 +76,8 @@ responses can arrive out of order; on the dial socket it is optional.
 | `PEER_MISMATCH`     | The connected address answered WhoIs as a different node, or WhoIs failed.    |
 | `DIAL_FAILED`       | The tailnet connection failed (for example, nothing listens on that port).    |
 | `ACTIVE_STREAMS`    | `logout`/`stop` without `force` while streams are open; `streams` lists them. |
-| `TOO_MANY_STREAMS`  | 256 streams are already open.                                                 |
-| `SHUTTING_DOWN`     | The daemon is exiting.                                                        |
+| `TOO_MANY_STREAMS`  | 64 streams are already open.                                                  |
+| `SHUTTING_DOWN`     | The process is exiting; the request was not carried out.                      |
 | `LISTEN_FAILED`     | `serve` could not open a requested tailnet port.                              |
 | `INTERNAL`          | Anything else.                                                                |
 
@@ -78,7 +98,8 @@ Returned by `status`, `login`, `logout` and `setPorts`:
   },
   "ports": [7443],
   "streams": [],
-  "warnings": []
+  "warnings": [],
+  "remoteLogoutConfirmed": true
 }
 ```
 
@@ -87,7 +108,8 @@ Returned by `status`, `login`, `logout` and `setPorts`:
 the node failed to start (`warnings` says why). `authURL` is present while an interactive login is
 pending; whoever opens it can attach the node to their tailnet, so it is returned only to the
 requesting owner and never logged. Names come from the control plane and are display data; only
-`stableNodeID` identifies a node.
+`stableNodeID` identifies a node. `remoteLogoutConfirmed` appears only in a `logout` result (see
+`logout` below).
 
 ## Secrets and output
 
@@ -140,8 +162,14 @@ daemon holds no Cove device token; the CLI sends the token through the stream.
    If node state exists, the node starts in the background; requests that need it wait boundedly.
    A daemon without state never contacts the control plane until `login`.
 3. Exit after `--idle-timeout` with no connections at all (an open stream or an in-flight request
-   keeps it alive), on `stop`, or on SIGINT/SIGTERM. Exit order: unlink the socket, close streams,
-   close the node (state kept), release the lock by exiting. Exit code 0.
+   keeps it alive), on `stop`, or on SIGINT/SIGTERM. Exit order: one shutdown transition after
+   which no connection is accepted and no stream is registered; unlink the socket; cancel in-flight
+   work (a pending login, a dial waiting for the node, and a connection still waiting to send its
+   request get `SHUTTING_DOWN`); close streams; wait (bounded) for every in-flight request to write
+   its reply, including the `stop` reply; close the node (state kept); release the lock by exiting.
+   Exit code 0. The idle decision and connection admission are made under one lock, so a
+   connection is either accepted before the decision (and prevents it) or closed unanswered after
+   it; the CLI's startup loop treats the latter like any failed connect.
 
 Exit codes: `0` normal, `1` error (stderr says why), `2` usage, `75` lock held.
 
@@ -175,31 +203,42 @@ version-mismatch error listing the streams.
 
 ### Operations
 
-| Op       | Fields                                                                                       | Result                            |
-| -------- | -------------------------------------------------------------------------------------------- | --------------------------------- |
-| `status` | —                                                                                            | Status (with `streams`)           |
-| `login`  | `authKey?`, `timeoutMs?` (default 60 s, max 5 min)                                           | Status                            |
-| `logout` | `force?`                                                                                     | Status (`LoggedOut`)              |
-| `stop`   | `force?` (frozen)                                                                            | `{}`, then the daemon exits       |
-| `dial`   | `target.stableNodeID`, `port`, `label?` (≤ 200 bytes), `timeoutMs?` (default 15 s, max 60 s) | `{streamId, peer}` then raw bytes |
+| Op       | Fields                                                                                      | Result                            |
+| -------- | ------------------------------------------------------------------------------------------- | --------------------------------- |
+| `status` | —                                                                                           | Status (with `streams`)           |
+| `login`  | `authKey?`, `timeoutMs?` (default 60 s, max 5 min)                                          | Status                            |
+| `logout` | `force?`                                                                                    | Status (`LoggedOut`)              |
+| `stop`   | `force?` (frozen)                                                                           | `{}`, then the daemon exits       |
+| `dial`   | `target.stableNodeID`, `port`, `label?` (≤ 64 bytes), `timeoutMs?` (default 15 s, max 60 s) | `{streamId, peer}` then raw bytes |
 
 `login`, `logout` and `stop` are serialized with each other and with `status` and stream setup;
-established streams continue during them.
+established streams continue during them. A request that was waiting behind a `stop` (or any other
+shutdown) fails with `SHUTTING_DOWN` without acting; a second `stop` does too. Out-of-range
+`timeoutMs` values are clamped to the maximum.
 
-- `login` with `authKey` (re)starts the node with the key and waits for Running. On failure, a node
-  that had no state before has its partial state deleted, so no half-logged-in node remains. Without
-  `authKey` it starts an interactive login and returns as soon as `authURL` is known (or the node is
-  Running); the CLI shows the URL and polls `status`. `ALREADY_LOGGED_IN` if Running.
+- `login` with `authKey` and no node state enrolls a new node with the key and waits for Running.
+  On failure its partial state is deleted, so no half-logged-in node remains; if that deletion
+  fails, the error message says so. With `authKey` and existing state (an enrolled node that needs
+  login again, for example after its key expired) it forces a reauthentication of that node with
+  the key, as `tailscale up --force-reauth --auth-key` does, and waits for Running; the node keeps
+  its stable ID, and on failure its state is kept. Without `authKey` it starts an interactive login
+  and returns as soon as `authURL` is known (or the node is Running); the CLI shows the URL and
+  polls `status`. `ALREADY_LOGGED_IN` if Running.
 - `logout` and `stop` with open streams and no `force` fail with `ACTIVE_STREAMS` and change
   nothing. With `force` they close the streams first. `logout` then deauthorizes the node with the
-  control plane (10 s bound) and deletes `<home>/state`; if the control plane cannot be reached the
-  state is still deleted and `warnings` says the node may remain in the admin console. `stop`
-  unlinks the socket before replying, so a reconnect never reaches the exiting daemon.
+  control plane (10 s bound) and deletes `<home>/state`. The local logout is never blocked: if the
+  control plane cannot be reached, or the node cannot even start, the state is still deleted, the
+  result has `remoteLogoutConfirmed: false`, and `warnings` says to remove the node in the admin
+  console. `remoteLogoutConfirmed: true` means the control plane acknowledged the logout. `stop`
+  unlinks the socket before replying, and the process exits only after the reply is written, so a
+  CLI that reads the reply knows a reconnect never reaches the exiting daemon.
 - `dial` resolves `target.stableNodeID` in the current netmap (waiting up to 5 s for it to appear),
   dials that peer's Tailscale address (IPv4 preferred), and keeps the connection only if WhoIs on
   its remote address reports the same stable ID. It never resolves a DNS name. On success the
-  response line is followed by raw bytes in both directions; half-close is propagated. The CLI must
-  not send stream bytes before reading the response.
+  response line is followed by raw bytes in both directions; half-close is propagated (neither
+  side's half-close is time-bounded, since both ends are the owner's). The CLI may send stream
+  bytes right after the `dial` frame, without waiting for the response: they are held in the
+  daemon and forwarded only after the peer is verified, and discarded unsent if the dial fails.
 
 ## `cove-tsnet serve` (server node, D10)
 
@@ -209,8 +248,13 @@ cove-tsnet serve --home <cove home>/tsnet --forward-socket <dir>/<name>.sock [--
 
 A child of the Cove server. Node state lives in `<home>/state/` (0700). The forward socket's
 directory must already exist, be owned by the user and have no group/other permissions, or serve
-exits with code 1. Serve exits 0 when stdin reaches EOF (the server went away) or on SIGINT/SIGTERM,
-closing listeners and the node and keeping the state.
+exits with code 1. Serve exits 0 when stdin reaches a clean EOF at a frame boundary (the server went
+away) or on SIGINT/SIGTERM. It exits 1, with the reason on stderr, when the control channel ends
+abnormally: an oversized frame (answered with `BAD_REQUEST` first), a truncated final frame, or a
+read error. On any exit it cancels in-flight work (a pending login returns `SHUTTING_DOWN`),
+refuses queued requests with `SHUTTING_DOWN`, waits boundedly for replies, then closes listeners
+and the node, keeping the state. A complete line that is not a valid request is answered with
+`BAD_REQUEST` and the channel continues.
 
 ### Control channel
 
@@ -257,6 +301,11 @@ half-close:
 `peer` is the WhoIs result for `remoteAddr`, or `null` with `whoIsError` set. It is for display and
 audit only and never authorizes anything: the connection still needs a Cove device token. At most
 512 forwarded connections are open at once; more are closed on accept.
+
+The tailnet peer is not trusted to end the connection. When the Cove server closes or half-closes
+its side, the peer's side is half-closed and the peer has 10 s to finish sending; then both are
+closed. A connection the server rejects therefore frees its slot within that grace even if the
+peer never sends or closes. A peer's half-close is propagated to the server without a bound.
 
 ## Test pause points
 
