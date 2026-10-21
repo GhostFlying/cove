@@ -46,7 +46,8 @@ export async function createAuthFixture() {
 
     // Runs `cove --home H ...args` with `input` on stdin (never in argv), to completion, from
     // `cwd` when given.
-    // `sample`, when given, runs while the command is alive with its PID.
+    // `sample`, when given, runs with the command's PID once the input was written; the caller
+    // keeps the command alive meanwhile (e.g. a proxy holding its request).
     coveInput(args, input, { home, sample, cwd } = {}) {
       const child = spawn(process.execPath, [cli, "--home", home, ...args], {
         env: base.env,
@@ -63,8 +64,8 @@ export async function createAuthFixture() {
       const timeout = setTimeout(() => child.kill("SIGKILL"), 30_000);
       return (async () => {
         try {
-          const sampled = sample ? await sample(child.pid) : undefined;
           child.stdin.end(input);
+          const sampled = sample ? await sample(child.pid) : undefined;
           const result = await done;
           return { ...result, sampled };
         } finally {
