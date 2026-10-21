@@ -313,6 +313,25 @@ WantedBy=default.target
 `;
 }
 
+const JOURNAL_LINES = 50;
+
+// Whether systemd stopped restarting a failed unit because it hit the start limit (D2), from the
+// unit's Result and, when needed, its journal (`journal` is read only then). When automatic
+// restarts hit the limit, systemd (255 on Ubuntu 24.04) logs "Start request repeated too quickly"
+// but keeps the last failure's Result (`signal`, `exit-code`); only a refused manual start
+// records `start-limit-hit`. Neither the Result nor NRestarts tells that case from a unit that
+// failed in a stop someone asked for after earlier crash restarts, so the journal decides: the
+// start limit message must come after the unit's last start or stop. A journal that cannot be
+// read claims no cause.
+export function systemdGaveUp(result: string | undefined, journal: () => string | null): boolean {
+  if (result === "start-limit-hit") return true;
+  const lines = journal()?.split("\n");
+  if (!lines) return false;
+  const last = (pattern: RegExp) => lines.findLastIndex((line) => pattern.test(line));
+  const limit = last(/Start request repeated too quickly/);
+  return limit >= 0 && limit > last(/^(Starting|Stopping) /);
+}
+
 class SystemdUser implements ServiceBackend {
   readonly manager = "systemd-user" as const;
   readonly unit: string;
@@ -333,7 +352,7 @@ class SystemdUser implements ServiceBackend {
       "--user",
       "show",
       "-p",
-      "LoadState,ActiveState,SubState,MainPID,Result,NRestarts",
+      "LoadState,ActiveState,SubState,MainPID,Result",
       this.unit,
     ]);
     const values: Record<string, string> = {};
@@ -386,14 +405,19 @@ class SystemdUser implements ServiceBackend {
       running: values.ActiveState === "active" && values.SubState === "running",
       pid: Number.isSafeInteger(pid) && pid > 0 ? pid : null,
       linger: lingerEnabled(),
-      // When automatic restarts hit the start limit, systemd (255 on Ubuntu 24.04) logs "Start
-      // request repeated too quickly" but keeps the last failure's Result (`signal`,
-      // `exit-code`); only a refused manual start records `start-limit-hit`. With
-      // Restart=on-failure, a failed unit that systemd had restarted before is one it gave up on.
       stoppedAfterCrashes:
-        values.ActiveState === "failed" &&
-        (values.Result === "start-limit-hit" || Number(values.NRestarts) > 0),
+        values.ActiveState === "failed" && systemdGaveUp(values.Result, () => this.journal()),
     };
+  }
+
+  // The unit's latest journal messages (systemd's own lines among them), or null when the journal
+  // cannot be read.
+  private journal(): string | null {
+    const result = run("journalctl", [
+      ...["--user", "-u", this.unit, "-n", String(JOURNAL_LINES)],
+      ...["-o", "cat", "--no-pager"],
+    ]);
+    return result.status === 0 ? result.stdout : null;
   }
 
   async unregister(): Promise<void> {
