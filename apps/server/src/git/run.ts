@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { performance } from "node:perf_hooks";
 
 // One bounded Git subprocess. Every Git command of the server goes through here so that none of
@@ -96,7 +96,10 @@ export async function findGit(
 ): Promise<GitExecutable> {
   for (const entry of (env.PATH ?? "").split(":")) {
     if (!isAbsolute(entry)) continue;
-    const path = join(entry, "git");
+    // Appended as the shell's lookup does, not join()ed: join resolves `..` lexically, while the
+    // kernel resolves it after following symlinks, so for `/var/../usr/bin` with /var a symlink
+    // join would name another file than the one the shell runs.
+    const path = `${entry}/git`;
     let identity: string;
     try {
       const found = await stat(path);

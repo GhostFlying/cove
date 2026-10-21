@@ -472,6 +472,24 @@ describe("repository queries", () => {
     await expect(readFile(calls, "utf8")).rejects.toThrow("ENOENT");
   });
 
+  // #144 item 2: the kernel resolves `..` after following a symlink; a lexical join would not.
+  // With `<root>/link/..` on PATH and link -> real/sub, the shell runs real/git, not <root>/git.
+  it("finds the git the shell finds through a PATH entry with a symlink followed by ..", async () => {
+    const root = await temporary();
+    await mkdir(join(root, "real", "sub"), { recursive: true });
+    await symlink(join(root, "real", "sub"), join(root, "link"));
+    await writeFile(join(root, "git"), `#!/bin/sh\n${reportsVersion("2.44.2")}exit 1\n`);
+    await writeFile(join(root, "real", "git"), `#!/bin/sh\n${reportsVersion("2.45.0")}exit 0\n`);
+    await chmod(join(root, "git"), 0o755);
+    await chmod(join(root, "real", "git"), 0o755);
+    process.env.PATH = `${root}/link/..:${savedEnv.PATH}`;
+    expect(await findGit()).toEqual({
+      kind: "supported",
+      path: `${root}/link/../git`,
+      version: "2.45.0",
+    });
+  });
+
   it("ignores an inherited GIT_DIR and resolves a linked worktree to its clone", async () => {
     const root = await temporary();
     const main = await clone(root, "main");
