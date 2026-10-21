@@ -213,11 +213,15 @@ async function ask(question: string): Promise<boolean> {
 // without a terminal to ask on, it prints the impact and fails with status 2, having done nothing.
 // A server whose state is unknown may be running: the confirmation is asked all the same, saying
 // that the impact cannot be listed; --yes goes ahead, which is how an operator stops a server
-// that no longer answers. Only a server proven stopped needs no confirmation.
+// that no longer answers. Only a server proven stopped needs no confirmation. `done` says what the
+// command already did when it is refused (upgrade asks again after installing), and `context`
+// is added to the printed refusal.
 async function confirmStop(
   args: Arguments,
   local: LocalServer,
   action: string,
+  done = "nothing was done",
+  context: Record<string, unknown> = {},
 ): Promise<ServerImpactResult | null> {
   if (local.state === "stopped") return null;
   const interactive = process.stdin.isTTY === true && process.stderr.isTTY === true;
@@ -228,34 +232,39 @@ async function confirmStop(
       return null;
     }
     if (!interactive) {
-      print({ action, confirmed: false, state: "unknown", reason: local.reason, impact: null });
+      print({
+        action,
+        ...context,
+        confirmed: false,
+        state: "unknown",
+        reason: local.reason,
+        impact: null,
+      });
       throw new StatusError(
         `${message}. If it is running, every live run ends and they cannot be listed. ` +
-          "Confirm with --yes; nothing was done",
+          `Confirm with --yes; ${done}`,
         2,
       );
     }
     process.stderr.write(
       `${message}.\nIf it is running, every live run ends; they cannot be listed.\n`,
     );
-    if (!(await ask(`${action}? [y/N] `)))
-      throw new StatusError("not confirmed; nothing was done", 1);
+    if (!(await ask(`${action}? [y/N] `))) throw new StatusError(`not confirmed; ${done}`, 1);
     return null;
   }
   const { session } = local;
   const impact = unwrap("server.impact", await session.client.call("server.impact", {}));
   if (args.flags.has("--yes")) return impact;
   if (!interactive) {
-    print({ action, confirmed: false, state: "running", impact });
+    print({ action, ...context, confirmed: false, state: "running", impact });
     throw new StatusError(
       `${action} stops the running server: ${impact.liveRuns.length} live run(s) end. ` +
-        "Confirm with --yes; nothing was done",
+        `Confirm with --yes; ${done}`,
       2,
     );
   }
   process.stderr.write(describeImpact(impact));
-  if (!(await ask(`${action}? [y/N] `)))
-    throw new StatusError("not confirmed; nothing was done", 1);
+  if (!(await ask(`${action}? [y/N] `))) throw new StatusError(`not confirmed; ${done}`, 1);
   return impact;
 }
 
@@ -551,7 +560,8 @@ export async function serverRestart(args: Arguments): Promise<number> {
   });
 }
 
-// `cove server upgrade [--yes] [--closure DIR]`: confirm, install and activate, restart.
+// `cove server upgrade [--yes] [--closure DIR]`: confirm, install and activate, confirm again if
+// the server changed meanwhile, restart.
 export async function serverUpgrade(args: Arguments): Promise<number> {
   takeFlags(args, ["--yes", "--closure"]);
   noWords(args, 2, "server upgrade takes no arguments");
@@ -572,6 +582,33 @@ export async function serverUpgrade(args: Arguments): Promise<number> {
       source === undefined ? undefined : resolve(source),
     );
     await activate(layout, installed.build);
+    // Installing can take minutes, and the confirmation above was for the server as it was then:
+    // one may have started meanwhile (a service manager's crash restart, a foreground start) or
+    // stopped answering. The state is read again right before the restart, and a change is
+    // confirmed again; the restart is the step that ends runs, so a refusal here leaves the new
+    // build installed and active, to take effect at the next restart.
+    const notRestarted = `build ${installed.build} was installed and activated, but the server was not restarted`;
+    const now = await localServer(layout);
+    try {
+      const instance =
+        now.state === "running"
+          ? unwrap("server.status", await now.session.client.call("server.status", {}))
+              .relayInstanceId
+          : null;
+      // Unchanged: the same state, and for a running server the same instance. With --yes the
+      // impact is read again all the same, so that the output lists what the restart ends.
+      const unchanged = now.state === local.state && instance === (before?.relayInstanceId ?? null);
+      if (!unchanged || args.flags.has("--yes"))
+        impact = await confirmStop(args, now, "server upgrade", notRestarted, {
+          build: installed.build,
+        });
+      before = await restartable(now);
+    } catch (error) {
+      if (error instanceof StatusError) throw error;
+      throw new Error(`${notRestarted}: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      await release(now);
+    }
     print({ build: installed.build, ...(await restartService(layout, before)), impact });
     return 0;
   });
