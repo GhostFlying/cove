@@ -207,9 +207,11 @@ test("a run keeps running while no client is connected and stops on tab stop", a
 
   // Every CLI command has exited: no client is connected to the server now.
   await waitFor("the first beats", async () => (await count().catch(() => 0)) > 0);
+  // Progress, not a rate: the run must write several more beats after the last client left. How
+  // many land in a fixed window depends on machine load (#146), so wait for them within a bound;
+  // a run that stopped without a client writes none and the wait times out.
   const before = await count();
-  await new Promise((done) => setTimeout(done, 1_000));
-  expect(await count()).toBeGreaterThan(before + 5);
+  await waitFor("the run's progress with no client", async () => (await count()) > before + 5);
   const live = await fixture.coveJson(["tab", "get", tabId], { home });
   expect(live.latestRun).toMatchObject({ lifecycle: "running", verification: "live" });
 
