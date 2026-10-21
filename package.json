@@ -18,7 +18,9 @@
     "format:check": "prettier --check .",
     "test": "node scripts/ci-test-gate.mjs",
     "test:watch": "vitest",
-    "check": "pnpm native:prepare && pnpm format:check && pnpm lint && pnpm build && pnpm test"
+    "check": "pnpm native:prepare && pnpm format:check && pnpm lint && pnpm build && pnpm test",
+    "tsnet:build": "node scripts/tsnet-build.mjs build",
+    "tsnet:test": "node scripts/tsnet-build.mjs test"
   },
   "devDependencies": {
     "@types/node": "26.6.2",
