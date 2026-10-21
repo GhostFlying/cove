@@ -19,7 +19,7 @@ import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installClosure } from "../../dist/install/installer.js";
 import { installLayout } from "../../dist/install/layout.js";
-import { systemdUnit } from "../../dist/install/service.js";
+import { systemdGaveUp, systemdUnit } from "../../dist/install/service.js";
 
 // m2 T3 safety of the installation commands, against the compiled CLI and modules, without a
 // service manager or a runtime closure (S1 and S2 cover those):
@@ -31,6 +31,8 @@ import { systemdUnit } from "../../dist/install/service.js";
 // - an upgrade reads the server's state again after installing, right before its restart: a
 //   server that started meanwhile is asked about;
 // - the systemd unit escapes `$` and `%` in paths;
+// - a failed systemd unit is reported as stopped after crashes only when systemd hit its start
+//   limit, not when a requested stop failed after earlier crash restarts;
 // - an installed build is reused only when its contents are the closure's.
 
 let fixture;
@@ -291,6 +293,52 @@ test("the systemd unit keeps `$` and `%` in paths literal", () => {
   const environment = unit.split("\n").find((line) => line.startsWith("Environment="));
   expect(environment).toContain('"COVE_HOME=/home/user/data $HOME %%h"');
   expect(unit).toContain("Description=Cove server (/home/user/data $HOME %%h)");
+});
+
+test("a failed systemd unit is stopped after crashes only when systemd hit its start limit", () => {
+  const unit = "cove-server-0123456789abcdef.service";
+  const started = [`Starting ${unit} - Cove server (/home/user/data)...`, `Started ${unit}.`];
+  const crashed = (count) => [
+    `${unit}: Main process exited, code=killed, status=9/KILL`,
+    `${unit}: Failed with result 'signal'.`,
+    `${unit}: Scheduled restart job, restart counter is at ${count}.`,
+  ];
+  const limited = [
+    ...crashed(5),
+    `${unit}: Start request repeated too quickly.`,
+    `${unit}: Failed with result 'signal'.`,
+    `Failed to start ${unit} - Cove server (/home/user/data).`,
+  ];
+  // A stop someone asked for that failed (here the server exited 1 while stopping).
+  const stopFailed = [
+    `Stopping ${unit} - Cove server (/home/user/data)...`,
+    `${unit}: Main process exited, code=exited, status=1/FAILURE`,
+    `${unit}: Failed with result 'exit-code'.`,
+    `Stopped ${unit} - Cove server (/home/user/data).`,
+  ];
+  const journal =
+    (...parts) =>
+    () =>
+      parts.flat().join("\n");
+  const unread = () => {
+    throw new Error("the journal is not needed");
+  };
+  expect({
+    limit: systemdGaveUp("signal", journal(started, crashed(1), started, limited)),
+    limitResult: systemdGaveUp("start-limit-hit", unread),
+    stopAfterCrashes: systemdGaveUp(
+      "exit-code",
+      journal(started, crashed(1), started, crashed(2), started, stopFailed),
+    ),
+    stopAfterPersonsStart: systemdGaveUp("exit-code", journal(limited, started, stopFailed)),
+    noJournal: systemdGaveUp("signal", () => null),
+  }).toEqual({
+    limit: true,
+    limitResult: true,
+    stopAfterCrashes: false,
+    stopAfterPersonsStart: false,
+    noJournal: false,
+  });
 });
 
 // A sealed closure in miniature: one file and a stamp over it. Installing copies and verifies it;
