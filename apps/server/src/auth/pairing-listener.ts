@@ -9,6 +9,7 @@ import {
   type PairingRedeemResult,
 } from "@cove/protocol/auth";
 import { bootstrapIdentity, isLoopbackLiteralHost } from "@cove/protocol/bootstrap";
+import { actualHeaders } from "../transport/local-admission.js";
 
 // The pairing listener (m2 D6): a separate loopback port that exists only while an invitation is
 // open. It is reachable before authentication, so it is small and bounded on purpose:
@@ -135,10 +136,14 @@ export class PairingListener {
       res.end(text);
     };
     const path = req.url;
+    // Node keeps the first of several Host headers; the raw headers decide, as on the business
+    // port (actualHeaders): a repeated Host, in any case and even with equal values, is refused.
+    const host = actualHeaders(req.headers, req.rawHeaders).host;
     if (
       req.method !== "POST" ||
       (path !== PAIRING_PATHS.identity && path !== PAIRING_PATHS.redeem) ||
-      !isLoopbackLiteralHost(req.headers.host ?? "") ||
+      typeof host !== "string" ||
+      !isLoopbackLiteralHost(host) ||
       req.headers.origin !== undefined ||
       req.headers["sec-fetch-mode"] !== undefined ||
       req.headers["sec-fetch-site"] !== undefined

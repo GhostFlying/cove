@@ -1,13 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { connect } from "node:net";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { bootstrapRequest, createAuthFixture, portOf } from "./auth-fixtures.mjs";
+import { bootstrapRequest, createAuthFixture, payloadOf, portOf } from "./auth-fixtures.mjs";
 
 // Request shapes a Cove client never sends, written byte for byte on a raw socket against the
 // compiled server (relay-protocol §11.1):
 // - an absolute-form request target (`POST http://evil.example/bootstrap`), which the router would
 //   match by its path alone, is malformed (400) before admission on the business port, for
-//   /bootstrap, /rpc, OPTIONS and the terminal WebSocket upgrade, whatever its authority.
+//   /bootstrap, /rpc, OPTIONS and the terminal WebSocket upgrade, whatever its authority;
+// - the pairing listener refuses a repeated Host header (mixed case, equal or conflicting values)
+//   on /bootstrap and /pair, as the business port does.
 // Each case has an origin-form control on the same connection shape that is admitted.
 
 let fixture;
@@ -117,4 +119,46 @@ test("an absolute-form request target is malformed before admission on the busin
     expect(answer.raw).not.toMatch(/access-control-allow-methods/i);
   }
   expect((await raw(port, ["OPTIONS * HTTP/1.1", host, ...preflight])).status).not.toBe(200);
+}, 60_000);
+
+test("the pairing listener refuses a repeated Host header on /bootstrap and /pair", async () => {
+  const serverHome = fixture.home("server");
+  const server = await fixture.startAuthServer(serverHome);
+  const { invitation } = await fixture.invite(serverHome);
+  const payload = payloadOf(invitation);
+  const port = payload.pairingPort;
+  const own = `127.0.0.1:${port}`;
+  const identity = JSON.stringify(bootstrapRequest(server));
+  // A redemption that can never succeed (wrong invite ID), so the invitation stays open.
+  const redeem = JSON.stringify({
+    type: "cove-pairing-redeem",
+    inviteId: "no-such-invite",
+    secret: "A".repeat(43),
+    deviceName: "probe",
+  });
+  for (const [path, body] of [
+    ["/bootstrap", identity],
+    ["/pair", redeem],
+  ]) {
+    // The control: one Host is admitted (the identity answers; the redemption is refused as an
+    // unknown invitation, not for its headers).
+    const control = await raw(port, [`POST ${path} HTTP/1.1`, `Host: ${own}`], body);
+    expect({ path, status: control.status }).toEqual({
+      path,
+      status: path === "/bootstrap" ? 200 : 403,
+    });
+    expect(control.raw.includes(server.record.serverId)).toBe(path === "/bootstrap");
+    for (const hosts of [
+      [`Host: ${own}`, `Host: ${own}`],
+      [`Host: ${own}`, `hOsT: ${own}`],
+      [`Host: ${own}`, "Host: 127.0.0.1:50123"],
+      [`host: ${own}`, "HOST: evil.example"],
+    ]) {
+      const answer = await raw(port, [`POST ${path} HTTP/1.1`, ...hosts], body);
+      expect({ path, hosts, status: answer.status }).toEqual({ path, hosts, status: 403 });
+      expect(answer.raw).not.toContain(server.record.serverId);
+    }
+  }
+  const listed = await fixture.coveJson(["auth", "invite", "list"], { home: serverHome });
+  expect(listed.invitations.map((entry) => entry.state)).toEqual(["open"]);
 }, 60_000);
