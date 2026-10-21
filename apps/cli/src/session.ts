@@ -91,7 +91,7 @@ export interface Session {
   readonly client: Client;
   // A remote session: the paired server's record and the token in use, which `auth device
   // rotate` replaces (the client asks for the credential before every request).
-  readonly remote?: { server: ServerRecord; useToken(token: string): void };
+  readonly remote?: { server: ServerRecord; token(): string; useToken(token: string): void };
   // Releases what the session's entry holds (an SSH tunnel, T2) after the client is disposed.
   close?(): Promise<void>;
 }
@@ -150,7 +150,7 @@ export async function openRemoteSession(
     return {
       record: target,
       client,
-      remote: { server, useToken: (next) => void (token = next) },
+      remote: { server, token: () => token, useToken: (next) => void (token = next) },
       close: () => entry.close(),
     };
   } catch (error) {

@@ -553,8 +553,17 @@ export function registerHttpRpc(
               const socket = request.raw.socket;
               const forget = core.auth?.connections.register(credential.deviceId, {
                 owner: principal,
-                answered: new Promise<void>((done) => reply.raw.once("close", () => done())),
+                answered: new Promise<void>((done) => {
+                  reply.raw.once("finish", () => done());
+                  reply.raw.once("close", () => done());
+                }),
                 close: () => socket.destroy(),
+                // After an answer was handed to the OS: a graceful end lets it reach the client,
+                // and the destroy bounds a peer that never closes its side.
+                end: () => {
+                  socket.end();
+                  setTimeout(() => socket.destroy(), 1_000).unref();
+                },
                 closed: new Promise<void>((done) => {
                   if (socket.destroyed) done();
                   else socket.once("close", () => done());

@@ -12,7 +12,7 @@ import {
   REQUIRED_CAPABILITIES,
 } from "@cove/protocol/bootstrap";
 import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createNodeHttpPort } from "../../dist/node-ports.js";
 import { cliBuildVersion } from "../../dist/session.js";
 import { createM1Fixture, cli } from "../m1/fixtures.mjs";
@@ -190,6 +190,50 @@ export async function createAuthFixture() {
       };
       proxies.push(proxy);
       return proxy;
+    },
+
+    // A terminal WebSocket of `server`, authenticated with `secret`, that never closes: written on
+    // a raw TCP socket, it ignores the server's close frame and keeps its side open, as a peer
+    // that stopped reading would. Resolves once the bootstrap result arrived; cleanup destroys it.
+    async stubbornTerminal(server, secret) {
+      const port = portOf(server);
+      const socket = connect({ host: "127.0.0.1", port });
+      sockets.push({ close: () => socket.destroy() });
+      let received = "";
+      socket.on("data", (chunk) => (received += chunk.toString("latin1")));
+      socket.on("error", () => undefined);
+      await new Promise((done, fail) => {
+        socket.once("connect", done);
+        socket.once("error", fail);
+      });
+      socket.write(
+        [
+          "GET /terminal HTTP/1.1",
+          `Host: 127.0.0.1:${port}`,
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`,
+          "Sec-WebSocket-Version: 13",
+          "",
+          "",
+        ].join("\r\n"),
+      );
+      await waitFor("the WebSocket upgrade", () => received.startsWith("HTTP/1.1 101"), 5_000);
+      // One masked text frame (RFC 6455 §5.2) with the first message.
+      const payload = Buffer.from(JSON.stringify({ ...bootstrapRequest(server), secret }));
+      const mask = randomBytes(4);
+      const length =
+        payload.length < 126
+          ? Buffer.from([0x80 | payload.length])
+          : Buffer.from([0x80 | 126, payload.length >> 8, payload.length & 0xff]);
+      const masked = Buffer.from(payload.map((byte, index) => byte ^ mask[index % 4]));
+      socket.write(Buffer.concat([Buffer.from([0x81]), length, mask, masked]));
+      await waitFor(
+        "the bootstrap result",
+        () => received.includes('"cove-bootstrap-result"'),
+        5_000,
+      );
+      return { closed: () => socket.destroyed || socket.readyState === "closed" };
     },
 
     async cleanup() {

@@ -221,21 +221,76 @@ test("revoking a device with control and an executing operation closes it, keeps
   clientB.client.dispose();
 }, 120_000);
 
-test("a device revoking itself gets its answer and is refused afterwards", async () => {
+// A device revoking itself from the CLI while another client of the same device holds control of
+// a live run: the server closes that client and the CLI's own terminal channel before it answers,
+// and the CLI still gets the answer (sent on a request of its own), which reports no unclosed
+// connection; control is released without a resize, and the device is refused afterwards.
+test("a device revoking itself while holding control gets the answer after its connections closed", async () => {
   const serverHome = fixture.home("server");
-  await fixture.startAuthServer(serverHome);
+  const server = await fixture.startAuthServer(serverHome);
+  const run = await fixture.coveJson(
+    [
+      ...["terminal", "create", "--cwd", fixture.root, "--cols", "80", "--rows", "24"],
+      ...["--", "/bin/sh", "-c", 'printf "loop-ready\\n"; while read line; do echo "$line"; done'],
+    ],
+    { home: serverHome },
+  );
   const home = fixture.home("device");
   const device = await fixture.pairOk(home, "box", (await fixture.invite(serverHome)).invitation);
+  const token = (await fixture.credential(home, device.serverId)).token;
+  const holding = await fixture.deviceClient(server, token);
+  const view = await attached(holding.client, run, "self-view");
+  expect(view.controller.setInputTarget(true, true)).toMatchObject({ ok: true });
+  expect(await view.controller.requestFocus({ cols: 80, rows: 24 })).toMatchObject({ ok: true });
+  const owner = await fixture.deviceClient(server, null);
+  const watcher = await attached(owner.client, run, "owner-view");
+  const holder = () => watcher.controller.snapshot().appliedAuthority?.holder ?? null;
+  await waitFor(
+    "the owner to see the device holding control",
+    () => holder()?.viewId === "self-view",
+  );
+
   const revoked = await fixture.cove(
     ["--server", "box", "auth", "device", "revoke", device.deviceId],
-    {
-      home,
-    },
+    { home },
   );
   expect(revoked.stderr).toBe("");
   expect(revoked.code).toBe(0);
-  expect(JSON.parse(revoked.stdout)).toMatchObject({ state: "succeeded" });
+  const record = JSON.parse(revoked.stdout);
+  expect(record).toMatchObject({ state: "succeeded", result: { deviceId: device.deviceId } });
+  expect(record.result).not.toHaveProperty("unclosedConnections");
+  // The holding client was closed before the answer, and control released without a resize.
+  expect(holding.closes).toContain(1008);
+  await waitFor("the owner to see control released", () => holder() === null, 5_000);
+  expect(watcher.controller.snapshot().appliedGeometry?.geometry).toEqual({ cols: 80, rows: 24 });
+  expect(owner.closes).toEqual([]);
+
   const after = await fixture.cove(["--server", "box", "status"], { home });
   expect(after.code).not.toBe(0);
   expect(after.stderr).toContain("DEVICE_REVOKED");
-});
+  holding.client.dispose();
+  owner.client.dispose();
+}, 60_000);
+
+// The same with a connection of the device that does not close: the answer counts it, and the
+// CLI reports the revocation as done but not confirmed (exit 1).
+test("a device revoking itself is told about a connection that did not close", async () => {
+  const serverHome = fixture.home("server");
+  const server = await fixture.startAuthServer(serverHome);
+  const home = fixture.home("device");
+  const device = await fixture.pairOk(home, "box", (await fixture.invite(serverHome)).invitation);
+  const token = (await fixture.credential(home, device.serverId)).token;
+  const stubborn = await fixture.stubbornTerminal(server, token);
+
+  const revoked = await fixture.cove(
+    ["--server", "box", "auth", "device", "revoke", device.deviceId],
+    { home },
+  );
+  expect(revoked.code).toBe(1);
+  const record = JSON.parse(revoked.stdout);
+  expect(record).toMatchObject({ state: "succeeded", result: { unclosedConnections: 1 } });
+  expect(revoked.stderr).toContain("1 of its connections had not closed");
+  expect(stubborn.closed()).toBe(false);
+  const after = await fixture.cove(["--server", "box", "status"], { home });
+  expect(after.stderr).toContain("DEVICE_REVOKED");
+}, 60_000);
