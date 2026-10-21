@@ -14,6 +14,7 @@ import { Store } from "../../dist/store/database.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { recordInstanceStart } from "../../dist/store/identity.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
+import { StoreUnavailableError } from "../../dist/store/store-errors.js";
 import { RunLog } from "../../dist/store/runs.js";
 import { LocalRuntime } from "../../dist/terminal/local-runtime.js";
 import { RunRegistry } from "../../dist/terminal/run-registry.js";
@@ -742,6 +743,34 @@ describe("refused spawns", () => {
       state: "succeeded",
       run: { runId: "run-2" },
     });
+  });
+
+  // #127 item 5: the registry entry is gone before the cleanup write is admitted, so a full store
+  // queue used to lose the cleanup for good and leave the tab blocked until a restart.
+  it("repeats a late refusal's cleanup the store queue refused until it is admitted", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const notStarted = env.runLog.notStarted.bind(env.runLog);
+    const calls = [];
+    env.runLog.notStarted = (run) => {
+      calls.push(run.runId);
+      return calls.length <= 3
+        ? Promise.reject(new StoreUnavailableError("busy", "not-sent"))
+        : notStarted(run);
+    };
+    const { outcome } = await env.refuseLate(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.tabs.create("p", create("c1")),
+    );
+    expect(outcome.operation).toMatchObject({ error: { kind: "RESULT_UNKNOWN" } });
+    for (let i = 0; i < 1_000 && (await env.rows("SELECT 1 FROM runs")).length; i++)
+      await new Promise((done) => setTimeout(done, 5));
+    expect(await env.rows("SELECT run_id FROM runs")).toEqual([]);
+    expect(calls).toEqual(["run-1", "run-1", "run-1", "run-1"]);
+    const reopened = await env.launched(
+      env.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
+    );
+    expect(reopened.outcome.operation).toMatchObject({ state: "succeeded" });
   });
 
   it("keeps a run whose spawn result is unknown, since the worker may have started it", async () => {
