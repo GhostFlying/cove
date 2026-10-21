@@ -37,7 +37,8 @@ import { readTsnetConfig } from "./tsnet-config.js";
 // hello answer, which is how a daemon that just decided to exit idle answers) start a detached
 // daemon unless one this command started is still running, back off briefly, and try again. A
 // started daemon that exits with 75 lost the lock to another one and only means "someone else
-// holds it right now"; one that exits 1 or 2 failed for a reason it wrote to its log (bad
+// holds it right now"; one that exits 0 (stopped by a concurrent command, or idle before this one
+// connected) or is killed by a signal is started again as well; one that exits 1 or 2 failed for a reason it wrote to its log (bad
 // permissions, a socket path that is too long), which retrying cannot fix, so that ends the loop at
 // once. When the deadline passes the command fails with ENTRY_UNAVAILABLE and the daemon's log
 // tail, and nothing was requested of any daemon. This loop is the only retry: it runs before any
@@ -523,8 +524,11 @@ export async function openDaemon(home: string, options: OpenOptions = {}): Promi
       );
     }
     // No daemon answered. Start one unless the one this command started is still running (it may
-    // be about to listen); a started daemon that failed outright ends the loop.
-    if (started?.exit && started.exit.code !== null && started.exit.code !== 75)
+    // be about to listen). A started daemon that exited 0 ended normally before this command
+    // reached it (a concurrent `remote tsnet stop`, or a short idle timeout), 75 lost the lock and
+    // a signal killed it: each is started again within the deadline. Any other status is a failure
+    // the daemon wrote to its log (1 error, 2 usage), which a retry cannot fix.
+    if (started?.exit && ![null, 0, 75].includes(started.exit.code))
       throw new DaemonUnavailable(
         `cove-tsnet dial exited with status ${started.exit.code}` + diagnostics(home, logFrom),
       );

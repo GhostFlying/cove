@@ -167,6 +167,20 @@ test("a hello that never comes in time ends the command at the deadline", async 
   expect(await events()).toEqual([]);
 }, 60_000);
 
+test("a daemon this command started that ends normally before it is ready is started again", async () => {
+  // The first daemon the CLI starts exits 0 before it listens (stopped, or idle, before the
+  // command reached it); that is not a failure, and the next one serves the command.
+  const exitedOnce = join(root, "exited-once");
+  await configure({ build: "b1", protocol: 1, exitOnce: exitedOnce });
+  const result = await tsnet("status");
+  expect(result.code).toBe(0);
+  expect(await readFile(exitedOnce, "utf8")).toBe("exited\n");
+  const { daemon } = JSON.parse(result.stdout);
+  expect(daemon.build).toBe("b1");
+  expect(alive(daemon.pid)).toBe(true);
+  expect((await events()).map((event) => event.op)).toEqual(["status"]);
+}, 60_000);
+
 test("identity holds after a login are reported, not success", async () => {
   await configure({
     build: "b1",
