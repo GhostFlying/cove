@@ -487,7 +487,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/worker-execution.test.mjs",
-    minimumTests: 35,
+    minimumTests: 36,
   },
   {
     project: "terminal-worker",

@@ -1140,7 +1140,7 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     ["native-adapter-input", 14],
     ["native-adapter-real", 6],
     ["run-session", 36],
-    ["worker-execution", 35],
+    ["worker-execution", 36],
     ["run-session-real", 1],
     ["pipe-endpoint", 34],
     ["main-shutdown", 1],
@@ -1547,7 +1547,7 @@ test("W2 retained and current suites reject missing, short, duplicate and unknow
   for (const [project, file, minimumTests] of [
     ["terminal-engine", "packages/terminal-engine/tests/engine-preview.test.mjs", 11],
     ["terminal-worker", "packages/terminal-worker/tests/pipe-endpoint.test.mjs", 34],
-    ["terminal-worker", "packages/terminal-worker/tests/worker-execution.test.mjs", 35],
+    ["terminal-worker", "packages/terminal-worker/tests/worker-execution.test.mjs", 36],
     ["terminal-worker", "packages/terminal-worker/tests/worker-flow.test.mjs", 16],
     ["terminal-worker", "packages/terminal-worker/tests/worker-preview.test.mjs", 5],
     ["terminal-worker", "packages/terminal-worker/tests/worker-recovery-clock.test.mjs", 3],
