@@ -32,6 +32,10 @@ export const operations = {
     db.prepare(sql).run();
     throw Object.assign(new Error("injected failure"), { code: "SQLITE_IOERR_WRITE" });
   },
+  // Fails with the SQLite code `code`, as SQLite would for a busy or read-only database.
+  "test.failWith": (_db, { code }) => {
+    throw Object.assign(new Error("injected failure"), { code });
+  },
   "test.failPlain": () => {
     throw Object.assign(new Error("plain failure"), { code: "ENOTSQLITE" });
   },

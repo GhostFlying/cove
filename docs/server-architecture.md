@@ -528,6 +528,13 @@ unknown（RPC 返回 `RESULT_UNKNOWN`，不自动重放），排队调用为 not
 写出 `{"event":"store-failed"}`、关闭并以退出码 1 结束。worker 线程拆除时回滚其未提交事务，因此重启后
 数据库处于最后一次提交的状态；调用方用同一操作 ID 查询或重发来确认结果。
 
+**持久错误不重试。** 后台调用方（被拒 spawn 的 run 清理、操作转 `requires_attention`）只重试可能自行消失的
+拒绝：队列满（busy、not-sent）与 SQLite 争用（`SQLITE_BUSY`、`SQLITE_LOCKED` 及其扩展码）。其余
+`StoreOperationError`（如 `SQLITE_READONLY`、`SQLITE_CORRUPT`、`SQLITE_IOERR_*`、`SQLITE_FULL`）每次都会
+同样失败，因此不重试；它仍已回滚，存储保持打开。server 在 stderr 写出
+`{"event":"store-operation-failed","operation":"<操作名>","code":"<SQLite 错误码或 null>"}`（不含参数与错误
+文本），未完成的记录留给下次启动处理（仍为 starting 的 run 标为 interrupted，操作由启动核实）。
+
 **有序关闭。** 停止接收新调用，等待全部已排队与已发送的调用应答，发送 `close` 由 worker 关闭数据库，
 等待 worker 退出，最后释放实例锁。worker 未确认关闭时，客户端终止它，并在释放锁后报告关闭失败。
 启动恢复、进程台账、run 记录与停止记录相对监听开始与关闭的顺序不变：它们都 await 存储调用，

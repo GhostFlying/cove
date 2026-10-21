@@ -166,6 +166,11 @@ export function createLocalApplication(
           // Logging is best effort; it never affects the worker or its terminals.
         }
       });
+  // A persistent store error (#144 item 4) is logged with the operation and SQLite code only:
+  // retries stop at it, and background work such as a run cleanup has no one else to tell.
+  const storeErrorLog = persistence?.store.onOperationError((operation, code) =>
+    log(JSON.stringify({ event: "store-operation-failed", operation, code })),
+  );
   const admission = new LocalAdmission(
     options,
     identity.secret,
@@ -217,6 +222,7 @@ export function createLocalApplication(
     },
     disposeCore: () => {
       healthLog?.dispose();
+      storeErrorLog?.();
       clock.stop();
       terminal?.close();
       arbiter.dispose();

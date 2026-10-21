@@ -5,10 +5,14 @@ import type { RuntimeComposition } from "../terminal/runtime-composition.js";
 import type { RunLog } from "../store/runs.js";
 import { retryRefused, type RetrySchedule } from "../store/store-errors.js";
 
-// The late-retirement cleanup is repeated for as long as the store refuses it (#127 item 5), with
-// the delay doubling up to a cap, like the operation hand-off of domain/worktrees.ts
-// (STORE_HANDOFF). A refusal (a full queue, or a transaction that rolled back) changed nothing, so
-// the repeat is safe; giving up would leave the run starting and its tab blocked until a restart.
+// The late-retirement cleanup is repeated for as long as the store refuses it transiently (#127
+// item 5), with the delay doubling up to a cap, like the operation hand-off of domain/worktrees.ts
+// (STORE_HANDOFF). A transient refusal (a full queue, or SQLite contention that rolled the
+// transaction back) changed nothing and can pass, so the repeat is safe; giving up would leave the
+// run starting and its tab blocked until a restart. A persistent error (a read-only, corrupt or
+// full database, an I/O error) is not repeated (retryRefused, #144 item 4): it would fail forever
+// with no diagnostic. The store logs it (Store.onOperationError), and the run stays starting
+// until the next start marks it interrupted.
 export const NOT_STARTED_RETRY: RetrySchedule = { tries: Infinity, delayMs: 50, capMs: 5_000 };
 
 // The run registry of a server with a store: every exit fact the registry accepts is also written
@@ -44,8 +48,8 @@ export class RecordingRunRegistry extends RunRegistry {
   // to a transient refusal: it is repeated by NOT_STARTED_RETRY. Repeating it later cannot reorder
   // it against another record of the run: a refused spawn has no exit, and while the row is
   // starting the tab refuses reopen and close (LIVE_RUNS_PRESENT). Only a closed or failed store,
-  // or a write whose outcome is unknown, ends the cleanup without a record; the server stops
-  // serving then, and the next start marks a run still starting as interrupted.
+  // a write whose outcome is unknown, or a persistent store error (logged by the store) ends the
+  // cleanup without a record; the next start marks a run still starting as interrupted.
   override retireRefusedSpawn(run: RunRef, worker: WorkerRef): boolean {
     const retired = super.retireRefusedSpawn(run, worker);
     if (retired)

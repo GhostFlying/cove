@@ -7,7 +7,9 @@ import type { StoreArgs, StoreOperationName, StoreResult } from "./sql/registry.
 import {
   reviveStoreError,
   StoreError,
+  StoreOperationError,
   StoreUnavailableError,
+  transientStoreRefusal,
   type StoreErrorCategory,
 } from "./store-errors.js";
 import type { StoreRequest, StoreResponse, StoreWorkerData } from "./store-protocol.js";
@@ -59,6 +61,9 @@ type Call = {
 // path the server was started through (a symlinked bin resolves to the real file).
 const WORKER_ENTRY = new URL("./store-worker.js", import.meta.url);
 
+// See Store.onOperationError.
+export type OperationErrorListener = (operation: string, code: string | null) => void;
+
 // The server's database (D5, D6 B). Callers run complete business operations by name
 // (store/sql/registry.ts); each call is one transaction executed by a dedicated worker thread
 // (store-worker.ts), so a business operation is never split across calls, never spans an await
@@ -108,6 +113,7 @@ export class Store {
   private readonly inFlight = new Map<number, Call>();
   private nextId = 0;
   private readonly failureListeners: (() => void)[] = [];
+  private readonly operationErrorListeners = new Set<OperationErrorListener>();
   private drained: (() => void) | undefined;
   private closeAnswer: ((ok: boolean) => void) | undefined;
   private closing: Promise<void> | undefined;
@@ -197,6 +203,17 @@ export class Store {
     else this.failureListeners.push(listener);
   }
 
+  // Called for every call that failed with a persistent operation error (not
+  // transientStoreRefusal): its operation name and SQLite code, never its arguments or message.
+  // Such an error leaves the store open and usable (the transaction rolled back), and the caller
+  // still receives it; this is how it reaches the operator even when the caller is background work
+  // that cannot answer anyone, such as a cleanup that retryRefused stops repeating (#144 item 4).
+  // Returns the unsubscribe function.
+  onOperationError(listener: OperationErrorListener): () => void {
+    this.operationErrorListeners.add(listener);
+    return () => this.operationErrorListeners.delete(listener);
+  }
+
   get isOpen(): boolean {
     return this.state === "open";
   }
@@ -269,7 +286,18 @@ export class Store {
     this.inFlight.delete(message.id);
     this.observer?.(message.timing[0], message.timing[1]);
     if (message.ok) call.resolve(message.value);
-    else call.reject(reviveStoreError(message.error));
+    else {
+      const error = reviveStoreError(message.error);
+      if (error instanceof StoreOperationError && !transientStoreRefusal(error))
+        for (const listener of this.operationErrorListeners) {
+          try {
+            listener(call.operation, error.code);
+          } catch {
+            // Reporting is best effort; it never changes the call's answer.
+          }
+        }
+      call.reject(error);
+    }
     this.pump();
   }
 

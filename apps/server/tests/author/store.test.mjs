@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { canonicalWriteIntent } from "@cove/protocol/rpc";
 import { Store, StoreError } from "../../dist/store/database.js";
-import { StoreOperationError } from "../../dist/store/store-errors.js";
+import { retryRefused, StoreOperationError } from "../../dist/store/store-errors.js";
 import { MIGRATIONS } from "../../dist/store/migrations.js";
 import { committedSchemaVersion } from "../../dist/store/schema-version.js";
 import { prepareHome } from "../../dist/store/home.js";
@@ -397,6 +397,44 @@ describe("store opening, migrations and the data directory lock", () => {
     store.observe((start, end) => observed.push(end >= start));
     await get(store, "SELECT 1");
     expect(observed).toEqual([true]);
+  });
+
+  // #144 item 4: only a refusal that can pass is repeated; a persistent error is thrown at once
+  // and reported by the store with its operation and code, while the store stays usable.
+  it("repeats only transient refusals and reports persistent operation errors", async () => {
+    const store = await open(await home());
+    const reported = [];
+    const unsubscribe = store.onOperationError((operation, code) =>
+      reported.push([operation, code]),
+    );
+    const schedule = { tries: Infinity, delayMs: 1, capMs: 1 };
+    const failing = (codes) => {
+      const calls = [];
+      const call = () => {
+        const code = codes[calls.length];
+        calls.push(code ?? "ok");
+        return code ? store.call("test.failWith", { code }) : get(store, "SELECT 1 AS one");
+      };
+      return { calls, call };
+    };
+    const busy = failing(["SQLITE_BUSY", "SQLITE_LOCKED_SHAREDCACHE"]);
+    expect(await retryRefused(busy.call, schedule)).toEqual({ one: 1 });
+    expect(busy.calls).toEqual(["SQLITE_BUSY", "SQLITE_LOCKED_SHAREDCACHE", "ok"]);
+    for (const code of ["SQLITE_READONLY", "SQLITE_CORRUPT", "SQLITE_IOERR_WRITE", "SQLITE_FULL"]) {
+      const persistent = failing([code, code]);
+      await expect(retryRefused(persistent.call, schedule)).rejects.toMatchObject({ code });
+      expect(persistent.calls).toEqual([code]);
+    }
+    expect(reported).toEqual([
+      ["test.failWith", "SQLITE_READONLY"],
+      ["test.failWith", "SQLITE_CORRUPT"],
+      ["test.failWith", "SQLITE_IOERR_WRITE"],
+      ["test.failWith", "SQLITE_FULL"],
+    ]);
+    unsubscribe();
+    await store.call("test.failWith", { code: "SQLITE_READONLY" }).catch(() => undefined);
+    expect(reported).toHaveLength(4);
+    expect(store.isOpen).toBe(true);
   });
 });
 

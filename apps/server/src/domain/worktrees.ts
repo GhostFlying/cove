@@ -242,12 +242,16 @@ const FS_DEADLINE_MS = 20_000;
 const DEFAULT_BRANCH_CANDIDATES = 100;
 const REQUEST_STEP_MS = 20_000;
 // The actors' store calls (#126 item 9). A refused call (store-errors.ts refusedStoreCall: a full
-// queue, or a transaction that rolled back) changed nothing, so it is repeated: a ledger read or
-// write a few times over about a second and a half, after which the operation is handed to
-// requires_attention; that hand-off is repeated for as long as it is refused, so an operation is
-// never left running without an actor. Only a closed or failed store, or a call whose outcome is
-// unknown, ends an actor without a record: the server stops serving then, and the next start
-// verifies the operation (createWorktreeVerifier).
+// queue, or a transaction that rolled back) changed nothing. A transient refusal (a full queue,
+// SQLite contention: transientStoreRefusal) is repeated: a ledger read or write a few times over
+// about a second and a half, after which the operation is handed to requires_attention; that
+// hand-off is repeated for as long as it is refused transiently, so an operation is not left
+// running without an actor because of a passing refusal. A persistent store error (a read-only,
+// corrupt or full database, an I/O error) is not repeated (#144 item 4): the operation is handed
+// off at once, and if the hand-off fails the same way it is left running, the store having logged
+// both errors (Store.onOperationError). That, a closed or failed store, or a call whose outcome is
+// unknown ends an actor without a record; the next start verifies the operation
+// (createWorktreeVerifier).
 export const STORE_RETRY: RetrySchedule = { tries: 6, delayMs: 50, capMs: 800 };
 export const STORE_HANDOFF: RetrySchedule = { tries: Infinity, delayMs: 50, capMs: 5_000 };
 
