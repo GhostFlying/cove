@@ -145,6 +145,17 @@ export type RedeemArgs = {
   device: { deviceId: string; name: string; tokenHash: Uint8Array };
 };
 
+function deviceCredential(row: DeviceRow): StoredDeviceCredential {
+  return {
+    deviceId: row.device_id,
+    tokenHash: row.token_hash,
+    pendingTokenHash: row.pending_token_hash,
+    revoked: row.revoked_at_ms !== null,
+    lastUsedAtMs: row.last_used_at_ms,
+    lastEntry: row.last_entry,
+  };
+}
+
 export const authOperations = Object.freeze({
   // Everything the main thread keeps in memory: each device's token hashes and state, and the
   // open invitations. Read once at startup (auth/service.ts).
@@ -157,14 +168,7 @@ export const authOperations = Object.freeze({
         db,
         `SELECT ${DEVICE_COLUMNS} FROM auth_devices ORDER BY device_id`,
       ).all() as DeviceRow[]
-    ).map((row) => ({
-      deviceId: row.device_id,
-      tokenHash: row.token_hash,
-      pendingTokenHash: row.pending_token_hash,
-      revoked: row.revoked_at_ms !== null,
-      lastUsedAtMs: row.last_used_at_ms,
-      lastEntry: row.last_entry,
-    })),
+    ).map(deviceCredential),
     openInvitations: openInvitations(db, args.at),
   }),
 
@@ -240,27 +244,39 @@ export const authOperations = Object.freeze({
     return { redeemed: true, deviceId: args.device.deviceId };
   },
 
-  // A successful authentication of a device (auth/devices.ts), written after the fact and
-  // coalesced there. `promotedHash` is set when the device authenticated with its pending token
-  // (D4 phase two): that token becomes the current one. It is written unconditionally, and the
-  // pending hash is cleared only while it is still the one promoted: a rotation that replaced it
-  // meanwhile keeps its newer pending token. The authenticator issues promotions in the order it
-  // made them and the store runs calls in order, so the stored current token is the last promoted.
+  // The last use of a device (auth/devices.ts), written after the fact and coalesced there.
   "auth.devices.touch": (
     db: Connection,
-    args: { deviceId: string; at: number; entry: EntryKind; promotedHash?: Uint8Array },
+    args: { deviceId: string; at: number; entry: EntryKind },
   ): void => {
     statement(
       db,
       "UPDATE auth_devices SET last_used_at_ms = ?, last_entry = ? WHERE device_id = ?",
     ).run(args.at, args.entry, args.deviceId);
-    if (args.promotedHash)
-      statement(
-        db,
-        `UPDATE auth_devices SET token_hash = ?,
-           pending_token_hash = CASE WHEN pending_token_hash = ? THEN NULL ELSE pending_token_hash END
-         WHERE device_id = ?`,
-      ).run(blob(args.promotedHash), blob(args.promotedHash), args.deviceId);
+  },
+
+  // D4 phase two: the device presented its pending token, which becomes the current one and
+  // invalidates the old token. This commits before the request carrying the new token is admitted
+  // (auth/devices.ts promote), so a use of the new token that anyone saw succeed is never undone by
+  // a restart. It applies only while that hash is still the device's pending one and the device is
+  // not revoked; otherwise nothing changes and `promoted` is false (a rotation replaced it, a
+  // revocation committed meanwhile, or an earlier promotion whose answer was lost already applied
+  // it). Either way the device's credential as committed is returned, which the authenticator
+  // adopts in place of its own copy.
+  "auth.devices.promote": (
+    db: Connection,
+    args: { deviceId: string; hash: Uint8Array; at: number; entry: EntryKind },
+  ): { promoted: boolean; device: StoredDeviceCredential | null } => {
+    const changed = statement(
+      db,
+      `UPDATE auth_devices SET token_hash = pending_token_hash, pending_token_hash = NULL,
+         last_used_at_ms = ?, last_entry = ?
+       WHERE device_id = ? AND pending_token_hash = ? AND revoked_at_ms IS NULL`,
+    ).run(args.at, args.entry, args.deviceId, blob(args.hash)).changes;
+    const row = statement(db, `SELECT ${DEVICE_COLUMNS} FROM auth_devices WHERE device_id = ?`).get(
+      args.deviceId,
+    ) as DeviceRow | undefined;
+    return { promoted: Number(changed) === 1, device: row ? deviceCredential(row) : null };
   },
 });
 

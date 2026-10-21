@@ -23,7 +23,12 @@ import type { Principal } from "../rpc/context.js";
 import type { Store } from "../store/database.js";
 import type { OpenInvitation } from "../store/sql/auth.js";
 import { DeviceConnections } from "./connections.js";
-import { DeviceAuthenticator, type DeviceVerdict, type EntryKind } from "./devices.js";
+import {
+  DeviceAuthenticator,
+  type ConfirmedVerdict,
+  type DeviceVerdict,
+  type EntryKind,
+} from "./devices.js";
 import { PairingListener } from "./pairing-listener.js";
 import { issueToken, newResourceId, newSecret, sameHash, secretHash } from "./tokens.js";
 
@@ -155,6 +160,15 @@ export class AuthService {
         ? { kind: "local-owner" }
         : { kind: "unauthenticated" };
     return this.devices.verify(credential.deviceId, credential.secret);
+  }
+
+  // A device verdict carrying `confirm` (a rotated token's first use) must be confirmed by the
+  // store before the transport admits or answers anything with it (devices.ts promote).
+  confirm(
+    authentication: Extract<Authentication, { kind: "device" }>,
+    entry: EntryKind,
+  ): Promise<ConfirmedVerdict> {
+    return this.devices.promote(authentication, entry);
   }
 
   admitted(authentication: Authentication, entry: EntryKind): void {

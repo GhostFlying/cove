@@ -524,7 +524,24 @@ export function registerHttpRpc(
             // request registered for revocation in the same synchronous step
             // (auth/connections.ts). Every request so far arrives on the loopback listener; T3/T5b
             // tell their entries apart when they add them.
-            const credential = admission.credential("POST", path, headers(request));
+            //
+            // The first use of a rotated token is confirmed by the store first (auth/devices.ts
+            // promote): nothing is executed or answered as authenticated until the promotion
+            // committed. The credential is then verified again, synchronously, so that a revocation
+            // committed during the wait is seen before the request registers. A store that cannot
+            // confirm now is answered UNAVAILABLE (retryable), never UNAUTHENTICATED.
+            let credential = admission.credential("POST", path, headers(request));
+            if (credential.kind === "device" && credential.confirm && core.auth) {
+              const confirmed = await core.auth.confirm(credential, "loopback");
+              if (owner.logicalClosed) return reply;
+              if (confirmed.kind !== "device")
+                return sendHttpAdmissionFailure(reply, confirmed.kind);
+              credential = admission.credential("POST", path, headers(request));
+              if (credential.kind === "device" && credential.confirm)
+                return sendHttpAdmissionFailure(reply, "unavailable");
+              if (credential.kind === "revoked" || credential.kind === "unauthenticated")
+                return sendHttpAdmissionFailure(reply, credential.kind);
+            }
             let principal: Principal | undefined;
             if (credential.kind === "device") {
               principal = {

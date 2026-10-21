@@ -100,11 +100,175 @@ export class TerminalWebSocket {
       return;
     }
     deadline = this.timer.set(() => close(WS_CLOSE_CODES.policy), 5000);
+    // The first frame, once parsed. The local owner secret or a device token (m2 D7) is verified
+    // without side effects. The first use of a rotated device token is confirmed by the store
+    // before anything is answered (auth/devices.ts promote): meanwhile any further frame closes the
+    // socket, and afterwards the frame is handled again with the token verified anew, which also
+    // sees a revocation committed during the wait. A store that cannot confirm it now is answered
+    // UNAVAILABLE (retryable), never as unauthenticated.
+    let confirming = false;
+    const first = (
+      input: unknown,
+      byteLength: number,
+      secret: unknown,
+      elapsedMs: number,
+      confirmed: boolean,
+    ): void => {
+      const verdict =
+        typeof secret === "string"
+          ? this.admission.authenticate(secret)
+          : ({ kind: "unauthenticated" } as const);
+      if (verdict.kind === "device" && verdict.confirm) {
+        const unavailable = (): void =>
+          socket.send(JSON.stringify(bootstrapFailure("UNAVAILABLE")), () =>
+            close(WS_CLOSE_CODES.capacity),
+          );
+        if (!this.core.auth || !validateWsFirstMessage(input, byteLength, elapsedMs, true)) {
+          close(WS_CLOSE_CODES.policy);
+          return;
+        }
+        if (confirmed) {
+          unavailable();
+          return;
+        }
+        confirming = true;
+        void this.core.auth.confirm(verdict, "loopback").then(
+          (outcome) => {
+            confirming = false;
+            if (retired || physicallyClosed) return;
+            if (outcome.kind === "unavailable") {
+              unavailable();
+              return;
+            }
+            try {
+              first(input, byteLength, secret, elapsedMs, true);
+            } catch {
+              close();
+            }
+          },
+          () => close(),
+        );
+        return;
+      }
+      const secretMatches = verdict.kind === "local-owner" || verdict.kind === "device";
+      const request = validateWsFirstMessage(input, byteLength, elapsedMs, secretMatches);
+      // The correct token of a revoked device in an otherwise valid first frame: the device is
+      // told why before the policy close (relay-protocol §11.8). Any other failure is closed
+      // without an answer, as before.
+      if (
+        verdict.kind === "revoked" &&
+        validateWsFirstMessage(input, byteLength, elapsedMs, true)
+      ) {
+        socket.send(JSON.stringify(bootstrapFailure("DEVICE_REVOKED")), () =>
+          close(WS_CLOSE_CODES.policy),
+        );
+        close(WS_CLOSE_CODES.policy);
+        return;
+      }
+      if (!request) {
+        const version =
+          input && typeof input === "object" && "bootstrapVersion" in input
+            ? input.bootstrapVersion
+            : undefined;
+        // Probe the auth/shape guard; negotiate the untouched version below.
+        const unsupportedVersion =
+          typeof version === "number" &&
+          Number.isSafeInteger(version) &&
+          version > 0 &&
+          version !== BOOTSTRAP_VERSION &&
+          validateWsFirstMessage(
+            { ...(input as Record<string, unknown>), bootstrapVersion: BOOTSTRAP_VERSION },
+            byteLength,
+            elapsedMs,
+            secretMatches,
+          ) !== null;
+        if (!unsupportedVersion) {
+          close(WS_CLOSE_CODES.policy);
+          return;
+        }
+      }
+      const result = negotiateBootstrap(
+        request ?? input,
+        {
+          ...this.admission.identity,
+          buildVersion: this.core.buildVersion,
+          effectiveBudgets: this.admission.budgets,
+        },
+        connection,
+      );
+      if (result.type !== "cove-bootstrap-result") {
+        socket.send(JSON.stringify(result), () => close());
+        close();
+        return;
+      }
+      const claim = this.admission.claim("authenticated");
+      if (!claim) {
+        close(WS_CLOSE_CODES.capacity);
+        return;
+      }
+      authenticated = claim;
+      const delivery = new TerminalConnectionDelivery(this.core.runtime.composition, {
+        connection,
+        encodeUtf8,
+        itemLimit:
+          this.admission.budgets.postNEvents + this.admission.budgets.pendingWorkerCommands + 4,
+        transport: {
+          write: (raw, settled) => {
+            let owned = true;
+            socket.send(raw, (error) => {
+              if (!owned) return;
+              owned = false;
+              // `ws` reports a successful send as `null`; delivery treats any
+              // defined value as a transport failure, so normalize it here.
+              settled(error ?? undefined);
+              if (!error) delivery.drain();
+            });
+            return false;
+          },
+        },
+        failed: () => close(),
+      });
+      try {
+        service = new TerminalCommandService(
+          this.core.runtime.composition,
+          this.core.runtime,
+          delivery,
+          this.arbiter,
+          {
+            createOpaqueId: randomUUID,
+            now: this.now,
+            identityLimit: 4096,
+            requestLimit: 4096,
+          },
+        );
+      } catch {
+        delivery.close();
+        close(WS_CLOSE_CODES.capacity);
+        return;
+      }
+      unauthenticated.release();
+      this.timer.clear(deadline);
+      this.services.add(service);
+      // An admitted device is recorded as used and its connection registered for revocation
+      // in this same synchronous step (auth/connections.ts): revocation closes it with the
+      // policy code, which ends its subscriptions and releases any control it held through
+      // the ordinary disconnect path (no resize).
+      if (verdict.kind === "device" && this.core.auth) {
+        this.core.auth.admitted(verdict, "loopback");
+        this.core.auth.connections.register(verdict.deviceId, {
+          close: () => close(WS_CLOSE_CODES.policy),
+          closed: physicalClose,
+        });
+      }
+      socket.send(JSON.stringify(result), (error) => {
+        if (error) close();
+      });
+    };
     socket.on("message", (bytes, binary) => {
       if (retired || physicallyClosed) return;
       try {
         if (!authenticated) {
-          if (binary) {
+          if (binary || confirming) {
             close();
             return;
           }
@@ -123,125 +287,7 @@ export class TerminalWebSocket {
             input && typeof input === "object" && "secret" in input
               ? (input as { secret: unknown }).secret
               : undefined;
-          const elapsedMs = this.now() - started;
-          // The local owner secret or a device token (m2 D7); verified without side effects.
-          const verdict =
-            typeof secret === "string"
-              ? this.admission.authenticate(secret)
-              : ({ kind: "unauthenticated" } as const);
-          const secretMatches = verdict.kind === "local-owner" || verdict.kind === "device";
-          const request = validateWsFirstMessage(input, bytes.byteLength, elapsedMs, secretMatches);
-          // The correct token of a revoked device in an otherwise valid first frame: the device is
-          // told why before the policy close (relay-protocol §11.8). Any other failure is closed
-          // without an answer, as before.
-          if (
-            verdict.kind === "revoked" &&
-            validateWsFirstMessage(input, bytes.byteLength, elapsedMs, true)
-          ) {
-            socket.send(JSON.stringify(bootstrapFailure("DEVICE_REVOKED")), () =>
-              close(WS_CLOSE_CODES.policy),
-            );
-            close(WS_CLOSE_CODES.policy);
-            return;
-          }
-          if (!request) {
-            const version =
-              input && typeof input === "object" && "bootstrapVersion" in input
-                ? input.bootstrapVersion
-                : undefined;
-            // Probe the auth/shape guard; negotiate the untouched version below.
-            const unsupportedVersion =
-              typeof version === "number" &&
-              Number.isSafeInteger(version) &&
-              version > 0 &&
-              version !== BOOTSTRAP_VERSION &&
-              validateWsFirstMessage(
-                { ...(input as Record<string, unknown>), bootstrapVersion: BOOTSTRAP_VERSION },
-                bytes.byteLength,
-                elapsedMs,
-                secretMatches,
-              ) !== null;
-            if (!unsupportedVersion) {
-              close(WS_CLOSE_CODES.policy);
-              return;
-            }
-          }
-          const result = negotiateBootstrap(
-            request ?? input,
-            {
-              ...this.admission.identity,
-              buildVersion: this.core.buildVersion,
-              effectiveBudgets: this.admission.budgets,
-            },
-            connection,
-          );
-          if (result.type !== "cove-bootstrap-result") {
-            socket.send(JSON.stringify(result), () => close());
-            close();
-            return;
-          }
-          const claim = this.admission.claim("authenticated");
-          if (!claim) {
-            close(WS_CLOSE_CODES.capacity);
-            return;
-          }
-          authenticated = claim;
-          const delivery = new TerminalConnectionDelivery(this.core.runtime.composition, {
-            connection,
-            encodeUtf8,
-            itemLimit:
-              this.admission.budgets.postNEvents + this.admission.budgets.pendingWorkerCommands + 4,
-            transport: {
-              write: (raw, settled) => {
-                let owned = true;
-                socket.send(raw, (error) => {
-                  if (!owned) return;
-                  owned = false;
-                  // `ws` reports a successful send as `null`; delivery treats any
-                  // defined value as a transport failure, so normalize it here.
-                  settled(error ?? undefined);
-                  if (!error) delivery.drain();
-                });
-                return false;
-              },
-            },
-            failed: () => close(),
-          });
-          try {
-            service = new TerminalCommandService(
-              this.core.runtime.composition,
-              this.core.runtime,
-              delivery,
-              this.arbiter,
-              {
-                createOpaqueId: randomUUID,
-                now: this.now,
-                identityLimit: 4096,
-                requestLimit: 4096,
-              },
-            );
-          } catch {
-            delivery.close();
-            close(WS_CLOSE_CODES.capacity);
-            return;
-          }
-          unauthenticated.release();
-          this.timer.clear(deadline);
-          this.services.add(service);
-          // An admitted device is recorded as used and its connection registered for revocation
-          // in this same synchronous step (auth/connections.ts): revocation closes it with the
-          // policy code, which ends its subscriptions and releases any control it held through
-          // the ordinary disconnect path (no resize).
-          if (verdict.kind === "device" && this.core.auth) {
-            this.core.auth.admitted(verdict, "loopback");
-            this.core.auth.connections.register(verdict.deviceId, {
-              close: () => close(WS_CLOSE_CODES.policy),
-              closed: physicalClose,
-            });
-          }
-          socket.send(JSON.stringify(result), (error) => {
-            if (error) close();
-          });
+          first(input, bytes.byteLength, secret, this.now() - started, false);
           return;
         }
         if (!binary) {

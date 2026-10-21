@@ -691,6 +691,10 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   本机秘密（43–256 个 base64url 字符，只出现在 rendezvous 文件中）与设备 token
   `cove_d1_<deviceId>.<43 个 base64url 字符>`。凭据正确但设备已撤销时为 `DEVICE_REVOKED`（HTTP 401，WS 以 policy 关闭），
   其余无法认证的情况都是 `UNAUTHENTICATED`，不区分设备不存在与秘密错误。
+  `auth.device.rotate` 发出的新 token 首次使用时，server 先在存储中提交“新 token 成为当前 token、旧 token 失效”，
+  提交后才受理并应答该请求；因此任何以新 token 得到认证成功应答的使用，重启后都不会让旧 token 恢复。
+  存储暂时无法提交时，该请求以 `UNAVAILABLE`（HTTP 503，WS 发送失败后以 capacity 关闭）拒绝且不执行，
+  两个 token 都保持原状，客户端稍后重试；有效 token 不会因此得到 `UNAUTHENTICATED`。
 - 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
   `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
 - 配对监听（m2 T1）不是 RPC，只接受两个 POST（`PAIRING_PATHS`），请求与响应各不超过 4 KiB。
