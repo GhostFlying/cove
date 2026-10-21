@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "../m1/fixtures.mjs";
 import { INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installLayout } from "../../dist/install/layout.js";
+import { systemdUnit } from "../../dist/install/service.js";
 
 // m2 T3 safety of the installation commands, against the compiled CLI and modules, without a
 // service manager or a runtime closure (S1 and S2 cover those):
@@ -14,7 +15,8 @@ import { installLayout } from "../../dist/install/layout.js";
 //   one wins;
 // - a server that holds its data directory but does not answer is never taken for a stopped one:
 //   the commands that would stop it ask for confirmation without an impact list, and prune keeps
-//   every build, since any of them may be the one it runs.
+//   every build, since any of them may be the one it runs;
+// - the systemd unit escapes `$` and `%` in paths.
 
 let fixture;
 
@@ -197,3 +199,16 @@ test("a server that holds the data directory but does not answer is never taken 
     server: null,
   });
 }, 120_000);
+
+test("the systemd unit keeps `$` and `%` in paths literal", () => {
+  const home = "/home/user/data $HOME %h";
+  const unit = systemdUnit(installLayout(home));
+  const exec = unit.split("\n").find((line) => line.startsWith("ExecStart="));
+  // In ExecStart, `$` starts a variable and `%` a specifier: both are doubled to stay literal.
+  expect(exec).toContain('"/home/user/data $$HOME %%h/install/current/bin/node"');
+  expect(exec).not.toMatch(/[^$]\$HOME/);
+  // Environment= expands specifiers but not variables.
+  const environment = unit.split("\n").find((line) => line.startsWith("Environment="));
+  expect(environment).toContain('"COVE_HOME=/home/user/data $HOME %%h"');
+  expect(unit).toContain("Description=Cove server (/home/user/data $HOME %%h)");
+});
