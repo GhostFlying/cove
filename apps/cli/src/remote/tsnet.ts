@@ -90,9 +90,7 @@ async function openStream(home: string, target: Target, unsent: string): Promise
   for (;;) {
     let channel: Channel;
     try {
-      ({ channel } = await openDaemon(home, {
-        deadlineMs: Math.max(1, deadline - Date.now()),
-      }));
+      ({ channel } = await openDaemon(home, { deadline }));
     } catch (error) {
       if (error instanceof DaemonUnavailable)
         throw new RemoteError("ENTRY_UNAVAILABLE", `${error.message}; ${unsent}`);

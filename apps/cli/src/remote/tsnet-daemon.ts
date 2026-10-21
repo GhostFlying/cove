@@ -287,32 +287,58 @@ function parseHello(value: unknown): Hello | null {
 }
 
 // Connects once and exchanges hello: the open channel and the daemon's hello, or null when no
-// daemon answered (nothing listens, or it closed the connection unanswered).
+// daemon answered (nothing listens, it closed the connection unanswered, or `deadline` passed).
+// Every wait is bounded by what is left of the one absolute deadline when that wait starts, so a
+// slow connect cannot leave the hello a stale budget, and a hello answered after the deadline
+// does not yield a channel.
 async function attempt(
   home: string,
   build: string,
-  timeoutMs: number,
+  deadline: number,
 ): Promise<{ channel: Channel; hello: Hello } | null> {
+  const left = () => deadline - Date.now();
+  if (left() <= 0) return null;
   let socket: Socket;
   try {
-    socket = await connectSocket(socketPath(home), Math.min(timeoutMs, CONNECT_TIMEOUT_MS));
+    socket = await connectSocket(socketPath(home), Math.min(left(), CONNECT_TIMEOUT_MS));
   } catch {
     return null;
   }
   const channel = new Channel(socket);
   try {
-    const hello = parseHello(
-      await channel.request(
-        { op: "hello", protocol: DIAL_PROTOCOL, build },
-        Math.min(timeoutMs, HELLO_TIMEOUT_MS),
-      ),
-    );
-    if (hello && hello.mode === "dial") return { channel, hello };
+    if (left() > 0) {
+      const hello = parseHello(
+        await channel.request(
+          { op: "hello", protocol: DIAL_PROTOCOL, build },
+          Math.min(left(), HELLO_TIMEOUT_MS),
+        ),
+      );
+      if (hello && hello.mode === "dial" && left() > 0) return { channel, hello };
+    }
   } catch {
     // Closed unanswered or answered with an error: no usable daemon on this connection.
   }
   channel.close();
   return null;
+}
+
+// `promise`, or DaemonUnavailable once `deadline` passes first (the promise is left to settle on
+// its own; nothing was requested of a daemon).
+async function beforeDeadline<T>(promise: Promise<T>, deadline: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new DaemonUnavailable(`${what} did not finish within the start deadline`)),
+          Math.max(0, deadline - Date.now()),
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -416,8 +442,10 @@ async function startDaemon(
 // Opening a daemon connection.
 
 export type OpenOptions = {
-  // Total start deadline (D14: 10 s).
-  readonly deadlineMs?: number;
+  // The absolute time (Date.now() milliseconds) by which a usable daemon must have answered;
+  // default START_DEADLINE_MS (D14: 10 s) from the call. A caller that retries around openDaemon
+  // passes its own deadline, so that all of its attempts share one budget.
+  readonly deadline?: number;
 };
 
 export type Daemon = { readonly channel: Channel; readonly hello: Hello };
@@ -435,7 +463,14 @@ function warnOnce(key: string, text: string): void {
 // build (see the top of this file). Throws DaemonUnavailable when the deadline passes or the
 // running daemon cannot be used; nothing was requested of any daemon then.
 export async function openDaemon(home: string, options: OpenOptions = {}): Promise<Daemon> {
-  const { path: binary, identity } = await currentBinary();
+  // One absolute deadline from the very start, identifying the executable included; every wait
+  // below gets what is left of it when the wait starts.
+  const deadline = options.deadline ?? Date.now() + START_DEADLINE_MS;
+  const { path: binary, identity } = await beforeDeadline(
+    currentBinary(),
+    deadline,
+    "identifying the cove-tsnet executable",
+  );
   const sock = socketPath(home);
   if (Buffer.byteLength(sock) > MAX_SOCKET_PATH_BYTES)
     throw new DaemonUnavailable(
@@ -445,24 +480,25 @@ export async function openDaemon(home: string, options: OpenOptions = {}): Promi
   ownerOnlyDirectory(tsnetHome(home));
   ownerOnlyDirectory(join(tsnetHome(home), "run"));
 
-  const deadline = Date.now() + (options.deadlineMs ?? START_DEADLINE_MS);
   let started: Started | undefined;
   let logFrom: number | undefined;
   let backoff = BACKOFF_MIN_MS;
   let replaced: string | undefined;
   for (;;) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
-    const reached = await attempt(home, identity.build, remaining);
+    if (deadline - Date.now() <= 0) break;
+    const reached = await attempt(home, identity.build, deadline);
     if (reached) {
       const { channel, hello } = reached;
       if (hello.build === identity.build) return reached;
       if (hello.streams.length === 0) {
         // Idle and another build: replace it. The stop is refused (ACTIVE_STREAMS) if a stream
         // started since the hello, and then nothing changed; either way, go round again.
+        const left = deadline - Date.now();
         try {
-          await channel.request({ op: "stop" }, Math.min(STOP_TIMEOUT_MS, Math.max(remaining, 1)));
-          replaced = hello.build;
+          if (left > 0) {
+            await channel.request({ op: "stop" }, Math.min(STOP_TIMEOUT_MS, left));
+            replaced = hello.build;
+          }
         } catch {
           // Refused or cut short: the next hello tells what runs now.
         }
@@ -503,7 +539,7 @@ export async function openDaemon(home: string, options: OpenOptions = {}): Promi
     backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
   }
   throw new DaemonUnavailable(
-    `the tsnet dial daemon did not become ready within ${(options.deadlineMs ?? START_DEADLINE_MS) / 1000} s` +
+    `the tsnet dial daemon did not become ready within ${START_DEADLINE_MS / 1000} s` +
       (replaced
         ? ` (an idle daemon of build ${printable(replaced, 128)} was stopped to be replaced)`
         : "") +
@@ -530,5 +566,5 @@ export async function probeDaemon(home: string): Promise<Daemon | null> {
   const { identity } = await currentBinary().catch(() => ({
     identity: { build: "unknown", protocol: DIAL_PROTOCOL },
   }));
-  return attempt(home, identity.build, HELLO_TIMEOUT_MS);
+  return attempt(home, identity.build, Date.now() + HELLO_TIMEOUT_MS);
 }

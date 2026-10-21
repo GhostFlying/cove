@@ -371,6 +371,11 @@ export function dialRequest(home, request, { keep = false, build = "t4-fixture" 
       clearTimeout(timer);
       fail(error);
     });
+    // A daemon that closes before it answered (exiting, or killed) fails the request at once.
+    socket.once("close", () => {
+      clearTimeout(timer);
+      fail(new Error(`dial ${request?.op ?? "hello"}: the connection closed unanswered`));
+    });
   });
 }
 
