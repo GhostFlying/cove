@@ -309,6 +309,20 @@ PENDING：
   请求在写盘前按方法 schema 校验，会被去掉或改变的字段（如放错位置的秘密）使命令不写盘、不发送并以 1 退出。
   现有命令没有秘密字段，不受影响。
 
+#152（M2 T6 操作记录保存期限，#97，未合入）：请求与成功输出不变；新增两类失败，都以 1 退出且 stdout 为空。
+
+- 已结束（succeeded、failed、cancelled）的操作记录在结束 30 天后由 server 清除，只保留 operationId：
+  - 对它 `cove operation get <id>` 与 `cove operation resend <id>` 以 1 退出，stdout 为空；
+  - stderr 含 `OPERATION_HISTORY_EXPIRED`，说明操作已结束超过 30 天、永不再执行；
+  - 直接 RPC 重发同一请求返回该 kind（acceptance `not-accepted`）；以不同参数重用这个 ID 返回 `OPERATION_ID_CONFLICT`。
+  - 这不是成功，也没有执行任何东西：应改为检查该操作影响的资源，不要换新 ID 重做，除非确实要再执行一次。
+- 未结束的记录（含 `requires_attention`）从不自动清除。
+- 本机待定记录保存 30 天后过期：
+  - `cove operation resend <id>` 在本地拒绝、不发送并以 1 退出，stderr 含 `expired after 30 days` 与 `nothing was sent`；
+  - 以同一 `--operation-id` 重新执行命令同样拒绝，需换新的 ID。
+  - `cove operation get <id>` 不受影响，仍向 server 查询。
+- tend 若长期保存 operationId 用于重试，30 天后的重试会得到上述结果；在 30 天内按原 ID 重发的语义不变。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -377,3 +391,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `7a67bc7`；#145（未合入）                  | 新增 PENDING #145：持久的存储操作错误不再重试，转交也失败时记录可停在 `running` 直到下次启动恢复，server 写 `store-operation-failed` 诊断事件；`operation continue/abandon` 读取失败时输出最后读到的记录；转交给另一个 Git 的 `git`（xcrun shim、包装脚本）每条命令前重新检查版本                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 2026-10-21 | main `a8f17f6`；#150（M2 T0，未合入）           | 新增 PENDING #150：`buildVersion` 改为真实构建标识；新增 M2 错误 kind（1042–1049）；带输入秘密的写的待定记录不保存秘密且不能 `operation resend`；现有请求与输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-21 | main `8855e3b`；#150（M2 T0，未合入）           | 更正 PENDING #150：`buildVersion` 也随 package 清单变化；以不同秘密字段重用 operationId、或请求含会被 schema 去掉的字段时，CLI 不写盘、不发送并以 1 退出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| 2026-10-21 | main `e8b35bf`；#152（M2 T6，未合入）           | 新增 PENDING #152：已结束操作的记录 30 天后清除，`operation get`/`resend` 与直接 RPC 重发返回 `OPERATION_HISTORY_EXPIRED`（以 1 退出、不执行），未结束的记录不清除；本机待定记录 30 天后过期，`resend` 与同 ID 重用在本地拒绝、不发送                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
