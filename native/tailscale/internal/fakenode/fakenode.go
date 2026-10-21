@@ -37,6 +37,13 @@ type Node struct {
 	// WhoIsAddr answers WhoIs for an address no Peer dial produced.
 	WhoIsAddr func(addr string) (proto.NodeInfo, error)
 	LogoutErr error
+	// ReauthAs is the stable ID a reauth completes as; empty keeps Self's.
+	ReauthAs string
+	// ReauthErr fails a reauth.
+	ReauthErr error
+	// OnReauth, OnWait and OnLookup, if set, run when those calls start, so
+	// a test can act at a known point.
+	OnReauth, OnWait, OnLookup func()
 
 	Reauths []string
 	Closed  bool
@@ -53,6 +60,9 @@ func (n *Node) Status(context.Context) (proto.Status, error) {
 }
 
 func (n *Node) WaitRunning(ctx context.Context) error {
+	if n.OnWait != nil {
+		n.OnWait()
+	}
 	n.mu.Lock()
 	block, state := n.BlockWait, n.State
 	n.mu.Unlock()
@@ -64,6 +74,9 @@ func (n *Node) WaitRunning(ctx context.Context) error {
 }
 
 func (n *Node) LookupPeer(_ context.Context, id string) (proto.NodeInfo, string, error) {
+	if n.OnLookup != nil {
+		n.OnLookup()
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	p, ok := n.Peers[id]
@@ -117,12 +130,23 @@ func (n *Node) Listen(port int) (net.Listener, error) {
 	return n.ListenFn(port)
 }
 
-func (n *Node) Reauth(_ context.Context, key string) error {
+func (n *Node) Reauth(ctx context.Context, key string) (node.ReauthResult, error) {
+	if n.OnReauth != nil {
+		n.OnReauth()
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.Reauths = append(n.Reauths, key)
+	if n.ReauthErr != nil {
+		return node.ReauthResult{}, n.ReauthErr
+	}
+	res := node.ReauthResult{Before: n.Self.StableNodeID, After: n.Self.StableNodeID}
+	if n.ReauthAs != "" {
+		res.After = n.ReauthAs
+		n.Self.StableNodeID = n.ReauthAs
+	}
 	n.State = proto.StateRunning
-	return nil
+	return res, nil
 }
 
 func (n *Node) Logout(context.Context) error { return n.LogoutErr }

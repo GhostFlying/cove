@@ -300,13 +300,14 @@ func (s *server) login(ctx context.Context, req proto.Request) (proto.Status, er
 	if s.isClosing() {
 		return proto.Status{}, errShuttingDown
 	}
-	before := s.mgr.Node()
-	st, err := s.mgr.Login(ctx, req.AuthKey, proto.Timeout(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
-	if s.mgr.Node() != before {
-		// A key login replaced the node object; listeners of the old node
-		// are dead and are reopened on the new one.
+	// Listeners are closed for the login and reopened by reconcile below:
+	// a reauth can complete as another node before the manager refuses and
+	// restores it, and nothing should be accepted under that identity. A
+	// Running node is refused with ALREADY_LOGGED_IN, so it keeps them.
+	if cur, err := s.mgr.Status(ctx); err != nil || cur.State != proto.StateRunning {
 		s.closeListeners()
 	}
+	st, err := s.mgr.Login(ctx, req.AuthKey, proto.Timeout(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
 	if lerr := s.reconcile(); err == nil && lerr != nil {
 		err = lerr
 	}

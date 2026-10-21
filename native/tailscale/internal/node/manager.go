@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -111,6 +112,14 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 	return proto.Status{}, lerr
 }
 
+// reauth reauthorizes the enrolled node with authKey and keeps its identity.
+//
+// A forced login can complete as a different node, for example with a key
+// of another tailnet: tailscaled then overwrites the profile with the new
+// node. That is not a recovery of this enrollment, so the state file is
+// snapshotted first and, if the stable ID changed, the node is stopped and
+// the snapshot put back. The original enrollment then still needs login,
+// and changing identity takes an explicit logout and login.
 func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, error) {
 	if m.node == nil {
 		m.Boot()
@@ -118,14 +127,57 @@ func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, err
 	if m.node == nil {
 		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "the enrolled node cannot start: %v", m.bootErr)
 	}
-	err := m.node.Reauth(ctx, authKey)
-	if err == nil {
-		err = m.node.WaitRunning(ctx)
+	statePath := filepath.Join(m.cfg.StateDir, stateFile)
+	snapshot, err := os.ReadFile(statePath)
+	if err != nil {
+		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled node state: %v", err)
 	}
+	res, err := m.node.Reauth(ctx, authKey)
 	if err != nil {
 		return proto.Status{}, loginError(ctx, err, authKey)
 	}
-	return m.node.Status(ctx)
+	if res.Before == "" || res.After == res.Before {
+		return m.node.Status(ctx)
+	}
+	m.closeNode()
+	msg := fmt.Sprintf("the key logged this node in as %s, not as the enrolled %s", proto.Truncate(res.After), res.Before)
+	if werr := writeFileAtomic(statePath, snapshot); werr != nil {
+		// The state now holds the other node; leave it stopped rather than
+		// run as an identity the owner did not ask for.
+		m.bootErr = fmt.Errorf("%s, and restoring the enrollment failed: %v", msg, werr)
+		return proto.Status{}, proto.Errorf(proto.CodeIdentityChanged,
+			"restoring the enrollment failed: %v; %s; log out to remove that node state", werr, msg)
+	}
+	m.Boot()
+	return proto.Status{}, proto.Errorf(proto.CodeIdentityChanged,
+		"%s; the enrollment was restored and still needs login. To use this key, log out and log in again; "+
+			"%s may remain in the other tailnet's admin console", msg, proto.Truncate(res.After))
+}
+
+// writeFileAtomic replaces path with data (0600) through a rename, so a
+// crash leaves either the old or the new content.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // loginError classifies a failed login. The control plane's message is
