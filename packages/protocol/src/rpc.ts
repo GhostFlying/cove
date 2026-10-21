@@ -8,6 +8,7 @@ import {
   OperationRecordSchema,
   RPC_METHODS,
   isWriteRpcMethod,
+  splitSecrets,
   validateRpcMethodParams,
   type OperationRecord,
   type RpcMethod,
@@ -280,7 +281,10 @@ export function canonicalWriteIntent(
   if (!isWriteRpcMethod(method)) return null;
   const parsed = validateRpcMethodParams(method, input);
   if (!parsed || parsed.method !== method) return null;
-  const { operationId: _operationId, ...params } = parsed.params;
+  // Secrets never enter the fingerprint (m2 "秘密与操作记录的分界"): a resend whose secret was
+  // dropped from the CLI pending record still names the same operation, and no stored receipt
+  // holds or reveals the secret through its canonical intent.
+  const { operationId: _operationId, ...params } = splitSecrets(parsed.params).value;
   const canonical = sorted({ method, params });
   if (!canonical) return null;
   const text = JSON.stringify(canonical);
@@ -350,18 +354,23 @@ export function validateOperationRecord(
 export {
   RPC_METHODS,
   RPC_DOMAINS,
+  SECRETS_MEMBER,
   WRITE_RPC_METHODS,
   OperationRecordSchema,
   RunRecordSchema,
   WorkerStatusSchema,
   isWriteRpcMethod,
+  secretFields,
+  splitSecrets,
   validateRpcMethodParams,
 } from "./rpc-methods.js";
 export type {
   OperationRecord,
+  RpcPermission,
   RunRecord,
   RpcDomain,
   RpcMethod,
+  SecretFields,
   WorkerStatus,
   WriteRpcMethod,
 } from "./rpc-methods.js";

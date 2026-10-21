@@ -29,6 +29,70 @@ export const REQUIRED_CAPABILITIES = Object.freeze([
 ] as const);
 
 const build = z.string().min(1).max(128);
+export const BuildVersionSchema = build;
+
+// Build identity (m2 D1, D12). A Cove build is named `<packageVersion>+<digest>`: the root
+// package version and the first 16 hex digits of a SHA-256 over the build's own compiled files
+// (apps/server/src/build-id.ts computes it). Content addressing, not the Git commit, because two
+// builds of one dirty checkout must not share an install directory, and an unchanged rebuild
+// keeps its name. The version part is informational: equality of the whole string is the only
+// comparison clients make, and a mismatch is a warning, never a refusal (D12). Other build
+// strings (a test peer's "author", the worker pipe's internal "0.0.0") stay valid on the wire:
+// the schema above bounds them, and this pattern only recognizes a real build.
+export const BUILD_ID_DIGEST_HEX = 16;
+const BUILD_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.-]{0,63}\+[0-9a-f]{16}$/;
+export function formatBuildId(packageVersion: string, digestHex: string): string {
+  const id = `${packageVersion}+${digestHex.slice(0, BUILD_ID_DIGEST_HEX)}`;
+  if (!/^[0-9a-f]+$/.test(digestHex) || !BUILD_ID_PATTERN.test(id))
+    throw new Error("Invalid build identity");
+  return id;
+}
+export function isBuildId(value: unknown): value is string {
+  return typeof value === "string" && BUILD_ID_PATTERN.test(value);
+}
+
+// The two credential kinds (m2 D4, D7), carried the same way on every channel: as
+// `Authorization: Bearer <credential>` on HTTP and as the `secret` of the terminal WebSocket's
+// first frame. Their alphabets are disjoint (only a device token contains "."), so a server tells
+// them apart without a separate kind field.
+//
+// - Local owner secret: the per-start secret the server writes into its 0600 rendezvous file in
+//   the data directory. Whoever can read it is the same OS user, the irrevocable local owner.
+// - Device token: `cove_d1_<deviceId>.<secret>`, issued once at pairing or rotation. The server
+//   looks the device up by deviceId and compares a SHA-256 of the 256-bit secret in constant
+//   time; it stores only that hash.
+export const LocalSecretSchema = z
+  .string()
+  .min(43)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/);
+// A device ID is chosen by the server; it never contains ".", which ends it inside a token.
+export const DeviceIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/);
+export const DEVICE_TOKEN_PREFIX = "cove_d1_";
+const DEVICE_TOKEN_PATTERN = /^cove_d1_([A-Za-z0-9][A-Za-z0-9_-]{0,39})\.([A-Za-z0-9_-]{43})$/;
+export const DeviceTokenSchema = z.string().regex(DEVICE_TOKEN_PATTERN);
+export const CredentialSchema = z.union([LocalSecretSchema, DeviceTokenSchema]);
+export type Credential =
+  | { kind: "local-secret"; secret: string }
+  | { kind: "device-token"; deviceId: string; secret: string };
+
+// Classifies a presented credential string. Null for anything malformed; a well-formed
+// credential still has to be verified by the server.
+export function parseCredential(value: unknown): Credential | null {
+  if (typeof value !== "string") return null;
+  const device = DEVICE_TOKEN_PATTERN.exec(value);
+  if (device) return { kind: "device-token", deviceId: device[1]!, secret: device[2]! };
+  return LocalSecretSchema.safeParse(value).success
+    ? { kind: "local-secret", secret: value }
+    : null;
+}
+
+export function formatDeviceToken(deviceId: string, secret: string): string {
+  const token = `${DEVICE_TOKEN_PREFIX}${deviceId}.${secret}`;
+  if (!DEVICE_TOKEN_PATTERN.test(token)) throw new Error("Invalid device token parts");
+  return token;
+}
+
 const capabilities = z.array(z.string().min(1).max(64)).max(M0_LIMITS.capabilityCount);
 export const BootstrapRequestSchema = z.object({
   type: z.literal("cove-bootstrap"),
@@ -42,13 +106,8 @@ export const BootstrapRequestSchema = z.object({
   encodings: z.array(z.string().min(1).max(64)).max(M0_LIMITS.capabilityCount),
 });
 export type BootstrapRequest = z.infer<typeof BootstrapRequestSchema>;
-export const WsBootstrapSchema = BootstrapRequestSchema.extend({
-  secret: z
-    .string()
-    .min(43)
-    .max(256)
-    .regex(/^[A-Za-z0-9_-]+$/),
-});
+// The field keeps its M0 name `secret`; it carries either credential kind.
+export const WsBootstrapSchema = BootstrapRequestSchema.extend({ secret: CredentialSchema });
 
 export function validateWsFirstMessage(
   input: unknown,
@@ -98,6 +157,8 @@ const BootstrapFailureFieldsSchema = z.object({
     "FORBIDDEN",
     "BUSY",
     "UNAVAILABLE",
+    // The correct token of a revoked device (m2 D8).
+    "DEVICE_REVOKED",
   ]),
   message: z.string().min(1).max(256),
   supportedVersions: z.object({
@@ -176,18 +237,54 @@ export function negotiateBootstrap(
   };
 }
 
+// Pre-authentication identity (m2 "认证前可达的面"). A POST /bootstrap without credentials is
+// answered with this and nothing else, so that a client can check the serverId (and, from its
+// channel, the peer) before it sends any token. It carries no task, path, device or terminal
+// information and no capabilities or budgets; serverId identifies a server but proves nothing.
+// The client compares serverId itself, so the answer does not depend on what the request
+// expected. A request that is not a well-formed bootstrap request gets BOOTSTRAP_UNSUPPORTED.
+// T1 serves it; T2 and the client call it before asking the credential provider.
+export const BootstrapIdentitySchema = z.object({
+  type: z.literal("cove-bootstrap-identity"),
+  bootstrapVersion: z.literal(BOOTSTRAP_VERSION),
+  protocolVersion: z.number().int().min(1).max(255),
+  buildVersion: build,
+  serverId: OpaqueIdSchema,
+  relayInstanceId: OpaqueIdSchema,
+});
+export type BootstrapIdentity = z.infer<typeof BootstrapIdentitySchema>;
+
+export function bootstrapIdentity(
+  request: unknown,
+  server: { serverId: string; relayInstanceId: string; buildVersion: string },
+): BootstrapIdentity | BootstrapFailure {
+  if (!BootstrapRequestSchema.safeParse(request).success) return failure("BOOTSTRAP_UNSUPPORTED");
+  // Built field by field, so nothing else the server knows can reach an unauthenticated peer.
+  const identity = BootstrapIdentitySchema.safeParse({
+    type: "cove-bootstrap-identity",
+    bootstrapVersion: BOOTSTRAP_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    buildVersion: server.buildVersion,
+    serverId: server.serverId,
+    relayInstanceId: server.relayInstanceId,
+  });
+  return identity.success ? identity.data : failure("BOOTSTRAP_UNSUPPORTED");
+}
+
 export const RendezvousSchema = z.object({
   bootstrapVersion: z.literal(BOOTSTRAP_VERSION),
   serverId: OpaqueIdSchema,
   relayInstanceId: OpaqueIdSchema,
   endpoint: z.string().regex(/^http:\/\/(?:127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$/),
-  secret: WsBootstrapSchema.shape.secret,
+  // The rendezvous holds the local owner secret, never a device token.
+  secret: LocalSecretSchema,
 });
 
 export type AdmissionKind =
   | "accepted"
   | "malformed"
   | "unauthenticated"
+  | "revoked"
   | "forbidden"
   | "mismatch"
   | "too-large"
@@ -197,6 +294,8 @@ export const ADMISSION_STATUS: Record<AdmissionKind, number> = Object.freeze({
   accepted: 200,
   malformed: 400,
   unauthenticated: 401,
+  // The status of a failed authentication; the body (DEVICE_REVOKED) tells the device why.
+  revoked: 401,
   forbidden: 403,
   mismatch: 409,
   "too-large": 413,

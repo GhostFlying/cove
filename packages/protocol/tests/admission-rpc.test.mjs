@@ -288,7 +288,9 @@ test("closed RPC methods publish params, results, permissions and CLI routes", (
   expect(
     Object.values(RPC_METHODS).every(
       (spec) =>
-        spec.permission === "local-principal" &&
+        ["owner", "local-owner"].includes(spec.permission) &&
+        Array.isArray(spec.secrets.input) &&
+        Array.isArray(spec.secrets.output) &&
         spec.params &&
         spec.result &&
         spec.capability &&

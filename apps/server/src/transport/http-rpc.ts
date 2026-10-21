@@ -21,7 +21,7 @@ import {
   type RpcId,
   type RpcMethod,
 } from "@cove/protocol/rpc";
-import type { LocalCore } from "../rpc/context.js";
+import type { LocalCore, Principal } from "../rpc/context.js";
 import { dispatchRpc } from "../rpc/dispatch.js";
 import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 
@@ -37,6 +37,7 @@ const admissionFailureKinds: readonly BootstrapFailure["kind"][] = [
   "FORBIDDEN",
   "BUSY",
   "UNAVAILABLE",
+  "DEVICE_REVOKED",
 ];
 const admissionFailureBodies = new Map<BootstrapFailure["kind"], string>(
   admissionFailureKinds.map((kind) => [kind, JSON.stringify(bootstrapFailure(kind))]),
@@ -54,6 +55,9 @@ export function sendHttpAdmissionFailure(
       break;
     case "unauthenticated":
       failure = "UNAUTHENTICATED";
+      break;
+    case "revoked":
+      failure = "DEVICE_REVOKED";
       break;
     case "forbidden":
       failure = "FORBIDDEN";
@@ -102,12 +106,15 @@ const domain = (id: RpcId, error: DomainError) => {
 };
 
 // The method table names the module that serves each method (apps/server/src/rpc/<domain>.ts).
+// `principal` is whom the transport authenticated; omitted, it is the local owner (the only
+// principal until device authentication, m2 T1).
 export async function dispatchLocalRpc(
   core: LocalCore,
   method: RpcMethod,
   params: Record<string, unknown>,
+  principal?: Principal,
 ): Promise<unknown> {
-  return dispatchRpc(core, method, params);
+  return dispatchRpc(core, method, params, principal);
 }
 
 function isDomainFailure(value: unknown): value is { error: DomainError } {
@@ -132,6 +139,7 @@ export async function rpcBody(
   core: LocalCore,
   bytes: Uint8Array,
   buffers: RpcBuffers = rpcBuffers(core),
+  principal?: Principal,
 ): Promise<{ status: number; body?: string }> {
   let value: unknown;
   let parseFailed = false;
@@ -163,7 +171,7 @@ export async function rpcBody(
     if (item.kind === "notification") {
       if (item.params !== null) {
         try {
-          await dispatchLocalRpc(core, item.method as RpcMethod, item.params);
+          await dispatchLocalRpc(core, item.method as RpcMethod, item.params, principal);
         } catch {
           // Notifications execute without emitting success or failure replies.
         }
@@ -174,7 +182,7 @@ export async function rpcBody(
     if (item.kind === "error") response = item.response;
     else {
       try {
-        const result = await dispatchLocalRpc(core, item.method, item.params);
+        const result = await dispatchLocalRpc(core, item.method, item.params, principal);
         if (isDomainFailure(result)) response = domain(item.id, result.error);
         else
           response = validateRpcResultForCall(item.method, item.params, result)

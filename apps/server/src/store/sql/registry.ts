@@ -1,3 +1,4 @@
+import { authOperations } from "./auth.js";
 import { bindingOperations } from "./bindings.js";
 import { configOperations } from "./config.js";
 import { identityOperations } from "./identity.js";
@@ -24,6 +25,7 @@ export const STORE_OPERATIONS = Object.freeze({
   ...tabOperations,
   ...worktreeOperations,
   ...bindingOperations,
+  ...authOperations,
 });
 
 export type StoreOperations = typeof STORE_OPERATIONS;

@@ -55,6 +55,30 @@ export const DOMAIN_ERROR_KINDS = [
   // request was not accepted and nothing was recorded. An entry that fails after the task was
   // recorded is reported by the task record (entryState), never by this refusal.
   "WORKSPACE_ENTRY_UNAVAILABLE",
+  // M2 kinds (device authorization, entries and operation retention), appended likewise.
+  // The device's token was valid but the device has been revoked (m2 D8). Only a caller that
+  // presented the device's correct secret learns this; a wrong or unknown token is
+  // UNAUTHENTICATED, which never tells a missing device from a wrong secret.
+  "DEVICE_REVOKED",
+  // Pairing refusal (m2 D6): the invitation is redeemed, cancelled, expired or unknown, or the
+  // secret is wrong. One kind for all of them, so a guesser learns nothing about which.
+  "INVITATION_UNAVAILABLE",
+  // An authenticated device-management request names an invitation or device this server has
+  // no record of. Unlike pairing, the caller is already the owner, so the distinction is safe.
+  "INVITATION_NOT_FOUND",
+  "DEVICE_NOT_FOUND",
+  // The client reached a server whose serverId is not the one it recorded for this alias; it
+  // stopped before sending any device token (m2 S7).
+  "SERVER_ID_MISMATCH",
+  // The channel peer (SSH host key, or the server tsnet node's stable ID) is not the one the
+  // client recorded; it stopped before sending any device token (m2 S6, S8).
+  "PEER_IDENTITY_MISMATCH",
+  // The selected entry (loopback, ssh or tsnet) could not be reached or started. Nothing was
+  // sent; the client never switches to another entry on its own (m2 D11).
+  "ENTRY_UNAVAILABLE",
+  // The operation ID is known but its full record was cleared after the retention period
+  // (m2 D13). The request is never executed again under this ID.
+  "OPERATION_HISTORY_EXPIRED",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -147,6 +171,18 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   REPO_IN_USE: "fix-request",
   // The cause is on the host (permissions, a file in the way); the operator fixes it and retries.
   WORKSPACE_ENTRY_UNAVAILABLE: "none",
+  // Pair again with a new invitation; repeating the request with the revoked token never helps.
+  DEVICE_REVOKED: "reauthenticate",
+  // A new invitation is the only recovery (m2 D6).
+  INVITATION_UNAVAILABLE: "none",
+  INVITATION_NOT_FOUND: "refresh-resource",
+  DEVICE_NOT_FOUND: "refresh-resource",
+  // The operator checks the entry or the client record; nothing is retried automatically.
+  SERVER_ID_MISMATCH: "none",
+  PEER_IDENTITY_MISMATCH: "none",
+  ENTRY_UNAVAILABLE: "none",
+  // Inspect the resources the operation affected; the same ID is never executed again.
+  OPERATION_HISTORY_EXPIRED: "refresh-resource",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(
@@ -192,7 +228,8 @@ export const WS_CLOSE_CODES = Object.freeze({
 });
 
 export function closeCodeForError(kind: DomainErrorKind): number {
-  if (kind === "UNAUTHENTICATED" || kind === "FORBIDDEN") return WS_CLOSE_CODES.policy;
+  if (kind === "UNAUTHENTICATED" || kind === "FORBIDDEN" || kind === "DEVICE_REVOKED")
+    return WS_CLOSE_CODES.policy;
   if (kind === "BUSY" || kind === "WORKER_UNAVAILABLE") return WS_CLOSE_CODES.capacity;
   return WS_CLOSE_CODES.protocol;
 }

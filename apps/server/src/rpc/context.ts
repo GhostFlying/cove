@@ -28,6 +28,19 @@ export type LocalCore = {
 
 export const M0_LOCAL_PRINCIPAL_ID = "m0-local";
 
+// Who is calling, as the transport authenticated it (m2 D7). Never taken from params. There is
+// one owner: `principalId` is always the durable local owner, so operation receipts stay keyed
+// by it whichever device sent the request (relay-protocol §11.3), and a device's own identity
+// travels beside it for audit, device management and the local-owner check.
+export type Principal =
+  | { readonly kind: "local-owner"; readonly principalId: string }
+  | { readonly kind: "device"; readonly principalId: string; readonly deviceId: string };
+
+// The local owner of this composition: the only principal before device authentication (T1).
+export function localOwner(core: LocalCore): Principal {
+  return { kind: "local-owner", principalId: core.principalId ?? M0_LOCAL_PRINCIPAL_ID };
+}
+
 // Methods whose table entry names the domain D.
 export type DomainMethod<D extends RpcDomain> = {
   [M in RpcMethod]: (typeof RPC_METHODS)[M]["domain"] extends D ? M : never;
@@ -35,9 +48,15 @@ export type DomainMethod<D extends RpcDomain> = {
 
 export type RpcCall<D extends RpcDomain> = {
   method: DomainMethod<D>;
-  // Already validated against the method's params schema.
+  // Already validated against the method's params schema, without its `secrets` member: a
+  // handler can hand these params to receipts and records without carrying a secret along.
   params: Record<string, unknown>;
+  // The method's declared input secrets (params.secrets), for its live use only. Never stored,
+  // logged or returned.
+  secrets?: Record<string, unknown>;
+  // principal.principalId; kept for the M1 handlers.
   principalId: string;
+  principal: Principal;
 };
 
 // A handler returns the method's result (validated against the result schema before it is sent)

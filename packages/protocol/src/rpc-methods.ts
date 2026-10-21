@@ -8,6 +8,8 @@ import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./identity.js";
 import { AppearanceSchema, GeometrySchema, ProfileSchema } from "./profile.js";
 import { RunStatusSchema, SpawnCommandSchema } from "./pipe.js";
 import { WorkerHealthSchema } from "./terminal-events.js";
+import * as A from "./auth.js";
+import { M2_RESULT_FIELDS, M2_RESULT_KEYS, ServiceStatusSchema } from "./auth.js";
 import * as W from "./workspace.js";
 import {
   TERMINAL_RESULT_KEYS,
@@ -40,6 +42,14 @@ export const WRITE_RPC_METHODS = [
   "tab.close",
   "binding.convert",
   "binding.delete",
+  "auth.invite.create",
+  "auth.invite.cancel",
+  "auth.device.rename",
+  "auth.device.revoke",
+  "auth.device.rotate",
+  "entry.set",
+  "server.tsnet.login",
+  "server.tsnet.logout",
 ] as const;
 export type WriteRpcMethod = (typeof WRITE_RPC_METHODS)[number];
 export const OperationMethodSchema = z.enum(WRITE_RPC_METHODS);
@@ -48,6 +58,18 @@ const TERMINAL_OPERATION_METHODS: ReadonlySet<string> = new Set([
   "terminal.stop",
 ]);
 
+// The M1 result fields plus the M2 references (auth.ts). An M2 field never shares a record with
+// mounts, source counts or a continue/abandon target, which keeps the largest record within
+// operationRecordBytes (workspace-contract.test.mjs and auth-contract.test.mjs build it).
+// Unknown members are stripped on parse, so a field that is not declared, a secret included, can
+// never be stored in a record.
+const OperationRecordResultSchema = OperationResultDataSchema.safeExtend(M2_RESULT_FIELDS).refine(
+  (result) =>
+    M2_RESULT_KEYS.every((key) => result[key] === undefined) ||
+    (result.mounts === undefined &&
+      result.sourceChanges === undefined &&
+      result.targetOperationId === undefined),
+);
 const OperationRecordFieldsSchema = z.object({
   operationId: OpaqueIdSchema,
   method: OperationMethodSchema,
@@ -56,7 +78,7 @@ const OperationRecordFieldsSchema = z.object({
   // The run the operation acts on. A terminal operation always has one; it may belong to an
   // earlier relay instance when the record is historical.
   run: RunRefSchema.optional(),
-  result: OperationResultDataSchema.optional(),
+  result: OperationRecordResultSchema.optional(),
   progress: OperationProgressSchema.optional(),
   error: DomainErrorSchema.optional(),
 });
@@ -138,6 +160,9 @@ export const ServerStatusResultSchema = z.object({
   // Optional on the wire because a server from before issue #103 does not send it; this server
   // always does.
   workers: z.array(WorkerStatusSchema).max(M0_LIMITS.maxRuns).optional(),
+  // How the server runs as a service (m2 D1, D2; T3 reports it). Optional: a server before T3
+  // does not send it.
+  service: ServiceStatusSchema.optional(),
 });
 export const TerminalListParamsSchema = z.object({
   limit: z.number().int().min(1).max(M0_LIMITS.listPage),
@@ -175,8 +200,31 @@ export const RPC_DOMAINS = [
   "mount",
   "tab",
   "binding",
+  // M2 (T0 placeholders): auth (T1), entry (T3), service: server.impact (T3), tsnet:
+  // server.tsnet.* (T5b).
+  "auth",
+  "entry",
+  "service",
+  "tsnet",
 ] as const;
 export type RpcDomain = (typeof RPC_DOMAINS)[number];
+
+// Who may call a method (m2 D7). Every authenticated principal is the owner: the local owner
+// (the same OS user, holding the data directory's local secret) and every paired device have the
+// same rights, since a device can run anything on the host through a terminal anyway.
+// "local-owner" methods are refused to devices (FORBIDDEN) for operational, not security,
+// reasons: logging the server's tsnet node in or out over RPC could cut the very entry a remote
+// caller depends on, and a tsnet auth key has no business crossing the network to the server.
+// Installing, starting, stopping and upgrading the service are local CLI actions, not RPCs.
+export type RpcPermission = "owner" | "local-owner";
+
+// The secret members of a method (m2 "秘密与操作记录的分界"): keys of `params.secrets` (input)
+// and of `result.secrets` (output). Checked against the schemas below when this module loads.
+export type SecretFields = {
+  readonly input: readonly string[];
+  readonly output: readonly string[];
+};
+const NO_SECRETS: SecretFields = Object.freeze({ input: [], output: [] });
 
 type MethodSpec = {
   readonly params: z.ZodType<Record<string, unknown>>;
@@ -188,32 +236,53 @@ type MethodSpec = {
   readonly scope: "instance" | "server";
   readonly domain: RpcDomain;
   readonly capability: string;
-  readonly permission: "local-principal";
+  readonly permission: RpcPermission;
+  readonly secrets: SecretFields;
   readonly cli: string;
 };
 
-// M1 methods are served under the negotiated operation-receipts capability; a separate
-// capability would change the bootstrap contract, which M1 does not need before the first release.
-const local = { permission: "local-principal", capability: "operation-receipts-v1" } as const;
+// M1 and M2 methods are served under the negotiated operation-receipts capability; a separate
+// capability would change the bootstrap contract, which is not needed before the first release
+// (m2 D12).
+const owner = {
+  permission: "owner",
+  capability: "operation-receipts-v1",
+  secrets: NO_SECRETS,
+} as const;
 const read = <D extends RpcDomain, P extends MethodSpec["params"], R extends z.ZodType>(
   domain: D,
   params: P,
   result: R,
   cli: string,
-) => ({ params, result, class: "read", scope: "server", domain, cli, ...local }) as const;
+) => ({ ...owner, params, result, class: "read", scope: "server", domain, cli }) as const;
 const write = <D extends RpcDomain, P extends MethodSpec["params"]>(
   domain: D,
   params: P,
   cli: string,
 ) =>
   ({
+    ...owner,
     params,
     result: OperationResultSchema,
     class: "write",
     scope: "server",
     domain,
     cli,
-    ...local,
+  }) as const;
+// A write whose live response may carry output secrets beside the record. Only the response of
+// the call that committed the operation has them; a resend or operation.get returns the record
+// alone (database-operations.ts, executeSecretWrite).
+const secretWrite = <D extends RpcDomain, P extends MethodSpec["params"], S extends z.ZodType>(
+  domain: D,
+  params: P,
+  secrets: SecretFields,
+  outputs: S,
+  cli: string,
+) =>
+  ({
+    ...write(domain, params, cli),
+    result: OperationResultSchema.extend({ secrets: outputs.optional() }),
+    secrets,
   }) as const;
 
 export const RPC_METHODS = Object.freeze({
@@ -224,7 +293,8 @@ export const RPC_METHODS = Object.freeze({
     scope: "instance",
     domain: "server",
     capability: "operation-receipts-v1",
-    permission: "local-principal",
+    permission: "owner",
+    secrets: NO_SECRETS,
     cli: "status",
   },
   "terminal.list": {
@@ -234,7 +304,8 @@ export const RPC_METHODS = Object.freeze({
     scope: "instance",
     domain: "terminal",
     capability: "terminal-preview-v1",
-    permission: "local-principal",
+    permission: "owner",
+    secrets: NO_SECRETS,
     cli: "terminal list",
   },
   "terminal.get": {
@@ -244,7 +315,8 @@ export const RPC_METHODS = Object.freeze({
     scope: "instance",
     domain: "terminal",
     capability: "terminal-preview-v1",
-    permission: "local-principal",
+    permission: "owner",
+    secrets: NO_SECRETS,
     cli: "terminal get",
   },
   "terminal.create": write("terminal", TerminalCreateParamsSchema, "terminal create"),
@@ -292,6 +364,65 @@ export const RPC_METHODS = Object.freeze({
     W.BindingListResultSchema,
     "mount history",
   ),
+  // M2 (docs/milestones/m2.md T0). Pairing redemption is not an RPC: it goes to the pairing
+  // listener and leaves no operation record (D6).
+  "auth.invite.create": secretWrite(
+    "auth",
+    A.AuthInviteCreateParamsSchema,
+    { input: [], output: ["invitation"] },
+    A.AuthInviteCreateSecretsSchema,
+    "auth invite create",
+  ),
+  "auth.invite.list": read(
+    "auth",
+    A.AuthInviteListParamsSchema,
+    A.AuthInviteListResultSchema,
+    "auth invite list",
+  ),
+  "auth.invite.cancel": write("auth", A.AuthInviteCancelParamsSchema, "auth invite cancel"),
+  "auth.device.list": read(
+    "auth",
+    A.AuthDeviceListParamsSchema,
+    A.AuthDeviceListResultSchema,
+    "auth device list",
+  ),
+  "auth.device.rename": write("auth", A.AuthDeviceRenameParamsSchema, "auth device rename"),
+  "auth.device.revoke": write("auth", A.AuthDeviceRevokeParamsSchema, "auth device revoke"),
+  "auth.device.rotate": secretWrite(
+    "auth",
+    A.AuthDeviceRotateParamsSchema,
+    { input: [], output: ["token"] },
+    A.AuthDeviceRotateSecretsSchema,
+    "auth device rotate",
+  ),
+  "entry.get": read("entry", A.EntryGetParamsSchema, A.EntryGetResultSchema, "server entry get"),
+  "entry.set": write("entry", A.EntrySetParamsSchema, "server entry set"),
+  "server.impact": read(
+    "service",
+    A.ServerImpactParamsSchema,
+    A.ServerImpactResultSchema,
+    "server restart",
+  ),
+  "server.tsnet.login": {
+    ...secretWrite(
+      "tsnet",
+      A.TsnetLoginParamsSchema,
+      { input: ["authKey"], output: ["loginUrl"] },
+      A.TsnetLoginSecretsSchema,
+      "server tsnet login",
+    ),
+    permission: "local-owner",
+  },
+  "server.tsnet.status": read(
+    "tsnet",
+    A.TsnetStatusParamsSchema,
+    A.TsnetStatusResultSchema,
+    "server tsnet status",
+  ),
+  "server.tsnet.logout": {
+    ...write("tsnet", A.TsnetLogoutParamsSchema, "server tsnet logout"),
+    permission: "local-owner",
+  },
 } as const satisfies Record<string, MethodSpec>);
 export type RpcMethod = keyof typeof RPC_METHODS;
 
@@ -303,6 +434,57 @@ if (
   tableWrites.some((method, index) => method !== WRITE_RPC_METHODS[index])
 )
   throw new Error("WRITE_RPC_METHODS must list the write methods of RPC_METHODS in order");
+
+// The one member that holds a method's secrets, in params and in results (auth.ts).
+export const SECRETS_MEMBER = "secrets";
+
+// Keys of a schema's optional `secrets` object, or null when it has none.
+function secretKeys(schema: z.ZodType): { keys: string[]; optional: boolean } | null {
+  const member = (schema as { shape?: Record<string, z.ZodType> }).shape?.[SECRETS_MEMBER];
+  if (!member) return null;
+  const optional = member instanceof z.ZodOptional;
+  const inner = optional ? (member as z.ZodOptional<z.ZodType>).unwrap() : member;
+  const shape = (inner as { shape?: Record<string, unknown> }).shape;
+  return { keys: shape ? Object.keys(shape).sort() : [], optional };
+}
+// The table's declarations are the schemas' `secrets` members exactly: a secret cannot be added
+// to a schema without being declared, nor declared without the schema carrying it. Input secrets
+// are optional, so params with their secrets dropped (a CLI pending record) still validate.
+for (const [method, spec] of Object.entries(RPC_METHODS)) {
+  const declared: SecretFields = spec.secrets;
+  for (const [side, schema] of [
+    ["input", spec.params],
+    ["output", spec.result],
+  ] as const) {
+    const found = secretKeys(schema);
+    const expected = [...declared[side]].sort();
+    if (
+      found === null
+        ? expected.length !== 0
+        : !found.optional || expected.length === 0 || found.keys.join() !== expected.join()
+    )
+      throw new Error(`Secret fields of ${method} (${side}) do not match its schema`);
+  }
+}
+
+export function secretFields(method: RpcMethod): SecretFields {
+  return RPC_METHODS[method].secrets;
+}
+
+// A copy of params or a result without its `secrets` member, and that member. Every path that
+// keeps, fingerprints or forwards a request or record past its live use goes through this.
+export function splitSecrets<T extends Record<string, unknown>>(
+  value: T,
+): { value: Omit<T, typeof SECRETS_MEMBER>; secrets: Record<string, unknown> | undefined } {
+  const { [SECRETS_MEMBER]: secrets, ...rest } = value;
+  return {
+    value: rest as Omit<T, typeof SECRETS_MEMBER>,
+    secrets:
+      secrets && typeof secrets === "object" && !Array.isArray(secrets)
+        ? (secrets as Record<string, unknown>)
+        : undefined,
+  };
+}
 
 export function isWriteRpcMethod(method: string): method is WriteRpcMethod {
   return Object.hasOwn(RPC_METHODS, method) && RPC_METHODS[method as RpcMethod].class === "write";
