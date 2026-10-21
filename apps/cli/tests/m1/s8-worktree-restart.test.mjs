@@ -337,3 +337,44 @@ test("an accepted continue or abandon whose outcome cannot be read still prints 
   expect(afterAbandon.stdout).not.toHaveProperty("target");
   expect(afterAbandon.stderr).toContain("`cove operation get abandon-1`");
 });
+
+test("a continue or abandon whose poll fails after a successful one prints the last record read (#144 item 5)", async () => {
+  // The compiled ending of continue/abandon: the first poll reads a newer record (revision 1,
+  // still running), the next read fails. The output used to be the revision-0 receipt the write
+  // was accepted with; it is the last record read.
+  const { finishAction } = await import("../../dist/commands/operation.js");
+  const accepted = {
+    operationId: "abandon-2",
+    method: "operation.abandon",
+    revision: 0,
+    state: "accepted",
+  };
+  const seen = { ...accepted, revision: 1, state: "running" };
+  const failing = {
+    ok: false,
+    kind: "local-error",
+    error: { category: "transport", reason: "connection-closed" },
+  };
+  const reads = [{ ok: true, value: { operation: seen } }];
+  const client = { getOperation: async () => reads.shift() ?? failing };
+  const stdout = [];
+  const stderr = [];
+  const out = process.stdout.write;
+  const err = process.stderr.write;
+  process.stdout.write = (chunk) => stdout.push(String(chunk)) > 0;
+  process.stderr.write = (chunk) => stderr.push(String(chunk)) > 0;
+  let code;
+  try {
+    code = await finishAction(client, accepted, "target-2");
+  } finally {
+    process.stdout.write = out;
+    process.stderr.write = err;
+  }
+  expect(code).toBe(1);
+  const printed = JSON.parse(stdout.join(""));
+  expect(printed.operation).toEqual(seen);
+  expect(printed.targetReadError).toContain(
+    "operation abandon-2 was accepted, but polling its state failed",
+  );
+  expect(stderr.join("")).toContain("(last seen running)");
+});
