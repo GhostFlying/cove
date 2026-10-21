@@ -9,6 +9,17 @@
 // the socket is unlinked before the lock is released, and the kernel
 // releases the lock when the process dies. A stale socket left by a killed
 // owner is therefore removed by whichever process next holds the lock.
+//
+// Shutdown is one transition, taken under mu: closing becomes true, after
+// which no connection is admitted and no stream is registered. Every path
+// into it (idle, stop, signal, listener failure) goes through beginShutdown,
+// and the idle check and the transition happen in the same critical section
+// as admission, so a connection is either admitted before the decision (and
+// keeps the daemon alive) or refused after it (closed before any reply).
+// After the transition the socket is unlinked and the lifetime context is
+// cancelled, so in-flight handlers (a pending login, a dial waiting for the
+// node) return; Run waits for all handlers, which lets a stop reply be
+// written, before closing the node and releasing the lock.
 package dial
 
 import (
@@ -35,15 +46,17 @@ import (
 // against honest mistakes (a stuck client, a runaway script), not attacks.
 const (
 	handshakeTimeout     = 10 * time.Second
+	replyTimeout         = 5 * time.Second
 	defaultDialTimeout   = 15 * time.Second
 	maxDialTimeout       = 60 * time.Second
 	defaultLoginTimeout  = 60 * time.Second
 	maxLoginTimeout      = 5 * time.Minute
 	logoutControlTimeout = 10 * time.Second
 	peerLookupWindow     = 5 * time.Second
-	maxStreams           = 256
-	maxConns             = 512
-	maxLabelBytes        = 200
+	// drainTimeout bounds how long Run waits for handlers after shutdown;
+	// every handler is itself bounded by the lifetime context or a deadline.
+	drainTimeout = 15 * time.Second
+	maxConns     = 512
 )
 
 // Config configures the daemon.
@@ -86,6 +99,10 @@ type daemon struct {
 	ln   net.Listener
 	sock string
 
+	// life is cancelled by the shutdown transition; every handler uses it.
+	life   context.Context
+	cancel context.CancelFunc
+
 	// ctl serializes login, logout and stop (write side) against status and
 	// dial setup (read side). Holding the read side until a new stream is
 	// registered guarantees logout and stop see every stream.
@@ -97,9 +114,11 @@ type daemon struct {
 	streams    map[string]*stream
 	nextID     uint64
 	closing    bool
+	handlers   sync.WaitGroup
+	// waiting holds the connections whose request has not been read yet.
+	waiting map[net.Conn]struct{}
 
-	shutdownOnce sync.Once
-	done         chan struct{}
+	closed chan struct{} // closed once the shutdown transition finished
 }
 
 // Run takes ownership of cfg.Home and serves until idle, stopped or ctx
@@ -114,6 +133,9 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	if cfg.IdleTimeout <= 0 {
 		return errors.New("idle timeout must be positive")
+	}
+	if !proto.ValidBuild(cfg.Build) {
+		return fmt.Errorf("invalid build identifier %q", cfg.Build)
 	}
 	runDir := filepath.Join(cfg.Home, "run")
 	if err := fsutil.EnsurePrivateDir(cfg.Home); err != nil {
@@ -131,7 +153,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	// Closing the lock file is the last thing Run does, after the socket is
-	// gone, so a new owner never finds a live daemon behind a stale socket.
+	// gone and every handler has finished, so a new owner never finds a live
+	// daemon behind a stale socket.
 	defer lock.Close()
 	cfg.Pause("locked")
 
@@ -160,8 +183,11 @@ func Run(ctx context.Context, cfg Config) error {
 		}, cfg.Start),
 		lastActive: time.Now(),
 		streams:    map[string]*stream{},
-		done:       make(chan struct{}),
+		waiting:    map[net.Conn]struct{}{},
+		closed:     make(chan struct{}),
 	}
+	d.life, d.cancel = context.WithCancel(context.Background())
+	defer d.cancel()
 	// The socket is ready before the node: hello and status answer at once
 	// and dial requests wait (boundedly) for the restored node.
 	d.ctl.Lock()
@@ -176,11 +202,14 @@ func Run(ctx context.Context, cfg Config) error {
 	select {
 	case <-ctx.Done():
 		d.shutdown("signal")
-	case <-d.done:
+	case <-d.closed:
 	}
-	<-d.done
+	<-d.closed
 	cfg.Pause("unlinked")
 	d.closeStreams()
+	if !waitTimeout(&d.handlers, drainTimeout) {
+		cfg.Logf("dial: handlers still running after %v; closing anyway", drainTimeout)
+	}
 	d.ctl.Lock()
 	d.mgr.Close()
 	d.ctl.Unlock()
@@ -188,18 +217,94 @@ func Run(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// shutdown stops accepting and unlinks the socket. The lock stays held
-// until Run returns.
+// beginShutdown performs the closing transition; mu must be held. It
+// reports whether this call made the transition.
+func (d *daemon) beginShutdownLocked() bool {
+	if d.closing {
+		return false
+	}
+	d.closing = true
+	return true
+}
+
+// finishShutdown runs after a successful transition: no new connection or
+// stream can appear, so the socket is unlinked and in-flight work is
+// cancelled. The lock stays held until Run returns.
+func (d *daemon) finishShutdown(reason string) {
+	d.ln.Close()
+	os.Remove(d.sock)
+	d.cancel()
+	// Wake handlers still waiting for a request (for example a client that
+	// sent only hello and kept the connection open); otherwise Run would
+	// wait for their handshake timeout before exiting.
+	d.mu.Lock()
+	for c := range d.waiting {
+		c.SetReadDeadline(time.Now())
+	}
+	d.mu.Unlock()
+	d.cfg.Logf("dial: shutting down (%s)", reason)
+	close(d.closed)
+}
+
 func (d *daemon) shutdown(reason string) {
-	d.shutdownOnce.Do(func() {
-		d.mu.Lock()
-		d.closing = true
-		d.mu.Unlock()
-		d.ln.Close()
-		os.Remove(d.sock)
-		d.cfg.Logf("dial: shutting down (%s)", reason)
-		close(d.done)
-	})
+	d.mu.Lock()
+	began := d.beginShutdownLocked()
+	d.mu.Unlock()
+	if began {
+		d.finishShutdown(reason)
+	}
+}
+
+func (d *daemon) isClosing() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.closing
+}
+
+// admit counts a new connection unless the daemon is closing or full. The
+// connection is waiting for its request until requestRead; the caller sets
+// its handshake deadline before admit, so a shutdown that shortens the
+// deadline afterwards is never overridden.
+func (d *daemon) admit(c net.Conn) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closing || d.conns >= maxConns {
+		return false
+	}
+	d.conns++
+	d.waiting[c] = struct{}{}
+	d.handlers.Add(1)
+	return true
+}
+
+// requestRead ends the waiting phase of c; from here on the handler is
+// cancelled through the lifetime context or by closing its stream.
+func (d *daemon) requestRead(c net.Conn) {
+	d.mu.Lock()
+	delete(d.waiting, c)
+	d.mu.Unlock()
+}
+
+func (d *daemon) release(c net.Conn) {
+	d.mu.Lock()
+	delete(d.waiting, c)
+	d.conns--
+	d.lastActive = time.Now()
+	d.mu.Unlock()
+	d.handlers.Done()
+}
+
+// idleShutdown makes the idle decision and the closing transition in one
+// critical section with admit, so no admitted connection is ever cut off by
+// an idle exit.
+func (d *daemon) idleShutdown(now time.Time) bool {
+	d.mu.Lock()
+	began := d.conns == 0 && now.Sub(d.lastActive) >= d.cfg.IdleTimeout && d.beginShutdownLocked()
+	d.mu.Unlock()
+	if began {
+		d.finishShutdown("idle")
+	}
+	return began
 }
 
 func (d *daemon) acceptLoop() {
@@ -209,26 +314,16 @@ func (d *daemon) acceptLoop() {
 			d.shutdown("listener closed")
 			return
 		}
-		d.mu.Lock()
-		if d.closing || d.conns >= maxConns {
-			d.mu.Unlock()
+		c.SetDeadline(time.Now().Add(handshakeTimeout))
+		if !d.admit(c) {
 			c.Close()
 			continue
 		}
-		d.conns++
-		d.mu.Unlock()
 		go func() {
-			defer d.release()
+			defer d.release(c)
 			d.handle(c)
 		}()
 	}
-}
-
-func (d *daemon) release() {
-	d.mu.Lock()
-	d.conns--
-	d.lastActive = time.Now()
-	d.mu.Unlock()
 }
 
 // idleLoop exits the daemon after IdleTimeout with no connection at all:
@@ -239,16 +334,12 @@ func (d *daemon) idleLoop() {
 	defer t.Stop()
 	for {
 		select {
-		case <-d.done:
+		case <-d.closed:
 			return
-		case <-t.C:
-		}
-		d.mu.Lock()
-		idle := d.conns == 0 && time.Since(d.lastActive) >= d.cfg.IdleTimeout
-		d.mu.Unlock()
-		if idle {
-			d.shutdown("idle")
-			return
+		case now := <-t.C:
+			if d.idleShutdown(now) {
+				return
+			}
 		}
 	}
 }
@@ -263,13 +354,26 @@ func (d *daemon) hello() proto.Hello {
 	}
 }
 
+var errShuttingDown = proto.Errorf(proto.CodeShuttingDown, "daemon is shutting down")
+
+// readError reports a failed request read. A read cut short by shutdown
+// (finishShutdown expires the read deadline) is SHUTTING_DOWN rather than
+// an I/O error.
+func (d *daemon) readError(err error) error {
+	var pe *proto.Error
+	if !errors.As(err, &pe) && d.isClosing() {
+		return errShuttingDown
+	}
+	return err
+}
+
 func (d *daemon) handle(c net.Conn) {
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(handshakeTimeout))
+	// The handshake deadline was set before admit.
 	br := bufio.NewReader(c)
 	req, err := proto.ReadRequest(br)
 	if err != nil {
-		writeErr(c, req, err)
+		writeErr(c, req, d.readError(err))
 		return
 	}
 	if req.Op != proto.OpHello {
@@ -277,14 +381,15 @@ func (d *daemon) handle(c net.Conn) {
 		return
 	}
 	clientProtocol := req.Protocol
-	if proto.WriteFrame(c, proto.Succeed(req, d.hello())) != nil {
+	if proto.WriteResponse(c, proto.Succeed(req, d.hello())) != nil {
 		return
 	}
 	req, err = proto.ReadRequest(br)
+	d.requestRead(c)
 	if err != nil {
 		// A client that only wanted the hello simply closes.
 		if !errors.Is(err, io.EOF) {
-			writeErr(c, req, err)
+			writeErr(c, req, d.readError(err))
 		}
 		return
 	}
@@ -296,17 +401,16 @@ func (d *daemon) handle(c net.Conn) {
 		return
 	}
 	c.SetDeadline(time.Time{})
-	ctx := context.Background()
+	ctx := d.life
 	switch req.Op {
 	case proto.OpStatus:
 		d.ctl.RLock()
-		st, err := d.mgr.Status(ctx)
+		st, err := d.status(ctx)
 		d.ctl.RUnlock()
-		st.Streams = d.streamList()
 		reply(c, req, st, err)
 	case proto.OpLogin:
 		d.ctl.Lock()
-		st, err := d.mgr.Login(ctx, req.AuthKey, clamp(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
+		st, err := d.login(ctx, req)
 		d.ctl.Unlock()
 		reply(c, req, st, err)
 	case proto.OpLogout:
@@ -316,16 +420,11 @@ func (d *daemon) handle(c net.Conn) {
 		reply(c, req, st, err)
 	case proto.OpStop:
 		d.ctl.Lock()
-		err := d.checkStreams(req.Force)
-		if err == nil {
-			d.closeStreams()
-		}
+		err := d.stop(req.Force)
 		d.ctl.Unlock()
-		// Unlink the socket before answering, so a CLI that sees the reply
-		// and reconnects can never reach this exiting daemon.
-		if err == nil {
-			d.shutdown("stop request")
-		}
+		// The socket is already unlinked, so a CLI that sees this reply and
+		// reconnects can never reach this exiting daemon; Run waits for this
+		// handler, so the reply is written before the process exits.
 		reply(c, req, struct{}{}, err)
 	case proto.OpDial:
 		d.dial(ctx, c, br, req)
@@ -334,7 +433,30 @@ func (d *daemon) handle(c net.Conn) {
 	}
 }
 
+// The lifecycle operations run with ctl held for writing and re-check
+// closing first: a request queued behind a stop must not act on a daemon
+// that is exiting.
+
+func (d *daemon) status(ctx context.Context) (proto.Status, error) {
+	if d.isClosing() {
+		return proto.Status{}, errShuttingDown
+	}
+	st, err := d.mgr.Status(ctx)
+	st.Streams = d.streamList()
+	return st, err
+}
+
+func (d *daemon) login(ctx context.Context, req proto.Request) (proto.Status, error) {
+	if d.isClosing() {
+		return proto.Status{}, errShuttingDown
+	}
+	return d.mgr.Login(ctx, req.AuthKey, proto.Timeout(req.TimeoutMs, defaultLoginTimeout, maxLoginTimeout))
+}
+
 func (d *daemon) logout(ctx context.Context, force bool) (proto.Status, error) {
+	if d.isClosing() {
+		return proto.Status{}, errShuttingDown
+	}
 	if err := d.checkStreams(force); err != nil {
 		return proto.Status{}, err
 	}
@@ -342,40 +464,73 @@ func (d *daemon) logout(ctx context.Context, force bool) (proto.Status, error) {
 	return d.mgr.Logout(ctx, logoutControlTimeout)
 }
 
-// checkStreams refuses a disruptive request while streams are active unless
-// the owner forced it, and lists the streams so the CLI can show them.
-func (d *daemon) checkStreams(force bool) error {
-	if force {
-		return nil
+// stop runs with ctl held for writing. The check, the closing transition
+// and the unlink happen before ctl is released, so no stream can be
+// registered between a successful check and the shutdown (register runs
+// under the read side and refuses once closing).
+func (d *daemon) stop(force bool) error {
+	d.mu.Lock()
+	if d.closing {
+		d.mu.Unlock()
+		return errShuttingDown
 	}
-	if list := d.streamList(); len(list) > 0 {
-		e := proto.Errorf(proto.CodeActiveStreams, "%d active stream(s); retry with force to close them", len(list))
-		e.Streams = list
-		return e
+	if !force && len(d.streams) > 0 {
+		d.mu.Unlock()
+		return d.activeStreamsError()
 	}
+	d.beginShutdownLocked()
+	d.mu.Unlock()
+	d.finishShutdown("stop request")
+	d.closeStreams()
 	return nil
 }
 
+// checkStreams refuses a disruptive request while streams are active unless
+// the owner forced it, and lists the streams so the CLI can show them.
+func (d *daemon) checkStreams(force bool) error {
+	if force || len(d.streamList()) == 0 {
+		return nil
+	}
+	return d.activeStreamsError()
+}
+
+func (d *daemon) activeStreamsError() error {
+	list := d.streamList()
+	e := proto.Errorf(proto.CodeActiveStreams, "%d active stream(s); retry with force to close them", len(list))
+	e.Streams = list
+	return e
+}
+
 func (d *daemon) dial(ctx context.Context, c net.Conn, br *bufio.Reader, req proto.Request) {
-	if req.Target == nil || req.Target.StableNodeID == "" {
-		writeErr(c, req, proto.Errorf(proto.CodeBadRequest, "dial needs target.stableNodeID"))
+	if req.Target == nil || !proto.ValidNodeID(req.Target.StableNodeID) {
+		writeErr(c, req, proto.Errorf(proto.CodeBadRequest,
+			"dial needs target.stableNodeID of 1-%d letters and digits", proto.MaxNodeIDBytes))
 		return
 	}
 	if req.Port < 1 || req.Port > 65535 {
 		writeErr(c, req, proto.Errorf(proto.CodeBadRequest, "port must be 1-65535"))
 		return
 	}
-	if len(req.Label) > maxLabelBytes {
-		writeErr(c, req, proto.Errorf(proto.CodeBadRequest, "label exceeds %d bytes", maxLabelBytes))
+	if len(req.Label) > proto.MaxLabelBytes {
+		writeErr(c, req, proto.Errorf(proto.CodeBadRequest, "label exceeds %d bytes", proto.MaxLabelBytes))
 		return
 	}
 	want := req.Target.StableNodeID
-	ctx, cancel := context.WithTimeout(ctx, clamp(req.TimeoutMs, defaultDialTimeout, maxDialTimeout))
+	ctx, cancel := context.WithTimeout(ctx, proto.Timeout(req.TimeoutMs, defaultDialTimeout, maxDialTimeout))
 	defer cancel()
 
 	d.ctl.RLock()
-	peerConn, info, err := d.openPeer(ctx, want, req.Port)
-	var s *stream
+	var (
+		peerConn net.Conn
+		info     proto.NodeInfo
+		s        *stream
+		err      error
+	)
+	if d.isClosing() {
+		err = errShuttingDown
+	} else {
+		peerConn, info, err = d.openPeer(ctx, want, req.Port)
+	}
 	if err == nil {
 		s, err = d.register(c, peerConn, want, req.Port, req.Label)
 		if err != nil {
@@ -388,11 +543,16 @@ func (d *daemon) dial(ctx context.Context, c net.Conn, br *bufio.Reader, req pro
 		return
 	}
 	defer d.unregister(s.info.ID)
-	if proto.WriteFrame(c, proto.Succeed(req, proto.DialResult{StreamID: s.info.ID, Peer: info})) != nil {
+	c.SetWriteDeadline(time.Now().Add(replyTimeout))
+	if proto.WriteResponse(c, proto.Succeed(req, proto.DialResult{StreamID: s.info.ID, Peer: info})) != nil {
 		peerConn.Close()
 		return
 	}
+	c.SetWriteDeadline(time.Time{})
 	d.cfg.Logf("dial: stream %s opened to %s port %d", s.info.ID, want, req.Port)
+	// Bytes the CLI sent right after the dial frame are already buffered in
+	// br; they are forwarded only now, after the peer was verified. The CLI
+	// side is trusted, so its half-close is not time-bounded (grace 0).
 	pipe.Join(c, br, peerConn, 0)
 	d.cfg.Logf("dial: stream %s closed", s.info.ID)
 }
@@ -417,20 +577,23 @@ func openVerified(ctx context.Context, n node.Node, want string, port int) (net.
 		ip   string
 		err  error
 	)
-	// Right after a node comes up its netmap may still be filling in.
-	lookupCtx, cancel := context.WithTimeout(ctx, peerLookupWindow)
-	defer cancel()
+	// Right after a node comes up its netmap may still be filling in, so a
+	// missing peer is retried for a short window. The window only decides
+	// whether to retry; each lookup runs under the request's own context, so
+	// the window closing during a lookup cannot turn "not found" into a
+	// spurious node error.
+	window := time.Now().Add(peerLookupWindow)
+retry:
 	for {
-		info, ip, err = n.LookupPeer(lookupCtx, want)
-		if !errors.Is(err, node.ErrPeerNotFound) {
+		info, ip, err = n.LookupPeer(ctx, want)
+		if !errors.Is(err, node.ErrPeerNotFound) || time.Now().After(window) {
 			break
 		}
 		select {
 		case <-time.After(200 * time.Millisecond):
-			continue
-		case <-lookupCtx.Done():
+		case <-ctx.Done():
+			break retry
 		}
-		break
 	}
 	if errors.Is(err, node.ErrPeerNotFound) {
 		return nil, info, proto.Errorf(proto.CodePeerNotFound, "no peer with stable node ID %s is visible", want)
@@ -450,7 +613,7 @@ func openVerified(ctx context.Context, n node.Node, want string, port int) (net.
 	if who.StableNodeID != want {
 		conn.Close()
 		return nil, info, proto.Errorf(proto.CodePeerMismatch,
-			"connected peer is %s, not %s", who.StableNodeID, want)
+			"connected peer is %s, not %s", proto.Truncate(who.StableNodeID), want)
 	}
 	return conn, who, nil
 }
@@ -459,9 +622,9 @@ func (d *daemon) register(local, peer net.Conn, target string, port int, label s
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.closing {
-		return nil, proto.Errorf(proto.CodeShuttingDown, "daemon is shutting down")
+		return nil, errShuttingDown
 	}
-	if len(d.streams) >= maxStreams {
+	if len(d.streams) >= proto.MaxStreams {
 		return nil, proto.Errorf(proto.CodeTooManyStreams, "%d streams are open", len(d.streams))
 	}
 	d.nextID++
@@ -514,29 +677,37 @@ func (d *daemon) streamList() []proto.StreamInfo {
 	return out
 }
 
+// reply writes a result or error, bounded so a stalled client cannot keep a
+// handler (and so Run) waiting.
 func reply(c net.Conn, req proto.Request, result any, err error) {
 	if err != nil {
 		writeErr(c, req, err)
 		return
 	}
-	proto.WriteFrame(c, proto.Succeed(req, result))
+	c.SetWriteDeadline(time.Now().Add(replyTimeout))
+	proto.WriteResponse(c, proto.Succeed(req, result))
 }
 
 func writeErr(c net.Conn, req proto.Request, err error) {
-	if errors.Is(err, proto.ErrFrameTooLarge) {
-		err = proto.Errorf(proto.CodeBadRequest, "frame exceeds %d bytes", proto.MaxFrameBytes)
-	}
-	proto.WriteFrame(c, proto.Fail(req, err))
-}
-
-func clamp(ms int, def, maxD time.Duration) time.Duration {
-	if ms <= 0 {
-		return def
-	}
-	return min(time.Duration(ms)*time.Millisecond, maxD)
+	c.SetWriteDeadline(time.Now().Add(replyTimeout))
+	proto.WriteResponse(c, proto.Fail(req, err))
 }
 
 func deadline(ctx context.Context) time.Time {
 	t, _ := ctx.Deadline()
 	return t
+}
+
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
