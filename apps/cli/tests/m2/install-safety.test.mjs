@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { createM1Fixture } from "../m1/fixtures.mjs";
-import { INSTALL_STAMP } from "../../dist/install/closure.js";
+import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
+import { installClosure } from "../../dist/install/installer.js";
 import { installLayout } from "../../dist/install/layout.js";
 import { systemdUnit } from "../../dist/install/service.js";
 
@@ -16,7 +17,8 @@ import { systemdUnit } from "../../dist/install/service.js";
 // - a server that holds its data directory but does not answer is never taken for a stopped one:
 //   the commands that would stop it ask for confirmation without an impact list, and prune keeps
 //   every build, since any of them may be the one it runs;
-// - the systemd unit escapes `$` and `%` in paths.
+// - the systemd unit escapes `$` and `%` in paths;
+// - an installed build is reused only when its contents are the closure's.
 
 let fixture;
 
@@ -211,4 +213,38 @@ test("the systemd unit keeps `$` and `%` in paths literal", () => {
   const environment = unit.split("\n").find((line) => line.startsWith("Environment="));
   expect(environment).toContain('"COVE_HOME=/home/user/data $HOME %%h"');
   expect(unit).toContain("Description=Cove server (/home/user/data $HOME %%h)");
+});
+
+// A sealed closure in miniature: one file and a stamp over it. Installing copies and verifies it;
+// nothing in it runs.
+async function miniClosure(dir, build, text) {
+  await mkdir(join(dir, "bin"), { recursive: true });
+  await writeFile(join(dir, "bin", "payload"), text);
+  await writeFile(
+    join(dir, INSTALL_STAMP),
+    JSON.stringify(stampFor(build, await contentsDigest(dir))),
+  );
+}
+
+test("an installed build is reused only when its contents are the closure's", async () => {
+  const home = await dataDirectory("reuse");
+  const layout = installLayout(home);
+  const first = join(fixture.root, "closure-first");
+  await miniClosure(first, BUILD_A, "first\n");
+  expect(await installClosure(layout, first)).toMatchObject({ build: BUILD_A, created: true });
+
+  const copy = join(fixture.root, "closure-copy");
+  await cp(first, copy, { recursive: true });
+  expect(await installClosure(layout, copy)).toMatchObject({ build: BUILD_A, created: false });
+
+  // Another closure under the same build ID: refused, and the installed build is unchanged.
+  const other = join(fixture.root, "closure-other");
+  await miniClosure(other, BUILD_A, "other\n");
+  await expect(installClosure(layout, other)).rejects.toThrow(
+    "already installed with different contents",
+  );
+  expect(await contentsDigest(join(home, "install", BUILD_A))).toBe(await contentsDigest(first));
+  expect(
+    (await readdir(join(home, "install"))).filter((name) => name.startsWith(".staging-")),
+  ).toEqual([]);
 });

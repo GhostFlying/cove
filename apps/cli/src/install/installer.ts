@@ -125,8 +125,16 @@ export async function installClosure(
     const dir = closurePath(layout, stamp.build);
     try {
       await lstat(dir);
-      // Already installed. The existing copy must still be intact to be reused.
-      await verifyClosure(dir);
+      // Already installed. The existing copy must still be intact to be reused, and must be the
+      // same closure: a build ID names its inputs, but two closures that differ under one ID (an
+      // input the ID missed) must not be taken for each other.
+      const existing = await verifyClosure(dir);
+      if (existing.contentsSha256 !== stamp.contentsSha256)
+        throw new Error(
+          `build ${stamp.build} is already installed with different contents ` +
+            `(${dir}); nothing was changed. Rebuild the closure, or remove the installed build ` +
+            "with `cove server prune` once it is neither active nor running",
+        );
       return { build: stamp.build, dir, stamp, created: false };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
