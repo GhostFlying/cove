@@ -1,4 +1,5 @@
 import { isAbsolute, normalize, basename } from "node:path";
+import { PortSchema, SshTargetSchema } from "@cove/protocol/auth";
 
 export type M0LocalOptions = {
   mode: "m0-local";
@@ -9,6 +10,14 @@ export type M0LocalOptions = {
   // Cove data directory (M1 D5). Without it the application runs without a store (unit tests);
   // the executable always resolves one (`--home`, COVE_HOME or ~/.cove).
   home?: string;
+  // Device pairing (m2 T1). These are startup flags until T3's entry configuration (entry.get /
+  // entry.set) replaces them:
+  // - pairingPort: the loopback port of the pairing listener. Absent: the port the open
+  //   invitations advertise, or any free port when there is none (auth/service.ts).
+  // - sshTarget: the `[user@]host` invitations advertise for the SSH entry. Absent: derived from
+  //   the OS user and host name when that is a valid target (entry/main.ts).
+  pairingPort?: number;
+  sshTarget?: string;
 };
 
 export function validateLocalOptions(input: M0LocalOptions): M0LocalOptions {
@@ -26,6 +35,9 @@ export function validateLocalOptions(input: M0LocalOptions): M0LocalOptions {
       (!isAbsolute(input.home) ||
         normalize(input.home) !== input.home ||
         (input.home.length > 1 && input.home.endsWith("/")))) ||
+    (input.pairingPort !== undefined &&
+      (!PortSchema.safeParse(input.pairingPort).success || input.pairingPort === input.port)) ||
+    (input.sshTarget !== undefined && !SshTargetSchema.safeParse(input.sshTarget).success) ||
     input.allowedOrigins.length > 16 ||
     input.allowedOrigins.some((origin) => {
       try {
@@ -49,7 +61,16 @@ export function parseLocalOptions(argv: readonly string[]): M0LocalOptions {
     if (
       !key ||
       !value ||
-      !["--mode", "--host", "--port", "--rendezvous", "--origin", "--home"].includes(key) ||
+      ![
+        "--mode",
+        "--host",
+        "--port",
+        "--rendezvous",
+        "--origin",
+        "--home",
+        "--pairing-port",
+        "--ssh-target",
+      ].includes(key) ||
       (key !== "--origin" && values.has(key))
     )
       throw new Error("Invalid local entry arguments");
@@ -58,6 +79,9 @@ export function parseLocalOptions(argv: readonly string[]): M0LocalOptions {
   }
   const port = values.get("--port");
   if (!port || !/^(0|[1-9][0-9]{0,4})$/.test(port)) throw new Error("Explicit local port required");
+  const pairingPort = values.get("--pairing-port");
+  if (pairingPort !== undefined && !/^[1-9][0-9]{0,4}$/.test(pairingPort))
+    throw new Error("Invalid local entry arguments");
   return validateLocalOptions({
     mode: values.get("--mode") as "m0-local",
     host: values.get("--host") as M0LocalOptions["host"],
@@ -65,6 +89,8 @@ export function parseLocalOptions(argv: readonly string[]): M0LocalOptions {
     rendezvousPath: values.get("--rendezvous") ?? "",
     allowedOrigins: origins,
     ...(values.has("--home") ? { home: values.get("--home")! } : {}),
+    ...(pairingPort !== undefined ? { pairingPort: Number(pairingPort) } : {}),
+    ...(values.has("--ssh-target") ? { sshTarget: values.get("--ssh-target")! } : {}),
   });
 }
 

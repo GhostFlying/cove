@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   BOOTSTRAP_VERSION,
   LOCAL_PATHS,
+  bootstrapFailure,
   negotiateBootstrap,
   validateWsFirstMessage,
   type AdmissionKind,
@@ -76,9 +77,12 @@ export class TerminalWebSocket {
     };
     const owner = { close };
     this.peers.add(owner);
+    let markClosed: () => void = () => undefined;
+    const physicalClose = new Promise<void>((done) => (markClosed = done));
     const closed = (): void => {
       if (physicallyClosed) return;
       physicallyClosed = true;
+      markClosed();
       retired = true;
       this.timer.clear(deadline);
       unauthenticated.release();
@@ -120,8 +124,26 @@ export class TerminalWebSocket {
               ? (input as { secret: unknown }).secret
               : undefined;
           const elapsedMs = this.now() - started;
-          const secretMatches = typeof secret === "string" && this.admission.verifies(secret);
+          // The local owner secret or a device token (m2 D7); verified without side effects.
+          const verdict =
+            typeof secret === "string"
+              ? this.admission.authenticate(secret)
+              : ({ kind: "unauthenticated" } as const);
+          const secretMatches = verdict.kind === "local-owner" || verdict.kind === "device";
           const request = validateWsFirstMessage(input, bytes.byteLength, elapsedMs, secretMatches);
+          // The correct token of a revoked device in an otherwise valid first frame: the device is
+          // told why before the policy close (relay-protocol §11.8). Any other failure is closed
+          // without an answer, as before.
+          if (
+            verdict.kind === "revoked" &&
+            validateWsFirstMessage(input, bytes.byteLength, elapsedMs, true)
+          ) {
+            socket.send(JSON.stringify(bootstrapFailure("DEVICE_REVOKED")), () =>
+              close(WS_CLOSE_CODES.policy),
+            );
+            close(WS_CLOSE_CODES.policy);
+            return;
+          }
           if (!request) {
             const version =
               input && typeof input === "object" && "bootstrapVersion" in input
@@ -206,6 +228,17 @@ export class TerminalWebSocket {
           unauthenticated.release();
           this.timer.clear(deadline);
           this.services.add(service);
+          // An admitted device is recorded as used and its connection registered for revocation
+          // in this same synchronous step (auth/connections.ts): revocation closes it with the
+          // policy code, which ends its subscriptions and releases any control it held through
+          // the ordinary disconnect path (no resize).
+          if (verdict.kind === "device" && this.core.auth) {
+            this.core.auth.admitted(verdict, "loopback");
+            this.core.auth.connections.register(verdict.deviceId, {
+              close: () => close(WS_CLOSE_CODES.policy),
+              closed: physicalClose,
+            });
+          }
           socket.send(JSON.stringify(result), (error) => {
             if (error) close();
           });

@@ -1,6 +1,7 @@
 import { domainError, type DomainError } from "@cove/protocol/errors";
 import type { RpcDomain, RpcMethod } from "@cove/protocol/rpc";
 import { RPC_METHODS } from "@cove/protocol/rpc";
+import type { AuthService } from "../auth/service.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { TerminalOperations } from "../operations/terminal-operations.js";
 import type { ConfigService } from "../store/config.js";
@@ -24,6 +25,9 @@ export type LocalCore = {
   // Operation receipts shared by every write of this server (durable when `store` is present).
   receipts?: OperationReceipts;
   config?: ConfigService;
+  // Device authorization (m2 T1): credentials, invitations, devices and the pairing listener.
+  // Absent without a store; the auth domain then reports CAPABILITY_UNAVAILABLE.
+  auth?: AuthService;
 };
 
 export const M0_LOCAL_PRINCIPAL_ID = "m0-local";
