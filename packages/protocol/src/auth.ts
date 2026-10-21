@@ -274,3 +274,106 @@ export const M2_RESULT_FIELDS = {
   appliesAfterRestart: z.literal(true).optional(),
 } as const;
 export const M2_RESULT_KEYS = Object.keys(M2_RESULT_FIELDS) as (keyof typeof M2_RESULT_FIELDS)[];
+
+// ---------------------------------------------------------------------------------------------
+// Invitation strings and pairing redemption (D6). Added by m2 T1, the protocol writer for this
+// wave; additive to the T0 contract above.
+
+// The invitation string of a payload, and the payload of a string. Decoding is bounded by the
+// string schema (AUTH_LIMITS.invitationChars) and returns null for anything that is not a valid
+// payload, so a pasted string is checked before any part of it is used. The secret is part of the
+// payload: whatever holds a decoded payload holds the secret, and must keep it out of logs,
+// errors and stored records. Every field of a valid payload is ASCII, so the JSON text is encoded
+// as base64url of its characters directly (this module has no text codec).
+const INVITATION_PREFIX = "cove-invite:v1:";
+const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+function base64url(ascii: string): string {
+  let out = "";
+  for (let i = 0; i < ascii.length; i += 3) {
+    const a = ascii.charCodeAt(i);
+    const b = i + 1 < ascii.length ? ascii.charCodeAt(i + 1) : 0;
+    const c = i + 2 < ascii.length ? ascii.charCodeAt(i + 2) : 0;
+    const bits = (a << 16) | (b << 8) | c;
+    out += BASE64URL[(bits >> 18) & 63]! + BASE64URL[(bits >> 12) & 63]!;
+    if (i + 1 < ascii.length) out += BASE64URL[(bits >> 6) & 63]!;
+    if (i + 2 < ascii.length) out += BASE64URL[bits & 63]!;
+  }
+  return out;
+}
+
+// The ASCII text of unpadded base64url, or null when it is not canonical base64url of ASCII.
+function fromBase64url(encoded: string): string | null {
+  if (encoded.length % 4 === 1) return null;
+  let out = "";
+  for (let i = 0; i < encoded.length; i += 4) {
+    const chunk = encoded.slice(i, i + 4);
+    const values = [...chunk].map((char) => BASE64URL.indexOf(char));
+    if (values.some((value) => value < 0)) return null;
+    const bits = values.reduce((sum, value, index) => sum | (value << (18 - 6 * index)), 0);
+    const bytes = [(bits >> 16) & 255, (bits >> 8) & 255, bits & 255].slice(0, chunk.length - 1);
+    if (bytes.some((byte) => byte > 127)) return null;
+    out += String.fromCharCode(...bytes);
+  }
+  return base64url(out) === encoded ? out : null;
+}
+
+export function encodeInvitation(payload: InvitationPayload): string {
+  const text = JSON.stringify(InvitationPayloadSchema.parse(payload));
+  if (!/^[\x20-\x7e]*$/.test(text)) throw new Error("An invitation payload is ASCII");
+  return InvitationStringSchema.parse(`${INVITATION_PREFIX}${base64url(text)}`);
+}
+export function decodeInvitation(text: unknown): InvitationPayload | null {
+  const string = InvitationStringSchema.safeParse(text);
+  if (!string.success) return null;
+  const json = fromBase64url(string.data.slice(INVITATION_PREFIX.length));
+  if (json === null) return null;
+  try {
+    const payload = InvitationPayloadSchema.safeParse(JSON.parse(json));
+    return payload.success ? payload.data : null;
+  } catch {
+    return null;
+  }
+}
+
+// The pairing listener (D6) answers two requests, both POST with a JSON body:
+// - PAIRING_PATHS.identity: a bootstrap request, answered with BootstrapIdentitySchema exactly as
+//   the business port answers one without credentials, so the redeeming client can check the
+//   invitation's serverId before it submits the secret.
+// - PAIRING_PATHS.redeem: the redemption below. It is not an RPC and leaves no operation record:
+//   the server redeems the invitation and creates the device in one transaction and answers once.
+//   A lost answer is not retried; the user creates a new invitation, and the device it left is
+//   listed never-connected (D6).
+export const PAIRING_PATHS = Object.freeze({ identity: "/bootstrap", redeem: "/pair" });
+// Both bodies are small; the listener refuses larger ones before parsing.
+export const PAIRING_LIMITS = Object.freeze({ requestBytes: 4096, responseBytes: 4096 });
+
+export const PairingRedeemRequestSchema = z.strictObject({
+  type: z.literal("cove-pairing-redeem"),
+  inviteId: InviteIdSchema,
+  secret: InvitationSecretSchema,
+  deviceName: DeviceNameSchema,
+});
+export type PairingRedeemRequest = z.infer<typeof PairingRedeemRequestSchema>;
+// `token` is the device's long-lived credential (D4): this answer is its only delivery, and the
+// client keeps it only in its 0600 credential file (D5). `businessPort` is the server's loopback
+// business port, which the invitation does not carry (it names the pairing port only) and every
+// entry forwards to (D3).
+export const PairingRedeemResultSchema = z
+  .strictObject({
+    type: z.literal("cove-pairing-result"),
+    serverId: OpaqueIdSchema,
+    deviceId: DeviceIdSchema,
+    token: DeviceTokenSchema,
+    businessPort: PortSchema,
+  })
+  .refine((value) => value.token.startsWith(`cove_d1_${value.deviceId}.`));
+export type PairingRedeemResult = z.infer<typeof PairingRedeemResultSchema>;
+// A refusal says nothing about the invitation: INVITATION_UNAVAILABLE for an unknown, redeemed,
+// cancelled or expired one and for a wrong secret alike. BUSY: an attempt or connection limit of
+// the listener was reached and nothing was checked. INVALID_ARGUMENT: the request was malformed.
+export const PairingFailureSchema = z.strictObject({
+  type: z.literal("cove-pairing-error"),
+  kind: z.enum(["INVITATION_UNAVAILABLE", "BUSY", "INVALID_ARGUMENT"]),
+});
+export type PairingFailure = z.infer<typeof PairingFailureSchema>;

@@ -397,3 +397,56 @@ test("secret checks inspect decoded values and exact output declarations", () =>
   ).toBeNull();
   expect(checkedOutputSecrets("auth.invite.cancel", { invitation: "x" })).toBeNull();
 });
+
+test("an invitation string round-trips its payload and nothing else decodes", async () => {
+  const { decodeInvitation, encodeInvitation } = await import("@cove/protocol/auth");
+  const payload = {
+    serverId: "server-1",
+    inviteId: "invite-1",
+    secret: "A".repeat(43),
+    expiresAtMs: 1_800_000_000_000,
+    pairingPort: 47_000,
+    entries: { ssh: { target: "user@example.test" } },
+  };
+  const text = encodeInvitation(payload);
+  expect(text).toMatch(/^cove-invite:v1:[A-Za-z0-9_-]+$/);
+  expect(decodeInvitation(text)).toEqual(payload);
+  for (const invalid of [
+    `${text}=`,
+    text.replace("cove-invite:v1:", "cove-invite:v2:"),
+    text.slice(0, -1),
+    "cove-invite:v1:",
+    `cove-invite:v1:${"_".repeat(3000)}`,
+    42,
+  ])
+    expect(decodeInvitation(invalid)).toBeNull();
+  expect(() => encodeInvitation({ ...payload, entries: {} })).toThrow();
+});
+
+test("pairing requests and answers are strict and the token names the device", async () => {
+  const { PairingFailureSchema, PairingRedeemRequestSchema, PairingRedeemResultSchema } =
+    await import("@cove/protocol/auth");
+  const request = {
+    type: "cove-pairing-redeem",
+    inviteId: "invite-1",
+    secret: "A".repeat(43),
+    deviceName: "laptop",
+  };
+  expect(PairingRedeemRequestSchema.safeParse(request).success).toBe(true);
+  expect(PairingRedeemRequestSchema.safeParse({ ...request, extra: 1 }).success).toBe(false);
+  const result = {
+    type: "cove-pairing-result",
+    serverId: "server-1",
+    deviceId: "device-1",
+    token: `cove_d1_device-1.${"B".repeat(43)}`,
+    businessPort: 47_001,
+  };
+  expect(PairingRedeemResultSchema.safeParse(result).success).toBe(true);
+  const otherDevice = `cove_d1_device-2.${"B".repeat(43)}`;
+  expect(PairingRedeemResultSchema.safeParse({ ...result, token: otherDevice }).success).toBe(
+    false,
+  );
+  const failure = { type: "cove-pairing-error", kind: "INVITATION_UNAVAILABLE" };
+  expect(PairingFailureSchema.safeParse(failure).success).toBe(true);
+  expect(PairingFailureSchema.safeParse({ ...failure, kind: "OTHER" }).success).toBe(false);
+});
