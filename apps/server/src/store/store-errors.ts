@@ -62,7 +62,8 @@ export function uncertainStoreOutcome(error: unknown): boolean {
 }
 
 // Whether a call is known to have changed nothing, so that repeating it is safe: refused before it
-// was sent because the queue was full, or run and rolled back. A closed or failed store is not
+// was sent because the queue was full, or run and rolled back. Only a transient refusal is worth
+// repeating (transientStoreRefusal); the others are persistent. A closed or failed store is not
 // retried (the server stops serving, entry/main.ts), and a call whose outcome is unknown is never
 // repeated.
 export function refusedStoreCall(error: unknown): boolean {
@@ -74,18 +75,31 @@ export function refusedStoreCall(error: unknown): boolean {
   );
 }
 
+// Whether a refusal may pass by itself, so that repeating the call can succeed: the queue was full,
+// or SQLite reported contention (SQLITE_BUSY, SQLITE_LOCKED and their extended codes). Every other
+// operation error is persistent: the same call fails the same way (SQLITE_READONLY, SQLITE_CORRUPT,
+// SQLITE_IOERR_*, SQLITE_FULL, a constraint, or an error the operation's own code threw), so
+// repeating it only hides the fault. It still changed nothing (refusedStoreCall).
+export function transientStoreRefusal(error: unknown): boolean {
+  if (error instanceof StoreOperationError)
+    return error.code !== null && /^SQLITE_(BUSY|LOCKED)(_|$)/.test(error.code);
+  return refusedStoreCall(error);
+}
+
 // How often, and after which delays, a refused call is repeated: up to `tries` calls in all, the
 // delay doubling from `delayMs` up to `capMs`.
 export type RetrySchedule = { tries: number; delayMs: number; capMs: number };
 
-// Runs `call`, repeating it after each refusal (refusedStoreCall) by `schedule`. The last refusal,
-// and any other failure at once, is thrown.
+// Runs `call`, repeating it after each transient refusal (transientStoreRefusal) by `schedule`.
+// The last refusal, and any other failure at once, is thrown: in particular a persistent operation
+// error, which even an unbounded schedule must not retry forever without anyone learning of it
+// (#144 item 4; the store reports those itself, Store.onOperationError).
 export async function retryRefused<T>(call: () => Promise<T>, schedule: RetrySchedule): Promise<T> {
   for (let tried = 1; ; tried++) {
     try {
       return await call();
     } catch (error) {
-      if (!refusedStoreCall(error) || tried >= schedule.tries) throw error;
+      if (!transientStoreRefusal(error) || tried >= schedule.tries) throw error;
       const delay = Math.min(schedule.delayMs * 2 ** (tried - 1), schedule.capMs);
       await new Promise((done) => setTimeout(done, delay).unref());
     }

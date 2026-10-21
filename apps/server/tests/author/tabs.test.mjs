@@ -14,7 +14,7 @@ import { Store } from "../../dist/store/database.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { recordInstanceStart } from "../../dist/store/identity.js";
 import { SqliteReceiptBackend } from "../../dist/store/operations.js";
-import { StoreUnavailableError } from "../../dist/store/store-errors.js";
+import { StoreOperationError, StoreUnavailableError } from "../../dist/store/store-errors.js";
 import { RunLog } from "../../dist/store/runs.js";
 import { LocalRuntime } from "../../dist/terminal/local-runtime.js";
 import { RunRegistry } from "../../dist/terminal/run-registry.js";
@@ -771,6 +771,32 @@ describe("refused spawns", () => {
       env.tabs.reopen("p", { operationId: "r1", tabId: "tab-instance-1" }),
     );
     expect(reopened.outcome.operation).toMatchObject({ state: "succeeded" });
+  });
+
+  // #144 item 4: a persistent store error (here a read-only database) fails the same way every
+  // time; the cleanup used to repeat it forever with no diagnostic. It is tried once, and the
+  // run stays starting for the next start to mark interrupted.
+  it("does not repeat a late refusal's cleanup that failed with a persistent store error", async () => {
+    const env = await setup({ runsPerWorker: 1 });
+    const calls = [];
+    env.runLog.notStarted = (run) => {
+      calls.push(run.runId);
+      return Promise.reject(new StoreOperationError("SQLITE_READONLY", "readonly database"));
+    };
+    const { outcome } = await env.refuseLate(
+      "spawn",
+      "WORKER_UNAVAILABLE",
+      env.tabs.create("p", create("c1")),
+    );
+    expect(outcome.operation).toMatchObject({ error: { kind: "RESULT_UNKNOWN" } });
+    for (let i = 0; i < 500 && calls.length === 0; i++)
+      await new Promise((done) => setTimeout(done, 2));
+    // Long enough for several repeats of NOT_STARTED_RETRY (50, 100, 200 ms ...).
+    await new Promise((done) => setTimeout(done, 500));
+    expect(calls).toEqual(["run-1"]);
+    expect(await env.rows("SELECT run_id, lifecycle FROM runs")).toEqual([
+      { run_id: "run-1", lifecycle: "starting" },
+    ]);
   });
 
   it("keeps a run whose spawn result is unknown, since the worker may have started it", async () => {
