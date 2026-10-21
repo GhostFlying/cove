@@ -70,13 +70,15 @@ const KILL_GRACE_MS = 1_000;
 const STDERR_TAIL_BYTES = 4096;
 const DETAIL_CHARS = 200;
 
-// The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process;
-// ssh runs in the background with stdin from /dev/null; a reader waits for the pipe's EOF and then
-// ends ssh; the supervisor exits with ssh's status. Arguments reach ssh as "$@", never through
-// the shell's parser.
+// The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process
+// and fd 4 the stderr pipe, which only ssh writes to: the shell's own stderr goes to /dev/null, so
+// its job messages (bash reports the reader it kills as "Terminated") never become the error line
+// shown for ssh. ssh runs in the background with stdin from /dev/null; a reader waits for the
+// pipe's EOF and then ends ssh; the supervisor exits with ssh's status. Arguments reach ssh as
+// "$@", never through the shell's parser.
 const SUPERVISOR = [
-  "exec 3<&0 </dev/null",
-  '"$@" &',
+  "exec 3<&0 4>&2 </dev/null 2>/dev/null",
+  '"$@" 2>&4 &',
   "ssh_pid=$!",
   '{ read -r _ <&3; kill -TERM "$ssh_pid" 2>/dev/null; } &',
   "reader_pid=$!",
