@@ -254,12 +254,21 @@ describe("Git runner", () => {
   // SIGKILL ends it. On macOS a group signal sent by a member of the group (the watcher's
   // `kill 0`) does not reliably reach the group leader: the child dies, the leader's `wait`
   // returns and it runs on (and may exit 0) after its deadline. The miss is a race, seen in about
-  // 5-15% of runs on macOS when many runs reach their deadline together, so up to four batches of
-  // 64 runs go at once. On Linux the group signal reaches every member before the sender returns,
-  // so this passes there with or without the fix. A leader that runs past the kill records it.
+  // 5-15% of runs on macOS when many runs reach their deadline together, so batches of 64 runs go
+  // at once until 256 of them were ready (see below). On Linux the group signal reaches every
+  // member before the sender returns, so this passes there with or without the fix. A leader that
+  // runs past the kill records it.
+  //
+  // Each run's leader is the process runGit spawned (the supervisor shell execs git, keeping its
+  // PID), recorded here at spawn, so whether it ended never depends on the stand-in having written
+  // anything. The stand-in records its PID only once it ignores SIGTERM and has a child to wait
+  // for. A run whose deadline came first (its start delayed under load) never reached the race:
+  // it is inconclusive, not a kill (#140), and too few ready runs fail the test.
   it(
     "kills a git that ignores SIGTERM at its deadline, leader included",
-    { timeout: 90_000 },
+    // Up to twelve batches. Each takes a few seconds even under heavy load (about 60% of its runs
+    // were ready with 32 busy loops on 16 cores); only a failing one waits the full 40 s.
+    { timeout: 300_000 },
     async () => {
       // Its output goes to /dev/null: the shell reports the killed child on stderr, and the run's
       // stderr is closed at the deadline, so a leader that ran on would die of SIGPIPE there and
@@ -267,37 +276,68 @@ describe("Git runner", () => {
       const script = [
         "exec >/dev/null 2>&1",
         'trap "" TERM',
-        'echo $$ > "$PWD/git.pid"',
         "/bin/sleep 30 &",
+        'echo $$ > "$PWD/git.pid"',
         "wait",
         "wait",
         'echo ran-on > "$PWD/ran-on"',
       ].join("\n");
       process.env.PATH = `${await fakeGit(script)}:${savedEnv.PATH}`;
+      // The leader PID of every run started in a batch's directories, by directory.
+      const leaders = new Map();
+      const spawnChild = ChildProcess.prototype.spawn;
+      const spawns = vi
+        .spyOn(ChildProcess.prototype, "spawn")
+        .mockImplementation(function (options) {
+          const spawned = spawnChild.call(this, options);
+          if (leaders.has(options.cwd)) leaders.set(options.cwd, this.pid);
+          return spawned;
+        });
+      // "killed", "unready" (not spawned, or killed before it was ready), "alive" or "ran on".
       const outcome = async (cwd) => {
-        let pid;
-        try {
-          pid = Number(await readFile(join(cwd, "git.pid"), "utf8"));
-        } catch (error) {
-          // Killed before it recorded its PID: nothing of it ran on.
-          if (error.code === "ENOENT") return "killed";
+        const leader = leaders.get(cwd);
+        if (leader === undefined) return "unready";
+        // Under load the kill can land seconds after the run settled: the supervisor, its watcher
+        // and the watcher's cat may all still be starting. A leader the kill missed runs on once
+        // its sleep ends, 30 s after it started, so one that neither ended nor ran on within 40 s
+        // was never killed.
+        const gone = (await ended(leader, 40_000)) ? "killed" : "alive";
+        if (gone === "alive") process.kill(leader, "SIGKILL");
+        if (await exists(join(cwd, "ran-on"))) return "ran on";
+        const recorded = await readFile(join(cwd, "git.pid"), "utf8").catch((error) => {
+          if (error.code === "ENOENT") return "";
           throw error;
-        }
-        if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("no git PID recorded");
-        // The watcher's own start may be delayed under load; give the kill time to land.
-        const gone = (await ended(pid, 10_000)) ? "killed" : "alive";
-        if (gone === "alive") process.kill(pid, "SIGKILL");
-        return (await exists(join(cwd, "ran-on"))) ? "ran on" : gone;
+        });
+        // Empty: killed before it got there, or between creating the file and writing to it.
+        if (recorded.trim() === "") return gone === "killed" ? "unready" : gone;
+        if (Number(recorded) !== leader)
+          throw new Error(`git recorded PID ${recorded.trim()}, but runGit spawned ${leader}`);
+        return gone;
       };
-      for (let batch = 0; batch < 4; batch++) {
-        const cwds = await Promise.all(Array.from({ length: 64 }, () => temporary()));
-        const results = await Promise.all(
-          cwds.map((cwd) => runGit(["status"], { cwd, timeoutMs: 1_000 })),
-        );
-        expect(results.filter((result) => result.reason !== "timeout")).toEqual([]);
-        const outcomes = await Promise.all(cwds.map(outcome));
-        expect(outcomes.filter((result) => result !== "killed")).toEqual([]);
+      // The fake's version is checked first, outside the runs' deadlines.
+      expect(await findGit()).toMatchObject({ kind: "supported" });
+      let ready = 0;
+      let runs = 0;
+      try {
+        for (let batch = 0; batch < 12 && ready < 256; batch++) {
+          const cwds = await Promise.all(Array.from({ length: 64 }, () => temporary()));
+          for (const cwd of cwds) leaders.set(cwd, undefined);
+          const results = await Promise.all(
+            cwds.map((cwd) => runGit(["status"], { cwd, timeoutMs: 1_000 })),
+          );
+          expect(results.filter((result) => result.reason !== "timeout")).toEqual([]);
+          const outcomes = await Promise.all(cwds.map(outcome));
+          expect(outcomes.filter((result) => !["killed", "unready"].includes(result))).toEqual([]);
+          ready += outcomes.filter((result) => result === "killed").length;
+          runs += outcomes.length;
+        }
+      } finally {
+        spawns.mockRestore();
       }
+      expect(
+        ready,
+        `only ${ready} of ${runs} runs were ready before their deadline`,
+      ).toBeGreaterThanOrEqual(256);
     },
   );
 
