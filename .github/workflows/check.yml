@@ -30,10 +30,12 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    # At least checkJobMinimumMs (69 minutes) from ciTimeBudget in ci-environment-setup.mjs. While
-    # unbounded work stays within its reserves, each step's own bound then fires and records
-    # evidence before the job is cancelled. A tooling test fails if this drops below the budget.
-    timeout-minutes: 70
+    # At least checkJobMinimumMs (89 minutes) from ciTimeBudget in ci-environment-setup.mjs. The
+    # bounds nest: the Vitest run (40 minutes) < the `pnpm check` stage that runs the gate (52)
+    # < this job. While unbounded work stays within its reserves, each step's own bound then fires
+    # and records evidence before the job is cancelled. A tooling test fails if this drops below
+    # the budget.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

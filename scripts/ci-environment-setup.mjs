@@ -22,8 +22,15 @@ export const ciTimeBudget = Object.freeze({
   setupStageMs: 10 * minute,
   // Each auxiliary gate command: the toolchain probe, discovery and the source revision.
   gateCommandMs: 2 * minute,
-  // The vitest run. Green macOS runs took 11.1-11.8 minutes when #111 raised it from 12.
-  vitestMs: 20 * minute,
+  // The vitest run. #111 raised it from 12 to 20 minutes when green macOS runs took 11.1-11.8.
+  // #151 raised it to 40: by 2026-10-21 green macOS runs took 15.5-17 minutes on main-based PRs
+  // and 19.95 minutes (3 s under the old bound) on the M2 T1 branch, while Ubuntu took 14.5. The
+  // run is effectively serial: every project but the small pure ones sets maxWorkers: 1, Vitest
+  // runs those projects one after another, and the per-file times add up to the wall time. So
+  // each new scenario suite adds its full duration, and the M2 slices keep adding them. 40
+  // minutes is twice the slowest green run. If green runs approach 30 minutes, shard or
+  // parallelize the run instead of raising this again.
+  vitestMs: 40 * minute,
   // Native preparation, format, lint, build and the gate's file preparation inside
   // `pnpm check`. They have no bound of their own; this reserve is well above the observed 30 s.
   checkPreludeReserveMs: 5 * minute,
