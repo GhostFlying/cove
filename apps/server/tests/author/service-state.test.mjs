@@ -6,7 +6,11 @@ import { Store } from "../../dist/store/database.js";
 import { prepareHome } from "../../dist/store/home.js";
 import { loadOrCreateIdentity, recordInstanceStart } from "../../dist/store/identity.js";
 import {
+  checkCrashRestartBudget,
   consequences,
+  CRASH_RESTART_BUDGET,
+  CrashRestartBudgetError,
+  crashRestartsOverBudget,
   installedBuild,
   recordServiceStart,
   START_REQUEST,
@@ -14,7 +18,7 @@ import {
 } from "../../dist/entry/service-state.js";
 
 // m2 T3 (D2, S1, S2): the start reason server.status reports, the installed and pending build,
-// and the platform consequences of a stop.
+// the platform consequences of a stop, and the crash restart budget under launchd.
 
 const directories = [];
 const stores = [];
@@ -184,5 +188,74 @@ describe("installed build and consequences", () => {
       "logout-stops-server",
     ]);
     expect(consequences("foreground")).toEqual(["live-runs-end"]);
+  });
+});
+
+describe("crash restart budget (launchd)", () => {
+  const crash = (startedAtMs) => ({ reason: "crash-restart", startedAtMs });
+  const now = 1_000_000;
+
+  it("counts the consecutive crash restarts within the window", () => {
+    const five = Array.from({ length: 5 }, (_, index) => crash(now - index * 1_000));
+    expect(crashRestartsOverBudget(five, now)).toBeNull();
+    expect(crashRestartsOverBudget([crash(now), ...five], now)).toBe(6);
+    // Another kind of start ends the chain: a person's start begins a new budget.
+    expect(
+      crashRestartsOverBudget(
+        [...five, { reason: "manual", startedAtMs: now - 6_000 }, ...five],
+        now,
+      ),
+    ).toBeNull();
+    // Crash restarts older than the window are not counted.
+    const old = now - CRASH_RESTART_BUDGET.windowMs - 1;
+    expect(crashRestartsOverBudget([...five, crash(old), crash(old)], now)).toBeNull();
+    // An instance of an earlier build has no recorded reason.
+    expect(
+      crashRestartsOverBudget([...five, { reason: null, startedAtMs: now - 6_000 }], now),
+    ).toBeNull();
+  });
+
+  it("stops the sixth crash restart under launchd and leaves systemd to its start limit", async () => {
+    const path = await temporary();
+    const layout = await prepareHome(join(path, "home"));
+    const store = await Store.open({
+      databasePath: layout.databasePath,
+      backupDirectory: layout.backupDirectory,
+    });
+    stores.push(store);
+    await loadOrCreateIdentity(store);
+    const start = Date.now();
+    const outcomes = [];
+    for (let index = 0; index <= CRASH_RESTART_BUDGET.restarts; index++) {
+      const relayInstanceId = `crashed-${index}`;
+      await recordInstanceStart(store, relayInstanceId, start + index);
+      await store.call("service.recordStart", {
+        relayInstanceId,
+        manager: "launchd-agent",
+        bootId: "boot-a",
+        reason: "crash-restart",
+      });
+      outcomes.push(
+        await checkCrashRestartBudget(store, {
+          manager: "launchd-agent",
+          lastStart: "crash-restart",
+          now: start + index,
+        }).then(
+          () => "serves",
+          (error) => (error instanceof CrashRestartBudgetError ? error.crashRestarts : error),
+        ),
+      );
+    }
+    expect(outcomes).toEqual(["serves", "serves", "serves", "serves", "serves", 6]);
+    await expect(
+      checkCrashRestartBudget(store, {
+        manager: "systemd-user",
+        lastStart: "crash-restart",
+        now: start + 6,
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      checkCrashRestartBudget(store, { manager: "launchd-agent", lastStart: "manual" }),
+    ).resolves.toBeUndefined();
   });
 });
