@@ -53,6 +53,52 @@ type Target = {
 
 type Stream = { readonly socket: Socket; readonly first: Buffer };
 
+// A verified stream waiting for its local connection: the raw socket after the dial answer and
+// the peer check, until splice() takes it over. Ownership passes in two explicit steps, and the
+// socket always has an error listener: the Channel's until detach(), this one's from detach()
+// to claim(), and splice()'s after that. Without it, a reset in the window (the first stream
+// waits for the client's first request; a later one for a promise turn) would be an unhandled
+// 'error' that crashes the CLI. A stream that failed while it waited is claimed as an error;
+// nothing was forwarded on it.
+export class PendingStream {
+  private failure: Error | undefined;
+  private readonly onError = (error: Error) => {
+    this.failure ??= error;
+    this.socket.destroy();
+  };
+
+  constructor(
+    private readonly socket: Socket,
+    private readonly first: Buffer,
+  ) {
+    socket.on("error", this.onError);
+  }
+
+  // Detaches the verified stream from `channel` and holds it, in one synchronous step.
+  static detach(channel: Channel): PendingStream {
+    const first = channel.detach();
+    return new PendingStream(channel.socket, first);
+  }
+
+  // Hands the stream over to its new owner, which must attach its own error listener before it
+  // yields. Throws (and destroys the stream) when it failed or closed while it waited.
+  claim(): Stream {
+    this.socket.off("error", this.onError);
+    if (this.failure || this.socket.destroyed) {
+      this.socket.destroy();
+      const cause = this.failure as NodeJS.ErrnoException | undefined;
+      throw new Error(
+        `the stream ended before it was used (${printable(cause?.code ?? cause?.message ?? "closed", 64)})`,
+      );
+    }
+    return { socket: this.socket, first: this.first };
+  }
+
+  discard(): void {
+    this.socket.destroy();
+  }
+}
+
 function label(text: string): string {
   return Buffer.from(text, "utf8").subarray(0, 64).toString("utf8").replace(/�$/, "");
 }
@@ -83,9 +129,10 @@ function dialFailure(error: DialError, target: Target): string {
   }
 }
 
-// One verified stream to `target`: the raw socket after the daemon's answer, with the stream bytes
-// that came with the answer. Throws RemoteError; nothing was sent to the server then.
-async function openStream(home: string, target: Target, unsent: string): Promise<Stream> {
+// One verified stream to `target`, held until it is claimed: the raw socket after the daemon's
+// answer, with the stream bytes that came with the answer. Throws RemoteError; nothing was sent to
+// the server then.
+async function openStream(home: string, target: Target, unsent: string): Promise<PendingStream> {
   const deadline = Date.now() + OPEN_DEADLINE_MS;
   for (;;) {
     let channel: Channel;
@@ -133,8 +180,7 @@ async function openStream(home: string, target: Target, unsent: string): Promise
           `${target.nodeId}; the stream was refused; ${unsent}`,
       );
     }
-    const first = channel.detach();
-    return { socket: channel.socket, first };
+    return PendingStream.detach(channel);
   }
 }
 
@@ -159,24 +205,34 @@ function splice(local: Socket, stream: Stream): void {
 }
 
 async function openBridge(home: string, target: Target, unsent: string): Promise<OpenedEntry> {
-  let pending: Stream | undefined = await openStream(home, target, unsent);
+  let pending: PendingStream | undefined = await openStream(home, target, unsent);
   const sockets = new Set<Socket>();
   const server: Server = createServer({ allowHalfOpen: true, pauseOnConnect: true }, (local) => {
     sockets.add(local);
     local.on("close", () => sockets.delete(local));
     local.on("error", () => local.destroy());
-    const ready = pending && !pending.socket.destroyed ? Promise.resolve(pending) : undefined;
+    const ready = pending;
     pending = undefined;
-    // A later connection gets its own stream; if that fails nothing is forwarded and the local
-    // connection is closed, which the client reports as a failed request.
-    (ready ?? openStream(home, target, unsent)).then(
-      (stream) => {
-        sockets.add(stream.socket);
-        stream.socket.on("close", () => sockets.delete(stream.socket));
+    // A later connection gets its own stream. If that fails, or a held stream failed while it
+    // waited, nothing is forwarded and the local connection is closed, which the client reports
+    // as a failed request.
+    (ready ? Promise.resolve(ready) : openStream(home, target, unsent)).then(
+      (held) => {
         if (local.destroyed) {
-          stream.socket.destroy();
+          held.discard();
           return;
         }
+        let stream: Stream;
+        try {
+          stream = held.claim();
+        } catch {
+          local.destroy();
+          return;
+        }
+        // claim() and splice() run in one synchronous step: the stream is never without an
+        // error listener.
+        sockets.add(stream.socket);
+        stream.socket.on("close", () => sockets.delete(stream.socket));
         splice(local, stream);
         local.resume();
       },
@@ -189,7 +245,7 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
       server.listen(0, "127.0.0.1", () => resolve());
     });
   } catch {
-    pending?.socket.destroy();
+    pending?.discard();
     throw new RemoteError(
       "ENTRY_UNAVAILABLE",
       `cannot open a local port for the tsnet entry; ${unsent}`,
@@ -202,7 +258,7 @@ async function openBridge(home: string, target: Target, unsent: string): Promise
     endpoint: `http://127.0.0.1:${port}`,
     close: () =>
       new Promise<void>((resolve) => {
-        pending?.socket.destroy();
+        pending?.discard();
         pending = undefined;
         for (const socket of sockets) socket.destroy();
         server.close(() => resolve());

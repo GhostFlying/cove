@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { chmod, lstat, readFile, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { saveServer } from "../../dist/remote/credentials.js";
+import { Channel } from "../../dist/remote/tsnet-daemon.js";
+import { PendingStream } from "../../dist/remote/tsnet.js";
 import { waitFor } from "../recording-view.mjs";
 import {
   alive,
@@ -344,3 +346,28 @@ test("a server node address that answers as another node is refused before anyth
     await new Promise((done) => target.close(done));
   }
 }, 60_000);
+
+test("a stream reset after the dial answer and before it is used is a failed stream, not a crash", async () => {
+  // The window between the dial answer and splice(): the verified stream waits for its local
+  // connection. A reset there must be held as the stream's failure; an 'error' event with no
+  // listener would end the CLI process (here: fail the run as an uncaught exception). A real
+  // reset cannot be provoked on a Unix socket on every platform, so the error is injected.
+  const path = join(root, "stream.sock");
+  const daemon = createServer((socket) => {
+    socket.on("error", () => socket.destroy());
+    socket.write(`${JSON.stringify({ ok: true, result: { streamId: "s1" } })}\n`);
+  });
+  await new Promise((done) => daemon.listen(path, done));
+  try {
+    const socket = connect({ path, allowHalfOpen: true });
+    await new Promise((done) => socket.once("connect", done));
+    const channel = new Channel(socket);
+    expect(await channel.read(5_000)).toMatchObject({ ok: true });
+    const held = PendingStream.detach(channel);
+    socket.destroy(Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }));
+    await new Promise((done) => setTimeout(done, 50));
+    expect(() => held.claim()).toThrow("the stream ended before it was used (ECONNRESET)");
+  } finally {
+    await new Promise((done) => daemon.close(done));
+  }
+}, 30_000);
