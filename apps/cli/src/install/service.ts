@@ -274,7 +274,9 @@ class LaunchAgent implements ServiceBackend {
 // ---- Linux systemd user unit -------------------------------------------------------------------
 
 // systemd's own quoting: inside double quotes a backslash and a quote are escaped; `%` starts a
-// specifier and `$` a variable in ExecStart, so both are doubled. The replacements are functions
+// specifier everywhere, so it is doubled. `$` starts a variable only in ExecStart's arguments,
+// where it is doubled too; the executable path (the first word) and Environment= values are not
+// variable-expanded, so a `$$` there would stay two characters. The replacements are functions
 // because a replacement string gives `$` a meaning of its own ("$$" inserts a single `$`).
 function systemdWord(value: string, variables: boolean): string {
   const escaped = value
@@ -299,7 +301,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ExecStart=${serverCommand(layout, "systemd-user")
-    .map((word) => systemdWord(word, true))
+    .map((word, index) => systemdWord(word, index > 0))
     .join(" ")}
 Environment=${environment}
 Restart=on-failure

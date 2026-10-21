@@ -206,9 +206,12 @@ test("the systemd unit keeps `$` and `%` in paths literal", () => {
   const home = "/home/user/data $HOME %h";
   const unit = systemdUnit(installLayout(home));
   const exec = unit.split("\n").find((line) => line.startsWith("ExecStart="));
-  // In ExecStart, `$` starts a variable and `%` a specifier: both are doubled to stay literal.
-  expect(exec).toContain('"/home/user/data $$HOME %%h/install/current/bin/node"');
-  expect(exec).not.toMatch(/[^$]\$HOME/);
+  // `%` starts a specifier everywhere; `$` starts a variable in ExecStart's arguments only, not in
+  // the executable path (systemd.service(5), "Command lines").
+  const [executable, ...args] = exec.slice("ExecStart=".length).match(/"(?:[^"\\]|\\.)*"/g);
+  expect(executable).toBe('"/home/user/data $HOME %%h/install/current/bin/node"');
+  expect(args).toContain('"/home/user/data $$HOME %%h"');
+  expect(args.join(" ")).not.toMatch(/[^$]\$HOME/);
   // Environment= expands specifiers but not variables.
   const environment = unit.split("\n").find((line) => line.startsWith("Environment="));
   expect(environment).toContain('"COVE_HOME=/home/user/data $HOME %%h"');
