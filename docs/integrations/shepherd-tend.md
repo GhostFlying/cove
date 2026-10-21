@@ -360,6 +360,35 @@ PENDING：
 - 设备以 `--server` 撤销自己的请求有 15 秒期限：请求已发出后超时报 `RESULT_UNKNOWN`（以 1 退出）；撤销可能已生效，
   该设备的 token 随之失效，需从其他设备或本机所有者用 `cove operation get <operationId>` 查询结果。
 
+#162（M2 T3 安装、服务管理与重启影响，未合入）：现有命令的请求不变；输出与行为的变化如下。
+
+- `cove status`（`server.status`）新增 `service: { manager, installedBuild, pendingBuild, lastStart, linger }`：
+  `manager` 为 `launchd-agent`、`systemd-user` 或 `foreground`（`cove server start`）；`pendingBuild` 是已安装、
+  尚未生效的 build（重启后才生效）；`lastStart` 为 `manual`、`crash-restart`、`boot`、`login` 或 `unknown`；
+  `linger` 只在 Linux 上为布尔值。
+- 入口配置：`cove server entry get` 输出 `{ revision, settings: { businessPort, pairingPort, sshTarget, tsnetHostname }, restartRequired }`；
+  `cove server entry set <名> <值>` 与 `entry reset <名>` 是普通写（可带 `--expected-revision`、`--operation-id`），输出操作记录；
+  端口与 `tsnetHostname` 在 server 下次启动时生效（`restartRequired` 为 true，stderr 提示 `cove server restart`）。
+  这三条与 `server status`、`server impact` 也可带 `--server`；其余 `server` 子命令只作用于本机，带 `--server` 时以 2 退出。
+- `cove server start` 不带 `--port` 时绑定入口配置中的业务端口（未配置时仍取空闲端口）；`--port N`（含 0）只覆盖这一次启动。
+  `cove server init` 的输出新增 `entry: { businessPort, pairingPort }`（未配置时为 null）。
+- `cove server install [--closure DIR | --activate BUILD]`：把运行闭包装到 `<home>/install/<build>/`，切换 `current`，写
+  `<home>/bin/cove`，未配置端口时选定端口，注册并（没有 server 在运行时）启动用户服务。输出
+  `{ build, dir, created, activated, runningBuild, pending, entry, service }`；`pending` 为 true 表示正在运行的 server 仍是旧 build。
+  目标 build 不支持数据库当前的 schema 时以 1 退出，`current` 与数据库不变（stderr 给出手动恢复步骤）。
+- `cove server restart [--yes]`、`upgrade [--yes] [--closure DIR]`、`service stop [--yes]`、`uninstall [--yes]` 会结束全部存活 run：
+  没有 `--yes` 且不在终端中时，stdout 输出 `{ action, confirmed: false, impact }` 并以 **2** 退出，什么也不做。
+  `restart`/`upgrade` 成功时输出 `{ serverId, previousRelayInstanceId, relayInstanceId, previousBuild, buildVersion, service, impact }`；
+  serverId 不变，relayInstanceId 改变。旧实例的 run 记为 stopped-with-server 或 interrupted，从不重跑（§5）。
+- `cove server impact` 输出 `{ platform, manager, liveRuns: [{ run, taskId, tabId }], consequences }`，`consequences` 的取值：
+  `live-runs-end`；`cgroup-processes-end`（systemd：停止或重启服务会结束 cgroup 内全部进程，**包括 Cove 终端里用
+  `nohup`、`setsid`、tmux 脱离的进程**）；`detached-processes-launchd`（launchd 停止 server 时，终端里脱离的进程是否保留由 launchd 决定；测试中它们保留）；`logout-stops-server`（macOS 注销即停止 server）。
+  tend 在服务下运行的 agent 不应依赖脱离 Cove 终端的后台进程跨越 server 重启。
+- `cove server service start|stop|status` 输出 `{ manager, unit, unitPath, registered, running, pid, linger }`
+  （`start` 另带新实例的 `relayInstanceId`）；没有用户服务管理器时 `status` 输出 `{ unavailable }`，`start`/`stop` 以 1 退出。
+  `cove server status` 输出 `{ home, installedBuild, builds, unit, server }`，`server` 是 `server.status` 的结果，没有 server 运行时为 null。
+  `cove server prune` 输出 `{ kept, removed }`。`cove server tsnet ...` 以 `CAPABILITY_UNAVAILABLE` 失败并以 1 退出。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -432,3 +461,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-21 | main `034ffc9`；#153（M2 T1，未合入）           | 新增 PENDING #153：全局 `--server`/`$COVE_SERVER` 与 `--via`（只有 loopback 可用，其余入口为 `ENTRY_UNAVAILABLE`，`server`/`remote` 组拒绝 `--server`）；`--server` 模式下相对路径与 `~` 以 2 退出且不发送，`terminal create` 须给绝对 `--cwd`；新增 `auth invite create/list/cancel`、`auth device list/rename/revoke/rotate`（邀请与新 token 只在首次响应中，重发以 1 退出；撤销有连接未关闭时以 1 退出）与 `remote add/list/remove/entry default`（邀请只经提示或 stdin）；本机命令的请求与输出不变                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 2026-10-21 | main `809e098`；#153（M2 T1，未合入）           | 更正 PENDING #153：设备以 `--server` 撤销自己时，其他连接在应答前关闭，应答报告实际 `unclosedConnections`（不为 0 时以 1 退出）；`mount delete-worktree PATH` 在 `--server` 模式下以 2 退出且不发送；`--server` 模式下 `repo register` 的路径用法错误在连接前给出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 2026-10-22 | main `4d55063`；#161（M2 T2，未合入）           | 新增 PENDING #161：`--via ssh` 可用（每条命令一个系统 `ssh -N -L`，`BatchMode`，host key 不符或未知时以 1 退出且不发送 token）；入口失败以 1 退出并列出记录中的入口，不换入口，serverId 不符为 `SERVER_ID_MISMATCH`；`remote add --via ssh` 经 SSH 配对；配对记录的锁改为 `<serverId>.lock.sqlite`；自我撤销请求 15 秒期限，超时为 `RESULT_UNKNOWN`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| 2026-10-22 | main `4d55063`；#162（M2 T3，未合入）           | 新增 PENDING #162：`server.status` 的 `service`；`server entry get/set/reset`（端口与 tsnet 主机名重启后生效）；`server start` 不带 `--port` 时用配置的业务端口，`server init` 输出 `entry`；`server install/prune/uninstall/service/restart/upgrade/status/impact`，结束 run 的命令没有 `--yes` 且不在终端中时输出影响清单并以 2 退出；systemd 下重启结束 cgroup 内脱离的进程；`server tsnet` 为 `CAPABILITY_UNAVAILABLE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |

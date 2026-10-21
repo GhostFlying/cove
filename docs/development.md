@@ -253,6 +253,45 @@ SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixtur
   不为 0 时命令以 1 退出。设备撤销自己时同样如此：server 先关闭它除承载这次撤销的请求之外的所有连接（包括 CLI
   自己的终端连接），再应答，应答发出后才结束那个请求；CLI 因此用一个不依赖终端连接的单独 HTTP 请求发送自我撤销。
 
+## M2 安装与用户服务（T3）
+
+范围与决定见 [M2](milestones/m2.md)（D1–D3、S1、S2）。前提：本 checkout 已 `pnpm build`、`pnpm native:prepare`，
+`pnpm` 与 Go（`COVE_GO` 或 PATH 上的 `go`，版本见 `native/tailscale/go.mod`）可用，并用 `.node-version` 的 Node 运行 CLI。
+
+```sh
+node apps/cli/dist/main.js server install          # 从本 checkout 构建闭包并安装、注册、启动服务
+~/.cove/bin/cove server status                      # 之后用安装的 CLI；它不需要 PATH 上有 Node
+~/.cove/bin/cove server entry get                   # 固定的业务与配对端口（install 时选定，20000–29999）
+~/.cove/bin/cove server restart                     # 先列出将结束的 run 与平台后果；确认后才重启（脚本用 --yes）
+node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的闭包；`server install --closure DIR` 安装它
+```
+
+- 闭包：`<home>/install/<build>/` 含 `bin/node`（固定版本）、`bin/cove-tsnet`、`app/`（`pnpm deploy --prod` 的 CLI、server、
+  worker 与原生模块）与 `cove-install.json`（build、schema 版本与内容摘要）。装好后不再修改；`current` 原子切换，
+  服务单元与 `<home>/bin/cove` 只引用 `current`。`cove server prune` 删除既不是 `current` 也不在运行的 build。
+  同一提交在不同路径的 checkout 中构建出的 build ID 不同（pnpm 按源路径命名 workspace 包），只多一个安装目录。
+- 安装新 build 不替换正在运行的 server：`server status` 显示 `pendingBuild`，`server restart`（或一步完成的
+  `server upgrade`）之后才生效。
+- 服务：macOS 为 `~/Library/LaunchAgents/dev.cove.server.<摘要>.plist`（gui 域，登录时启动、注销时停止，日志在
+  `<home>/server/log/service.log`）；Linux 为 `~/.config/systemd/user/cove-server-<摘要>.service`（日志用 `journalctl --user -u`）。
+  `<摘要>` 取自数据目录的真实路径，不同数据目录各有一个服务。Linux 需要 linger 才能在注销后与开机后运行：
+  `sudo loginctl enable-linger $USER`（CLI 只提示，不执行 sudo）。没有 systemd user 的主机继续用前台 `cove server start`。
+- 停止与重启的后果：systemd 用默认的 `KillMode=control-group`，停止或重启服务会结束 cgroup 内全部进程，**包括在 Cove
+  终端里用 `nohup`、tmux 等脱离的进程**，前台 `cove server start` 则不会。macOS 上由 launchd 停止或重启 server（`bootout`）时，
+  Cove 终端里用 `nohup` 脱离的进程在测试中继续运行（本机 macOS 26 arm64 观察，S2 在 CI 中记录）；这是 launchd 与进程会话
+  的行为，不是承诺，注销场景未验证。
+- 回退：`cove server install --activate <build>` 切换到已安装的 build，先用目标 build 检查数据库 schema；新版本启动时
+  会前进迁移，所以只有与当前 schema 兼容的旧版本能激活，否则拒绝且数据库不变。确需回到不兼容的旧版本时：
+  1. `cove server service stop --yes`；
+  2. 用迁移前留下的备份替换数据库：把 `<home>/server/backups/` 中旧 build 的 schema 对应的最新备份
+     （`cove-schema-<旧 schema>-<时间>-*.db`）复制为 `<home>/server/cove.db`，并删除
+     `cove.db-wal` 与 `cove.db-shm`（备份之后写入的记录会丢失）；
+  3. `cove server install --activate <旧 build>`，再 `cove server service start`。
+     Cove 不自动降级数据库，也不代为执行这些步骤。
+- `cove server uninstall --yes` 停止并移除服务单元、全部已安装 build 与 `<home>/bin/cove`，数据目录（数据库、身份、设备）保留。
+- 测试：`apps/cli/tests/m2/s1-*`、`s2-*` 注册真实的用户服务，名称取自临时数据目录，只在 `COVE_TEST_SERVICE_MANAGER=1`
+  时运行（CI 的 check job 设置它）；本机运行它们会在当前用户的 gui 域或 systemd user 管理器中短暂注册并移除测试服务。
+
 ## B0 实验环境
 
 Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行十项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
