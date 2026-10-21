@@ -278,7 +278,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/secret-boundary.test.mjs",
-    minimumTests: 17,
+    minimumTests: 18,
   },
   { project: "server", file: "apps/server/tests/author/build-id.test.mjs", minimumTests: 4 },
   {

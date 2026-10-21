@@ -200,6 +200,26 @@ describe("HTTP answers behind the secret boundary", () => {
     expect(body).not.toContain(authKey);
   });
 
+  it("refuses a refusal that carries an output secret, with or without its details", async () => {
+    const token = `cove_d1_dev-1.${"T".repeat(43)}`;
+    const secret = "T".repeat(43);
+    const run = { serverId: "s1", relayInstanceId: "i1", runId: secret };
+    const error = domainError("LIVE_RUNS_PRESENT", "not-accepted", undefined, { runs: [run] });
+    for (const outcome of [
+      { error, secrets: { token: `cove_d1_dev-1.${secret}` } },
+      { error: { ...error, nested: { secrets: { token } } } },
+      { error: domainError("BUSY"), secrets: { token } },
+    ]) {
+      const { body, parsed } = await answer(
+        "auth.device.rotate",
+        { operationId: "o1" },
+        () => outcome,
+      );
+      expect(parsed.error.code).toBe(-32603);
+      expect(body).not.toContain(secret);
+    }
+  });
+
   it("refuses a misplaced nested secret and undeclared output secret keys", async () => {
     const operation = record("server.tsnet.login", { secretDelivery: "first-response-only" });
     const token = `cove_d1_dev-1.${"T".repeat(43)}`;
