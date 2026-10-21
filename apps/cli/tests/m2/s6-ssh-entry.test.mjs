@@ -255,3 +255,29 @@ test("a command killed with SIGKILL leaves no ssh behind", async () => {
   );
   expect(await connects("127.0.0.1", Number(stdout.trim()))).toBe(false);
 }, 60_000);
+
+test("a command that closed its tunnel exits at once: no close timer keeps it alive", async () => {
+  const { fixture, sshd } = ssh;
+  const { server } = await sshServer();
+  const holder = spawn(
+    process.execPath,
+    [
+      resolve(import.meta.dirname, "tunnel-holder.mjs"),
+      sshd.target,
+      String(portOf(server)),
+      "close",
+    ],
+    { env: fixture.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  holder.stdout.on("data", (chunk) => (stdout += chunk));
+  holder.stderr.on("data", (chunk) => (stderr += chunk));
+  const code = await new Promise((done) => holder.once("exit", (exitCode) => done(exitCode)));
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  // close() waits up to 2 s for ssh, then 1 s twice; a timer of those left running would hold the
+  // process that long after close() returned.
+  const elapsed = Number(/exit (\d+)/.exec(stdout)?.[1]);
+  expect(elapsed).toBeLessThan(500);
+  expect(await sshClients(sshd.clientConfig)).toEqual([]);
+}, 60_000);
