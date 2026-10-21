@@ -472,6 +472,28 @@ describe("repository queries", () => {
     await expect(readFile(calls, "utf8")).rejects.toThrow("ENOENT");
   });
 
+  // #144 item 3: a run that joins a version check another run started is bounded by its own
+  // deadline, not by the first run's; the shared check still answers the first run.
+  it("bounds a run waiting for a shared version check by its own deadline", async () => {
+    const cwd = await temporary();
+    const directory = await temporary();
+    await writeFile(
+      join(directory, "git"),
+      "#!/bin/sh\nfor last; do :; done\n" +
+        `if [ "$last" = version ]; then /bin/sleep 1; echo 'git version 2.45.0'; exit 0; fi\n` +
+        "echo ran\n",
+    );
+    await chmod(join(directory, "git"), 0o755);
+    process.env.PATH = `${directory}:${savedEnv.PATH}`;
+    const first = runGit(["status"], { cwd, timeoutMs: 5_000 });
+    const started = Date.now();
+    const joined = await runGit(["status"], { cwd, timeoutMs: 50 });
+    const waited = Date.now() - started;
+    expect(joined).toEqual({ kind: "failed", reason: "timeout" });
+    expect(waited).toBeLessThan(500);
+    expect(await first).toMatchObject({ kind: "exited", code: 0, stdout: "ran\n" });
+  });
+
   // #144 item 2: the kernel resolves `..` after following a symlink; a lexical join would not.
   // With `<root>/link/..` on PATH and link -> real/sub, the shell runs real/git, not <root>/git.
   it("finds the git the shell finds through a PATH entry with a symlink followed by ..", async () => {
