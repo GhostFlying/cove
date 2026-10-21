@@ -172,8 +172,14 @@ const UNSETTLED: ReadonlySet<OperationRecord["state"]> = new Set([
 // Writes are acknowledged once the server records the operation; poll its receipt until it
 // reaches a terminal state so the command reports what actually happened. The write was
 // accepted, so every polling failure must still name the operation and point at its read-only
-// receipt; the caller must never be left to guess or resend.
-export async function settle(client: Client, initial: OperationRecord): Promise<OperationRecord> {
+// receipt; the caller must never be left to guess or resend. `observed`, when given, is told each
+// record read, so a caller that reports a failed poll can print the latest record rather than the
+// one it started from.
+export async function settle(
+  client: Client,
+  initial: OperationRecord,
+  observed?: (operation: OperationRecord) => void,
+): Promise<OperationRecord> {
   const id = initial.operationId;
   const inspect = `inspect it with \`cove operation get ${id}\``;
   let operation = initial;
@@ -184,6 +190,7 @@ export async function settle(client: Client, initial: OperationRecord): Promise<
     await sleep(POLL_MS);
     try {
       operation = unwrap("operation.get", await client.getOperation(id)).operation;
+      observed?.(operation);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(

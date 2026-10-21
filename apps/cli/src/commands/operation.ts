@@ -73,7 +73,9 @@ export async function finishAction(
   let operation = accepted;
   let target: OperationRecord | null = null;
   try {
-    operation = await settle(client, operation);
+    // Every record read replaces `operation`, so a poll that fails after others succeeded prints
+    // the last one read, not the receipt the write was accepted with (#144 item 5).
+    operation = await settle(client, operation, (seen) => (operation = seen));
     if (operation.state === "succeeded") {
       const current = unwrap(
         "operation.get",
