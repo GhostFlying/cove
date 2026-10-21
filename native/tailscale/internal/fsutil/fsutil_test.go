@@ -70,3 +70,30 @@ func TestLockIsExclusiveUntilClosed(t *testing.T) {
 		t.Fatalf("lock file mode %04o", fi.Mode().Perm())
 	}
 }
+
+func TestLockHeldObservesWithoutCreatingOrKeeping(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "lock")
+	if held, err := LockHeld(p); err != nil || held {
+		t.Fatalf("missing file: held=%v err=%v", held, err)
+	}
+	if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the probe created the lock file: %v", err)
+	}
+	a, err := Lock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held, err := LockHeld(p); err != nil || !held {
+		t.Fatalf("while locked: held=%v err=%v", held, err)
+	}
+	a.Close()
+	if held, err := LockHeld(p); err != nil || held {
+		t.Fatalf("after release: held=%v err=%v", held, err)
+	}
+	// The probe kept nothing: the lock can be taken right after it.
+	b, err := Lock(p)
+	if err != nil {
+		t.Fatalf("lock after probe: %v", err)
+	}
+	b.Close()
+}

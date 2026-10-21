@@ -103,3 +103,27 @@ func Lock(path string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// LockHeld reports whether another open file description holds Lock's lock
+// on path, without creating the file or keeping any lock. A missing file was
+// never locked. The probe takes a shared lock for an instant: while it is
+// held a concurrent Lock fails with ErrLocked, which a caller of Lock already
+// treats as "someone else owns it right now" and retries.
+func LockHeld(path string) (bool, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return true, nil
+		}
+		return false, err
+	}
+	// Closing the descriptor releases the shared lock.
+	return false, nil
+}

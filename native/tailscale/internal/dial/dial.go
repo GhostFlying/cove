@@ -87,6 +87,16 @@ func Paths(home string) (lock, socket string) {
 // ErrLocked reports that another daemon owns the directory.
 var ErrLocked = fsutil.ErrLocked
 
+// Owned reports whether a daemon holds the directory's lock right now: one
+// that is running, starting before it listens, or exiting after it unlinked
+// its socket. It creates nothing, so it never starts or blocks a daemon
+// beyond an instant (a Run racing it returns ErrLocked, as for any owner).
+// A false answer is about the instant of the probe only.
+func Owned(home string) (bool, error) {
+	lock, _ := Paths(home)
+	return fsutil.LockHeld(lock)
+}
+
 type stream struct {
 	info  proto.StreamInfo
 	local net.Conn
