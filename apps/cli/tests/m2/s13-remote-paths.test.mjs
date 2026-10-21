@@ -1,6 +1,7 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { registeredRemote } from "../m1/s3-worktree-remotes.mjs";
 import { createAuthFixture } from "./auth-fixtures.mjs";
 
 // m2 S13 (remote path semantics, D11), against the compiled CLI and server. With --server, a path
@@ -123,4 +124,29 @@ test("local mode still resolves relative paths against the CLI's directory", asy
   });
   expect(local.code).toBe(0);
   expect((await serverRepos()).map((repo) => repo.path)).toEqual([serverRepo.path]);
+});
+
+// mount delete-worktree PATH finds the worktree by real path, which only this host's filesystem
+// can resolve. With --server it is refused (2) before anything is read, saved or sent, so neither
+// a client path that resolves here to the server's worktree (a symlink in the client's tree) nor
+// the server's own path deletes anything; the IDs form still does.
+test("delete-worktree by path is refused with --server and resolves nothing on the client", async () => {
+  const alpha = await registeredRemote(fixture, serverHome, "alpha");
+  const { task } = await fixture.coveJson(["task", "create", "Held", "--worktree", alpha.repoId], {
+    home: serverHome,
+  });
+  const [mount] = task.workspace.mounts.filter((item) => item.source === "worktree");
+  const alias = join(clientCwd, "worktree-alias");
+  await symlink(mount.path, alias);
+  for (const path of [alias, mount.path, "./worktree-alias"]) {
+    const refused = await remote(["mount", "delete-worktree", path, "--yes"]);
+    expect({ path, code: refused.code }).toEqual({ path, code: 2 });
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toMatch(/takes <taskId> <mountId>, not a path|relative/);
+  }
+  expect(await pendingRecords()).toEqual([]);
+  expect((await stat(mount.path)).isDirectory()).toBe(true);
+  const deleted = await remote(["mount", "delete-worktree", task.taskId, mount.mountId, "--yes"]);
+  expect(deleted.code).toBe(0);
+  await expect(stat(mount.path)).rejects.toThrow("ENOENT");
 });

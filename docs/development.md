@@ -214,7 +214,8 @@ cove --home A auth device revoke <deviceId>
 - token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
   `remote remove` 只删除本机记录，不撤销 server 上的设备。
 - `--server` 模式下路径参数是 server 主机上的路径：相对路径与 `~` 是用法错误，不发送；绝对路径原样发送，
-  `terminal create` 必须给 `--cwd`。`server` 与 `remote` 两组命令只作用于本机，不接受 `--server`。
+  `terminal create` 必须给 `--cwd`。CLI 不在本机文件系统上解析这些路径：`mount delete-worktree PATH` 要在本机
+  解析真实路径，因此 `--server` 模式下以 2 拒绝，须改用 `<taskId> <mountId>`。`server` 与 `remote` 两组命令只作用于本机，不接受 `--server`。
 - 撤销会立即拒绝该设备的所有请求，并关闭它的连接（终端连接持有的控制权随之释放）；它已受理的操作照常完成。
   `auth device revoke` 等这些连接关闭后才返回，响应中的 `unclosedConnections` 是等待期限内仍未关闭的连接数，
   不为 0 时命令以 1 退出。设备撤销自己时同样如此：server 先关闭它除承载这次撤销的请求之外的所有连接（包括 CLI

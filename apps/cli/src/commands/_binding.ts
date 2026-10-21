@@ -8,6 +8,7 @@ import type { RunHistoryRecord, TabRecord, TaskRecord } from "@cove/protocol/wor
 import type { Session } from "../session.js";
 import {
   flag,
+  isRemote,
   optionalIntegerFlag,
   print,
   StatusError,
@@ -52,7 +53,8 @@ required. It is refused while any run uses the worktree (LIVE_RUNS_PRESENT, with
 Without a mountId it deletes the task's only managed worktree mount, listing them (exit 2) when
 there are none or several. Given a PATH (starting with /, . or ~, or containing a /) it finds the
 task and mount whose managed worktree is at that real path, archived tasks included; a checkout
-or a worktree Cove does not manage is not deleted (\`cove mount remove\` unmounts it).
+or a worktree Cove does not manage is not deleted (\`cove mount remove\` unmounts it). The PATH
+form resolves the path on this host, so it is refused with --server.
 mount history lists the bindings a mount has had, oldest first.`;
 
 function expectedWorkspaceRevision(args: Arguments): { expectedWorkspaceRevision?: number } {
@@ -293,6 +295,14 @@ export async function runBinding(args: Arguments, sub: string): Promise<number |
     const byPath = first !== undefined && isPathArgument(first);
     if (byPath && (args.words.length !== 3 || args.command))
       throw new UsageError("mount delete-worktree PATH takes no mount id");
+    // The PATH form finds the worktree by comparing real paths, which this host can only resolve
+    // on its own filesystem; with --server the path is the server host's, and no server lookup
+    // takes a path, so only the IDs name what is deleted (m2 S13).
+    if (byPath && isRemote())
+      throw new UsageError(
+        "with --server, mount delete-worktree takes <taskId> <mountId>, not a path " +
+          "(`cove --server ALIAS task get <taskId>` lists the mounts); nothing was sent",
+      );
     const [givenTaskId, givenMountId] = byPath
       ? [undefined, undefined]
       : taskAndMaybeMount(args, "delete-worktree");
