@@ -22,7 +22,7 @@
 | 字段（建议）      | 用途                                                  | 何时变化                             |
 | ----------------- | ----------------------------------------------------- | ------------------------------------ |
 | `serverId`        | 本机用户/profile 下的持久服务身份，对应同一份业务状态 | 普通服务重启、升级或切换网络入口不变 |
-| `buildVersion`    | 诊断当前客户端或 relay 二进制                         | 随应用发布变化                       |
+| `buildVersion`    | 诊断当前客户端或 relay 二进制（格式见 §11.8）         | 随构建变化                           |
 | `protocolVersion` | 标识基础 wire 格式及行为契约                          | 发生不兼容变化时显式增加             |
 | `relayInstanceId` | 标识实际持有 PTY 的一次 relay 运行实例                | 新进程实例获得新 ID；重连不变        |
 
@@ -577,6 +577,12 @@ RPC 错误使用标准整数 error.code、供人阅读的 error.message 和可�
 | `GIT_UNAVAILABLE`                             | Git 无回答（超时/超限/缺 git/git 早于 2.45）；未接受，路径状态未知   |
 | `REPO_IN_USE`                                 | 仍有 task（含已归档）的挂载引用该 repo；未接受，先移除这些挂载       |
 | `WORKSPACE_ENTRY_UNAVAILABLE`                 | workspace 根目录无法创建，或入口路径已被占用；未接受，不记录任何内容 |
+| `DEVICE_REVOKED`                              | 设备 token 正确但设备已撤销；重新配对，不以旧 token 重试             |
+| `INVITATION_UNAVAILABLE`                      | 邀请已兑换、已取消、已过期、不存在或秘密错误（不区分）；换新邀请     |
+| `INVITATION_NOT_FOUND` / `DEVICE_NOT_FOUND`   | 已认证的管理请求指向不存在的邀请/设备；刷新列表                      |
+| `SERVER_ID_MISMATCH`                          | 入口另一端的 serverId 不是登记的那个；未发送 token，人工核对         |
+| `PEER_IDENTITY_MISMATCH`                      | SSH host key 或 tsnet 节点 ID 与登记不符；未发送 token，人工核对     |
+| `ENTRY_UNAVAILABLE`                           | 所选入口无法到达或启动；未发送，客户端不自行改用其他入口             |
 | 网络超时、连接断开、不可识别的 5xx            | 客户端本地状态为结果未知；按 operationId 查询，不能认定操作失败      |
 
 错误示例（1001 仅为示意，领域错误整数码尚未冻结）：
@@ -628,3 +634,38 @@ HTTP 响应与 WS 事件谁先到都合法。操作 ID 关联结果与事件，�
 8. 标准 id 回显、result/error 互斥、解析错误、notification 无响应、空 batch/混合 batch 的行为符合 JSON-RPC 2.0。
 
 参考：[JSON-RPC 2.0](https://www.jsonrpc.org/specification)。标准 envelope 已选；Cove 的方法、HTTP binding 与操作恢复细节按上述草案继续收敛。
+
+### 11.8 M2 方法、凭据与秘密边界
+
+M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首次发布前，`protocolVersion` 不变（m2 D12）。
+处理器在对应任务合入前以 `CAPABILITY_UNAVAILABLE` 拒绝。
+
+| 方法                                                        | 类别  | 权限          | 秘密字段（输入 / 输出） |
+| ----------------------------------------------------------- | ----- | ------------- | ----------------------- |
+| `auth.invite.create`                                        | 写    | `owner`       | — / `invitation`        |
+| `auth.invite.list`、`auth.device.list`                      | 读    | `owner`       | —                       |
+| `auth.invite.cancel`、`auth.device.rename`/`revoke`         | 写    | `owner`       | —                       |
+| `auth.device.rotate`（只轮换调用者自己的 token）            | 写    | `owner`       | — / `token`             |
+| `entry.get` / `entry.set`（入口配置，端口与主机名重启生效） | 读/写 | `owner`       | —                       |
+| `server.impact`（重启影响）、`server.tsnet.status`          | 读    | `owner`       | —                       |
+| `server.tsnet.login`                                        | 写    | `local-owner` | `authKey` / `loginUrl`  |
+| `server.tsnet.logout`                                       | 写    | `local-owner` | —                       |
+
+- 权限：已认证的主体都是同一个 owner（m2 D7）。`local-owner` 方法只接受本机凭据，设备调用为 `FORBIDDEN`，
+  理由是运维而非安全：远程登出 tsnet 可能切断调用者所用的入口，auth key 也不应经网络传给 server。
+  配对兑换不是 RPC，走配对监听且不留操作记录（D6）。安装与启停服务是本机 CLI 动作，不是 RPC。
+- 秘密只放在 params 或 result 的嵌套成员 `secrets` 中，方法表逐方法声明其键，模块加载时与 schema 核对。
+  分派层在构造指纹、规范化参数与操作记录之前移除输入秘密，单独交给处理器；结果中声明的 `secrets`
+  之外任何位置出现秘密值都视为内部错误。输出秘密只在真正提交该写操作的那次调用中返回，
+  同 operationId 的重复提交与 `operation.get` 都读不到。CLI 的待定记录只保存被省略的秘密字段名，
+  这样的记录不能重发：`operation resend` 在本地拒绝且不发送，需重新执行原命令。
+- 凭据：`Authorization: Bearer` 与终端 WS 的 `secret` 接受两种形式，二者互不重叠：
+  本机秘密（43–256 个 base64url 字符，只出现在 rendezvous 文件中）与设备 token
+  `cove_d1_<deviceId>.<43 个 base64url 字符>`。凭据正确但设备已撤销时为 `DEVICE_REVOKED`（HTTP 401，WS 以 policy 关闭），
+  其余无法认证的情况都是 `UNAUTHENTICATED`，不区分设备不存在与秘密错误。
+- 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
+  `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
+- `buildVersion` 为 `<根 package 版本>+<16 位十六进制>`：运行时对 `apps/*/dist`、`packages/*/dist` 中的编译产物
+  （不含 `.d.ts`、`.map`、`.tsbuildinfo`）与 `pnpm-lock.yaml` 按相对路径计算 SHA-256，取前 16 位，每个进程缓存一次。
+  server 与 CLI 对同一构建得到同一值；找不到 workspace 根目录时为 `unidentified`。它只用于诊断与版本提示，
+  不参与兼容判定；runtime 与 worker 之间的 pipe 仍报 `0.0.0`，因为二者总来自同一构建。
