@@ -1379,7 +1379,7 @@ test("rejects removal of a gate test below the required floor", () => {
   );
 });
 
-test("M1 CLI suites are registered per file and join the required inventory", async () => {
+test("M1 and M2 CLI suites are registered per file and join the required inventory", async () => {
   // Pinned independently of the directory listing: these suites cannot leave the inventory by
   // deleting a test together with its registration.
   expect(fileRegisteredDirectories).toEqual([
@@ -1402,13 +1402,20 @@ test("M1 CLI suites are registered per file and join the required inventory", as
         "test-isolation",
       ],
     },
+    { project: "cli", directory: "apps/cli/tests/m2", required: ["pending-secrets"] },
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
   const registered = await readFileRegisteredSuites();
   expect(registered).toContainEqual({ project: "cli", file, minimumTests: 5 });
-  expect(registered.every((suite) => suite.file.startsWith("apps/cli/tests/m1/"))).toBe(true);
-  for (const name of fileRegisteredDirectories[0].required)
-    expect(registered.map((suite) => suite.file)).toContain(`apps/cli/tests/m1/${name}.test.mjs`);
+  expect(
+    registered.every(
+      (suite) =>
+        suite.file.startsWith("apps/cli/tests/m1/") || suite.file.startsWith("apps/cli/tests/m2/"),
+    ),
+  ).toBe(true);
+  for (const { directory, required } of fileRegisteredDirectories)
+    for (const name of required)
+      expect(registered.map((suite) => suite.file)).toContain(`${directory}/${name}.test.mjs`);
   const files = await readVitestOwnedTestFiles();
   for (const suite of registered) expect(files).toContain(suite.file);
   const all = await readRequiredSuites();

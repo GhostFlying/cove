@@ -6,6 +6,8 @@ import { OpaqueIdSchema } from "@cove/protocol/identity";
 import {
   canonicalWriteIntent,
   isWriteRpcMethod,
+  secretFields,
+  splitSecrets,
   validateRpcMethodParams,
   type OperationRecord,
   type WriteRpcMethod,
@@ -26,11 +28,18 @@ import {
 // under the data directory before the first send, with the server it was meant for, the method
 // and the complete immutable params. `cove operation resend` sends exactly this request again, and
 // only to the same server (serverId); the relay instance may have changed in between.
+//
+// Secrets are never saved (m2 "秘密与操作记录的分界"): `params` is the request without its
+// `secrets` member, and `omittedSecrets` names the secret fields the request carried. Such a
+// record cannot be resent, since the request it saved is incomplete; `resend` refuses it locally
+// and the operator runs the original command again (`operation get` still reads its outcome).
+// The fingerprint excludes secrets, so the saved params still identify the operation.
 export type PendingOperation = {
   readonly version: 1;
   readonly serverId: string;
   readonly method: WriteRpcMethod;
   readonly params: Record<string, unknown> & { operationId: string };
+  readonly omittedSecrets?: readonly string[];
   readonly savedAtMs: number;
 };
 
@@ -44,7 +53,8 @@ function pendingPath(home: string, operationId: string): string {
   return join(pendingDirectory(home), `${operationId}.json`);
 }
 
-export async function readPending(home: string, operationId: string): Promise<PendingOperation> {
+// The saved record of an operation ID, validated, whether or not it can be resent.
+async function loadPending(home: string, operationId: string): Promise<PendingOperation> {
   let text: string;
   try {
     text = await readFile(pendingPath(home, operationId), "utf8");
@@ -64,9 +74,28 @@ export async function readPending(home: string, operationId: string): Promise<Pe
     !OpaqueIdSchema.safeParse(parsed.serverId).success ||
     !isWriteRpcMethod(parsed.method) ||
     parsed.params?.operationId !== operationId ||
+    Object.hasOwn(parsed.params, "secrets") ||
+    (parsed.omittedSecrets !== undefined &&
+      (!Array.isArray(parsed.omittedSecrets) ||
+        parsed.omittedSecrets.some(
+          (field) => !secretFields(parsed.method).input.includes(field as string),
+        ))) ||
     !validateRpcMethodParams(parsed.method, parsed.params)
   )
     throw new Error(`the saved request for operation ${operationId} is invalid`);
+  return parsed;
+}
+
+// The saved request of an operation ID, for `operation resend`: refused when its secrets were
+// omitted. Only field names are printed, never a value.
+export async function readPending(home: string, operationId: string): Promise<PendingOperation> {
+  const parsed = await loadPending(home, operationId);
+  if (parsed.omittedSecrets?.length)
+    throw new Error(
+      `operation ${operationId} carried secrets (${parsed.omittedSecrets.join(", ")}) that are ` +
+        `never saved, so it cannot be resent; nothing was sent. Run the original command again ` +
+        `(\`cove operation get ${operationId}\` shows whether the server recorded it)`,
+    );
   return parsed;
 }
 
@@ -90,7 +119,7 @@ async function existingPending(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  return readPending(home, operationId);
+  return loadPending(home, operationId);
 }
 
 // Makes a published pending record's directory entries durable: every directory from the record's
@@ -214,11 +243,15 @@ export async function acceptWrite<M extends WriteRpcMethod>(
   params: Record<string, unknown> & { operationId: string },
   onFailure?: (outcome: Exclude<CallOutcome<unknown>, { ok: true }>) => void,
 ): Promise<OperationRecord> {
+  // The secrets stay in this process: the record keeps the params without them.
+  const { value: stored, secrets } = splitSecrets(params);
+  const omitted = Object.keys(secrets ?? {});
   const pending: PendingOperation = {
     version: 1,
     serverId: session.record.serverId,
     method,
-    params,
+    params: stored as typeof params,
+    ...(omitted.length > 0 ? { omittedSecrets: omitted } : {}),
     savedAtMs: Date.now(),
   };
   const saved = await publishPending(homeDirectory(args), pending);
@@ -228,7 +261,11 @@ export async function acceptWrite<M extends WriteRpcMethod>(
         `or parameters; nothing was sent. Use a fresh --operation-id for this request ` +
         `(\`cove operation resend ${params.operationId}\` sends the saved one)`,
     );
-  const outcome = await session.client.call(method, saved.params as never);
+  // The saved request plus this command's own secrets (same intent: secrets are not part of it).
+  const outcome = await session.client.call(
+    method,
+    (secrets ? { ...saved.params, secrets } : saved.params) as never,
+  );
   if (!outcome.ok) onFailure?.(outcome);
   const accepted = unwrap(method, outcome);
   return (accepted as { operation: OperationRecord }).operation;
