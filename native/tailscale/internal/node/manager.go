@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,19 +14,68 @@ import (
 
 // Manager owns the login lifecycle of the single node behind one state
 // directory. It is not safe for concurrent mutation: callers serialize
-// Boot, Login, Logout and Close (the control mutex in both modes), while
-// Running may run concurrently with other Running calls.
+// Boot, Login, Logout, Close and any Status while Held (the control mutex
+// in both modes). Running, Held, and Status without a hold only read, so
+// they may run concurrently with each other.
+//
+// Identity hold. Paired clients pin the server node's stable ID, so a login
+// of an enrolled node that ends as another node (a key of another tailnet,
+// say) breaks every pairing. The manager does not try to undo that: putting
+// back tailscaled's earlier state cannot cover a crash, or a login the
+// backend completes after the attempt timed out, and the clients' pinning
+// already fails closed. Instead, from the moment a login of an enrolled
+// node starts until the identity it ended as is known to be the enrolled
+// one, the manager holds the node: Usable returns nil, so serve keeps its
+// listeners closed and dial refuses streams, and Status reports the hold.
+// An attempt that did not finish (error, timeout, cancel) stops the node,
+// so nothing can complete later in this process; the next Status or Login
+// settles the hold by restarting the node from its state and reading the
+// persisted identity. A different identity stays held until a logout.
 type Manager struct {
 	cfg   Config
 	start Starter
 	node  Node
 	// bootErr is why a node with persisted state is not running.
 	bootErr error
+	// hold is set while the node's identity is not known to be the
+	// enrolled one; see the type comment.
+	hold *hold
+	// onHold, if set, runs whenever a hold is placed, before the login it
+	// guards starts.
+	onHold func()
+}
+
+// hold records why the node may not be used.
+type hold struct {
+	// enrolled is the stable ID the node was enrolled as.
+	enrolled string
+	// changed reports that the node was observed as current, another node;
+	// only a logout ends that hold.
+	changed bool
+	current string
+	// interactive marks an interactive login that may still complete; it
+	// settles only once the node is Running as the enrolled identity.
+	interactive bool
+	// cause is the redacted error of an attempt that did not finish.
+	cause string
 }
 
 // NewManager creates a manager; nothing starts until Boot or Login.
 func NewManager(cfg Config, start Starter) *Manager {
 	return &Manager{cfg: cfg, start: start}
+}
+
+// OnHold sets a function to run whenever the manager places a hold, under
+// the caller's lock and before the guarded login starts. serve closes its
+// listeners there, so the decision to stop accepting is the same decision
+// that starts the login, not an earlier, separate observation.
+func (m *Manager) OnHold(f func()) { m.onHold = f }
+
+func (m *Manager) placeHold(h *hold) {
+	m.hold = h
+	if m.onHold != nil {
+		m.onHold()
+	}
 }
 
 // Boot starts the node from persisted state, if there is any. Without state
@@ -49,20 +97,107 @@ func (m *Manager) Boot() {
 	m.node, m.bootErr = n, nil
 }
 
+// settle tries to end the hold by observing the node's identity. It
+// returns the hold's error while the hold remains and nil once it is gone.
+func (m *Manager) settle(ctx context.Context) *proto.Error {
+	h := m.hold
+	if h == nil {
+		return nil
+	}
+	if h.changed {
+		return m.holdError()
+	}
+	if m.node == nil {
+		m.Boot()
+		if m.node == nil {
+			if m.bootErr != nil {
+				h.cause = proto.Truncate("restarting the node to check its identity failed: " + m.bootErr.Error())
+			}
+			return m.holdError()
+		}
+	}
+	id, err := m.node.StableID(ctx)
+	if err != nil {
+		h.cause = proto.Truncate("reading the node identity failed: " + err.Error())
+		return m.holdError()
+	}
+	if id != h.enrolled {
+		// Stopped, so a node of another tailnet does not stay connected
+		// there; its profile is still the persisted state, which a logout
+		// removes.
+		m.closeNode()
+		h.changed, h.current = true, id
+		return m.holdError()
+	}
+	if h.interactive {
+		st, err := m.node.Status(ctx)
+		if err != nil || st.State != proto.StateRunning {
+			return m.holdError()
+		}
+	}
+	m.hold = nil
+	return nil
+}
+
+// holdError describes the current hold.
+func (m *Manager) holdError() *proto.Error {
+	h := m.hold
+	switch {
+	case h.changed:
+		cur := h.current
+		if cur == "" {
+			cur = "a node without identity"
+		}
+		return proto.Errorf(proto.CodeIdentityChanged,
+			"the node is now %s, not the enrolled %s; it was stopped and serves nothing. Paired clients pin %s and "+
+				"must pair again. To recover, log out, log in with the intended key, then pair the clients again",
+			proto.Truncate(cur), h.enrolled, h.enrolled)
+	case h.interactive:
+		return proto.Errorf(proto.CodeLoginUncertain,
+			"an interactive login of enrolled node %s is in progress; it serves nothing until it runs as %s again",
+			h.enrolled, h.enrolled)
+	}
+	msg := fmt.Sprintf("a login of enrolled node %s did not finish and may still have completed as another node; "+
+		"the node was stopped and serves nothing until its identity is confirmed (status or login checks it)", h.enrolled)
+	if h.cause != "" {
+		msg += ": " + h.cause
+	}
+	return proto.Errorf(proto.CodeLoginUncertain, "%s", msg)
+}
+
 // Status reports the node state. Without a node it reports LoggedOut, or
 // Unavailable when persisted state exists but the node failed to start.
+// While a hold remains, Status first tries to settle it and then reports it
+// in Hold and the first warning, with the other identity, if observed, as
+// Self.
 func (m *Manager) Status(ctx context.Context) (proto.Status, error) {
-	if m.node == nil {
-		if HasState(m.cfg.StateDir) {
-			msg := "node state exists but the node is not running"
-			if m.bootErr != nil {
-				msg = m.bootErr.Error()
-			}
-			return proto.Status{State: proto.StateUnavailable, Warnings: []string{msg}}.Bounded(), nil
+	herr := m.settle(ctx)
+	var st proto.Status
+	switch {
+	case m.node != nil:
+		var err error
+		if st, err = m.node.Status(ctx); err != nil {
+			return st, err
 		}
-		return proto.Status{State: proto.StateLoggedOut}, nil
+	case herr != nil:
+		st = proto.Status{State: proto.StateUnavailable}
+	case HasState(m.cfg.StateDir):
+		msg := "node state exists but the node is not running"
+		if m.bootErr != nil {
+			msg = m.bootErr.Error()
+		}
+		st = proto.Status{State: proto.StateUnavailable, Warnings: []string{msg}}
+	default:
+		st = proto.Status{State: proto.StateLoggedOut}
 	}
-	return m.node.Status(ctx)
+	if herr != nil {
+		st.Hold = herr.Code
+		st.Warnings = append([]string{herr.Message}, st.Warnings...)
+		if m.hold.changed {
+			st.Self = &proto.NodeInfo{StableNodeID: m.hold.current}
+		}
+	}
+	return st.Bounded(), nil
 }
 
 // Login logs the node in.
@@ -71,14 +206,18 @@ func (m *Manager) Status(ctx context.Context) (proto.Status, error) {
 // and waits until it is Running; on failure the partial state is deleted,
 // so no half-logged-in node remains. With authKey and persisted state (for
 // example a node whose key expired) it forces a reauthentication of the
-// existing node with the key, keeping its identity; on failure the state is
-// kept as it was. Without authKey it starts an interactive login and returns
-// as soon as the control plane provides the login URL; the owner then polls
-// Status.
+// existing node with the key, under an identity hold. Without authKey it
+// starts an interactive login and returns as soon as the control plane
+// provides the login URL; the owner then polls Status.
 func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Duration) (proto.Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if m.node != nil {
+	// An interactive login in progress may be replaced by another login;
+	// any other hold must settle, or be ended by a logout, first.
+	if herr := m.settle(ctx); herr != nil && (m.hold.changed || !m.hold.interactive) {
+		return proto.Status{}, herr
+	}
+	if m.node != nil && m.hold == nil {
 		st, err := m.node.Status(ctx)
 		if err == nil && st.State == proto.StateRunning {
 			e := proto.Errorf(proto.CodeAlreadyLoggedIn, "node is already logged in; log out first")
@@ -112,14 +251,12 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 	return proto.Status{}, lerr
 }
 
-// reauth reauthorizes the enrolled node with authKey and keeps its identity.
-//
-// A forced login can complete as a different node, for example with a key
-// of another tailnet: tailscaled then overwrites the profile with the new
-// node. That is not a recovery of this enrollment, so the state file is
-// snapshotted first and, if the stable ID changed, the node is stopped and
-// the snapshot put back. The original enrollment then still needs login,
-// and changing identity takes an explicit logout and login.
+// reauth reauthorizes the enrolled node with authKey and reports the
+// outcome as it is: the same identity is success, another identity is
+// IDENTITY_CHANGED, and an attempt that did not finish is LOGIN_UNCERTAIN,
+// because the backend may still complete it (it keeps retrying a failing
+// control connection on its own). In the last two cases the node is
+// stopped and stays held; see the Manager comment.
 func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, error) {
 	if m.node == nil {
 		m.Boot()
@@ -127,57 +264,34 @@ func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, err
 	if m.node == nil {
 		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "the enrolled node cannot start: %v", m.bootErr)
 	}
-	statePath := filepath.Join(m.cfg.StateDir, stateFile)
-	snapshot, err := os.ReadFile(statePath)
+	enrolled, err := m.node.StableID(ctx)
 	if err != nil {
-		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled node state: %v", err)
+		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled identity: %v", err)
 	}
-	res, err := m.node.Reauth(ctx, authKey)
-	if err != nil {
-		return proto.Status{}, loginError(ctx, err, authKey)
-	}
-	if res.Before == "" || res.After == res.Before {
+	if enrolled == "" {
+		// The node never finished a login, so no client can have pinned
+		// it: there is no identity to hold.
+		m.hold = nil
+		if _, err := m.node.Reauth(ctx, authKey); err != nil {
+			return proto.Status{}, loginError(ctx, err, authKey)
+		}
 		return m.node.Status(ctx)
 	}
-	m.closeNode()
-	msg := fmt.Sprintf("the key logged this node in as %s, not as the enrolled %s", proto.Truncate(res.After), res.Before)
-	if werr := writeFileAtomic(statePath, snapshot); werr != nil {
-		// The state now holds the other node; leave it stopped rather than
-		// run as an identity the owner did not ask for.
-		m.bootErr = fmt.Errorf("%s, and restoring the enrollment failed: %v", msg, werr)
-		return proto.Status{}, proto.Errorf(proto.CodeIdentityChanged,
-			"restoring the enrollment failed: %v; %s; log out to remove that node state", werr, msg)
-	}
-	m.Boot()
-	return proto.Status{}, proto.Errorf(proto.CodeIdentityChanged,
-		"%s; the enrollment was restored and still needs login. To use this key, log out and log in again; "+
-			"%s may remain in the other tailnet's admin console", msg, proto.Truncate(res.After))
-}
-
-// writeFileAtomic replaces path with data (0600) through a rename, so a
-// crash leaves either the old or the new content.
-func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
+	m.placeHold(&hold{enrolled: enrolled})
+	after, err := m.node.Reauth(ctx, authKey)
 	if err != nil {
-		return err
+		m.closeNode()
+		lerr := loginError(ctx, err, authKey)
+		m.hold.cause = proto.Truncate(lerr.Code + ": " + lerr.Message)
+		return proto.Status{}, m.holdError()
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+	if after != enrolled {
+		m.closeNode()
+		m.hold.changed, m.hold.current = true, after
+		return proto.Status{}, m.holdError()
 	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	m.hold = nil
+	return m.node.Status(ctx)
 }
 
 // loginError classifies a failed login. The control plane's message is
@@ -193,6 +307,9 @@ func loginError(ctx context.Context, err error, authKey string) *proto.Error {
 	return proto.Errorf(code, "%s", redact(err.Error(), authKey))
 }
 
+// loginInteractive starts an interactive login. For an enrolled node the
+// login can complete as another node whenever the owner opens the URL, so
+// it is held until Status sees the node Running as the enrolled identity.
 func (m *Manager) loginInteractive(ctx context.Context) (proto.Status, error) {
 	if m.node == nil {
 		n, err := m.start(m.cfg, "")
@@ -201,9 +318,21 @@ func (m *Manager) loginInteractive(ctx context.Context) (proto.Status, error) {
 		}
 		m.node = n
 	}
+	if m.hold == nil {
+		id, err := m.node.StableID(ctx)
+		if err != nil {
+			return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled identity: %v", err)
+		}
+		if id != "" {
+			m.placeHold(&hold{enrolled: id, interactive: true})
+		}
+	}
 	for {
 		st, err := m.node.Status(ctx)
 		if err == nil && (st.AuthURL != "" || st.State == proto.StateRunning) {
+			if m.hold != nil {
+				return m.Status(ctx)
+			}
 			return st, nil
 		}
 		select {
@@ -247,13 +376,17 @@ func (m *Manager) Logout(ctx context.Context, timeout time.Duration) (proto.Stat
 	if err := os.RemoveAll(m.cfg.StateDir); err != nil {
 		return proto.Status{}, fmt.Errorf("deleting node state: %w", err)
 	}
-	m.bootErr = nil
+	m.bootErr, m.hold = nil, nil
 	return proto.Status{State: proto.StateLoggedOut, Warnings: warnings, RemoteLogoutConfirmed: &confirmed}.Bounded(), nil
 }
 
 // Running returns the node once its backend is Running, waiting at most
 // timeout for a restored node to come up.
 func (m *Manager) Running(ctx context.Context, timeout time.Duration) (Node, error) {
+	if m.hold != nil {
+		// Settling needs the exclusive side; status or login does it.
+		return nil, m.holdError()
+	}
 	n := m.node
 	if n == nil {
 		return nil, proto.Errorf(proto.CodeNotLoggedIn, "node is not logged in")
@@ -276,8 +409,18 @@ func (m *Manager) Running(ctx context.Context, timeout time.Duration) (Node, err
 	return n, nil
 }
 
-// Node returns the started node, Running or not, or nil.
-func (m *Manager) Node() Node { return m.node }
+// Held reports whether an identity hold is in place. Holds change only
+// under the caller's exclusive lock, so the shared side may read this.
+func (m *Manager) Held() bool { return m.hold != nil }
+
+// Usable returns the started node, Running or not, or nil if there is none
+// or it is held.
+func (m *Manager) Usable() Node {
+	if m.hold != nil {
+		return nil
+	}
+	return m.node
+}
 
 // Close stops the node and keeps its state.
 func (m *Manager) Close() { m.closeNode() }

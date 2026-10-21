@@ -285,8 +285,6 @@ func TestStopDoesNotWaitForIdleConnections(t *testing.T) {
 	}
 }
 
-// Shutdown cancels a login blocked on the control plane: the client gets
-// SHUTTING_DOWN and Run returns promptly.
 // signal returns a hook that closes the returned channel the first time it
 // runs.
 func signal() (func(), chan struct{}) {
@@ -336,6 +334,30 @@ func TestDialTimeoutIsNotShutdown(t *testing.T) {
 	}
 }
 
+// A reauth that ends as another node holds the node: status reports the
+// hold (settling it needs the exclusive side) and dials are refused.
+func TestDialRefusedUnderAnIdentityHold(t *testing.T) {
+	fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"}, ReauthAs: "nOther"}
+	r := startDaemon(t, fn, true)
+	cl := open(t, r.sock, frame(proto.Request{ID: "l", Op: proto.OpLogin, AuthKey: "tskey-test-0000"}))
+	if resp := cl.read(t); resp.OK || resp.Error.Code != proto.CodeIdentityChanged {
+		t.Fatalf("login: %+v", resp)
+	}
+	cl = open(t, r.sock, frame(proto.Request{ID: "s", Op: proto.OpStatus}))
+	resp := cl.read(t)
+	b, _ := json.Marshal(resp.Result)
+	var st proto.Status
+	if !resp.OK || json.Unmarshal(b, &st) != nil || st.Hold != proto.CodeIdentityChanged || st.Self.StableNodeID != "nOther" {
+		t.Fatalf("status: %+v", resp)
+	}
+	cl = open(t, r.sock, dialFrame(2000))
+	if resp := cl.read(t); resp.OK || resp.Error.Code != proto.CodeIdentityChanged {
+		t.Fatalf("dial: %+v", resp)
+	}
+}
+
+// Shutdown cancels a login blocked on the control plane: the client gets
+// SHUTTING_DOWN and Run returns promptly.
 func TestShutdownCancelsABlockedLogin(t *testing.T) {
 	r := startDaemon(t, &fakenode.Node{State: proto.StateNeedsLogin, BlockWait: true}, false)
 	cl := open(t, r.sock, frame(proto.Request{ID: "l", Op: proto.OpLogin, AuthKey: "tskey-test-0000", TimeoutMs: 300000}))
