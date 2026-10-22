@@ -293,9 +293,11 @@ cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（�
 tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
 同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
 需要 `native/tailscale/go.mod` 固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。
-所有节点只加入 testcontrol 的测试 Tailnet（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`）。在 server 自己的 tsnet 接线（T5b）
-合入前，测试自己运行 `cove-tsnet serve`，把业务端口与配对端口转发到 server 的同号 loopback 端口，并把 serve 节点
-写入邀请；协议不兼容、身份冻结、未确认的登出与 `PEER_MISMATCH` 用脚本化的假 dial 进程（`tsnet-fake-dial.mjs`）覆盖。
+所有节点只加入 testcontrol 的测试 Tailnet（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`）。`s8-tsnet-server-node` 用 server
+自己的 tsnet 节点（T5b）：`server tsnet login` 后按邀请的 `entries.tsnet` 经 tsnet 配对并运行命令。其余场景为了单独
+控制 server 节点（占用名称、重启、记录收到的字节），自己运行 `cove-tsnet serve`，把业务端口与配对端口转发到 server 的
+同号 loopback 端口，并把 serve 节点写入邀请；协议不兼容、身份冻结、未确认的登出与 `PEER_MISMATCH` 用脚本化的假
+dial 进程（`tsnet-fake-dial.mjs`）覆盖。
 
 ## M2 安装与用户服务（T3）
 
