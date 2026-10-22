@@ -2,7 +2,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSy
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { createRequire } from "node:module";
+import childProcess from "node:child_process";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, expect, test } from "vitest";
@@ -314,6 +315,50 @@ test("a forward socket that cannot be opened backs off as a failed start, not as
   rmSync(join(home, "tsnet", "run"));
   await until("the helper to run", () => node.pid !== undefined, 15_000);
 }, 40_000);
+
+test("shutdown does not wait for an exit that a failed spawn never emits", async () => {
+  const { node, context, seedState, home } = rig();
+  await seedState();
+  context.binary = join(home, "missing-cove-tsnet");
+  // The spawn failure is held back for 500 ms, its exit code included, so close() runs while it
+  // is pending: the window between spawn() returning and the failure being reported. Node keeps
+  // that window shorter than any other task can observe, so it is widened here.
+  const spawned = [];
+  const original = childProcess.spawn;
+  childProcess.spawn = (...args) => {
+    const child = original(...args);
+    const emit = child.emit.bind(child);
+    let reported = false;
+    let exitCode = child.exitCode;
+    Object.defineProperty(child, "exitCode", {
+      get: () => (reported ? exitCode : null),
+      set: (value) => (exitCode = value),
+    });
+    child.emit = (event, ...rest) => {
+      if (event !== "error" && event !== "close") return emit(event, ...rest);
+      setTimeout(() => {
+        reported = true;
+        emit(event, ...rest);
+      }, 500);
+      return true;
+    };
+    spawned.push(child);
+    return child;
+  };
+  syncBuiltinESMExports();
+  try {
+    expect(await node.start(context)).toBeUndefined();
+    await until("the spawn", () => spawned.length === 1);
+    const started = Date.now();
+    await node.close();
+    // Bounded by the late `error`, not by the 20 s stop wait (or forever, waiting for `exit`).
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(spawned[0].pid).toBeUndefined();
+  } finally {
+    childProcess.spawn = original;
+    syncBuiltinESMExports();
+  }
+});
 
 test("a helper speaking another protocol is not restarted", async () => {
   const { node, context, seedState, logs } = rig();
