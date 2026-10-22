@@ -26,6 +26,7 @@ import {
   InvitationStringSchema,
   SshTargetSchema,
   TsnetHostnameSchema,
+  TsnetNodeIdSchema,
 } from "@cove/protocol/auth";
 import {
   DOMAIN_ERROR_KINDS,
@@ -331,6 +332,11 @@ test("M2 schemas bound third-party and operator input", () => {
   expect(TsnetHostnameSchema.safeParse("cove-devbox").success).toBe(true);
   for (const invalid of ["-cove", "cove-", "Cove", "a.b", "x".repeat(64)])
     expect(TsnetHostnameSchema.safeParse(invalid).success).toBe(false);
+  // A stable node ID is what the dial socket accepts as a target: letters and digits, 1-64.
+  for (const valid of ["nXXXXCNTRL", "n1", "x".repeat(64)])
+    expect(TsnetNodeIdSchema.safeParse(valid).success).toBe(true);
+  for (const invalid of ["", "n_1", "n-1", "n.1", "x".repeat(65)])
+    expect(TsnetNodeIdSchema.safeParse(invalid).success).toBe(false);
   const payload = {
     serverId: "s1",
     inviteId: "inv-1",

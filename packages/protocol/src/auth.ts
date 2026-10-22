@@ -40,7 +40,10 @@ export const EntryKindSchema = z.enum(["loopback", "ssh", "tsnet"]);
 
 // Tailscale data is third-party input (m2 threat model): bounded and character-restricted
 // before Cove keeps or shows it. The stable node ID is what clients verify (never the name).
-export const TsnetNodeIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+// Letters and digits only, as real stable IDs (`n…CNTRL`) are and as `cove-tsnet dial` accepts
+// for a dial target (native/tailscale/PROTOCOL.md bounds): an ID this schema admitted but the
+// dial socket refused would pair a client that could never connect.
+export const TsnetNodeIdSchema = z.string().regex(/^[A-Za-z0-9]{1,64}$/);
 export const TsnetNodeNameSchema = z
   .string()
   .max(253)
