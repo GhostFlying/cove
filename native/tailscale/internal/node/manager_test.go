@@ -318,3 +318,76 @@ func TestLoginCancelledByShutdown(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// interactivelyHeld returns a manager whose enrolled node nClient has an
+// interactive login pending, so it is held with LOGIN_UNCERTAIN.
+func interactivelyHeld(t *testing.T, fn *fakenode.Node) *node.Manager {
+	t.Helper()
+	starts := 0
+	m := node.NewManager(node.Config{StateDir: enrolled(t)}, starter(t, fn, &starts))
+	m.Boot()
+	if st, err := m.Login(context.Background(), "", 5*time.Second); err != nil || st.Hold != proto.CodeLoginUncertain {
+		t.Fatalf("interactive login: %+v %v", st, err)
+	}
+	return m
+}
+
+// An interactive login can complete while status is being observed. The
+// identity and the Running state must come from that one observation: a
+// login completing as another node during the status call is
+// IDENTITY_CHANGED, never a settled hold (#155).
+func TestInteractiveSettleJudgesOneObservation(t *testing.T) {
+	fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"},
+		AuthURL: "https://login.example/a"}
+	m := interactivelyHeld(t, fn)
+	// The owner completes the login with another account while the next
+	// status call is under way.
+	fn.OnStatus = func() {
+		fn.OnStatus = nil
+		fn.SetSelf("nOther")
+		fn.SetState(proto.StateRunning)
+	}
+	st, err := m.Status(context.Background())
+	if err != nil || st.Hold != proto.CodeIdentityChanged || st.Self == nil || st.Self.StableNodeID != "nOther" ||
+		!fn.Closed || m.Usable() != nil {
+		t.Fatalf("a login completed as another node settled the hold: %+v %v", st, err)
+	}
+}
+
+// A login that replaces a pending interactive login is judged against the
+// identity that hold was enrolled as, whatever the node reports between the
+// settle attempt and the new login (#155).
+func TestReplacementLoginKeepsTheEnrolledIdentity(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// observed is the self the node reports from the replacement's
+		// settle attempt on; reauthAs is the identity the reauth ends as.
+		observed, reauthAs string
+	}{
+		// The pending attempt completed as another node, not yet Running.
+		{name: "pending attempt became another node", observed: "nOther"},
+		// The node reports no identity for a moment; the reauth then
+		// completes as another node. Reading the identity again would find
+		// none and judge nothing.
+		{name: "identity unreadable, reauth as another node", observed: "", reauthAs: "nOther"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"},
+				AuthURL: "https://login.example/a", ReauthAs: c.reauthAs}
+			m := interactivelyHeld(t, fn)
+			fn.OnStatus = func() {
+				fn.OnStatus = nil
+				fn.SetSelf(c.observed)
+			}
+			_, err := m.Login(context.Background(), "tskey-test-0000", 5*time.Second)
+			wantCode(t, err, proto.CodeIdentityChanged, "nOther", "nClient")
+			if m.Usable() != nil || !m.Held() {
+				t.Fatal("a node that changed identity was usable")
+			}
+			st, err := m.Status(context.Background())
+			if err != nil || st.Hold != proto.CodeIdentityChanged || st.Self == nil || st.Self.StableNodeID != "nOther" {
+				t.Fatalf("status: %+v %v", st, err)
+			}
+		})
+	}
+}
