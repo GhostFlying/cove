@@ -346,7 +346,9 @@ cove --home B remote entry default box ssh           # 改默认入口；失败�
 ### SSH 入口
 
 - 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
-  ssh 在 `sh` 监督进程下运行，监督进程在 CLI 的管道关闭时结束 ssh，不留下孤儿进程。
+  ssh 在 `sh` 监督进程下运行：CLI 关闭隧道时在管道上写一行，监督进程随即结束 ssh；CLI 以任何方式结束（包括 SIGKILL）时
+  管道随之关闭，监督进程确认自己已不是 CLI 的子进程后结束 ssh（至多约 1 秒），不留下孤儿进程。管道关闭而 CLI 仍在运行时
+  不结束 ssh（#174），而是在 ssh 的 stderr 记一行 `cove-ssh: the supervisor pipe ended ... while the CLI runs` 并等 CLI 结束。
 - 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
   `NoHostAuthenticationForLocalhost=no`、`ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，
   并关闭连接复用（ControlMaster）；ssh 认识时还固定 `NoHostAuthenticationForProxyCommand=no`（Apple 的 ssh）与
