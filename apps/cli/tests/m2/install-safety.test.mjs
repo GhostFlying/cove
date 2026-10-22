@@ -658,43 +658,50 @@ test("public uninstall leaves an absent bin absent", async () => {
   expect(existsSync(layout.current)).toBe(false);
 });
 
-test.runIf(process.platform === "darwin")(
-  "public launchd commands preflight invalid logs before activation or service effects",
-  async () => {
-    for (const kind of ["mode", "symlink"]) {
-      for (const operation of ["start", "restart", "upgrade", "install"]) {
-        const home = await dataDirectory(`${kind}-log-${operation}`);
-        const layout = installLayout(home);
-        await mkdir(layout.installDirectory, { mode: 0o700 });
-        await runnableClosure(join(layout.installDirectory, BUILD_A), BUILD_A);
-        await symlink(BUILD_A, layout.current);
-        await mkdir(join(home, "server"), { mode: 0o700 });
-        const external = await invalidParent(
-          layout.logDirectory,
-          kind,
-          `${kind}-log-${operation}-external`,
-        );
-        const source = join(fixture.root, `${kind}-log-${operation}-closure`);
-        await runnableClosure(source, BUILD_B);
-        const mock = await publicCommandRig(home, `${kind}-log-${operation}-manager`);
-        const commands = {
-          start: ["server", "service", "start"],
-          restart: ["server", "restart", "--yes"],
-          upgrade: ["server", "upgrade", "--yes", "--closure", source],
-          install: ["server", "install", "--closure", source],
-        };
-        const result = await mock.run(commands[operation]);
-        expect(result.code).toBe(1);
-        expect(result.stderr).toContain(`Cove directory ${layout.logDirectory}`);
-        expect(await readlink(layout.current)).toBe(BUILD_A);
-        expect(await readFile(join(external, "service.log"), "utf8")).toBe("unrelated log\n");
-        expect(await mock.effects()).toBe("");
-        expect(await readFile(mock.state, "utf8")).toBe(mock.initial);
-        expect(existsSync(join(layout.installDirectory, BUILD_B))).toBe(false);
-      }
+test("public native service commands preflight invalid startup paths before activation or service effects", async () => {
+  // Each CI OS exercises its consequential startup directory; neither platform
+  // registers a skipped test or touches the real service manager.
+  const target = {
+    darwin: { directory: "log", sentinel: "service.log", contents: "unrelated log\n" },
+    linux: {
+      directory: "service",
+      sentinel: "start-request.json",
+      contents: "unrelated start request\n",
+    },
+  }[process.platform];
+  if (!target) throw new Error(`Unsupported service test platform: ${process.platform}`);
+  for (const kind of ["mode", "symlink"]) {
+    for (const operation of ["start", "restart", "upgrade", "install"]) {
+      const name = `${kind}-${target.directory}-${operation}`;
+      const home = await dataDirectory(name);
+      const layout = installLayout(home);
+      await mkdir(layout.installDirectory, { mode: 0o700 });
+      await runnableClosure(join(layout.installDirectory, BUILD_A), BUILD_A);
+      await symlink(BUILD_A, layout.current);
+      await mkdir(join(home, "server"), { mode: 0o700 });
+      const managedPath = join(home, "server", target.directory);
+      const external = await invalidParent(managedPath, kind, `${name}-external`);
+      await writeFile(join(external, target.sentinel), target.contents);
+      const source = join(fixture.root, `${name}-closure`);
+      await runnableClosure(source, BUILD_B);
+      const mock = await publicCommandRig(home, `${name}-manager`);
+      const commands = {
+        start: ["server", "service", "start"],
+        restart: ["server", "restart", "--yes"],
+        upgrade: ["server", "upgrade", "--yes", "--closure", source],
+        install: ["server", "install", "--closure", source],
+      };
+      const result = await mock.run(commands[operation]);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(`Cove directory ${managedPath}`);
+      expect(await readlink(layout.current)).toBe(BUILD_A);
+      expect(await readFile(join(external, target.sentinel), "utf8")).toBe(target.contents);
+      expect(await mock.effects()).toBe("");
+      expect(await readFile(mock.state, "utf8")).toBe(mock.initial);
+      expect(existsSync(join(layout.installDirectory, BUILD_B))).toBe(false);
     }
-  },
-);
+  }
+});
 
 test("malformed and incomplete service output respects the final UTF-8 bound and keeps diagnostics", async () => {
   const diagnostic =
