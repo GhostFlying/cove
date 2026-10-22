@@ -1,9 +1,6 @@
-import { existsSync } from "node:fs";
 import type { Server } from "node:http";
 import type { Duplex } from "node:stream";
-import { join } from "node:path";
 import type { DomainError } from "@cove/protocol/errors";
-import { installedClosureRoot, workspaceRootOf } from "../build-id.js";
 import { createTsnetEntry } from "./tsnet.js";
 import type { ConnectionPeer } from "../transport/connection-entry.js";
 
@@ -77,28 +74,8 @@ export type PairingEntry = {
   dispose(): Promise<void>;
 };
 
-// Where this build's `cove-tsnet` is: `bin/cove-tsnet` of an installed closure (D1), else the
-// output of `pnpm tsnet:build` in the workspace this server was built in. Null when neither exists:
-// the tsnet entry is then unavailable, the other entries are not affected.
-export function tsnetBinaryPath(): string | null {
-  const closure = installedClosureRoot();
-  if (closure) {
-    const installed = join(closure, "bin", "cove-tsnet");
-    return existsSync(installed) ? installed : null;
-  }
-  const root = workspaceRootOf();
-  if (!root) return null;
-  const arch = process.arch === "x64" ? "amd64" : process.arch;
-  const built = join(
-    root,
-    "native",
-    "tailscale",
-    "dist",
-    `${process.platform}-${arch}`,
-    "cove-tsnet",
-  );
-  return existsSync(built) ? built : null;
-}
+// Where this build's `cove-tsnet` is (build-id.ts, shared with the CLI's dial daemon client).
+export { tsnetBinaryPath } from "../build-id.js";
 
 export class ListenerSet {
   private readonly tsnet: TsnetEntry;
