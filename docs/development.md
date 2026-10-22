@@ -211,6 +211,7 @@ node apps/cli/dist/main.js server install            # 安装闭包、注册并�
 # laptop 经 SSH 配对：先用普通 ssh 记录 devbox 的 host key
 cove remote add devbox --via ssh                     # 在提示中粘贴邀请
 cove --server devbox task list                       # 之后所有业务命令都可远程执行，走 SSH
+cove --server devbox --via tsnet task list           # 邀请含 tsnet 入口时：同一记录的另一个入口，同一 server
 ```
 
 或者经 tsnet 配对（另一个客户端，或代替上面的 SSH 配对；devbox 已 `server tsnet login`，邀请含 tsnet 入口）：
@@ -221,10 +222,13 @@ cove remote add devbox --via tsnet                   # 在提示中粘贴邀请
 cove --server devbox task list                       # 走 tsnet
 ```
 
-已知限制（#173，将改为记录邀请中的全部入口）：目前从另一台主机配对时，配对记录只保存配对所用的那一个入口
-（`--via ssh` 只有 ssh，`--via tsnet` 只有 tsnet），因此这台客户端不能再用 `--via` 换到另一个入口；同一客户端也不能把同一 server
-再配对一次（`remote add` 拒绝已配对的 serverId）。现在只有在 server 所在主机上不带 `--via` 配对时，记录才同时含 loopback、
-邀请中的 ssh 与 tsnet 入口，可用 `--via` 切换（见下文“设备配对与 `--server`”中的数据目录 B）。
+配对记录保存邀请中的全部入口（SSH 目标与 tsnet 节点；在 server 所在主机上不带 `--via` 配对时另有 loopback），
+默认入口是配对所经的入口（不带 `--via` 时为 loopback），因此同一客户端可用 `--via ssh|tsnet` 在入口间切换，
+`remote entry default` 改默认入口；命令从不自动换入口。配对没有经过的入口与经过的同样在每次使用时核实：ssh 按 known_hosts
+检查 host key（经 tsnet 配对后第一次用 `--via ssh` 前，同样先用普通 ssh 记录 host key），tsnet 按邀请中的稳定 ID 核对节点，
+再核对配对时的 serverId，通过前不发送 token。一个客户端对一台 server 只有一条记录：对已配对的 server 再次 `remote add` 会被拒绝，
+并列出记录中的入口，邀请不被使用。#173 修复之前从另一台主机配对的记录只有配对所用的入口；要补上其他入口，`remote remove`
+后在 server 上撤销旧设备，再用新邀请重新配对。
 
 ### 安装与用户服务
 
@@ -313,9 +317,10 @@ cove --home B --server box status                    # 或 COVE_SERVER=box
 cove --home A auth device list                       # 本机所有者也能管理设备
 cove --home B --server box auth device rotate        # 轮换本客户端自己的 token
 cove --home A auth device revoke <deviceId>
-# 另一台主机上的客户端（数据目录 C）经邀请中的 SSH 目标配对，之后默认走 SSH
+# 另一台主机上的客户端（数据目录 C）经邀请中的 SSH 目标配对，之后默认走 SSH；记录也含邀请中的 tsnet 入口
 cove --home C remote add devbox --via ssh
 cove --home C --server devbox status
+cove --home C --server devbox --via tsnet status     # 同一记录的 tsnet 入口
 cove --home B --server box --via ssh status          # 同一主机配对的记录也有 ssh 入口
 cove --home B remote entry default box ssh           # 改默认入口；失败时从不自动换入口
 ```
@@ -408,7 +413,7 @@ cove --home A server tsnet logout    # 删除节点状态；控制面未确认�
 ```sh
 cove --home B remote tsnet login          # auth key 从隐藏提示或 stdin 读；输入为空则在 stderr 显示登录 URL 并等待
 cove --home B remote tsnet status         # 节点状态、活动流与 dial 进程（pid、build）
-cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet
+cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet；也记录邀请中的 SSH 目标
 cove --home B --server box --via tsnet status # 同一主机配对时也记录邀请中的 tsnet 入口
 cove --home B remote tsnet logout [--yes] # 有活动流时不带 --yes 列出它们并以 1 退出；带 --yes 先关闭再登出
 cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；从不启动；锁被占用而无应答时以 1 退出

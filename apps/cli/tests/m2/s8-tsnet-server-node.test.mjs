@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
-import { payloadOf } from "./auth-fixtures.mjs";
+import { SSH_TARGET, payloadOf } from "./auth-fixtures.mjs";
 import { startTailnet, tsnetBuilds } from "./tsnet-fixtures.mjs";
 import { createTsnetScenario } from "./tsnet-scenario.mjs";
 
@@ -56,7 +56,9 @@ test("a client pairs over tsnet with the server's own node and runs commands thr
   const record = await fixture.pairOk(client, "box", invitation, ["--via", "tsnet"]);
   expect(record.defaultEntry).toBe("tsnet");
   const saved = await fixture.credential(client, record.serverId);
+  // Every entry of the invitation: its SSH target too, never loopback (another host).
   expect(saved.entries).toEqual({
+    ssh: { target: SSH_TARGET, port: businessPort },
     tsnet: { nodeId: node.nodeId, name: node.nodeName, port: businessPort },
   });
 

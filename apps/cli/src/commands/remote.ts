@@ -32,11 +32,13 @@ kept in <home>/client/servers/<serverId>.json (0600). A lost pairing answer is n
 create a new invitation and pair again; \`cove auth device list\` shows the device the lost
 attempt left as never-connected, and \`cove auth device revoke\` removes it. remote remove
 forgets the server on this client only; revoke the device on the server as well. Without --via,
-remote add pairs with a server on this host (loopback) and also records the invitation's SSH
-entry; with --via ssh it pairs through the invitation's SSH target, which ssh must already know
-(known_hosts), and records only that entry; with --via tsnet it pairs through the invitation's
-tsnet node from this client's own node (\`cove remote tsnet login\` first), and records only that
-entry.`;
+remote add pairs with a server on this host (loopback); with --via ssh it pairs through the
+invitation's SSH target, which ssh must already know (known_hosts); with --via tsnet it pairs
+through the invitation's tsnet node from this client's own node (\`cove remote tsnet login\`
+first). Either way the record holds every entry the invitation names (its SSH target and tsnet
+node), plus loopback when paired on the server's host; the entry the pairing went through is the
+default. A command uses --via ssh|tsnet or the default, and never switches entries on its own;
+\`remote entry default\` changes the default.`;
 
 // These commands manage this client's own records; they never address a server with --server.
 export const localOnly = true;
@@ -107,8 +109,10 @@ async function add(args: Arguments): Promise<number> {
   const existing = (await listServers(home)).find((record) => record.serverId === payload.serverId);
   if (existing)
     throw new Error(
-      `this client is already paired with that server as ${existing.alias}; ` +
-        `run \`cove remote remove ${existing.alias}\` first. The invitation was not used`,
+      `this client is already paired with that server as ${existing.alias} ` +
+        `(entries: ${Object.keys(existing.entries).join(", ")}); one record holds every entry ` +
+        `of a server. To pair again, run \`cove remote remove ${existing.alias}\` first and ` +
+        `revoke its device (${existing.deviceId}) on the server. The invitation was not used`,
     );
   const result = await redeemInvitation(payload, deviceName, via, cliBuildVersion(), home);
   // The entries this pairing reached and the invitation's (remote/pairing.ts pairedRecord).
