@@ -107,8 +107,9 @@ M2 已实现（[D3](milestones/m2.md#d3-本机入口与稳定端口选-a)）：
   满额时先关闭等待请求头最久的连接，以免不发完请求头的对端占满文件描述符。经 tsnet 转交的连接进入同一监听，受同样的上限。
 - 配对监听是单独的端口，只在有 `open` 邀请时开放（§9.3），不经上述原始连接上限，而有自己的上限：同时 8 个连接、
   请求期限 5 秒、所有邀请合计每 60 秒 20 次兑换尝试，请求与响应各不超过 4 KiB。
-- server 的监听集合（`apps/server/src/network/listeners.ts`）按业务端口、配对端口、tsnet 的顺序启动，逆序关闭；
-  配对端口或 tsnet 节点无法启动时只记录日志，业务入口照常服务。
+- server 的监听集合（`apps/server/src/network/listeners.ts`）按业务端口、配对端口、tsnet 的顺序启动；关闭时先关 tsnet 节点
+  （不再转交连接），再关业务监听，最后释放配对监听（等待未写完的设备最后使用记录）。配对端口或 tsnet 节点无法启动时只记录日志，
+  业务入口照常服务。
 
 ### 内置 Tailscale
 
@@ -130,9 +131,11 @@ M2 已实现（[D10](milestones/m2.md#d10-tsnet-的进程边界选-a)、T5b）�
 - 节点默认主机名为 `cove-<主机名第一个点之前的部分>`（入口配置 `tsnetHostname` 可改）；只在 Tailnet 上监听与 loopback 同号的业务端口，
   以及有 `open` 邀请时的配对端口。接受的连接经 0700 目录中的 Unix socket 逐条转交 Node，附带 WhoIs 得到的对端节点，
   只用于显示与设备的最后入口记录，不作授权。
-- 登录用 auth key（只经 stdin 帧传给 `cove-tsnet`）或交互登录 URL，由本机 CLI 的 `cove server tsnet login/status/logout`
-  执行（local-owner 方法，见 [relay-protocol §11.8](relay-protocol.md#118-m2-方法凭据与秘密边界)）。
-- 客户端也有自己的 tsnet 节点：CLI 经每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程连接 server 节点，
+- 登录用 auth key（只经 stdin 帧传给 `cove-tsnet`）或交互登录 URL。RPC 权限：`server.tsnet.login` 与 `server.tsnet.logout`
+  是 local-owner 方法，设备调用为 `FORBIDDEN`；`server.tsnet.status` 是普通 owner 读方法，设备也可调用
+  （[relay-protocol §11.8](relay-protocol.md#118-m2-方法凭据与秘密边界)）。CLI 另有限制：`cove server tsnet login/status/logout`
+  整组只作用于本机，不接受 `--server`。
+- 客户端也有自己的 tsnet 节点：CLI 经每个 OS 用户与 Cove 数据目录（`--home`）一个、按需启动的 `cove-tsnet dial` 常驻进程连接 server 节点，
   状态在客户端的 `<home>/tsnet-client/`，客户端节点不监听任何端口；每条流建立前按配对时记录的 server 节点稳定 ID 用 WhoIs 核对对端，
   从不只凭 MagicDNS 名称信任对端（[D14](milestones/m2.md#d14-客户端-tsnet-节点的并发所有权选-b按需启动的常驻客户端进程)）。
 - Mobile 与 Desktop 同样经内嵌 tsnet 连接 server，不依赖设备上的系统 Tailscale；这推翻了原先“初版 mobile 不内嵌 Tailscale，
