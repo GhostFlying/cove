@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { connect } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { cli } from "../m1/fixtures.mjs";
 import { waitFor } from "../recording-view.mjs";
 import { bootstrapRequest, createAuthFixture, payloadOf, portOf } from "./auth-fixtures.mjs";
 
@@ -16,6 +19,14 @@ import { bootstrapRequest, createAuthFixture, payloadOf, portOf } from "./auth-f
 // stderr). s9-tsnet-node.test.mjs runs the real helper against a test control plane.
 
 const FAKE = resolve(import.meta.dirname, "s9-fake-tsnet.mjs");
+// node-pty, for the prompt on a terminal: the terminal worker's (a dependency of the server).
+const serverPackage = dirname(createRequire(import.meta.url).resolve("@cove/server/package.json"));
+const pty = createRequire(
+  join(
+    realpathSync(join(serverPackage, "node_modules", "@cove", "terminal-worker")),
+    "package.json",
+  ),
+)("node-pty");
 const KEY = "tskey-auth-k0123456789ABCDEFGHIJ";
 const LOGIN_URL = "https://login.example.test/a/interactive-0123456789";
 
@@ -245,5 +256,45 @@ test("an interactive login shows its URL once, a refused login fails honestly, a
   const failure = await fixture.coveJson(["server", "tsnet", "status"], { home });
   expect(failure.warnings[0]).toBe(
     "the last login failed (LOGIN_FAILED): invalid key [redacted], see [url]",
+  );
+}, 60_000);
+
+test("Ctrl-C or Ctrl-D at the hidden auth-key prompt cancels before anything is saved or sent", async () => {
+  const home = fixture.home("server");
+  await fixture.startAuthServer(home);
+  for (const key of ["\x03", "\x04"]) {
+    const terminal = pty.spawn(
+      process.execPath,
+      [cli, "--home", home, "server", "tsnet", "login"],
+      {
+        env: fixture.env,
+        cols: 120,
+        rows: 24,
+      },
+    );
+    let output = "";
+    terminal.onData((data) => (output += data));
+    let ended = false;
+    const exited = new Promise((done) =>
+      terminal.onExit((result) => {
+        ended = true;
+        done(result);
+      }),
+    );
+    try {
+      await waitFor("the prompt", async () => output.includes("Auth key"), 10_000);
+      terminal.write(key);
+      expect((await exited).exitCode).toBe(130);
+    } finally {
+      if (!ended) terminal.kill();
+    }
+    expect(output).toContain("the login was cancelled; nothing was sent");
+  }
+  // No login reached the server (it would have started the helper) and no pending record exists.
+  expect(await tsnetHome(fixture.root)).toBeNull();
+  const pending = join(home, "cli", "operations");
+  expect(existsSync(pending) ? readdirSync(pending) : []).toEqual([]);
+  expect((await fixture.coveJson(["server", "tsnet", "status"], { home })).state).toBe(
+    "logged-out",
   );
 }, 60_000);

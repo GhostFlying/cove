@@ -25,13 +25,17 @@ import { acceptWrite, operationIdFor } from "./_pending.js";
 // never an argument or an environment variable, is sent once as the request's input secret and
 // is never saved (the pending record omits it, so the request cannot be resent: the operator runs
 // the command again). Empty input starts an interactive login: the server answers with a login
-// URL, shown here once on stderr; whoever opens it decides which tailnet the node joins.
+// URL, shown here once on stderr; whoever opens it decides which tailnet the node joins. At the
+// prompt that is an empty line submitted with Enter; Ctrl-C, or Ctrl-D (end of input), cancels
+// the command before anything is saved or sent, since starting a login on an enrolled node holds
+// it until the login is settled.
 export const usage = `  server tsnet login [--operation-id ID]
   server tsnet status
   server tsnet logout [--operation-id ID]
 
 server tsnet login reads an auth key from a hidden prompt, or from stdin when it is not a
-terminal; empty input starts an interactive login and prints its URL once. The node then serves
+terminal; empty input (Enter at the prompt) starts an interactive login and prints its URL once;
+Ctrl-C or Ctrl-D at the prompt cancels without sending anything. The node then serves
 the business port, and the pairing port while an invitation is open. server tsnet logout removes
 the node's state; if the control plane did not confirm it, remove the node in the admin console.`;
 
@@ -113,8 +117,9 @@ async function currentStatus(client: Client): Promise<TsnetStatus> {
 }
 
 // Reads the key without it ever being an argument: a prompt that does not echo when stdin is a
-// terminal, otherwise stdin itself, bounded. Never printed, not even in an error.
-async function readAuthKey(): Promise<string | undefined> {
+// terminal, otherwise stdin itself, bounded. Never printed, not even in an error. Null when the
+// prompt was cancelled; undefined for an interactive login.
+async function readAuthKey(): Promise<string | undefined | null> {
   let text: string;
   if (process.stdin.isTTY) {
     const prompt = createInterface({
@@ -125,15 +130,21 @@ async function readAuthKey(): Promise<string | undefined> {
     process.stderr.write("Auth key (input is hidden; empty for an interactive login): ");
     // readline echoes typed input through _writeToOutput; silencing it hides the key.
     (prompt as unknown as { _writeToOutput: (text: string) => void })._writeToOutput = () => {};
+    let answer: string | null;
     try {
-      text = await new Promise<string>((resolve) => {
+      answer = await new Promise<string | null>((resolve) => {
         prompt.once("line", resolve);
-        prompt.once("close", () => resolve(""));
+        // Without a SIGINT listener readline turns Ctrl-C into a close, which must not read as
+        // an empty answer; a close without a line (Ctrl-D, a lost terminal) is no answer either.
+        prompt.once("SIGINT", () => resolve(null));
+        prompt.once("close", () => resolve(null));
       });
     } finally {
       prompt.close();
       process.stderr.write("\n");
     }
+    if (answer === null) return null;
+    text = answer;
   } else {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -241,6 +252,10 @@ async function explainFailure(client: Client, operation: OperationRecord): Promi
 async function login(args: Arguments): Promise<number> {
   const operationId = operationIdFor(args);
   const authKey = await readAuthKey();
+  if (authKey === null) {
+    process.stderr.write("cove: the login was cancelled; nothing was sent\n");
+    return 130;
+  }
   return withLocalSession(args, async (session) => {
     const { operation, loginUrl } = await sendWrite(args, session, "server.tsnet.login", {
       operationId,
