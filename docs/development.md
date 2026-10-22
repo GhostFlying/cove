@@ -397,7 +397,7 @@ action/上传预留 5 分钟，`check.yml` 设为 90 分钟；这些上限都按
 
 `Shepherd/tend doc` workflow（`.github/workflows/tend-doc.yml`，#101）执行 `scripts/tend-doc-check.mjs`：PR 改动 tend
 依赖的接口而未改 [Shepherd/tend 集成说明](integrations/shepherd-tend.md) 时失败。路径清单及理由见脚本：
-`apps/cli/src/commands/`、`apps/cli/src/main.ts`、`apps/cli/src/session.ts`、protocol 的 RPC 方法与 schema
+`apps/cli/src/commands/`、`apps/cli/src/install/`（`server install/service/restart/upgrade/status` 等）、`apps/cli/src/main.ts`、`apps/cli/src/session.ts`、protocol 的 RPC 方法与 schema
 （`rpc-methods.ts`、`rpc.ts`、`workspace.ts`、`errors.ts`、`auth.ts`、`bootstrap.ts`）、server 的 `store/` 与
 `operations/`，以及运行与 recipe 环境（#160）：`apps/server/src/domain/tabs.ts`、
 `packages/protocol/src/pipe-command.ts`、`packages/terminal-worker/src/worker-execution.ts`。只有真实测试根
