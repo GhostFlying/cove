@@ -122,7 +122,8 @@ cove server start --harness               # 前台运行；打印 harness 页面
 - 目录检查（#172，用户决定 2026-10-22）：数据目录下 Cove 自己管理的目录（`<home>/server` 及其 `run`、`service`、`backups`，
   `<home>/tsnet` 及其 `run`、已存在的 `state`；安装命令使用的 `install`、`bin` 与 `server/log`）必须属于当前用户、权限 0700、不是符号链接，
   否则在业务入口与 rendezvous 就绪前启动失败，原因写明目录、属主 uid、权限与规则，Cove 不自动修正。已存在的数据目录本身（自己指定的或早先建立的）
-  与它的所有上级目录（包括 `$HOME`）、数据目录外已有的自定义 `--rendezvous` 父目录不检查属主与权限，也可以是符号链接；这些目录仍须解析为目录，发布前后核对目标目录身份。数据目录不存在时 Cove 以 0700 创建；Cove 创建的外部 rendezvous 缺失末级目录同样检查属主、0700 与非符号链接，清理时只删除自己创建的空目录。
+  与它的所有上级目录（包括 `$HOME`）、已知管理子树之外已有的自定义 `--rendezvous` 父目录（即使位于数据目录内）不检查属主与权限，也可以是符号链接；这些目录仍须解析为目录，发布前后核对目标目录身份。数据目录不存在时 Cove 以 0700 创建；Cove 创建的自定义 rendezvous 缺失末级目录同样检查属主、0700 与非符号链接，清理时只删除自己创建的空目录。
+  rendezvous 检查的已知 Cove 管理子树为 `server`、`tsnet`、`install`、`bin`、`client`（凭据）、`cli`（操作与锁）、`tsnet-client`（客户端节点）；仅在 home 内不代表目录由 Cove 管理。
   安装激活先检查 `bin` 再替换 `install/current`；卸载在停止/移除服务及删除安装内容前检查已有 `bin`，缺失的 `bin` 不创建。
   启动或重启 launchd 服务（包括已注册的服务）先检查 `server/log`；install/upgrade 在安装激活前完成这些启动路径检查，目录拒绝不改变当前 build 或停止服务。
 - server 启动失败时以 1 退出，stderr 先写一行 `{"event":"startup-failed","atMs":…,"category":…,"cleanup":…,"detail":…}`
