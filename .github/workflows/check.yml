@@ -38,12 +38,13 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
-    # At least checkJobMinimumMs (89 minutes) from ciTimeBudget in ci-environment-setup.mjs. The
+    # At least checkJobMinimumMs (93 minutes) from ciTimeBudget in ci-environment-setup.mjs. The
     # bounds nest: the Vitest run (40 minutes) < the `pnpm check` stage that runs the gate (52)
-    # < this job. While unbounded work stays within its reserves, each step's own bound then fires
-    # and records evidence before the job is cancelled. A tooling test fails if this drops below
-    # the budget.
-    timeout-minutes: 90
+    # < this job. Browser setup has an independent 12-minute step limit; cancellation can leave
+    # in-progress evidence and is not proof privileged APT descendants exited. Synchronous check
+    # commands may ignore TERM, so only the workflow/job deadline is ultimate containment.
+    # A tooling test checks the configured allowances, including setup finalization reserves.
+    timeout-minutes: 95
     env:
       COVE_CI_SHARD: ${{ matrix.shard }}/3
       # m2 S1/S2 install a runtime closure and register a real user service (a LaunchAgent, a
@@ -80,6 +81,7 @@ jobs:
       - run: node scripts/ci-test-gate.mjs --environment
       - run: node scripts/ci-environment-setup.mjs --native
       - run: node scripts/ci-environment-setup.mjs --browser
+        timeout-minutes: 12
       - run: node scripts/ci-environment-setup.mjs --check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -190,6 +192,7 @@ jobs:
       - run: node scripts/ci-environment-setup.mjs --install
       - run: node scripts/ci-environment-setup.mjs --native
       - run: node scripts/ci-environment-setup.mjs --browser
+        timeout-minutes: 12
       - run: pnpm build
       - run: node scripts/ci-test-gate.mjs --browser-close-diagnostic
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

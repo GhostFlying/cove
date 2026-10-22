@@ -559,17 +559,31 @@ project 整体放在同一分片；权重只影响平衡，不影响正确性；
 run attempt、分片序号与 arch。聚合只接受当前 attempt 的分片：“re-run failed jobs”（通过的分片仍属旧 attempt）
 与只重跑聚合 job 都会失败，重跑须选 “re-run all jobs”。失败时也上传已有证据，缺失 artifact 会使该 job 失败；聚合结果另存为
 `ci-<sha>-check-<os>-attempt-<n>-aggregate`。时间上限是防挂死预算，并非性能 SLA，统一定义在
-`scripts/ci-environment-setup.mjs` 的 `ciTimeBudget`：install/native/browser 各 10 分钟，
+`scripts/ci-environment-setup.mjs` 的 `ciTimeBudget`：install/native/browser 的命令期限各 10 分钟，
+install/native 各留 1 分钟终止与写证据预算，browser 的 workflow 步骤上限 12 分钟，
 gate 辅助命令（toolchain、discovery、source revision）各 2 分钟，Vitest 40 分钟；`pnpm check` 阶段
 52 分钟，包括无独立上限的 native/format/lint/build 预留 5 分钟、两条辅助命令、Vitest、source
-revision 与收尾 1 分钟；job 至少 89 分钟，包括三个准备步骤、`--environment`、check 阶段与 runner
-action/上传预留 5 分钟，`check.yml` 设为 90 分钟；这些上限都按每个分片 job 计。聚合 job 的 `--aggregate` 步骤 5 分钟，
+revision 与收尾 1 分钟；job 至少 93 分钟，包括上述准备/收尾预算、`--environment`、check 阶段与 runner
+action/上传预留 5 分钟，`check.yml` 设为 95 分钟；这些上限都按每个分片 job 计。聚合 job 的 `--aggregate` 步骤 5 分钟，
 加 runner action 预留共至少 10 分钟，`check.yml` 设为 15 分钟。Vitest 上限由 #151 从 20 分钟提高：除少数纯逻辑 project 外都设
 `maxWorkers: 1`，这些 project 依次执行，Vitest 实际串行，每个新增场景 suite 都把自身耗时全部加到总时长上；
 不分片的 macOS 绿色运行到 2026-10-21 已达 27.8 分钟（run 39696359165），#163 因此改为分片而非放开 `maxWorkers`
 （后者会改变 3 vCPU runner 上计时敏感的 PTY、浏览器、sshd 与用户服务 suite 的隔离）。分片的绿色运行接近 20 分钟时
 应增加分片，而不是再提高上限。外层上限按内层的配置上限而非实测耗时组合；只要无独立
-上限的工作不超出其预留，挂死时就由最内层上限先触发并写下证据；tooling 测试校验这一组合与 workflow 值。C1 原有 tooling 测试仍在；应用、完整 PTY
+上限的工作不超出其预留，普通失败有时间写证据；tooling 测试校验这一组合与 workflow 值。
+install/native/browser 在启动前写 `in-progress` 元数据（SHA、run/attempt、argv、起止期限），运行中持续写完整的
+`<stage>.stdout.bin`、`<stage>.stderr.bin`，不截成最后 64000 字符；完成后记录退出/错误/超时状态。
+控制器到期后向自有进程组发 TERM，250ms 后 KILL，再等最多 250ms 后关闭输出管道并返回失败，避免
+忽略 TERM 或后代持有管道使控制器一直等待。原始输出写入失败同样失败。特权 APT 或自行脱离进程组的后代
+是否退出仍是 UNKNOWN，不能以控制器返回或 job 取消当作清理证明。外层取消可能只留下 `in-progress` 和部分输出；
+`always()` 上传保留这些未完成结果。`check`/gate 的同步命令仍可能忽略 TERM，不能承诺每个内层期限都硬停止或完成元数据；
+workflow 的步骤/job 上限是最终花费约束。
+
+Ubuntu 24.04 amd64 的全新 GitHub-hosted runner 在浏览器安装前只识别公共 `ubuntu.sources` deb822 配置与
+GitHub 的已知 mirror list，保存原始/有效配置后把 Ubuntu URIs 改为单一官方 `https://archive.ubuntu.com/ubuntu/`。
+保留 suites（含 security/backports）、components 与 Signed-By；不读 apt 认证或其他源，不改镜像列表、不循环重试。
+不支持的布局在安装前失败且保留原文件，避免猜测配置或泄露未知仓库 URL。此为 #183 重复 APT 卡顿的路线缓解，
+此前网络根因仍 UNKNOWN；仍执行固定 Playwright 的完整 `--with-deps chromium`，保留所有库、字体与浏览器检查。C1 原有 tooling 测试仍在；应用、完整 PTY
 生命周期与移动端测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。B0 只补齐两个真实实验环境；C1
 实施记录见 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。
 
