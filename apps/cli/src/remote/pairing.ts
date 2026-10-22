@@ -9,6 +9,7 @@ import {
 } from "@cove/protocol/auth";
 import type { ServerRecord } from "./credentials.js";
 import { openPairingEntry, preAuthIdentity, RemoteError, type Via } from "./entries.js";
+import { withEntryFailure } from "./entry-types.js";
 import { postJson, TransportFailure } from "./http.js";
 
 // Client side of pairing (m2 D6, "配对流程与状态" steps 2–5). The invitation string holds a
@@ -47,6 +48,10 @@ export async function redeemInvitation(
   const entry = await openPairingEntry(payload, via, home);
   try {
     return await redeemOver(entry.endpoint, payload, deviceName, buildVersion);
+  } catch (error) {
+    // The redemption's own connection can be a later tsnet stream (the identity check used the
+    // first one); its refusal (a hold, PEER_MISMATCH) is otherwise only a closed connection here.
+    throw withEntryFailure(error, entry);
   } finally {
     await entry.close();
   }

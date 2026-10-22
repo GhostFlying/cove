@@ -95,9 +95,9 @@ export interface Session {
   readonly remote?: { server: ServerRecord; token(): string; useToken(token: string): void };
   // Releases what the session's entry holds (an SSH tunnel) after the client is disposed.
   close?(): Promise<void>;
-  // Adds the entry's latest channel failure (a refused later tsnet stream) to a command's error,
-  // which the client alone reports only as a closed connection.
-  withEntryFailure?(error: unknown): unknown;
+  // The entry's latest channel failure (a refused later tsnet stream), which the client alone
+  // reports only as a closed connection; withSession adds it to a failing command's report.
+  entryFailure?(): RemoteError | undefined;
 }
 
 async function connected(client: Client, endpoint: string): Promise<void> {
@@ -156,7 +156,7 @@ export async function openRemoteSession(
       client,
       remote: { server, token: () => token, useToken: (next) => void (token = next) },
       close: () => entry.close(),
-      withEntryFailure: (error) => withEntryFailure(error, entry),
+      entryFailure: () => entry.failure?.(),
     };
   } catch (error) {
     await entry.close();
