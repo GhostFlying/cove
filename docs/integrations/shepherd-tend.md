@@ -467,7 +467,17 @@ M2 T4 客户端 tsnet（PR #165，合入于 `379905d`；CLI `27cfdb3`、`762f633
 
 PENDING：
 
-当前没有。
+M2 #173、#174 远程配对的全部入口与 SSH 隧道监督（PR #178，未合入）：请求不变；输出与行为的变化如下。
+
+- `cove remote add <ALIAS> --via ssh|tsnet` 记录邀请中的全部入口（ssh 与 tsnet，以邀请所含为准），默认入口为配对所用的入口；
+  不带 `--via` 时（同一主机）仍以 loopback 为默认并记录其余入口。`remote list` 的 `entries` 因此可同时含 `ssh` 与 `tsnet`。
+  未经配对使用过的入口在每次使用时同样核对 host key（known_hosts）或 tsnet 稳定节点 ID 与 serverId，核对不符时不发送 token；
+  不自动换入口，入口失败时仍以 1 退出并在 stderr 列出 `Entries of <alias>: ...` 与 `--via`。
+- 此前配对的记录不变，仍只有原来的入口；要加入其他入口须 `cove remote remove`、在 server 撤销该设备后重新配对。
+  已配对同一 server 时 `remote add` 的错误列出该记录的入口，邀请不被使用。
+- 经 SSH 的命令：隧道只在 CLI 请求结束或 CLI 已退出时结束 ssh；CLI 运行中监督管道意外结束时不再中断命令（此前可能以
+  ssh 被 SIGTERM（143）失败），并在 stderr 写出 `cove-ssh: the supervisor pipe ended ... while the CLI runs`。CLI 被强制结束后，
+  其 ssh 约 1 秒内退出。
 
 PLANNED：
 
@@ -552,3 +562,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `379905d`（PR #141、#143、#145、#150、#152、#153、#161、#162、#167、#165） | 基准改为 main `379905d`；全部 PENDING 项改为 AVAILABLE（§2），注明各 PR 的合入提交与主要引入提交，PENDING 现为空；§2 表格补列操作记录保存期限、设备授权、远程 server、安装与服务、server 的 tsnet 节点；按 main 上的代码更正此前 PENDING 中已过时的说明：`--via ssh\|tsnet`、`remote tsnet` 与 `server tsnet` 均已可用（不再是 `ENTRY_UNAVAILABLE`/`CAPABILITY_UNAVAILABLE`），`server entry/status/impact` 可带 `--server`，`remote add` 带 `--via`，同一主机配对时另记 tsnet 入口，邀请只有设置 `sshTarget` 后才含 SSH 入口，T0 的错误 kind 由 T1–T6 产生且 T5b 另加 1050–1052、输入秘密目前只有 `server tsnet login`；补充已核对的输出：`install --activate` 的 `{ build, activated, schema }`、`upgrade` 成功输出另带 `build`、前台 server 不能 `restart`/`upgrade`、`server status --server` 只输出 `{ server }`、`remote tsnet stop` 的 `stopped` 形状、安装版的 build 标识                                                                                           |
 | 2026-10-22 | main `379905d`（#170 review 更正）                                              | 更正 §2：`restart`/`upgrade`/`service stop`/`uninstall` 只结束服务管理器运行的 server 的 run，前台 server 须在原处停止；设备 token 不能调用 local-owner 方法（`server.tsnet.login`/`logout`）；原始连接总数上限计入全部连接，正常客户端在满额时也会被拒绝；30 天是清除的下限，被引用的记录保留，tombstone 内容见协议 §11.3；`server tsnet status` 不接受选项；dial 进程按 OS 用户与数据目录唯一；`PEER_IDENTITY_MISMATCH`（1047）只是声明保留，对端核对失败报为 `ENTRY_UNAVAILABLE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-22 | main `379905d`（M2 实机试用更正）                                               | 更正 §2 T5b：经 SSH 隧道连接的设备 `lastEntry` 为 `loopback`（server 看到的是隧道的 loopback 连接），只有经 tsnet 的为 `tsnet`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 2026-10-22 | main `cb94496`；#178（M2 #173、#174，未合入）                                   | 新增 PENDING #178：`remote add --via ssh\|tsnet` 记录邀请中的全部入口，默认入口为配对所用的入口；已配对时的错误列出记录的入口；经 SSH 的命令不再因监督管道意外结束而以 143 失败                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
