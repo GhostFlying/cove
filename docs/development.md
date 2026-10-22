@@ -276,7 +276,8 @@ cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（�
   流建立并转发字节后，连接中断就是连接中断，不重发。dial 进程没有活动流时空闲 10 分钟退出，先删 socket 再释放锁。
 - 每条流按配对记录中 server 节点的稳定 ID 请求，dial 进程用 WhoIs 核对对端后才转发（`PEER_MISMATCH` 时拒绝），
   CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。后续连接的流被拒时（身份保留、`PEER_MISMATCH`），
-  该连接不转发任何字节，命令失败时的错误给出原因。
+  该连接不转发任何字节，命令失败时的错误给出原因；配对时同样如此；命令自己处理的失败（例如写已受理、读回失败时输出回执并以 1 退出）
+  另在 stderr 写出原因，回执与退出码不变。
 - 版本：dial 进程的 build 与 CLI 将启动的 `cove-tsnet` 不同时，没有活动流就请它退出并启动当前版本；
   有活动流时绝不替换——本机协议兼容则沿用并在 stderr 警告，不兼容则报错并列出活动流（等待其结束或 `remote tsnet stop --yes`）。
 - 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
@@ -285,8 +286,9 @@ cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（�
 - auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
 - 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
   （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。它们只在开发 workspace 中生效；
-  安装版（带 `cove-install.json` 的目录）设置了它们时，tsnet 命令与入口在读取输入、启动进程之前以错误退出，并始终使用自己的
-  `bin/cove-tsnet`。
+  安装闭包（T3 的 `<home>/install/<build>/`，根目录有 `cove-install.json`）中设置了它们时，tsnet 入口在启动 dial 进程、
+  发送任何内容之前以错误退出（`remote tsnet` 命令在读取输入之前；`remote add` 此时已在本机读过邀请，但没有发送），
+  并始终使用闭包自己的 `bin/cove-tsnet`。CLI 与 server 用同一个查找（`@cove/server/build-id` 的 `tsnetBinaryPath`）。
 
 tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
 同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
