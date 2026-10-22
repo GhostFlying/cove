@@ -189,6 +189,43 @@ test("a logout or a reauth in flight is never advertised from the status cached 
   expect(node.invitationEntry(42001)).toBeNull();
 });
 
+// #175: a logged-out node has nothing to run, so the helper does not keep running logged out.
+test("a logout that deleted the node stops the helper, and the next login starts a new one", async () => {
+  const { node, home, logs, ops, seedState, startRunning } = rig();
+  await seedState();
+  await startRunning();
+  const first = node.pid;
+  expect((await node.logout()).kind).toBe("answered");
+  expect(existsSync(join(home, "tsnet", "state"))).toBe(false);
+  await until("the helper to exit", () => node.pid === undefined);
+  expect(logs.some((line) => line.includes('"event":"tsnet-helper-stopping"'))).toBe(true);
+  // Not restarted: status is answered here, logged out, while no helper runs.
+  await delay(1_500);
+  expect(node.pid).toBeUndefined();
+  expect((await node.status()).state).toBe("logged-out");
+  // A login (here without the server's availability check first) starts a new helper.
+  const outcome = await node.login(KEY, 5_000, 10_000);
+  expect(outcome.kind).toBe("answered");
+  expect(outcome.status.state).toBe("running");
+  expect(node.pid).toBeGreaterThan(0);
+  expect(node.pid).not.toBe(first);
+  expect((await ops()).filter((op) => op.op === "start")).toHaveLength(2);
+});
+
+test("a logout does not stop the helper while another login is in flight", async () => {
+  const { node, seedState, startRunning } = rig();
+  await seedState();
+  await startRunning();
+  const pid = node.pid;
+  const login = node.login("tskey-slowfail-0123456789abcdef", 5_000, 10_000);
+  expect((await node.logout()).kind).toBe("answered");
+  // The login still gets its own answer from the same helper.
+  expect((await login).kind).toBe("refused");
+  expect(node.pid === undefined || node.pid === pid).toBe(true);
+  // Only once neither runs is the helper stopped.
+  await until("the helper to exit", () => node.pid === undefined);
+});
+
 test("a port update that timed out is not advertised until the helper acknowledges the set", async () => {
   const { node, home, seedState, setPairing, startRunning, ops } = rig();
   await seedState();
