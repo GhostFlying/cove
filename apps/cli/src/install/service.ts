@@ -79,16 +79,21 @@ function probeTimeout(deadlineMs = Infinity): number {
   return Math.max(0, Math.min(JOURNAL_TIMEOUT_MS, deadlineMs - Date.now()));
 }
 
-// Slice raw UTF-8 before decoding and discard a partial leading line, including its partial
-// code point. The returned string therefore also respects the promised UTF-8 byte limit.
+// Slice before decoding and discard a partial leading line/code point. Malformed UTF-8 can
+// expand to three-byte replacement characters, so also bound the final encoded output. Both
+// cuts retain complete recent lines (including a bounded startup diagnostic after noisy data).
 export function serviceOutputTail(bytes: Buffer, maxBytes = SERVICE_LOG_BYTES): string {
-  const start = Math.max(0, bytes.length - maxBytes);
-  let tail = bytes.subarray(start);
-  if (start > 0) {
-    const newline = tail.indexOf(10);
-    tail = newline < 0 ? Buffer.alloc(0) : tail.subarray(newline + 1);
-  }
-  return tail.toString("utf8").split("\n").slice(-SERVICE_LOG_LINES).join("\n");
+  const wholeLines = (source: Buffer): string => {
+    const start = Math.max(0, source.length - maxBytes);
+    let tail = source.subarray(start);
+    if (start > 0) {
+      const newline = tail.indexOf(10);
+      tail = newline < 0 ? Buffer.alloc(0) : tail.subarray(newline + 1);
+    }
+    return tail.toString("utf8").split("\n").slice(-SERVICE_LOG_LINES).join("\n");
+  };
+  const decoded = wholeLines(bytes);
+  return Buffer.byteLength(decoded) > maxBytes ? wholeLines(Buffer.from(decoded)) : decoded;
 }
 
 function journalOutput(args: string[], deadlineMs?: number): string | null {
