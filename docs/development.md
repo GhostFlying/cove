@@ -263,6 +263,8 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
   出现本次启动之后的 `startup-failed` 事件时，立即在 stderr 写
   `cove: the server failed to start: <原因>; waiting for the service manager to start it again`，
   仍继续等待（服务管理器会再启动它）；服务管理器因反复崩溃放弃重启时立即以 1 失败；超时的错误也带上最近一次的原因。
+- 非终端下 `restart`、`upgrade`、`service stop` 与 `uninstall` 拒绝时（退出 2），除 stdout 的 JSON 外，在 stderr 列出
+  将结束的 run 与全部平台后果（与终端确认时显示的内容相同）。
 - server 是否在运行：能连上即为运行；连不上时看它的实例锁（`<home>/server/cove.lock`，server 存活期间一直持有）：
   没有进程持有才算已停止。锁被持有却连不上（握手超时、容量拒绝、启动中或卡住）时状态未知：`restart`、`upgrade`、
   `service stop` 与 `uninstall` 照样要求确认，但无法列出 run，`--yes` 才继续（这也是停止一个不再应答的 server 的办法）；

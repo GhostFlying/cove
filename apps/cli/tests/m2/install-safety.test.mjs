@@ -19,7 +19,7 @@ import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installClosure } from "../../dist/install/installer.js";
 import { installLayout } from "../../dist/install/layout.js";
-import { startupFailureSince } from "../../dist/install/commands.js";
+import { describeImpact, startupFailureSince } from "../../dist/install/commands.js";
 import {
   fileTail,
   SERVICE_LOG_LINES,
@@ -272,6 +272,10 @@ test("an upgrade asks again when a server started while it installed", async () 
     expect(refused.stderr).toContain(
       `build ${BUILD_A} was installed and activated, but the server was not restarted`,
     );
+    // #175: stderr lists what a terminal would have been shown, every consequence included.
+    const { impact } = JSON.parse(refused.stdout);
+    expect(refused.stderr).toContain(describeImpact(impact));
+    expect(impact.consequences.length).toBeGreaterThan(0);
     expect(await fixture.serverRuns(server)).toBe(true);
     expect((await fixture.coveJson(["server", "status"], { home })).server).toMatchObject({
       relayInstanceId,
@@ -379,6 +383,21 @@ test("an installed build is reused only when its contents are the closure's", as
   expect(
     (await readdir(join(home, "install"))).filter((name) => name.startsWith(".staging-")),
   ).toEqual([]);
+});
+
+// #175: the impact a refusal prints names every consequence, the systemd cgroup one included.
+test("the printed impact names every live run and every consequence", () => {
+  const text = describeImpact({
+    liveRuns: [{ run: { runId: "r1" }, taskId: "t1", tabId: null }],
+    consequences: ["live-runs-end", "cgroup-processes-end", "some-future-consequence"],
+  });
+  expect(text).toBe(
+    "Live runs that end:\n  run r1 (task t1, tab -)\n" +
+      "- every live run ends and is recorded as interrupted; nothing is run again automatically\n" +
+      "- systemd ends every process of the service's cgroup, including processes a terminal " +
+      "detached with nohup, setsid or tmux\n" +
+      "- some-future-consequence\n",
+  );
 });
 
 // #172: the cause a wait for a started server reports is this start's, bounded and printable.
