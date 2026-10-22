@@ -357,7 +357,7 @@ export const requiredSuites = [
     minimumTests: 4,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 42 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 45 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 8 },
   { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 11 },
@@ -2204,11 +2204,25 @@ async function readShardJson(directory, name, label) {
 // scan and suite registrations; each shard must have run exactly the plan's files; and the merged
 // report must pass verifyInventory and the view evidence check against the complete inventory.
 // A shard that failed, never ran, ran the wrong files or left a file out fails it.
+//
+// Every shard must come from the aggregating run attempt (`runId`, github-<run>-<attempt>), and
+// so must its passing result and its browser evidence. A rerun replaces only the jobs it reruns,
+// so an older attempt's artifact can outlive a rerun shard that failed before uploading, and a
+// rerun of the aggregation alone sees only earlier attempts' artifacts. Accepting either could
+// report a pass that no current execution produced, so both fail. GitHub's "re-run failed jobs"
+// therefore fails closed (the shards that passed are not rerun); a rerun must rerun all jobs.
 export async function aggregateShards(
   directory,
-  { platform, sourceCommit, githubRunId, sources, suites, count = ciShardCount },
+  { platform, sourceCommit, runId, sources, suites, count = ciShardCount },
 ) {
-  const names = (await readdir(directory, { withFileTypes: true }))
+  const attempt = /^github-(\d+)-(\d+)$/.exec(runId ?? "");
+  if (!attempt) throw new Error(`The aggregation needs a GitHub run attempt identity: ${runId}`);
+  // No download directory at all (no artifact of this attempt matched) is zero shards.
+  const entries = await readdir(directory, { withFileTypes: true }).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const names = entries
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
@@ -2231,13 +2245,20 @@ export async function aggregateShards(
     if (
       plan.sourceCommit !== sourceCommit ||
       plan.platform !== platform ||
-      plan.githubRunId !== githubRunId ||
+      plan.runId !== runId ||
+      plan.githubRunId !== attempt[1] ||
+      plan.githubRunAttempt !== attempt[2] ||
       typeof plan.root !== "string" ||
       !plan.root.startsWith("/")
     )
-      throw new Error(`Shard ${label} is from another commit, run, platform or checkout`);
+      throw new Error(`Shard ${label} is from another commit, run attempt, platform or checkout`);
     const result = await readShardJson(shardDirectory, shardResultName, name);
-    if (result?.passed !== true || result.index !== plan.index || result.count !== count)
+    if (
+      result?.passed !== true ||
+      result.index !== plan.index ||
+      result.count !== count ||
+      result.runId !== runId
+    )
       throw new Error(`Shard ${label} did not record a passing result`);
     const report = await readShardJson(shardDirectory, "vitest-results.json", name);
     shards.set(plan.index, { directory: shardDirectory, plan, report, label });
@@ -2303,11 +2324,13 @@ export async function aggregateShards(
   const inventory = verifyInventory(discovered, merged, sources, suites);
   if (inventory.some((suite) => suite.project === "terminal-web")) {
     if (!viewShard) throw new Error("No shard ran the V1 browser suites");
-    await verifyBrowserCleanupEvidence(
+    const cleanup = await verifyBrowserCleanupEvidence(
       join(viewShard.directory, "browser-cleanup"),
       sourceCommit,
       viewEvidenceCases(merged, inventory),
     );
+    if (cleanup.runId !== runId)
+      throw new Error(`Shard ${viewShard.label} browser evidence is from another run attempt`);
   }
   return {
     inventory,
@@ -2337,7 +2360,8 @@ async function aggregateMain(args) {
     const result = await aggregateShards(resolve(directory), {
       platform,
       sourceCommit: checkoutCommit(),
-      githubRunId: process.env.GITHUB_RUN_ID ?? null,
+      // The aggregating attempt; aggregateShards refuses anything but a GitHub run attempt.
+      runId: `github-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`,
       sources: await readVitestOwnedTestFiles(),
       suites: await readRequiredSuites(),
     });
@@ -2436,6 +2460,7 @@ async function main() {
         sourceCommit,
         runId,
         githubRunId: process.env.GITHUB_RUN_ID ?? null,
+        githubRunAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
         platform: toolchain.platform,
         arch: toolchain.arch,
         files: plan[shard.index - 1].files,
@@ -2497,7 +2522,7 @@ async function main() {
       await recordViewEvidence(report, inventory);
     await writeFile(
       join(evidenceDir, shardResultName),
-      `${JSON.stringify({ index: shard.index, count: shard.count, passed: true })}\n`,
+      `${JSON.stringify({ index: shard.index, count: shard.count, runId, passed: true })}\n`,
     );
     console.log(
       `Required suite inventory passed${shard.count === 1 ? "" : ` for shard ${shard.index}/${shard.count}`}: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
