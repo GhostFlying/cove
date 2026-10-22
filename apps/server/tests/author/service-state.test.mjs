@@ -343,6 +343,8 @@ describe("Cove-managed directories", () => {
     await chmod(home, 0o755);
     const layout = await prepareHome(home);
     expect(layout.home).toBe(home);
+    // An absent tsnet state remains absent: directory validation must not trigger auto-start.
+    expect(await exists(join(home, "tsnet/state"))).toBe(false);
     expect((await lstat(home)).mode & 0o777).toBe(0o755);
     expect((await lstat(layout.serverDirectory)).mode & 0o777).toBe(0o700);
     // A home reached through a symbolic link is the user's choice too.
@@ -359,6 +361,47 @@ describe("Cove-managed directories", () => {
     );
     expect((await lstat(layout.serverDirectory)).mode & 0o777).toBe(0o750);
   });
+
+  it("refuses all persistent managed descendants before readiness, with and without node state", async () => {
+    for (const withState of [false, true]) {
+      for (const relative of [
+        "server/service",
+        "server/backups",
+        "tsnet",
+        "tsnet/run",
+        "tsnet/state",
+      ]) {
+        const home = await realpath(await temporary());
+        await prepareHome(home);
+        await mkdir(join(home, "tsnet/state"), { mode: 0o700 });
+        if (withState) await writeFile(join(home, "tsnet/state/tailscaled.state"), "{}");
+        const path = join(home, relative);
+        await chmod(path, 0o755);
+        const rendezvous = join(home, "server/run/rendezvous.json");
+        const result = await serverProcess(
+          [
+            "--mode",
+            "m0-local",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--home",
+            home,
+            "--rendezvous",
+            rendezvous,
+          ],
+          isolated(home),
+        );
+        expect(result.code).toBe(1);
+        expect(result.stderr).toContain(
+          `Cove directory ${path} has owner uid ${process.getuid()} and mode 0755`,
+        );
+        expect(await exists(rendezvous)).toBe(false);
+        expect((await lstat(path)).mode & 0o777).toBe(0o755);
+      }
+    }
+  }, 60_000);
 
   it("starts under a writable ancestor and reports a refused Cove directory as its startup cause", async () => {
     const root = await realpath(await temporary());
@@ -394,7 +437,7 @@ describe("Cove-managed directories", () => {
     expect(await exited).toBe(0);
     expect((await lstat(home)).mode & 0o777).toBe(0o755);
 
-    // A run directory of another mode: refused by the rendezvous publisher, by name, with the
+    // A run directory of another mode: refused before listeners start, by name, with the
     // startup-failed event and the person's line on stderr, and exit status 1.
     const run = join(home, "server", "run");
     await mkdir(run);
@@ -403,14 +446,13 @@ describe("Cove-managed directories", () => {
     const refused = await serverProcess(argv, isolated(root));
     expect(refused.code).toBe(1);
     const cause =
-      `Local rendezvous publication failed: Cove directory ${run} has owner uid ` +
-      `${process.getuid()} and mode 0750; ${rule}`;
+      `Cove directory ${run} has owner uid ` + `${process.getuid()} and mode 0750; ${rule}`;
     const events = refused.stderr
       .split("\n")
       .filter((line) => line.startsWith('{"event":"startup-failed"'))
       .map((line) => JSON.parse(line));
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ category: "rendezvous", cleanup: "verified", detail: cause });
+    expect(events[0]).toMatchObject({ category: "store", cleanup: "verified", detail: cause });
     expect(events[0].atMs).toBeGreaterThanOrEqual(before);
     expect(refused.stderr).toContain(`cove-server: ${cause}\n`);
     // <home>/server of another mode: refused before the data directory is opened.

@@ -5,7 +5,6 @@ import {
   chmod,
   cp,
   lstat,
-  mkdir,
   readdir,
   readlink,
   realpath,
@@ -26,6 +25,7 @@ import {
   type InstallStamp,
 } from "./closure.js";
 import { closurePath, launcherScript, type InstallLayout } from "./layout.js";
+import { ensureInstallDirectory } from "./layout.js";
 
 // Installing and activating closures in a data directory (m2 D1). Callers hold the install lock.
 
@@ -117,7 +117,7 @@ export async function installClosure(
   layout: InstallLayout,
   source: string | undefined,
 ): Promise<Installed> {
-  await mkdir(layout.installDirectory, { recursive: true, mode: 0o700 });
+  await ensureInstallDirectory(layout.installDirectory);
   const staged =
     source === undefined ? await buildClosure(layout) : await copyClosure(layout, source);
   try {
@@ -230,7 +230,7 @@ export async function activate(layout: InstallLayout, build: string): Promise<Sc
 }
 
 async function writeLauncher(layout: InstallLayout): Promise<void> {
-  await mkdir(dirname(layout.launcher), { recursive: true, mode: 0o700 });
+  await ensureInstallDirectory(dirname(layout.launcher));
   const temporary = `${layout.launcher}.${process.pid}.tmp`;
   await writeFile(temporary, launcherScript(layout), { mode: 0o755 });
   await chmod(temporary, 0o755);

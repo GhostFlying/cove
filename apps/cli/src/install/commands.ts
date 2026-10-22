@@ -1,3 +1,4 @@
+import { ensureInstallDirectory } from "./layout.js";
 import { mkdir, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -131,7 +132,8 @@ function backendOrThrow(layout: InstallLayout): ServiceBackend {
 // "manual"); it holds no secret and grants nothing.
 async function requestStart(layout: InstallLayout): Promise<void> {
   const path = join(layout.home, START_REQUEST);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await ensureInstallDirectory(join(layout.home, "server"));
+  await ensureInstallDirectory(dirname(path));
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify({ requestedAtMs: Date.now() })}\n`, {
     mode: 0o600,

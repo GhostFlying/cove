@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { stampedBuild, INSTALL_STAMP } from "../build-id.js";
 import type { Store } from "../store/database.js";
+import { ensureManagedDirectory } from "../store/home.js";
 import type {
   LiveRunImpact,
   PreviousStart,
@@ -169,7 +170,7 @@ export async function checkCrashRestartBudget(
 
 export async function recordCrashStop(home: string, crashRestarts: number): Promise<void> {
   const path = join(home, CRASH_STOP);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await ensureManagedDirectory(dirname(path));
   const temporary = `${path}.${process.pid}.tmp`;
   const record = {
     stoppedAtMs: Date.now(),

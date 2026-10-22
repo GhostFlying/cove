@@ -3,7 +3,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } fr
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
-import { serverCommand, type InstallLayout } from "./layout.js";
+import { ensureInstallDirectory, serverCommand, type InstallLayout } from "./layout.js";
 
 // The user-level service manager that runs an installed server (m2 D2): a LaunchAgent in the
 // macOS gui domain, a systemd user unit on Linux. Both detach the server from the shell, SSH
@@ -245,7 +245,8 @@ class LaunchAgent implements ServiceBackend {
   }
 
   async register(start: boolean): Promise<void> {
-    await mkdir(this.layout.logDirectory, { recursive: true, mode: 0o700 });
+    await ensureInstallDirectory(join(this.layout.home, "server"));
+    await ensureInstallDirectory(this.layout.logDirectory);
     await writeAtomically(this.unitPath, launchAgentPlist(this.layout));
     if (start) await this.start();
   }

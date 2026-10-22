@@ -3051,6 +3051,30 @@ describe("D passive production local entry", () => {
       expect((await rpcBody(core, utf8(Array.from({ length: 16 }, () => list)))).status).toBe(413);
     });
   });
+  it("publishes rendezvous directly in a pre-existing 0755 home, including its symlink spelling", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "cove-home-rendezvous-")));
+    await chmod(root, 0o755);
+    const alias = `${root}-alias`;
+    await symlink(root, alias);
+    try {
+      for (const home of [root, alias]) {
+        const path = join(home, "direct.json");
+        const publisher = new LocalRendezvous(path, [root, alias]);
+        await publisher.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        });
+        expect(JSON.parse(await readFile(path, "utf8")).serverId).toBe(identity.serverId);
+        await publisher.close();
+        expect((await stat(root)).mode & 0o777).toBe(0o755);
+      }
+    } finally {
+      await rm(alias);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("D-A18 secure missing leaf directory is created 0700 and removed only after owned file cleanup", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-secure-parent-"));
     const parent = join(root, "owned");

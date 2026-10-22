@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { ensureManagedDirectory, HomeError } from "./home.js";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import type { Migration } from "./migrations.js";
@@ -93,7 +93,7 @@ export async function openConnection(options: ConnectionOptions): Promise<Opened
     if (version < target) {
       if (version > 0) {
         // A copy of the previous schema's data, taken under the lock before migrating.
-        await mkdir(options.backupDirectory, { recursive: true, mode: 0o700 });
+        await ensureManagedDirectory(options.backupDirectory);
         backupPath = join(
           options.backupDirectory,
           `cove-schema-${version}-${options.now}-${randomUUID().slice(0, 8)}.db`,
@@ -112,7 +112,7 @@ export async function openConnection(options: ConnectionOptions): Promise<Opened
     return { db, schemaVersion: target, backupPath };
   } catch (error) {
     db.close();
-    if (error instanceof StoreError) throw error;
+    if (error instanceof StoreError || error instanceof HomeError) throw error;
     throw new StoreError("unavailable", "The Cove database cannot be opened");
   }
 }

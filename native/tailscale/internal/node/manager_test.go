@@ -423,3 +423,33 @@ func TestInteractiveLoginTimeoutLeavesTheNodeAsItIs(t *testing.T) {
 		}
 	})
 }
+
+func TestServerStrictStateDirectoryDoesNotRepairExistingState(t *testing.T) {
+	for _, strict := range []bool{true, false} {
+		dir := enrolled(t)
+		if err := os.Chmod(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		starts := 0
+		m := node.NewManager(node.Config{StateDir: dir, StrictStateDirectory: strict}, func(_ node.Config, _ string) (node.Node, error) {
+			starts++
+			return &fakenode.Node{State: proto.StateRunning}, nil
+		})
+		m.Boot()
+		defer m.Close()
+		info, err := os.Lstat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strict {
+			if starts != 0 || info.Mode().Perm() != 0o755 {
+				t.Fatal("server accepted or repaired invalid state")
+			}
+			if _, err := m.Login(context.Background(), "tskey-test-0000", time.Second); err == nil || !strings.Contains(err.Error(), "mode 0755") {
+				t.Fatalf("strict login error: %v", err)
+			}
+		} else if starts != 1 || info.Mode().Perm() != 0o700 {
+			t.Fatal("changed client directory semantics")
+		}
+	}
+}
