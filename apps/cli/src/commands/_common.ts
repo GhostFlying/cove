@@ -4,6 +4,7 @@ import type { CallOutcome, Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import { ALIAS_PATTERN } from "../remote/credentials.js";
 import type { Via } from "../remote/entries.js";
+import { withEntryFailure } from "../remote/entry-types.js";
 import { openRemoteSession, openSession, type Session } from "../session.js";
 
 // Shared CLI plumbing for the command modules. A module named `<group>.ts` in this directory
@@ -275,13 +276,22 @@ export async function withSession<T>(
   const session = remoteTarget
     ? await openRemoteSession(homeDirectory(args), remoteTarget.alias, remoteTarget.via)
     : await openSession(rendezvousPath(args));
+  // A remote entry's own reason for a closed connection (a refused later tsnet stream) is added to
+  // a failing command's report: to its error, or, for a command that reported a handled failure
+  // itself (a receipt on stdout and exit status 1, e.g. a read after an accepted write), on stderr
+  // after it, leaving the receipt and the status unchanged.
+  const failure = { failure: () => session.entryFailure?.() };
+  let result: T;
   try {
-    return await action(session);
+    result = await action(session);
   } catch (error) {
-    // A remote entry's own reason for a closed connection (a refused later tsnet stream).
-    throw session.withEntryFailure ? session.withEntryFailure(error) : error;
+    throw withEntryFailure(error, failure);
   } finally {
     session.client.dispose();
     await session.close?.();
   }
+  const reason = failure.failure();
+  if (reason && typeof result === "number" && result !== 0)
+    process.stderr.write(`cove: ${reason.message}\n`);
+  return result;
 }
