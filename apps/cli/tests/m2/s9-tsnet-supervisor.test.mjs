@@ -212,6 +212,21 @@ test("a logout that deleted the node stops the helper, and the next login starts
   expect((await ops()).filter((op) => op.op === "start")).toHaveLength(2);
 });
 
+test("all concurrent control requests share the helper-ready transition after logout", async () => {
+  const { node, ops, seedState, startRunning } = rig();
+  await seedState();
+  await startRunning();
+  expect((await node.logout()).kind).toBe("answered");
+  // Both resume calls wait for the same retirement. Only one can start the next helper.
+  const answers = await Promise.all([
+    node.login(KEY, 5_000, 10_000),
+    node.login(KEY, 5_000, 10_000),
+  ]);
+  expect(answers.map((answer) => answer.kind)).toEqual(["answered", "answered"]);
+  expect((await ops()).filter((op) => op.op === "login")).toHaveLength(2);
+  expect((await ops()).filter((op) => op.op === "start")).toHaveLength(2);
+});
+
 test("a logout does not stop the helper while another login is in flight", async () => {
   const { node, seedState, startRunning } = rig();
   await seedState();
