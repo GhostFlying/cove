@@ -47,6 +47,11 @@ func EnsureManagedDir(path string) error {
 	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	return CheckManagedDir(path)
+}
+
+// CheckManagedDir validates the strict server rule without creating or changing state.
+func CheckManagedDir(path string) error {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return err
