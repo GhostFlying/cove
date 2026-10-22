@@ -265,15 +265,18 @@ cove --home B remote tsnet status         # 节点状态、活动流与 dial 进
 cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet
 cove --home B --server box --via tsnet status # 同一主机配对时也记录邀请中的 tsnet 入口
 cove --home B remote tsnet logout [--yes] # 有活动流时不带 --yes 列出它们并以 1 退出；带 --yes 先关闭再登出
-cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；没有进程时不启动
+cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；从不启动；锁被占用而无应答时以 1 退出
 cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（默认 10m），下次启动生效
 ```
 
 - 每条经 tsnet 的命令先连 `<home>/tsnet-client/run/dial.sock`（0600），连不上时以脱离的方式启动 dial 进程并在
-  10 秒总期限内循环连接与重新启动；期限用尽报 `ENTRY_UNAVAILABLE`，附 `run/dial.log` 的末尾。重试只发生在提交请求之前；
+  10 秒总期限内循环连接与重新启动（一个绝对期限，识别可执行文件、连接、hello 与替换旧版本的 stop 共用；自己启动的进程
+  正常退出、退出码 75 或被信号结束时重新启动，退出码 1、2 立即失败）；期限用尽报 `ENTRY_UNAVAILABLE`，附 `run/dial.log` 的末尾。
+  `remote tsnet stop` 用 `cove-tsnet dial-owned` 查看锁：只有没有 hello 且锁空闲时才报告没有 dial 进程。重试只发生在提交请求之前；
   流建立并转发字节后，连接中断就是连接中断，不重发。dial 进程没有活动流时空闲 10 分钟退出，先删 socket 再释放锁。
 - 每条流按配对记录中 server 节点的稳定 ID 请求，dial 进程用 WhoIs 核对对端后才转发（`PEER_MISMATCH` 时拒绝），
-  CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。
+  CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。后续连接的流被拒时（身份保留、`PEER_MISMATCH`），
+  该连接不转发任何字节，命令失败时的错误给出原因。
 - 版本：dial 进程的 build 与 CLI 将启动的 `cove-tsnet` 不同时，没有活动流就请它退出并启动当前版本；
   有活动流时绝不替换——本机协议兼容则沿用并在 stderr 警告，不兼容则报错并列出活动流（等待其结束或 `remote tsnet stop --yes`）。
 - 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
@@ -281,7 +284,9 @@ cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（�
   logout 的 `remoteLogoutConfirmed: false` 表示本地状态已删除但控制面未确认，需要在管理控制台删除该节点。
 - auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
 - 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
-  （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。
+  （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。它们只在开发 workspace 中生效；
+  安装版（带 `cove-install.json` 的目录）设置了它们时，tsnet 命令与入口在读取输入、启动进程之前以错误退出，并始终使用自己的
+  `bin/cove-tsnet`。
 
 tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
 同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
