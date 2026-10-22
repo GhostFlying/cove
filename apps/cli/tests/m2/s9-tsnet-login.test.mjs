@@ -1,14 +1,16 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { connect } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { createClient } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { parseArguments } from "../../dist/commands/_common.js";
+import { run as tsnetCommand } from "../../dist/commands/_tsnet.js";
 import { createNodePorts } from "../../dist/node-ports.js";
 import { cliBuildVersion } from "../../dist/session.js";
 import { cli } from "../m1/fixtures.mjs";
@@ -24,14 +26,6 @@ import { bootstrapRequest, createAuthFixture, payloadOf, portOf } from "./auth-f
 // stderr). s9-tsnet-node.test.mjs runs the real helper against a test control plane.
 
 const FAKE = resolve(import.meta.dirname, "s9-fake-tsnet.mjs");
-// node-pty, for the prompt on a terminal: the terminal worker's (a dependency of the server).
-const serverPackage = dirname(createRequire(import.meta.url).resolve("@cove/server/package.json"));
-const pty = createRequire(
-  join(
-    realpathSync(join(serverPackage, "node_modules", "@cove", "terminal-worker")),
-    "package.json",
-  ),
-)("node-pty");
 const KEY = "tskey-auth-k0123456789ABCDEFGHIJ";
 const LOGIN_URL = "https://login.example.test/a/interactive-0123456789";
 
@@ -264,44 +258,87 @@ test("an interactive login shows its URL once, a refused login fails honestly, a
   );
 }, 60_000);
 
-test("Ctrl-C or Ctrl-D at the hidden auth-key prompt cancels before anything is saved or sent", async () => {
-  const home = fixture.home("server");
-  await fixture.startAuthServer(home);
-  for (const key of ["\x03", "\x04"]) {
-    const terminal = pty.spawn(
-      process.execPath,
-      [cli, "--home", home, "server", "tsnet", "login"],
-      {
-        env: fixture.env,
-        cols: 120,
-        rows: 24,
-      },
-    );
-    let output = "";
-    terminal.onData((data) => (output += data));
-    let ended = false;
-    const exited = new Promise((done) =>
-      terminal.onExit((result) => {
-        ended = true;
-        done(result);
-      }),
-    );
-    try {
-      await waitFor("the prompt", async () => output.includes("Auth key"), 10_000);
-      terminal.write(key);
-      expect((await exited).exitCode).toBe(130);
-    } finally {
-      if (!ended) terminal.kill();
-    }
-    expect(output).toContain("the login was cancelled; nothing was sent");
-  }
-  // No login reached the server (it would have started the helper) and no pending record exists.
+// What a login leaves when it was cancelled before anything was sent: no helper started (a login
+// request starts it), no pending record, and a node still logged out.
+async function nothingSent(home) {
   expect(await tsnetHome(fixture.root)).toBeNull();
   const pending = join(home, "cli", "operations");
   expect(existsSync(pending) ? readdirSync(pending) : []).toEqual([]);
   expect((await fixture.coveJson(["server", "tsnet", "status"], { home })).state).toBe(
     "logged-out",
   );
+}
+
+// `cove server tsnet login` in this process (the compiled command module, as main.js runs it),
+// reading from `input`, a stream that says it is a terminal; `act` types on it once the prompt is
+// shown. Resolves with the exit code and what the command wrote to stderr.
+async function promptLogin(home, act) {
+  const input = new PassThrough();
+  input.isTTY = true;
+  let stderr = "";
+  const write = process.stderr.write;
+  process.stderr.write = (chunk, ...rest) => {
+    stderr += chunk;
+    return write.call(process.stderr, chunk, ...rest);
+  };
+  try {
+    const code = tsnetCommand(parseArguments(["--home", home, "server", "tsnet", "login"]), input);
+    await waitFor("the prompt", async () => stderr.includes("Auth key"), 10_000);
+    act(input);
+    return { code: await code, stderr };
+  } finally {
+    process.stderr.write = write;
+  }
+}
+
+test("cancelling the hidden auth-key prompt saves and sends nothing; only Enter submits", async () => {
+  const home = fixture.home("server");
+  await fixture.startAuthServer(home);
+  const cancels = {
+    // Ctrl-C in raw mode: readline's SIGINT event.
+    "ctrl-c": (input) => input.write("\x03"),
+    "ctrl-d at an empty prompt": (input) => input.write("\x04"),
+    // readline ends the unterminated line as a `line` at EOF (#167 C4).
+    "eof after a partly typed key": (input) => {
+      input.write("tskey-auth-partial0123");
+      input.end();
+    },
+    "a terminal that hung up": (input) => input.end(),
+    "a terminal that failed": (input) => input.destroy(new Error("EIO")),
+  };
+  const outcomes = {};
+  for (const [name, act] of Object.entries(cancels)) {
+    const result = await promptLogin(home, act).catch((error) => ({ code: String(error) }));
+    outcomes[name] = {
+      code: result.code,
+      cancelled: result.stderr?.includes("the login was cancelled; nothing was sent") ?? false,
+    };
+  }
+  expect(outcomes).toEqual(
+    Object.fromEntries(Object.keys(cancels).map((name) => [name, { code: 130, cancelled: true }])),
+  );
+  await nothingSent(home);
+  // The control: a key ended with Enter on the same kind of input is submitted.
+  const submitted = await promptLogin(home, (input) => input.write(`${KEY}\r`));
+  expect(submitted.code).toBe(0);
+  expect((await opsOf(await tsnetHome(fixture.root))).some((op) => op.op === "login")).toBe(true);
+}, 60_000);
+
+test("a SIGINT while the command waits for its key ends it before anything is sent", async () => {
+  const home = fixture.home("server");
+  await fixture.startAuthServer(home);
+  // stdin stays open, so the command is still reading its key when the signal arrives.
+  const child = spawn(process.execPath, [cli, "--home", home, "server", "tsnet", "login"], {
+    env: fixture.env,
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  await new Promise((done) => setTimeout(done, 1_000));
+  child.kill("SIGINT");
+  const [code, signal] = await new Promise((done) =>
+    child.once("exit", (exitCode, exitSignal) => done([exitCode, exitSignal])),
+  );
+  expect(code === 130 || signal === "SIGINT").toBe(true);
+  await nothingSent(home);
 }, 60_000);
 
 // A login request as the local owner, sent straight to the server's HTTP RPC.
