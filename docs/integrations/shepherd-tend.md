@@ -413,7 +413,7 @@ PENDING：
 - 新增错误 kind，以 1 退出：
   - `TSNET_LOGIN_FAILED`（1050，节点不变，包括已经登录）；
   - `TSNET_IDENTITY_CHANGED`（1051）；
-  - `TSNET_LOGIN_UNCERTAIN`（1052）。
+  - `TSNET_LOGIN_UNCERTAIN`（1052，包括 URL 未能在应答中送达）。
   - 结果不确定的 login/logout 记录为 `requires_attention`（`RESULT_UNKNOWN`），不会自动重做。
 - 节点登录后，`auth invite create` 的邀请可含 `entries.tsnet`；没有 SSH 目标但节点可用时也能创建邀请。
   `auth device list` 中经 tsnet 连接的设备 `lastEntry` 为 `tsnet`。

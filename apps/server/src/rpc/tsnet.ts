@@ -24,10 +24,20 @@ import { capabilityUnavailable, type RpcHandler } from "./context.js";
 // these methods): whether the node logged in is then read from `server tsnet status`, never
 // assumed, and the request is never repeated on its own.
 //
-// The live answer waits up to LIVE_WAIT_MS for the helper; the CLI's request timeout is longer
+// The live answer waits up to TSNET_WRITE_TIMING.liveWaitMs for the helper; the CLI's request timeout is longer
 // (apps/cli commands/_tsnet.ts). A login that takes longer (an auth-key login may take up to the
 // helper's 60 s) answers with the running record and completes in the background; the CLI then
 // follows the record with operation.get.
+//
+// Delivery of the login URL. A record that says `secretDelivery: "first-response-only"` must be
+// one whose URL that first response really carried: the operator who did not get it can only
+// learn from the record that it existed. So the terminal record and the live answer are decided
+// together: when the helper's answer is ready while the live answer is still open, the work
+// claims the live answer (it then waits for the record's commit and carries the URL); once the
+// live wait has ended unclaimed, a URL that arrives is never delivered and the record is
+// TSNET_LOGIN_UNCERTAIN (an interactive login was started, and whoever has its URL could still
+// complete it), never succeeded. The interactive deadlines are also kept inside the live wait,
+// so this happens only when the helper answers late.
 //
 // Secret boundary. The auth key is the call's input secret (call.secrets, never params): it goes
 // to the helper inside the login frame and nowhere else. It is not in the canonical intent (the
@@ -38,12 +48,20 @@ import { capabilityUnavailable, type RpcHandler } from "./context.js";
 // remoteLogoutConfirmed). The login URL is returned only as the live answer's output secret, by
 // the call that ran the login; a resend, operation.get or a background completion never has it.
 
-const LIVE_WAIT_MS = 25_000;
-// How long the helper may take: an auth-key login waits for the node to run (PROTOCOL.md login);
-// an interactive login answers as soon as the URL is known, and must do so within the live wait,
-// since a URL that arrives after the answer went out could never be delivered.
-const KEY_LOGIN_TIMEOUT_MS = 60_000;
-const INTERACTIVE_LOGIN_TIMEOUT_MS = 20_000;
+// How long the live answer waits, and how long the helper may take: an auth-key login waits for
+// the node to run (PROTOCOL.md login); an interactive login answers as soon as the URL is known.
+// `deadlineMs` bounds the request itself (the helper's own timeout plus its answer). The
+// interactive deadline is shorter than the live wait, so that its URL can still be delivered.
+export type TsnetWriteTiming = {
+  readonly liveWaitMs: number;
+  readonly key: { readonly timeoutMs: number; readonly deadlineMs: number };
+  readonly interactive: { readonly timeoutMs: number; readonly deadlineMs: number };
+};
+export const TSNET_WRITE_TIMING: TsnetWriteTiming = {
+  liveWaitMs: 25_000,
+  key: { timeoutMs: 60_000, deadlineMs: 75_000 },
+  interactive: { timeoutMs: 15_000, deadlineMs: 20_000 },
+};
 
 const encoder = new TextEncoder();
 const encodeUtf8 = (text: string): Uint8Array => encoder.encode(text);
@@ -82,13 +100,15 @@ export const handle: RpcHandler<"tsnet"> = async (core, call) => {
   }
 };
 
-async function runWrite(
-  tsnet: TsnetNode,
+// Exported with `timing` for the tests of the delivery rule above; handle uses the defaults.
+export async function runWrite(
+  tsnet: Pick<TsnetNode, "available" | "login" | "logout">,
   receipts: OperationReceipts,
   principalId: string,
   method: WriteMethod,
   params: { operationId: string },
   authKey: string | undefined,
+  timing: TsnetWriteTiming = TSNET_WRITE_TIMING,
 ): Promise<LiveAnswer> {
   const context: DatabaseWriteContext = {
     serverId: receipts.composition.serverId,
@@ -148,18 +168,24 @@ async function runWrite(
     return { error: domainError("RESULT_UNKNOWN", "unknown") };
   }
 
+  // Whether the live answer is still open, was claimed by the work (it carries the work's
+  // outcome) or ended with the running record; see "Delivery of the login URL".
+  let live: "open" | "claimed" | "ended" = "open";
   let loginUrl: string | undefined;
   const work = (async (): Promise<OperationRecord> => {
     let terminal: OperationRecord;
+    let url: string | undefined;
     if (method === "server.tsnet.login") {
-      const outcome = await tsnet.login(
-        authKey,
-        authKey ? KEY_LOGIN_TIMEOUT_MS : INTERACTIVE_LOGIN_TIMEOUT_MS,
-      );
+      const limits = authKey ? timing.key : timing.interactive;
+      const outcome = await tsnet.login(authKey, limits.timeoutMs, limits.deadlineMs);
       terminal = loginRecord(running, outcome);
-      if (outcome.kind === "answered") loginUrl = outcome.loginUrl;
+      if (outcome.kind === "answered") url = outcome.loginUrl;
     } else terminal = logoutRecord(running, await tsnet.logout());
-    const forbidden = loginUrl ? [...secrets, loginUrl] : secrets;
+    // Decided synchronously with the claim, so the timer cannot end the live answer in between.
+    if (live === "open") live = "claimed";
+    else if (url) terminal = failed(running, "TSNET_LOGIN_UNCERTAIN");
+    if (live === "claimed") loginUrl = url;
+    const forbidden = url ? [...secrets, url] : secrets;
     // The record is fixed by kind above; this check guards the boundary against a later change.
     if (holdsSecret(terminal, forbidden)) terminal = unknown(running);
     try {
@@ -173,7 +199,15 @@ async function runWrite(
   let timer: ReturnType<typeof setTimeout> | undefined;
   const settled = await Promise.race([
     work,
-    new Promise<null>((done) => (timer = setTimeout(() => done(null), LIVE_WAIT_MS))),
+    new Promise<null>(
+      (done) =>
+        (timer = setTimeout(() => {
+          // A claimed answer waits for the work's commit instead.
+          if (live !== "open") return;
+          live = "ended";
+          done(null);
+        }, timing.liveWaitMs)),
+    ),
   ]);
   clearTimeout(timer);
   if (!settled) return { operation: running };
