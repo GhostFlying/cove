@@ -30,6 +30,14 @@ import type { TsnetEntry, TsnetEntryContext, TsnetInvitationEntry } from "./list
 // would not either, PROTOCOL.md "Lifecycle"). The status of such a node is answered here: logged
 // out, as the helper would report it.
 //
+// After a logout (#175). A logout the helper answered, which deleted the state, leaves nothing for
+// the helper to do: it is stopped (its orderly stop, as at shutdown) once no other login or logout
+// is in flight, and it is not restarted. A failed or lost login is not followed by a stop: an
+// interactive login may still be completing in the browser. A login or logout that starts while
+// the helper stops waits for that stop and starts a new helper (control, available), so it is
+// never sent to a helper that is going away. Until then status answers logged out here, as for a
+// node that never logged in.
+//
 // Supervision (D10). The helper is a child of this process and nothing else depends on it: PTYs,
 // runs and the loopback and SSH entries never wait for it, so its crash costs the tsnet entry
 // alone. An exit nobody asked for is followed by a restart after a backoff that doubles from 1 s
@@ -380,6 +388,10 @@ export class TsnetNode implements TsnetEntry {
   private controlsStarted = 0;
   private syncing = 0;
   private portWork: Promise<void> = Promise.resolve();
+  // A logout deleted the state; the helper stops once no control is in flight ("After a logout").
+  private loggedOut = false;
+  // Settles when the helper stopped after a logout has exited.
+  private stopping: Promise<void> | undefined;
 
   // The helper's directory under the data directory; its state is `<tsnetHome>/state`.
   static homeOf(home: string): string {
@@ -529,11 +541,44 @@ export class TsnetNode implements TsnetEntry {
     if (!this.context || !this.launch) return { ok: false, reason: "the server is starting" };
     if ("refused" in this.launch) return { ok: false, reason: this.launch.refused };
     if (this.closing) return { ok: false, reason: "the server is stopping" };
-    if (!this.wanted) {
-      this.wanted = true;
-      this.spawnHelper();
-    }
+    await this.resume();
+    if (this.closing) return { ok: false, reason: "the server is stopping" };
     return (await this.whenReady()) ? { ok: true } : { ok: false, reason: this.downReason() };
+  }
+
+  // Makes the helper wanted again: waits for a stop after a logout to finish, then starts it.
+  // True when this call started it.
+  private async resume(): Promise<boolean> {
+    while (this.stopping) await this.stopping;
+    if (this.wanted || this.closing) return false;
+    this.wanted = true;
+    this.spawnHelper();
+    return true;
+  }
+
+  // Stops the helper after a logout that deleted the state ("After a logout"): no restart is
+  // scheduled, its stdin is closed (its orderly stop) and its exit is awaited as at shutdown.
+  private stopAfterLogout(): void {
+    this.loggedOut = false;
+    if (this.closing || !this.wanted || this.hasState()) return;
+    this.wanted = false;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
+    const child = this.child;
+    const retirement = this.retirement;
+    if (!child || !retirement) return;
+    this.context?.log({ event: "tsnet-helper-stopping", reason: "logged out" });
+    const stopping = (async () => {
+      this.channel?.close();
+      const timer = setTimeout(() => child.kill("SIGKILL"), STOP_WAIT_MS);
+      timer.unref();
+      await retirement;
+      clearTimeout(timer);
+    })();
+    this.stopping = stopping;
+    void stopping.finally(() => {
+      if (this.stopping === stopping) this.stopping = undefined;
+    });
   }
 
   // One login request (PROTOCOL.md `login`): the helper's own `timeoutMs`, and the `deadlineMs`
@@ -544,27 +589,34 @@ export class TsnetNode implements TsnetEntry {
     timeoutMs: number,
     deadlineMs: number,
   ): Promise<TsnetLoginOutcome> {
-    return this.control(() => this.loginRequest(authKey, timeoutMs, deadlineMs));
+    return this.control((started) => this.loginRequest(authKey, timeoutMs, deadlineMs, started));
   }
 
   logout(): Promise<TsnetLogoutOutcome> {
-    return this.control(() => this.logoutRequest());
+    return this.control((started) => this.logoutRequest(started));
   }
 
   // A login or logout: the node may change from its first moment (a reauth holds it, a logout
   // closes its listeners first), so nothing is advertised from before it, while it runs or from
   // an answer requested meanwhile; once it ends the node is observed again. See "Advertisement".
-  private async control<T>(request: () => Promise<T>): Promise<T> {
+  private async control<T>(request: (started: number) => Promise<T>): Promise<T> {
     this.controls++;
-    this.controlsStarted++;
+    // This request's place among the logins and logouts started so far, taken now: the request
+    // itself may first wait for a helper (resume), while later ones start.
+    const started = ++this.controlsStarted;
     this.controlGeneration++;
     this.advertised = undefined;
     try {
-      return await request();
+      // A helper stopped after an earlier logout is started again (resume) for this request.
+      if (await this.resume()) await this.whenReady();
+      return await request(started);
     } finally {
       this.controls--;
       this.controlGeneration++;
-      if (this.controls === 0 && !this.closing) void this.status();
+      if (this.controls === 0 && !this.closing) {
+        if (this.loggedOut) this.stopAfterLogout();
+        void this.status();
+      }
     }
   }
 
@@ -572,11 +624,12 @@ export class TsnetNode implements TsnetEntry {
     authKey: string | undefined,
     timeoutMs: number,
     deadlineMs: number,
-  ): Promise<TsnetLoginOutcome> {
-    this.loginFailure = undefined;
     // A login or logout that starts after this one supersedes it: this one's failure, ending
     // later, must not be published over that one's outcome (control() counts the starts).
-    const started = this.controlsStarted;
+    started: number,
+  ): Promise<TsnetLoginOutcome> {
+    this.loginFailure = undefined;
+    this.loggedOut = false;
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     let answer: HelperStatus;
@@ -616,12 +669,14 @@ export class TsnetNode implements TsnetEntry {
     return { kind: "answered", status, ...(url.success ? { loginUrl: url.data } : {}) };
   }
 
-  private async logoutRequest(): Promise<TsnetLogoutOutcome> {
+  private async logoutRequest(started: number): Promise<TsnetLogoutOutcome> {
     this.loginFailure = undefined;
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     try {
       const answer = (await channel.request({ op: "logout" }, LOGOUT_TIMEOUT_MS)) as HelperStatus;
+      // The helper is stopped once no control is in flight, if the state is gone by then.
+      if (started === this.controlsStarted) this.loggedOut = true;
       return { kind: "answered", remoteLogoutConfirmed: answer.remoteLogoutConfirmed === true };
     } catch (error) {
       return error instanceof HelperRefused
