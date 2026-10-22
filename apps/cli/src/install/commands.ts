@@ -1,4 +1,4 @@
-import { ensureInstallDirectory } from "./layout.js";
+import { checkInstallDirectory, ensureInstallDirectory } from "./layout.js";
 import { mkdir, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -29,7 +29,13 @@ import {
 } from "./installer.js";
 import { acquireInstallLock, installLayout, type InstallLayout } from "./layout.js";
 import { lockHeld } from "./os-lock.js";
-import { lingerAdvice, serviceBackend, type ServiceBackend, type UnitStatus } from "./service.js";
+import {
+  lingerAdvice,
+  prepareServiceStart,
+  serviceBackend,
+  type ServiceBackend,
+  type UnitStatus,
+} from "./service.js";
 
 // `cove server install|prune|uninstall|service|restart|upgrade|status|impact` (m2 D1, D2, S1,
 // S2), dispatched by commands/server.ts. Everything but `status` and `impact` acts on this host's
@@ -383,6 +389,9 @@ export async function serverInstall(args: Arguments): Promise<number> {
       print({ build: target, activated: true, schema });
       return 0;
     }
+    // Refuse invalid operation paths before copying a build or changing current.
+    await ensureInstallDirectory(dirname(layout.launcher));
+    await prepareServiceStart(layout);
     const installed = await installClosure(
       layout,
       source === undefined ? undefined : resolve(source),
@@ -483,6 +492,8 @@ export async function serverUninstall(args: Arguments): Promise<number> {
   noWords(args, 2, "server uninstall takes no arguments");
   const layout = await layoutOf(args);
   return withLock(layout, async () => {
+    // Uninstall must reject the restored launcher parent before unregistering/stopping service.
+    await checkInstallDirectory(dirname(layout.launcher));
     const found = serviceBackend(layout);
     const backend = "unavailable" in found ? null : found.backend;
     const before = await localServer(layout);
@@ -561,6 +572,7 @@ export async function serviceCommand(args: Arguments): Promise<number> {
     if (local.state === "running")
       throw new Error("a server is already running for this data directory");
     if (local.state === "unknown") throw new Error(`not started: ${unconfirmed(local)}`);
+    await prepareServiceStart(layout);
     const previous = await rendezvousInstance(layout);
     const since = Date.now();
     await requestStart(layout);
@@ -595,6 +607,7 @@ async function restartable(local: LocalServer): Promise<RunningServer | null> {
 // (TimeoutStopSec, ExitTimeOut) killed it.
 async function restartService(layout: InstallLayout, before: RunningServer | null) {
   const backend = backendOrThrow(layout);
+  await prepareServiceStart(layout);
   const stale = before?.relayInstanceId ?? (await rendezvousInstance(layout));
   const since = Date.now();
   await requestStart(layout);
@@ -649,6 +662,9 @@ export async function serverUpgrade(args: Arguments): Promise<number> {
     } finally {
       await release(local);
     }
+    // Refuse invalid operation paths before copying a build or changing current.
+    await ensureInstallDirectory(dirname(layout.launcher));
+    await prepareServiceStart(layout);
     const installed = await installClosure(
       layout,
       source === undefined ? undefined : resolve(source),
