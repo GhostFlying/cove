@@ -469,7 +469,9 @@ Esc 中断等补充（`codex-transcript-poll.ts`），终端标题仅作后备�
 - 稳定的 task 身份与可变的挂载绑定，明确 session 不会随路径切换自动移动。
 - 本地和远端 TUI 的创建、接入、重连；桌面与 mobile 操作同一个执行实例。
 - 独立的 relay 协议版本、稳定实例发现、兼容性握手以及显式 recovery/reset。
-- 独立持久 server、多客户端直连与同步、内置 Tailscale 和 host 网络接入。
+- 独立持久 server、多客户端直连与同步、内嵌 Tailscale（tsnet）和 host 网络接入；不使用系统 Tailscale
+  （[M2 D9](milestones/m2.md#d9-网络入口不使用系统-tailscale范围变更)）。M2 已实现本机安装与用户服务、设备配对与撤销，
+  以及 CLI 经 loopback、SSH 与 tsnet 入口远程操作（[Server 架构 §§4、5、9](server-architecture.md#4-host-网络和内置-tailscale)）。
 - 主仓库转独立 worktree，先把清洁来源与已有改动场景的行为做清楚。
 - 为跨主机迁移保留身份、revision 和操作记录设计。
 - Relay 为数据传输提供独立调度与可恢复的操作身份，完整迁移范围另行确定。
@@ -480,7 +482,9 @@ Esc 中断等补充（`codex-transcript-poll.ts`），终端标题仅作后备�
 
 - managed agent、接管 agent 执行循环。
 - 独立 PTY keeper 与 server 重启后的活进程无损恢复。
-- Chat UI 与 Web App（均为二期），以及 mobile 内嵌 Tailscale。
+- Chat UI 与 Web App（均为二期）。
+- 系统 Tailscale（tailscaled）入口；M2 D9 之后 mobile 与 desktop 也经内嵌 tsnet 连接，这推翻了原先“一期不做 mobile 内嵌 Tailscale”
+  的边界，其承载方式在 M3 规划时决定。
 - agent 原生 session 无损迁移、活进程热迁移。
 - 为会话迁移改写远端 agent 索引库或 session 数据库。
 - Shepherd 运行时依赖或看板同步实现。
@@ -639,8 +643,10 @@ Agent 与脚本通过 CLI 使用同样的操作；不要求用户维护配置文
 ### 14.1 领域命令与统一操作接口
 
 以下命令域是建议。M0/M1 已实现本机的 `server`、`status`、`config`、`repo`、`task`、`mount`、`tab`、`terminal`
-与 `operation` 子命令（用法见[开发说明](development.md#m1-本机试用与-cli-用法)）；`auth`、`transfer`、`client`
-等仍是建议。首个正式发布前，已实现命令的名称、参数与 JSON 输出也不冻结：
+与 `operation` 子命令（用法见[开发说明](development.md#m1-本机试用与-cli-用法)）。M2 增加了 `auth`（邀请、设备列表、改名、撤销、轮换）、
+`remote`（客户端的配对记录、默认入口与客户端 tsnet 节点，相当于下表的 `client` 中的连接部分），以及 `server` 下的
+`install`、`service`、`restart`、`upgrade`、`status`、`impact`、`entry` 与 `tsnet`（用法见[开发说明](development.md#m2-远程-server安装配对与入口)）。
+`transfer` 与 `client` 的显示偏好仍是建议。首个正式发布前，已实现命令的名称、参数与 JSON 输出也不冻结：
 
 | 命令域                   | 能力范围                                                                 |
 | ------------------------ | ------------------------------------------------------------------------ |
@@ -653,7 +659,11 @@ Agent 与脚本通过 CLI 使用同样的操作；不要求用户维护配置文
 | `client`                 | 明确作用域的连接与显示偏好，不将当前设备配置误写到 server                |
 | 后续领域                 | 定时任务、chat 等在其交付期同步提供完整命令与配置                        |
 
-示例：`cove --server devbox terminal config set idle-after 10m`。
+远程目标已实现（[M2 D11](milestones/m2.md#d11-cli-作为远程-operator选-a)）：全局 `--server <别名>`（或 `COVE_SERVER`）
+选择配对过的 server，`--via ssh|tsnet` 选择入口，未指定时用配对记录的固定默认入口，失败时不自动换入口；
+远程模式下路径参数必须是执行主机上的绝对路径。安装、服务启停与 `server tsnet` 是本机 bootstrap 边界，不接受 `--server`；
+`server entry`、`server status` 与 `server impact` 可远程使用。
+示例（建议，`terminal config` 尚未实现）：`cove --server devbox terminal config set idle-after 10m`。
 命令需暴露可发现的选项与类型，不以通用 `set <任意 JSON 路径>` 作为全部配置能力的替代。
 配置的 get/set/reset/schema/status 按领域提供；跨领域原子更新是否需要另行评估。
 
