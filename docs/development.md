@@ -387,6 +387,11 @@ action/上传预留 5 分钟，`check.yml` 设为 90 分钟。Vitest 上限由 #
 依赖的接口而未改 [Shepherd/tend 集成说明](integrations/shepherd-tend.md) 时失败。路径清单及理由见脚本：
 `apps/cli/src/commands/`、`apps/cli/src/main.ts`、`apps/cli/src/session.ts`、protocol 的 RPC 方法与 schema
 （`rpc-methods.ts`、`rpc.ts`、`workspace.ts`、`errors.ts`、`auth.ts`、`bootstrap.ts`）、server 的 `store/` 与
-`operations/`；`tests/` 下文件与 `*.test.*` 不计。比较的是 PR head 与它和 base 分支的 merge base 之间的改动。
+`operations/`，以及运行与 recipe 环境（#160）：`apps/server/src/domain/tabs.ts`、
+`packages/protocol/src/pipe-command.ts`、`packages/terminal-worker/src/worker-execution.ts`。只有真实测试根
+（仓库根 `tests/`、`apps/<名>/tests/`、`packages/<名>/tests/`）下的文件与 `<名>.test|spec.<js/ts 扩展名>` 不计；
+源码树内的 `tests/` 目录和 `x.test.helpers.ts` 之类仍计入。比较的是 PR head 与它和 base 分支的 merge base 之间的改动；
+说明文档在 PR head 不存在（删除或改名移走）时始终失败。
 确实不影响 tend 时，在 PR 描述中单独一行写 `Shepherd-Doc: not-affected <理由>`，理由不能为空；以 `Shepherd-Doc:`
 开头但格式不符的行也会失败。修改描述会重新触发该检查；push 到 main 等非 PR 事件只报告“已跳过”，不算通过。
+输出的文件名来自 PR，控制字符一律转义，打印期间停用 workflow command；step summary 中以实体转义的 `<code>` 呈现。
