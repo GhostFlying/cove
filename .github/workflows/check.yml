@@ -84,19 +84,22 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          # The aggregation downloads ci-<sha>-check-<os>-shard-*. A rerun of a shard replaces its
-          # own artifact (overwrite), so the aggregation never sees two results for one shard.
-          name: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-${{ matrix.shard }}-${{ runner.arch }}
+          # Named for the attempt that produced it. The aggregation downloads only the current
+          # attempt's ci-<sha>-check-<os>-attempt-<n>-shard-*, so an artifact an earlier attempt
+          # left behind can never stand in for a shard that this attempt reran.
+          name: ci-${{ github.sha }}-check-${{ matrix.os }}-attempt-${{ github.run_attempt }}-shard-${{ matrix.shard }}-${{ runner.arch }}
           path: .cache/ci/
           if-no-files-found: error
           retention-days: 14
-          overwrite: true
 
   # The required `check (<os>)` result. It runs even when a shard failed or was cancelled
-  # (always()), so a failed shard fails this job instead of leaving it skipped, and validates the
-  # shard artifacts with `ci-test-gate.mjs --aggregate`: every shard passed for this commit and
-  # run, ran exactly its planned files, and the merged report passes the complete inventory. It
-  # reads JSON only, so it runs on Linux for both OSes.
+  # (always()), so a failed shard fails this job instead of leaving it skipped. It first fails
+  # unless every shard job succeeded, then validates the shard artifacts with
+  # `ci-test-gate.mjs --aggregate`: every shard passed in this run attempt for this commit, ran
+  # exactly its planned files, and the merged report passes the complete inventory. Shards from
+  # an earlier attempt are refused, so "re-run failed jobs" (which leaves passed shards on their
+  # old attempt) fails closed: rerun all jobs instead. It reads JSON only, so it runs on Linux for
+  # both OSes. `needs` covers the whole shard matrix, so a shard failing on either OS fails both.
   check:
     needs: check-shard
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.diagnostic == '' && inputs.expected_sha == '')) }}
@@ -110,6 +113,13 @@ jobs:
     # bound (5) is inside it. A tooling test checks both.
     timeout-minutes: 15
     steps:
+      - name: Require every shard job to have succeeded
+        if: ${{ needs.check-shard.result != 'success' }}
+        env:
+          SHARD_RESULT: ${{ needs.check-shard.result }}
+        run: |
+          echo "::error title=check shards::The shard jobs ended as '$SHARD_RESULT', not 'success'."
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -118,19 +128,18 @@ jobs:
           node-version-file: .node-version
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-*
+          pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-attempt-${{ github.run_attempt }}-shard-*
           path: .cache/ci-shards/
           merge-multiple: false
       - run: node scripts/ci-test-gate.mjs --aggregate .cache/ci-shards ${{ matrix.os }}
         timeout-minutes: 5
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
+        if: ${{ always() && needs.check-shard.result == 'success' }}
         with:
-          name: ci-${{ github.sha }}-check-${{ matrix.os }}-aggregate
+          name: ci-${{ github.sha }}-check-${{ matrix.os }}-attempt-${{ github.run_attempt }}-aggregate
           path: .cache/ci/aggregate/
           if-no-files-found: error
           retention-days: 14
-          overwrite: true
 
   # cove-tsnet (native/tailscale) builds with Go, not pnpm, so it is a separate job with its own
   # small bound instead of a share of the check job's budget.

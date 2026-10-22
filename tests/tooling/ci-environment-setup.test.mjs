@@ -103,20 +103,31 @@ test("the workflow runs exactly ciShardCount shards per OS and aggregates them i
     `\n    name: check shard (\${{ matrix.os }}, \${{ matrix.shard }}/${ciShardCount})\n`,
   );
   expect(shardJob).toContain("\n        os: [ubuntu-latest, macos-latest]\n");
+  // Each artifact is bound to the attempt that produced it, and the aggregation downloads only
+  // the current attempt's, so an earlier attempt's artifact cannot outlive a rerun shard.
   expect(shardJob).toContain(
-    "name: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-${{ matrix.shard }}-${{ runner.arch }}",
+    "name: ci-${{ github.sha }}-check-${{ matrix.os }}-attempt-${{ github.run_attempt }}-shard-${{ matrix.shard }}-${{ runner.arch }}",
   );
   const aggregateJob = workflowJob(workflow, "check");
   // The required status checks are named `check (ubuntu-latest)` and `check (macos-latest)`.
   expect(aggregateJob).toContain("\n    name: check (${{ matrix.os }})\n");
   expect(aggregateJob).toContain("\n        os: [ubuntu-latest, macos-latest]\n");
   expect(aggregateJob).toContain("\n    needs: check-shard\n");
-  // A failed or cancelled shard must fail the required check, never skip it.
+  // A failed or cancelled shard must fail the required check, never skip it: the job always
+  // runs, and its first step fails unless every shard job succeeded.
   expect(aggregateJob).toMatch(/\n {4}if: \$\{\{ always\(\) && /);
-  expect(aggregateJob).toContain("pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-*");
+  const steps = aggregateJob.split("\n    steps:\n")[1];
+  expect(steps).toMatch(
+    /^ {6}- name: Require every shard job to have succeeded\n {8}if: \$\{\{ needs\.check-shard\.result != 'success' \}\}\n(?: {8}.*\n)*? {10}exit 1\n/,
+  );
+  expect(aggregateJob).toContain(
+    "pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-attempt-${{ github.run_attempt }}-shard-*",
+  );
   expect(aggregateJob).toContain(
     "- run: node scripts/ci-test-gate.mjs --aggregate .cache/ci-shards ${{ matrix.os }}",
   );
+  // Replacing an artifact in place would let a stale name stand for a newer execution.
+  expect(workflow).not.toContain("overwrite: true");
 });
 
 test("records a failed setup command before rejecting it", async () => {

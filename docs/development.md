@@ -374,13 +374,15 @@ fixture 与用户服务标签都不共享；每个分片冻结安装后先核对
 完整 `pnpm check`（`COVE_CI_SHARD=k/3`）：照常验证整个仓库的 discovery、inventory 与最低用例数，再只运行并验证
 按确定性计划分到本分片的文件（`scripts/ci-test-gate.mjs` 的 `planShards`，按记录耗时贪心平衡，terminal-web
 project 整体放在同一分片；权重只影响平衡，不影响正确性；按 `.suite.json` 新注册的文件自动分配）。必需的
-`check (<os>)` job 在分片失败或取消时也运行（`always()`），以 `--aggregate` 下载该 OS 的分片 artifact，要求每个
-分片都记录了同一 commit、run 与平台下的通过结果、discovery 一致、实际文件与计划一致，再把合并报告按完整 inventory
+`check (<os>)` job 在分片失败或取消时也运行（`always()`），首步在分片 job 未全部成功（`needs.check-shard.result`）时
+直接失败，再以 `--aggregate` 下载该 OS 本次 run attempt 的分片 artifact，要求每个
+分片都记录了同一 commit、同一 run attempt 与平台下的通过结果、discovery 一致、实际文件与计划一致，再把合并报告按完整 inventory
 用 `verifyInventory` 与 V1 浏览器证据校验，严格程度与单次不分片运行相同；任一分片失败、缺失、多跑或漏跑文件都使其失败。
 本地 `pnpm test` 不设 `COVE_CI_SHARD`，仍作为一个分片运行全部文件。每个分片 job 上传 `.cache/ci` 中的安装/浏览器准备记录、环境、inventory、
 `shard.json`（计划与 discovery）、逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、OS、
-分片序号与 arch，重跑分片时覆盖自身 artifact。失败时也上传已有证据，缺失 artifact 会使该 job 失败；聚合结果另存为
-`ci-<sha>-check-<os>-aggregate`。时间上限是防挂死预算，并非性能 SLA，统一定义在
+run attempt、分片序号与 arch。聚合只接受当前 attempt 的分片：“re-run failed jobs”（通过的分片仍属旧 attempt）
+与只重跑聚合 job 都会失败，重跑须选 “re-run all jobs”。失败时也上传已有证据，缺失 artifact 会使该 job 失败；聚合结果另存为
+`ci-<sha>-check-<os>-attempt-<n>-aggregate`。时间上限是防挂死预算，并非性能 SLA，统一定义在
 `scripts/ci-environment-setup.mjs` 的 `ciTimeBudget`：install/native/browser 各 10 分钟，
 gate 辅助命令（toolchain、discovery、source revision）各 2 分钟，Vitest 40 分钟；`pnpm check` 阶段
 52 分钟，包括无独立上限的 native/format/lint/build 预留 5 分钟、两条辅助命令、Vitest、source

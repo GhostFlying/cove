@@ -1372,7 +1372,7 @@ test("rejects removal of a gate test below the required floor", () => {
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 42 }, (_, index) => ({
+    ...Array.from({ length: 45 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -1380,7 +1380,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 41 tests; needs 42/,
+    /discovered 44 tests; needs 45/,
   );
 });
 
@@ -2145,6 +2145,7 @@ async function shardArtifacts(mutate = () => {}, count = 2) {
         sourceCommit: shardCommit,
         runId: "github-7-1",
         githubRunId: "7",
+        githubRunAttempt: "1",
         platform: "darwin",
         arch: "arm64",
         files: shard.files,
@@ -2163,7 +2164,7 @@ async function shardArtifacts(mutate = () => {}, count = 2) {
           name: `${shardRoot}/${relative(root, suite.name)}`,
         })),
       },
-      result: { index: shard.index, count, passed: true },
+      result: { index: shard.index, count, runId: "github-7-1", passed: true },
     };
     mutate(shard.index, artifact);
     const shardDirectory = resolve(
@@ -2185,7 +2186,7 @@ async function shardArtifacts(mutate = () => {}, count = 2) {
 const aggregateOptions = {
   platform: "darwin",
   sourceCommit: shardCommit,
-  githubRunId: "7",
+  runId: "github-7-1",
   sources: shardSources,
   suites,
   count: 2,
@@ -2250,7 +2251,7 @@ test("a failing, missing, partial or misplaced shard fails the aggregation", asy
     ])
       await fail((at, artifact) => {
         if (at === index) artifact.plan[field] = value;
-      }, /another commit, run, platform or checkout/);
+      }, /another commit, run attempt, platform or checkout/);
     await fail((at, artifact) => {
       if (at === index) artifact.plan.discovered.pop();
     }, /discovered different tests/);
@@ -2296,4 +2297,92 @@ test("a failing, missing, partial or misplaced shard fails the aggregation", asy
       suites: [suites[0], { ...suites[1], minimumTests: 9 }],
     }),
   ).rejects.toThrow(/needs 9/);
+});
+
+// Moves a fixture shard to run attempt `n`, as that attempt's own execution would record it.
+function atAttempt(artifact, n) {
+  artifact.plan.runId = `github-7-${n}`;
+  artifact.plan.githubRunAttempt = String(n);
+  artifact.result.runId = `github-7-${n}`;
+}
+
+test("only the aggregating run attempt's shards can pass the aggregation", async () => {
+  const second = { ...aggregateOptions, runId: "github-7-2" };
+  // All shards rerun in attempt 2 and aggregated by attempt 2: the only passing rerun.
+  const rerun = await shardArtifacts((_, artifact) => atAttempt(artifact, 2));
+  await expect(aggregateShards(rerun, second)).resolves.toMatchObject({
+    shards: [{ index: 1 }, { index: 2 }],
+  });
+  const reject = async (mutate, options, pattern) =>
+    expect(aggregateShards(await shardArtifacts(mutate), options)).rejects.toThrow(pattern);
+  const stale = /another commit, run attempt, platform or checkout/;
+  // Stale reports: every shard is attempt 1's, aggregated in attempt 2.
+  await reject(() => {}, second, stale);
+  // Mixed attempts: "re-run failed jobs" reran shard 2 only, so shard 1 is still attempt 1's.
+  await reject((index, artifact) => index === 2 && atAttempt(artifact, 2), second, stale);
+  // A shard's passing result left by an earlier attempt under a current plan.
+  await reject(
+    (index, artifact) => {
+      atAttempt(artifact, 2);
+      if (index === 1) artifact.result.runId = "github-7-1";
+    },
+    second,
+    /did not record a passing result/,
+  );
+  // The plan's own fields must agree with its runId.
+  await reject(
+    (index, artifact) => {
+      atAttempt(artifact, 2);
+      if (index === 2) artifact.plan.githubRunAttempt = "1";
+    },
+    second,
+    stale,
+  );
+  // An aggregation without a GitHub run attempt identity accepts nothing.
+  for (const runId of [undefined, "github-7-", "local-1-2", "github-undefined-undefined"])
+    await reject(() => {}, { ...aggregateOptions, runId }, /needs a GitHub run attempt identity/);
+});
+
+test("a rerun shard that failed before uploading cannot be replaced by an earlier attempt", async () => {
+  // Early setup failure: the shard's artifact holds only its setup records, no plan or report.
+  const early = await shardArtifacts((index, artifact) => {
+    if (index !== 2) return;
+    artifact.plan = null;
+    artifact.report = null;
+    artifact.result = null;
+  });
+  await mkdir(resolve(early, `ci-${shardCommit}-check-macos-latest-shard-2`, "setup"));
+  await expect(aggregateShards(early, aggregateOptions)).rejects.toThrow(
+    /has no readable shard\.json/,
+  );
+  // Lost before uploading: attempt 2's download holds only shard 1, and attempt 1's shard 2
+  // was never downloaded, because artifact names carry the attempt.
+  const lost = await shardArtifacts((_, artifact) => atAttempt(artifact, 2));
+  await rm(resolve(lost, `ci-${shardCommit}-check-macos-latest-shard-2`), { recursive: true });
+  await expect(aggregateShards(lost, { ...aggregateOptions, runId: "github-7-2" })).rejects.toThrow(
+    "Expected 2 shard artifacts, found 1",
+  );
+  // Even if attempt 1's shard 2 were present beside them, it is refused as stale.
+  const mixed = await shardArtifacts((index, artifact) => index === 1 && atAttempt(artifact, 2));
+  await expect(
+    aggregateShards(mixed, { ...aggregateOptions, runId: "github-7-2" }),
+  ).rejects.toThrow(/Shard 2\/2 is from another commit, run attempt/);
+});
+
+test("an aggregation rerun on its own finds no shard of its attempt", async () => {
+  // Rerunning only `check (<os>)` makes a new attempt whose download pattern matches nothing:
+  // no download directory at all...
+  const empty = await mkdtemp(resolve(tmpdir(), "cove-ci-shards-"));
+  temporaryDirectories.push(empty);
+  await expect(
+    aggregateShards(resolve(empty, "absent"), { ...aggregateOptions, runId: "github-7-2" }),
+  ).rejects.toThrow("Expected 2 shard artifacts, found 0");
+  // ...or an empty one.
+  await expect(
+    aggregateShards(empty, { ...aggregateOptions, runId: "github-7-2" }),
+  ).rejects.toThrow("Expected 2 shard artifacts, found 0");
+  // And the previous attempt's passing artifacts, were they present, are refused.
+  await expect(
+    aggregateShards(await shardArtifacts(), { ...aggregateOptions, runId: "github-7-2" }),
+  ).rejects.toThrow(/another commit, run attempt/);
 });
