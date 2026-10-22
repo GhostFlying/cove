@@ -17,6 +17,7 @@ import {
   chmod,
   symlink,
   lstat,
+  rename,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -3075,6 +3076,97 @@ describe("D passive production local entry", () => {
     }
   });
 
+  it("publishes in existing external 0755/0777 directories and symlink parents without adopting them", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-external-rendezvous-"));
+    const metadata = async (path) => {
+      const info = await lstat(path);
+      return { dev: info.dev, ino: info.ino, uid: info.uid, mode: info.mode };
+    };
+    try {
+      for (const mode of [0o755, 0o777]) {
+        const target = join(root, `external-${mode.toString(8)}`);
+        const alias = `${target}-alias`;
+        await mkdir(target, { mode: 0o700 });
+        await chmod(target, mode);
+        await symlink(target, alias);
+        await writeFile(join(target, "prior"), "user data\n");
+        const before = await metadata(target);
+        const aliasBefore = await metadata(alias);
+        for (const homes of [[], [join(root, "separate-home")]]) {
+          for (const parent of [target, alias]) {
+            const path = join(parent, "rendezvous");
+            const file = new LocalRendezvous(path, homes);
+            try {
+              await file.publish({
+                bootstrapVersion: 1,
+                ...identity,
+                endpoint: "http://127.0.0.1:32123",
+              });
+              expect(JSON.parse(await readFile(path, "utf8")).serverId).toBe(identity.serverId);
+              expect((await lstat(path)).mode & 0o777).toBe(0o600);
+              expect((await readdir(target)).sort()).toEqual(["prior", "rendezvous"]);
+            } finally {
+              await file.close();
+            }
+            expect(await readdir(target)).toEqual(["prior"]);
+            expect(await readFile(join(target, "prior"), "utf8")).toBe("user data\n");
+            expect(await metadata(target)).toEqual(before);
+            expect(await metadata(alias)).toEqual(aliasBefore);
+          }
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses cleanup through a replaced external directory and preserves both directories", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-parent-identity-"));
+    const parent = join(root, "external");
+    const moved = join(root, "moved");
+    await mkdir(parent, { mode: 0o755 });
+    const file = new LocalRendezvous(join(parent, "rendezvous"));
+    try {
+      await file.publish({
+        bootstrapVersion: 1,
+        ...identity,
+        endpoint: "http://127.0.0.1:32123",
+      });
+      await rename(parent, moved);
+      await mkdir(parent, { mode: 0o700 });
+      await writeFile(join(parent, "rendezvous"), "user replacement\n");
+      await expect(file.close()).rejects.toThrow("Owned rendezvous cleanup unverifiable");
+      expect(await readFile(join(parent, "rendezvous"), "utf8")).toBe("user replacement\n");
+      expect(JSON.parse(await readFile(join(moved, "rendezvous"), "utf8")).serverId).toBe(
+        identity.serverId,
+      );
+    } finally {
+      // close already closed the handle; the changed directory identity forbids path cleanup.
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an external parent that is a file without changing its bytes", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-parent-file-"));
+    const parent = join(root, "user-file");
+    const file = new LocalRendezvous(join(parent, "rendezvous"));
+    try {
+      await writeFile(parent, "user data\n");
+      await expect(
+        file.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        }),
+      ).rejects.toThrow(`the rendezvous parent ${parent} is not a directory`);
+      expect(await readFile(parent, "utf8")).toBe("user data\n");
+      expect(await readdir(root)).toEqual(["user-file"]);
+    } finally {
+      await file.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("D-A18 secure missing leaf directory is created 0700 and removed only after owned file cleanup", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-secure-parent-"));
     const parent = join(root, "owned");
@@ -3106,7 +3198,7 @@ describe("D passive production local entry", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it("D-A19 insecure and symlinked configured parents refuse publication and preserve foreign bytes", async () => {
+  it("D-A19 insecure and symlinked managed descendants refuse publication and preserve foreign bytes", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-refused-parent-"));
     try {
       const insecure = join(root, "insecure");
@@ -3122,7 +3214,7 @@ describe("D passive production local entry", () => {
         ["insecure", insecure],
         ["symlink", alias],
       ]) {
-        const file = new LocalRendezvous(join(parent, "rendezvous"));
+        const file = new LocalRendezvous(join(parent, "rendezvous"), [root]);
         let error;
         try {
           await file.publish({

@@ -84,16 +84,17 @@ function serverEntry(): Promise<string> {
   });
 }
 
-// The data directory is created owner-only before the server starts so that it can be
-// canonicalized (macOS /tmp and /var are symlinks); the server checks and narrows it again.
+// Create a missing data directory with 0700, then canonicalize its spelling (macOS /tmp and
+// /var are symlinks). An existing user directory keeps its owner/mode; the server strictly
+// validates only Cove-created or known managed directories.
 async function prepareHome(home: string): Promise<string> {
   await mkdir(home, { recursive: true, mode: 0o700 });
   return realpath(home);
 }
 
-// The server publishes the rendezvous only into an owner-only directory reached through no
-// symlinked ancestor, and creates that final directory itself. Create the ancestors with 0700
-// and canonicalize them so the server's checks pass.
+// Create missing ancestors with 0700 and canonicalize their spelling. The publisher can create
+// the final leaf itself; existing external user directories may keep their mode and symlinks.
+// Known managed descendants still get strict checks, and publication pins the parent identity.
 async function prepareRendezvousPath(path: string): Promise<string> {
   const absolute = resolve(path);
   const runDirectory = dirname(absolute);
