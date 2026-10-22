@@ -28,7 +28,7 @@ import { RawConnectionGate } from "../transport/raw-connections.js";
 import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/terminal-websocket.js";
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
-import { homeLayout, resolveHome } from "../store/home.js";
+import { HomeError, homeLayout, resolveHome } from "../store/home.js";
 import { SCHEMA_VERSION } from "../store/migrations.js";
 import { committedSchemaVersion } from "../store/schema-version.js";
 import { StoreError, type Store, type StoreOptions } from "../store/database.js";
@@ -36,7 +36,7 @@ import { instanceStopCall, recordInstanceStart } from "../store/identity.js";
 import { SqliteReceiptBackend } from "../store/operations.js";
 import { RunLog } from "../store/runs.js";
 import { describeUnsupportedGit, findGit } from "../git/run.js";
-import { launchIdentity, LocalRendezvous } from "./local-rendezvous.js";
+import { launchIdentity, LocalRendezvous, RendezvousPublicationError } from "./local-rendezvous.js";
 import { openPersistence, RendezvousConflictError, replaceStaleRendezvous } from "./persistence.js";
 import { RecordingRunRegistry } from "./recording-run-registry.js";
 import { EntryConfigService } from "./entry-config.js";
@@ -337,13 +337,55 @@ export class LocalEntryStartupError extends Error {
   constructor(
     readonly category: "store" | "worker" | "listen" | "rendezvous" | "interrupted" | "git",
     readonly cleanup: "verified" | "unverifiable",
-    // A safe description (no paths or secrets) of a store refusal, such as a data directory in
-    // use by another server or a database schema newer than this build.
+    // A safe description of the cause: a store refusal (a data directory in use by another server,
+    // a database schema newer than this build), a refused Cove directory or a failed system call.
+    // It may name paths, uids, modes, ports and error codes (#172: the person starting the server
+    // has to know which directory to fix); it never carries a secret or request content.
     readonly detail?: string,
   ) {
-    super("Local entry startup unavailable");
+    super(
+      detail === undefined
+        ? `Local entry startup unavailable (${category})`
+        : `Local entry startup unavailable: ${detail}`,
+    );
     this.name = "LocalEntryStartupError";
   }
+}
+
+// The safe cause of a startup failure (LocalEntryStartupError.detail), or undefined when the
+// error is not one whose description is known to be safe. Cove's own refusals carry messages
+// written for this; a failed system call is described by its call, path or address and code only,
+// never by its message text or an argument.
+function startupCause(error: unknown): string | undefined {
+  if (
+    error instanceof StoreError ||
+    error instanceof HomeError ||
+    error instanceof RendezvousPublicationError ||
+    error instanceof RendezvousConflictError
+  )
+    return error.message;
+  const errno = error as (NodeJS.ErrnoException & { address?: unknown; port?: unknown }) | null;
+  if (typeof errno?.code !== "string" || !/^E[A-Z0-9]+$/.test(errno.code)) return undefined;
+  const target =
+    typeof errno.path === "string"
+      ? ` ${errno.path}`
+      : typeof errno.address === "string"
+        ? ` ${errno.address}${typeof errno.port === "number" ? `:${errno.port}` : ""}`
+        : "";
+  return `${typeof errno.syscall === "string" ? errno.syscall : "a system call"}${target} failed with ${errno.code}`;
+}
+
+// The startup-failed event's detail, bounded and with control characters escaped so that one
+// event stays one log line whatever a path contains.
+const STARTUP_DETAIL_MAX = 512;
+function eventDetail(detail: string): string {
+  const escaped = Array.from(detail, (c) => {
+    const code = c.charCodeAt(0);
+    return code < 0x20 || code === 0x7f ? `\\u${code.toString(16).padStart(4, "0")}` : c;
+  }).join("");
+  return escaped.length > STARTUP_DETAIL_MAX
+    ? `${escaped.slice(0, STARTUP_DETAIL_MAX - 3)}...`
+    : escaped;
 }
 
 // A startup port flag collides with a stored port (both name the same port).
@@ -382,11 +424,7 @@ async function openLocalApplication(
   try {
     persistence = await openPersistence(options.home, Date.now, hooks?.store);
   } catch (error) {
-    throw new LocalEntryStartupError(
-      "store",
-      "verified",
-      error instanceof StoreError ? error.message : undefined,
-    );
+    throw new LocalEntryStartupError("store", "verified", startupCause(error));
   }
   const store = persistence.store;
   const identity = { ...launchIdentity(), serverId: persistence.identity.serverId };
@@ -457,7 +495,7 @@ async function openLocalApplication(
     }
     probe?.start(store);
     hooks?.onStoreOpen?.(store);
-    return { local, store };
+    return { local, store, home: persistence.layout.home };
   } catch (error) {
     if (error instanceof CrashRestartBudgetError) {
       // An orderly stop: recorded as one, so that the next start (a person's, or the next login)
@@ -474,7 +512,12 @@ async function openLocalApplication(
       throw new LocalEntryStartupError("rendezvous", "verified", error.message);
     if (error instanceof EntryConfigurationError)
       throw new LocalEntryStartupError("listen", "verified", error.message);
-    throw new LocalEntryStartupError("store", "verified", "The Cove data directory is unusable");
+    const cause = startupCause(error);
+    throw new LocalEntryStartupError(
+      "store",
+      "verified",
+      `The Cove data directory is unusable${cause === undefined ? "" : `: ${cause}`}`,
+    );
   }
 }
 
@@ -487,8 +530,15 @@ export async function startLocalEntry(
   probe?: D6Probe,
   hooks?: ServerTestHooks,
 ) {
-  const { local, store } = await openLocalApplication(input, probe, hooks);
-  const rendezvous = new LocalRendezvous(local.options.rendezvousPath);
+  const opened = await openLocalApplication(input, probe, hooks);
+  const { local, store } = opened;
+  // The data directory in its canonical spelling and as given, so that a rendezvous below it is
+  // recognized either way (local-rendezvous.ts managedComponents).
+  const homes = [
+    ...("home" in opened ? [opened.home] : []),
+    ...(local.options.home === undefined ? [] : [local.options.home]),
+  ];
+  const rendezvous = new LocalRendezvous(local.options.rendezvousPath, homes);
   // The entries (network/listeners.ts): loopback business port, pairing listener and tsnet node.
   const log = (event: Record<string, unknown>): void => {
     try {
@@ -640,12 +690,13 @@ export async function startLocalEntry(
     } catch {
       cleanup = "unverifiable";
     }
-    // Preserve a safe initiating category and a separate ownership outcome,
-    // without copying raw exception messages, paths or secret-bearing inputs.
+    // Preserve a safe initiating category, a separate ownership outcome and the safe cause
+    // (startupCause: Cove's own refusals and system call codes), without copying raw exception
+    // messages or secret-bearing inputs.
     throw new LocalEntryStartupError(
       error instanceof LocalEntryStartupError ? error.category : category,
       cleanup,
-      error instanceof LocalEntryStartupError ? error.detail : undefined,
+      error instanceof LocalEntryStartupError ? error.detail : startupCause(error),
     );
   }
 }
@@ -685,11 +736,7 @@ async function initializeHome(argv: readonly string[]): Promise<void> {
   try {
     persistence = await openPersistence(resolveHome(values.get("--home")));
   } catch (error) {
-    throw new LocalEntryStartupError(
-      "store",
-      "verified",
-      error instanceof StoreError ? error.message : undefined,
-    );
+    throw new LocalEntryStartupError("store", "verified", startupCause(error));
   }
   try {
     const workspaceRoot = values.get("--workspace-root");
@@ -752,6 +799,32 @@ export function runServerProcess(
         ? `cove-server: ${error.detail}\n`
         : fallback,
     );
+  };
+  // A failed server start (#172) reports its cause twice on stderr: one startup-failed event for
+  // the service log, which `cove server install`, `service start` and `restart` read to say why
+  // no new instance answered (atMs lets them ignore an earlier start's event), and one line for a
+  // person. Both carry the safe cause only (startupCause); without one, the failed step.
+  const failStart = (error: unknown): void => {
+    process.exitCode = 1;
+    const startup = error instanceof LocalEntryStartupError ? error : undefined;
+    const found = startup?.detail ?? startupCause(error);
+    const detail = found === undefined ? undefined : eventDetail(found);
+    const step = startup?.category ?? "startup";
+    try {
+      process.stderr.write(
+        `${JSON.stringify({
+          event: "startup-failed",
+          atMs: Date.now(),
+          category: step,
+          cleanup: startup?.cleanup ?? "verified",
+          detail: detail ?? null,
+        })}\n` +
+          `cove-server: ${detail ?? `m0-local startup unavailable (${step})`}` +
+          `${startup?.cleanup === "unverifiable" ? "; its cleanup is unverifiable" : ""}\n`,
+      );
+    } catch {
+      // Logging is best effort; the exit status still reports the failure.
+    }
   };
   if (argv[0] === "--mode" && argv[1] === "init") {
     initializeHome(argv).catch((error: unknown) => fail(error, "cove-server init unavailable\n"));
@@ -836,7 +909,7 @@ export function runServerProcess(
           return;
         throw error;
       }
-    })().catch((error: unknown) => fail(error, "m0-local startup unavailable\n"));
+    })().catch((error: unknown) => failStart(error));
 }
 
 // Whether this module is the program node was started with. Compared by real path: an installed

@@ -3120,7 +3120,15 @@ describe("D passive production local entry", () => {
           names,
           prior: await readFile(join(parent, "prior"), "utf8"),
         });
-        expect(error?.message).toBe("Local rendezvous publication failed");
+        // The refusal names the directory, what it is and the rule (#172).
+        expect(error?.message).toBe(
+          `Local rendezvous publication failed: Cove directory ${parent} ` +
+            (name === "insecure"
+              ? `has owner uid ${process.getuid()} and mode 0755`
+              : "is a symbolic link") +
+            "; Cove's own directories must be owned by the current user, have mode 0700 and " +
+            `not be symbolic links (uid ${process.getuid()}, mode 0700)`,
+        );
         expect(names).toEqual(["prior"]);
       }
       expect((await lstat(insecure)).mode & 0o777).toBe(0o755);

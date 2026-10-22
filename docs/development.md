@@ -117,11 +117,14 @@ cove server start --harness               # 前台运行；打印 harness 页面
   [D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)）。同一数据目录只允许一个 server。
   一次性试用可另给 `--home`，其他命令使用同一个 `--home` 连接它。
 - 其他命令在另一个 shell 中执行，经 `<home>/server/run/rendezvous.json`（或 `--rendezvous`、`$COVE_RENDEZVOUS`）找到 server。
-- 已知限制（#172，将改为不检查 Cove 管理之外原已存在的目录，例如用户给出的数据目录及其上级）：目前 rendezvous 文件所在目录（默认 `<home>/server/run`）的每一级上级目录都必须属于当前用户或 root，
-  且不能被组或其他用户写入（root 所有并带 sticky 位的除外），该目录本身须属于当前用户且为 0700。数据目录位于另一个非 root
-  用户拥有的目录之下时，server 启动失败，只报 `m0-local startup unavailable`；在 #172 修复前把数据目录换到满足条件的位置。
 - 停止 server（Ctrl-C）时先打印将受影响的存活 run；再次启动后记录都在，有序停止的旧 run 记为随 server 停止
   （stopped-with-server），崩溃或被强杀后为会话中断（interrupted），都不自动重开或重跑（[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）。
+- 目录检查（#172，用户决定 2026-10-22）：数据目录下 Cove 自己管理的目录（`<home>/server`、`<home>/server/run`、
+  `<home>/tsnet` 及其 `run`；数据目录之外的 `--rendezvous` 只有它所在的目录）必须属于当前用户、权限 0700、不是符号链接，
+  否则启动失败，原因写明目录、属主 uid、权限与规则，Cove 不自动修正。已存在的数据目录本身（自己指定的或早先建立的）
+  与它的所有上级目录（包括 `$HOME`）不检查属主与权限，也可以是符号链接；数据目录不存在时 Cove 以 0700 创建。
+- server 启动失败时以 1 退出，stderr 先写一行 `{"event":"startup-failed","atMs":…,"category":…,"cleanup":…,"detail":…}`
+  （`detail` 不含秘密，最多 512 个字符，控制字符已转义；无可安全报告的原因时为 `null`），再写一行 `cove-server: <原因>`。
 - harness 页面列出全部终端 run（tab 的 run 也在其中），点击即可接入；它是 M0 的测试载体，不是 GUI 客户端。
 
 ### 命令

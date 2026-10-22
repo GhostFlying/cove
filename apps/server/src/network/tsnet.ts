@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, rm, unlink } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -14,6 +14,7 @@ import {
   type TsnetStatusResultSchema,
 } from "@cove/protocol/auth";
 import { installedClosureRoot, workspaceRootOf } from "../build-id.js";
+import { ensureManagedDirectory, HomeError } from "../store/home.js";
 import { markEntry } from "../transport/connection-entry.js";
 import type { TsnetEntry, TsnetEntryContext, TsnetInvitationEntry } from "./listeners.js";
 
@@ -708,17 +709,19 @@ export class TsnetNode implements TsnetEntry {
   private async prepareForward(): Promise<boolean> {
     if (this.forward) return true;
     try {
-      await mkdir(this.home, { recursive: true, mode: 0o700 });
-      await chmod(this.home, 0o700);
+      // `<home>/tsnet` and its run directory are Cove's own (the data directory above them exists:
+      // prepareHome), held to the rule of store/home.ts (#172: owned by this user, 0700, no
+      // symlink) and refused rather than repaired.
+      await ensureManagedDirectory(this.home);
       let directory = join(this.home, "run");
       if (Buffer.byteLength(join(directory, "forward.sock")) > SOCKET_PATH_BYTES) {
-        // A data directory too deep for a socket path: a private directory of this start.
+        // A data directory too deep for a socket path: a private directory (mkdtemp: 0700) of
+        // this start.
         directory = await mkdtemp(join(tmpdir(), "cove-tsnet-"));
         this.socketDirectory = directory;
       } else {
-        await mkdir(directory, { recursive: true, mode: 0o700 });
+        await ensureManagedDirectory(directory);
       }
-      await chmod(directory, 0o700);
       this.socketPath = join(directory, "forward.sock");
       // A socket file left by an earlier server of this data directory, which only one server
       // at a time uses (the database lock).
@@ -734,11 +737,13 @@ export class TsnetNode implements TsnetEntry {
       await chmod(this.socketPath, 0o600);
       this.forward = server;
       return true;
-    } catch {
-      this.failure = "the forward socket cannot be opened; it is retried after a backoff";
+    } catch (error) {
+      // A refused Cove directory names itself (its message is safe: a path, uid and mode).
+      const cause = error instanceof HomeError ? `: ${error.message}` : "";
+      this.failure = `the forward socket cannot be opened${cause}; it is retried after a backoff`;
       this.context?.log({
         event: "tsnet-unavailable",
-        reason: "the forward socket cannot be opened",
+        reason: `the forward socket cannot be opened${cause}`,
       });
       return false;
     }
