@@ -116,27 +116,56 @@ func (m *Manager) settle(ctx context.Context) *proto.Error {
 			return m.holdError()
 		}
 	}
+	if h.interactive {
+		return m.settleInteractive(ctx)
+	}
 	id, err := m.node.StableID(ctx)
 	if err != nil {
 		h.cause = proto.Truncate("reading the node identity failed: " + err.Error())
 		return m.holdError()
 	}
 	if id != h.enrolled {
-		// Stopped, so a node of another tailnet does not stay connected
-		// there; its profile is still the persisted state, which a logout
-		// removes.
-		m.closeNode()
-		h.changed, h.current = true, id
+		m.markChanged(id)
 		return m.holdError()
-	}
-	if h.interactive {
-		st, err := m.node.Status(ctx)
-		if err != nil || st.State != proto.StateRunning {
-			return m.holdError()
-		}
 	}
 	m.hold = nil
 	return nil
+}
+
+// settleInteractive settles the hold of an interactive login, which the
+// backend may complete at any moment while the owner has the URL open. The
+// identity and the Running state must therefore come from one and the same
+// status observation: reading the identity first and the state afterwards
+// (#155) lets a login that completes as another node in between pass as the
+// enrolled node, Running. A login that has not completed reports the
+// enrolled node, or no self at all, and keeps the hold.
+func (m *Manager) settleInteractive(ctx context.Context) *proto.Error {
+	h := m.hold
+	st, err := m.node.Status(ctx)
+	if err != nil {
+		return m.holdError()
+	}
+	var id string
+	if st.Self != nil {
+		id = st.Self.StableNodeID
+	}
+	if id != "" && id != h.enrolled {
+		m.markChanged(id)
+		return m.holdError()
+	}
+	if st.State != proto.StateRunning || id != h.enrolled {
+		return m.holdError()
+	}
+	m.hold = nil
+	return nil
+}
+
+// markChanged turns the hold into IDENTITY_CHANGED for the observed id. The
+// node is stopped, so a node of another tailnet does not stay connected
+// there; its profile is still the persisted state, which a logout removes.
+func (m *Manager) markChanged(id string) {
+	m.closeNode()
+	m.hold.changed, m.hold.current = true, id
 }
 
 // holdError describes the current hold.
@@ -264,9 +293,19 @@ func (m *Manager) reauth(ctx context.Context, authKey string) (proto.Status, err
 	if m.node == nil {
 		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "the enrolled node cannot start: %v", m.bootErr)
 	}
-	enrolled, err := m.node.StableID(ctx)
-	if err != nil {
-		return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled identity: %v", err)
+	// A reauth that replaces a pending interactive login keeps that hold's
+	// enrolled identity. Reading it again would let the interactive attempt,
+	// completing as another node between the settle and this read, become
+	// the identity the new login is judged against (#155).
+	var enrolled string
+	if m.hold != nil {
+		enrolled = m.hold.enrolled
+	} else {
+		id, err := m.node.StableID(ctx)
+		if err != nil {
+			return proto.Status{}, proto.Errorf(proto.CodeLoginFailed, "reading the enrolled identity: %v", err)
+		}
+		enrolled = id
 	}
 	if enrolled == "" {
 		// The node never finished a login, so no client can have pinned
