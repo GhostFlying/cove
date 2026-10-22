@@ -695,3 +695,34 @@ test.runIf(process.platform === "darwin")(
     }
   },
 );
+
+test("malformed and incomplete service output respects the final UTF-8 bound and keeps diagnostics", async () => {
+  const diagnostic =
+    JSON.stringify({
+      event: "startup-failed",
+      atMs: 10,
+      category: "worker",
+      cleanup: "verified",
+      detail: "safe EPIPE cause",
+    }) + "\n";
+  for (const bytes of [
+    Buffer.concat([Buffer.alloc(SERVICE_LOG_BYTES - 1, 0xff), Buffer.from("\n")]),
+    Buffer.concat([Buffer.alloc(60_000, 0xff), Buffer.from("\n" + diagnostic)]),
+    Buffer.concat([
+      Buffer.alloc(60_000, 0xff),
+      Buffer.from("\n" + diagnostic),
+      Buffer.from([0xe2, 0x82]),
+    ]),
+  ]) {
+    const output = serviceOutputTail(bytes);
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(SERVICE_LOG_BYTES);
+    expect(Buffer.from(output).toString("utf8")).toBe(output);
+    const log = join(fixture.root, "malformed.log");
+    await writeFile(log, bytes);
+    expect(Buffer.byteLength(fileTail(log))).toBeLessThanOrEqual(SERVICE_LOG_BYTES);
+  }
+  const output = serviceOutputTail(
+    Buffer.concat([Buffer.alloc(60_000, 0xff), Buffer.from("\n" + diagnostic)]),
+  );
+  expect(startupFailureSince(output, 0)).toContain("safe EPIPE cause");
+});
