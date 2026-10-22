@@ -18,11 +18,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  aggregateJobMinimumMs,
   checkJobMinimumMs,
   checkStageMs,
   ciTimeBudget,
   runRecordedSetup,
 } from "../../scripts/ci-environment-setup.mjs";
+import { ciShardCount } from "../../scripts/ci-test-gate.mjs";
 import { prepareNodePty } from "../../scripts/node-pty-install.mjs";
 import { prepareBetterSqlite3 } from "../../scripts/better-sqlite3-prepare.mjs";
 
@@ -59,12 +61,62 @@ test("CI time bounds nest inside each other using configured allowances", async 
     resolve(import.meta.dirname, "../../.github/workflows/check.yml"),
     "utf8",
   );
-  // The `check` job block ends at the next top-level job or at the end of the file.
-  const job = /\n {2}check:\n([\s\S]*?)(?=\n {2}[\w-]+:\n|$)/.exec(workflow)?.[1];
-  expect(job, "check.yml has no top-level `check` job").toBeDefined();
-  const timeout = /\n {4}timeout-minutes: (\d+)\n/.exec(`\n${job}\n`)?.[1];
-  expect(timeout, "the `check` job has no timeout-minutes").toBeDefined();
-  expect(Number(timeout) * 60_000).toBeGreaterThanOrEqual(jobNeeds);
+  const shardJob = workflowJob(workflow, "check-shard");
+  expect(jobTimeoutMs(shardJob)).toBeGreaterThanOrEqual(jobNeeds);
+
+  // The aggregating job: its step bound, then the runner actions, inside the job's bound.
+  const aggregateNeeds = ciTimeBudget.aggregateStepMs + ciTimeBudget.jobActionsReserveMs;
+  expect(aggregateJobMinimumMs).toBeGreaterThanOrEqual(aggregateNeeds);
+  const aggregateJob = workflowJob(workflow, "check");
+  expect(jobTimeoutMs(aggregateJob)).toBeGreaterThanOrEqual(aggregateNeeds);
+  const step =
+    /\n {6}- run: node scripts\/ci-test-gate\.mjs --aggregate [^\n]+\n {8}timeout-minutes: (\d+)\n/.exec(
+      aggregateJob,
+    )?.[1];
+  expect(step, "the aggregation step has no timeout-minutes").toBeDefined();
+  expect(Number(step) * 60_000).toBeLessThanOrEqual(ciTimeBudget.aggregateStepMs);
+});
+
+// A top-level job block of check.yml; it ends at the next top-level job or comment, or the end.
+function workflowJob(workflow, name) {
+  const job = new RegExp(`\\n {2}${name}:\\n([\\s\\S]*?)(?=\\n {2}[#\\w-]|$)`).exec(workflow)?.[1];
+  expect(job, `check.yml has no top-level \`${name}\` job`).toBeDefined();
+  return `\n${job}\n`;
+}
+
+function jobTimeoutMs(job) {
+  const timeout = /\n {4}timeout-minutes: (\d+)\n/.exec(job)?.[1];
+  expect(timeout, "the job has no timeout-minutes").toBeDefined();
+  return Number(timeout) * 60_000;
+}
+
+test("the workflow runs exactly ciShardCount shards per OS and aggregates them into the required checks", async () => {
+  const workflow = await readFile(
+    resolve(import.meta.dirname, "../../.github/workflows/check.yml"),
+    "utf8",
+  );
+  const shardJob = workflowJob(workflow, "check-shard");
+  const shards = Array.from({ length: ciShardCount }, (_, index) => index + 1);
+  expect(shardJob).toContain(`\n        shard: [${shards.join(", ")}]\n`);
+  expect(shardJob).toContain(`\n      COVE_CI_SHARD: \${{ matrix.shard }}/${ciShardCount}\n`);
+  expect(shardJob).toContain(
+    `\n    name: check shard (\${{ matrix.os }}, \${{ matrix.shard }}/${ciShardCount})\n`,
+  );
+  expect(shardJob).toContain("\n        os: [ubuntu-latest, macos-latest]\n");
+  expect(shardJob).toContain(
+    "name: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-${{ matrix.shard }}-${{ runner.arch }}",
+  );
+  const aggregateJob = workflowJob(workflow, "check");
+  // The required status checks are named `check (ubuntu-latest)` and `check (macos-latest)`.
+  expect(aggregateJob).toContain("\n    name: check (${{ matrix.os }})\n");
+  expect(aggregateJob).toContain("\n        os: [ubuntu-latest, macos-latest]\n");
+  expect(aggregateJob).toContain("\n    needs: check-shard\n");
+  // A failed or cancelled shard must fail the required check, never skip it.
+  expect(aggregateJob).toMatch(/\n {4}if: \$\{\{ always\(\) && /);
+  expect(aggregateJob).toContain("pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-*");
+  expect(aggregateJob).toContain(
+    "- run: node scripts/ci-test-gate.mjs --aggregate .cache/ci-shards ${{ matrix.os }}",
+  );
 });
 
 test("records a failed setup command before rejecting it", async () => {

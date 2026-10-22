@@ -28,8 +28,10 @@ export const ciTimeBudget = Object.freeze({
   // run is effectively serial: every project but the small pure ones sets maxWorkers: 1, Vitest
   // runs those projects one after another, and the per-file times add up to the wall time. So
   // each new scenario suite adds its full duration, and the M2 slices keep adding them. 40
-  // minutes is twice the slowest green run. If green runs approach 30 minutes, shard or
-  // parallelize the run instead of raising this again.
+  // minutes is twice the slowest green run. By #163 the unsharded macOS run took 27.8 minutes, so
+  // check.yml now runs the gate as ciShardCount shard jobs per OS (scripts/ci-test-gate.mjs), and
+  // this bound and those derived from it apply to each shard; a shard plans about 9 minutes of
+  // that run. Add a shard rather than raising this when a shard's green runs approach 20 minutes.
   vitestMs: 40 * minute,
   // Native preparation, format, lint, build and the gate's file preparation inside
   // `pnpm check`. They have no bound of their own; this reserve is well above the observed 30 s.
@@ -39,6 +41,9 @@ export const ciTimeBudget = Object.freeze({
   // Runner actions (checkout, setup-node, pnpm, upload-artifact) have no bound we configure;
   // observed at most about 40 s together.
   jobActionsReserveMs: 5 * minute,
+  // The aggregation of one OS's shard reports (`ci-test-gate.mjs --aggregate`), the step bound
+  // in check.yml. It only reads and validates JSON and scans the checkout's test files.
+  aggregateStepMs: 5 * minute,
 });
 
 // `pnpm check`: prelude, toolchain probe and discovery, vitest, source revision, finalization.
@@ -49,13 +54,18 @@ export const checkStageMs =
   ciTimeBudget.gateCommandMs +
   ciTimeBudget.checkFinalizeReserveMs;
 
-// The `check` job: three setup steps, the `--environment` toolchain probe, the check stage and
-// the runner actions. `.github/workflows/check.yml` must allow at least this long.
+// Each `check-shard` job: three setup steps, the `--environment` toolchain probe, the check stage
+// and the runner actions. `.github/workflows/check.yml` must allow at least this long.
 export const checkJobMinimumMs =
   3 * ciTimeBudget.setupStageMs +
   ciTimeBudget.gateCommandMs +
   checkStageMs +
   ciTimeBudget.jobActionsReserveMs;
+
+// Each aggregating `check` job: the aggregation step and the runner actions (checkout,
+// setup-node, artifact download and upload).
+export const aggregateJobMinimumMs =
+  ciTimeBudget.aggregateStepMs + ciTimeBudget.jobActionsReserveMs;
 
 function custodyError(phase, error, stream) {
   return { phase, stream, error };

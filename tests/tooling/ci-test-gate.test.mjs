@@ -3,9 +3,14 @@ import { fstatSync, readFileSync } from "node:fs";
 import filesystem, { cp, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { Writable } from "node:stream";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import {
+  aggregateShards,
+  ciShardCount,
+  parseShard,
+  planShards,
+  vitestRunArgs,
   fileRegisteredDirectories,
   readFileRegisteredSuites,
   readRequiredSuites,
@@ -1367,7 +1372,7 @@ test("rejects removal of a gate test below the required floor", () => {
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 38 }, (_, index) => ({
+    ...Array.from({ length: 42 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -1375,7 +1380,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 37 tests; needs 38/,
+    /discovered 41 tests; needs 42/,
   );
 });
 
@@ -2053,4 +2058,242 @@ test("ordinary Vitest records replay failure after durable binary custody", asyn
   expect(JSON.parse(await readFile(outputFile, "utf8"))[0].outputCapture.custodyErrors).toEqual(
     expect.arrayContaining([expect.objectContaining({ phase: "replay", code: "EPIPE" })]),
   );
+});
+
+test("shard plans place every discovered file in exactly one non-empty shard", async () => {
+  const suites = await readRequiredSuites();
+  // A new per-file registered suite needs no planning entry: it gets its project's weight.
+  const added = { project: "cli", file: "apps/cli/tests/m2/new-scenario.test.mjs" };
+  const entries = [...suites.map(({ project, file }) => ({ project, file })), added];
+  const all = entries.map((entry) => entry.file).sort();
+  const viewFiles = suites
+    .filter((suite) => suite.project === "terminal-web")
+    .map((suite) => suite.file);
+  expect(viewFiles).toHaveLength(3);
+  for (const count of [1, 2, ciShardCount, 4, 7]) {
+    const plan = planShards(entries, count);
+    expect(plan.map((shard) => shard.index)).toEqual(
+      Array.from({ length: count }, (_, i) => i + 1),
+    );
+    const files = plan.flatMap((shard) => shard.files);
+    expect(files.slice().sort()).toEqual(all);
+    expect(new Set(files).size).toBe(files.length);
+    expect(plan.every((shard) => shard.files.length > 0)).toBe(true);
+    // The V1 browser suites share one shard: their cleanup evidence is validated together.
+    expect(
+      plan.filter((shard) => viewFiles.some((file) => shard.files.includes(file))),
+    ).toHaveLength(1);
+    // Every runner computes the same plan, whatever order discovery lists the files in, and
+    // repeated tests of one file count once.
+    const shuffled = [...entries.slice().reverse(), ...entries.slice(0, 5)];
+    expect(planShards(shuffled, count)).toEqual(plan);
+  }
+  expect(() => planShards(entries, 0)).toThrow(/Invalid shard count/);
+  expect(() => planShards(entries.slice(0, 2), 3)).toThrow(/non-empty shards/);
+  expect(() =>
+    planShards([...entries, { project: "server", file: added.file }], ciShardCount),
+  ).toThrow(/belongs to two projects/);
+});
+
+test("COVE_CI_SHARD selects one of its shards and an unset value runs everything", () => {
+  expect(parseShard(undefined)).toEqual({ index: 1, count: 1 });
+  expect(parseShard("")).toEqual({ index: 1, count: 1 });
+  expect(parseShard("2/3")).toEqual({ index: 2, count: 3 });
+  expect(parseShard("3/3")).toEqual({ index: 3, count: 3 });
+  for (const value of ["0/3", "4/3", "1/0", "3", "a/b", " 1/3", "1/3 ", "01/3", "1/3/1", "-1/3"])
+    expect(() => parseShard(value)).toThrow(/COVE_CI_SHARD/);
+  // An unsharded run has no filter; a shard's files follow `run` as absolute paths, before every
+  // option, so no option can take a file name as its value.
+  const whole = vitestRunArgs([]);
+  expect(whole.slice(1, 3)).toEqual(["run", "--reporter=default"]);
+  const sharded = vitestRunArgs([first, second]);
+  expect(sharded.slice(1, 4)).toEqual(["run", resolve(root, first), resolve(root, second)]);
+  expect(sharded.slice(4)).toEqual(whole.slice(2));
+  expect(sharded.slice(4).every((arg) => arg.startsWith("--"))).toBe(true);
+});
+
+const shardCommit = "c".repeat(40);
+const shardRoot = "/runner/work/cove/cove";
+const shardSources = [first, second].sort();
+
+// Writes one OS's shard artifacts the way check-shard jobs leave them, from the two-suite
+// tooling fixture. `mutate(index, artifact)` may change a shard's plan, report or result before
+// it is written; a null result or report is left out.
+async function shardArtifacts(mutate = () => {}, count = 2) {
+  const directory = await mkdtemp(resolve(tmpdir(), "cove-ci-shards-"));
+  temporaryDirectories.push(directory);
+  const discovered = discoveredCases.map((test) => ({
+    projectName: test.projectName,
+    file: relative(root, test.file),
+    name: test.name,
+  }));
+  const plan = planShards(
+    discovered.map((test) => ({ project: test.projectName, file: test.file })),
+    count,
+  );
+  for (const shard of plan) {
+    const owned = report().testResults.filter((suite) =>
+      shard.files.includes(relative(root, suite.name)),
+    );
+    const tests = owned.reduce((sum, suite) => sum + suite.assertionResults.length, 0);
+    const artifact = {
+      plan: {
+        schemaVersion: 1,
+        index: shard.index,
+        count,
+        root: shardRoot,
+        sourceCommit: shardCommit,
+        runId: "github-7-1",
+        githubRunId: "7",
+        platform: "darwin",
+        arch: "arm64",
+        files: shard.files,
+        sources: shardSources,
+        discovered: structuredClone(discovered),
+      },
+      report: {
+        success: true,
+        numTotalTests: tests,
+        numPassedTests: tests,
+        numFailedTests: 0,
+        numPendingTests: 0,
+        numTodoTests: 0,
+        testResults: owned.map((suite) => ({
+          ...suite,
+          name: `${shardRoot}/${relative(root, suite.name)}`,
+        })),
+      },
+      result: { index: shard.index, count, passed: true },
+    };
+    mutate(shard.index, artifact);
+    const shardDirectory = resolve(
+      directory,
+      `ci-${shardCommit}-check-macos-latest-shard-${shard.index}`,
+    );
+    await mkdir(shardDirectory);
+    for (const [name, value] of [
+      ["shard.json", artifact.plan],
+      ["vitest-results.json", artifact.report],
+      ["shard-result.json", artifact.result],
+    ])
+      if (value !== null)
+        await writeFile(resolve(shardDirectory, name), `${JSON.stringify(value)}\n`);
+  }
+  return directory;
+}
+
+const aggregateOptions = {
+  platform: "darwin",
+  sourceCommit: shardCommit,
+  githubRunId: "7",
+  sources: shardSources,
+  suites,
+  count: 2,
+};
+
+test("aggregation merges passing shards into the complete inventory", async () => {
+  const result = await aggregateShards(await shardArtifacts(), aggregateOptions);
+  expect(result.inventory).toEqual([
+    { project: "tooling", file: first, discovered: 2, passed: 2 },
+    { project: "tooling", file: second, discovered: 8, passed: 8 },
+  ]);
+  expect(result.shards.map((shard) => shard.index)).toEqual([1, 2]);
+  expect(result.shards.reduce((sum, shard) => sum + shard.tests, 0)).toBe(10);
+});
+
+test("a failing, missing, partial or misplaced shard fails the aggregation", async () => {
+  const fail = async (mutate, pattern, options = aggregateOptions) =>
+    expect(aggregateShards(await shardArtifacts(mutate), options)).rejects.toThrow(pattern);
+  for (const index of [1, 2]) {
+    // A failed test in any shard: the shard records no passing result...
+    await fail((at, artifact) => {
+      if (at !== index) return;
+      artifact.report.success = false;
+      artifact.report.numFailedTests = 1;
+      artifact.report.numPassedTests -= 1;
+      artifact.report.testResults[0].status = "failed";
+      artifact.report.testResults[0].assertionResults = [
+        { status: "failed" },
+        ...artifact.report.testResults[0].assertionResults.slice(1),
+      ];
+      artifact.result = null;
+    }, /has no readable shard-result\.json/);
+    // ...and even a result file claiming a pass cannot hide the failed report.
+    await fail((at, artifact) => {
+      if (at !== index) return;
+      artifact.report.success = false;
+      artifact.report.testResults[0].assertionResults = [{ status: "failed" }];
+    }, /Vitest result is absent or unsuccessful/);
+    await fail((at, artifact) => {
+      if (at !== index) return;
+      artifact.report.testResults[0].assertionResults = [{ status: "skipped" }];
+    }, /skipped, pending, or failed/);
+    // A shard that never ran, or ran nothing.
+    await fail((at, artifact) => {
+      if (at === index) artifact.report = null;
+    }, /has no readable vitest-results\.json/);
+    await fail((at, artifact) => {
+      if (at !== index) return;
+      artifact.report.testResults = [];
+      artifact.report.numTotalTests = 0;
+      artifact.report.numPassedTests = 0;
+    }, /executed 0 of/);
+    await fail((at, artifact) => {
+      if (at === index) artifact.result.passed = false;
+    }, /did not record a passing result/);
+    // A shard from another commit, run or platform, or with other discovery or sources.
+    for (const [field, value] of [
+      ["sourceCommit", "d".repeat(40)],
+      ["githubRunId", "8"],
+      ["platform", "linux"],
+      ["root", "relative/root"],
+    ])
+      await fail((at, artifact) => {
+        if (at === index) artifact.plan[field] = value;
+      }, /another commit, run, platform or checkout/);
+    await fail((at, artifact) => {
+      if (at === index) artifact.plan.discovered.pop();
+    }, /discovered different tests/);
+    await fail((at, artifact) => {
+      if (at === index) artifact.plan.sources = [first];
+    }, /scanned different test files/);
+    await fail((at, artifact) => {
+      if (at === index) artifact.plan.files = [first, second];
+    }, /different file set than the plan/);
+    await fail((at, artifact) => {
+      if (at !== index) return;
+      artifact.report.testResults[0].name = `/elsewhere/${first}`;
+    }, /outside its shard checkout/);
+  }
+  // A file run by two shards, or by the wrong one.
+  await fail((at, artifact) => {
+    if (at !== 1) return;
+    artifact.report.testResults.push({
+      name: `${shardRoot}/${relative(root, report().testResults[0].name)}`,
+      status: "passed",
+      assertionResults: Array(2).fill({ status: "passed" }),
+    });
+  }, /result outside its plan/);
+  // A missing or duplicated shard artifact.
+  const directory = await shardArtifacts();
+  await rm(resolve(directory, `ci-${shardCommit}-check-macos-latest-shard-2`), {
+    recursive: true,
+  });
+  await expect(aggregateShards(directory, aggregateOptions)).rejects.toThrow(
+    "Expected 2 shard artifacts, found 1",
+  );
+  await fail((at, artifact) => {
+    if (at === 2) Object.assign(artifact.plan, { index: 1 });
+  }, "Shard 1/2 appears twice");
+  // Expecting more shards than were run.
+  await expect(
+    aggregateShards(await shardArtifacts(), { ...aggregateOptions, count: 3 }),
+  ).rejects.toThrow("Expected 3 shard artifacts, found 2");
+  // The checkout's own inventory still binds: a raised minimum fails the merged report.
+  await expect(
+    aggregateShards(await shardArtifacts(), {
+      ...aggregateOptions,
+      suites: [suites[0], { ...suites[1], minimumTests: 9 }],
+    }),
+  ).rejects.toThrow(/needs 9/);
 });

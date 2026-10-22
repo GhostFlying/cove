@@ -368,17 +368,29 @@ T1 恢复实验通过 `@cove/terminal-engine/probes/recovery-boundaries` 暴露�
 用 Node 运行编译后的 ESM/exports，并检查类型不匹配、私有子路径导入被拒绝。
 不依赖临时包的源码 alias，也不启动真实 agent 或用户终端。
 
-CI 保留严格必需的 `check (ubuntu-latest)`、`check (macos-latest)` 两项，冻结安装后先核对
-Node/pnpm 精确版本，再执行 native 准备、浏览器安装与 `pnpm check`。每个 job 上传 `.cache/ci` 中的安装/浏览器准备记录、环境、inventory、
-逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、job、OS/arch。失败时也上传已有证据，
-缺失 artifact 会使该 job 失败。时间上限是防挂死预算，并非性能 SLA，统一定义在
+CI 保留严格必需的 `check (ubuntu-latest)`、`check (macos-latest)` 两项。自 #163 起 Vitest 门禁按 OS 分成
+`ciShardCount`（3）个 `check shard (<os>, k/3)` job，各在独立 runner 上运行，端口、`COVE_HOME`、浏览器、sshd
+fixture 与用户服务标签都不共享；每个分片冻结安装后先核对 Node/pnpm 精确版本，再执行 native 准备、浏览器安装与
+完整 `pnpm check`（`COVE_CI_SHARD=k/3`）：照常验证整个仓库的 discovery、inventory 与最低用例数，再只运行并验证
+按确定性计划分到本分片的文件（`scripts/ci-test-gate.mjs` 的 `planShards`，按记录耗时贪心平衡，terminal-web
+project 整体放在同一分片；权重只影响平衡，不影响正确性；按 `.suite.json` 新注册的文件自动分配）。必需的
+`check (<os>)` job 在分片失败或取消时也运行（`always()`），以 `--aggregate` 下载该 OS 的分片 artifact，要求每个
+分片都记录了同一 commit、run 与平台下的通过结果、discovery 一致、实际文件与计划一致，再把合并报告按完整 inventory
+用 `verifyInventory` 与 V1 浏览器证据校验，严格程度与单次不分片运行相同；任一分片失败、缺失、多跑或漏跑文件都使其失败。
+本地 `pnpm test` 不设 `COVE_CI_SHARD`，仍作为一个分片运行全部文件。每个分片 job 上传 `.cache/ci` 中的安装/浏览器准备记录、环境、inventory、
+`shard.json`（计划与 discovery）、逐项命令 argv/退出码/信号/错误码、Vitest JSON/JUnit；artifact 名包含 commit、OS、
+分片序号与 arch，重跑分片时覆盖自身 artifact。失败时也上传已有证据，缺失 artifact 会使该 job 失败；聚合结果另存为
+`ci-<sha>-check-<os>-aggregate`。时间上限是防挂死预算，并非性能 SLA，统一定义在
 `scripts/ci-environment-setup.mjs` 的 `ciTimeBudget`：install/native/browser 各 10 分钟，
 gate 辅助命令（toolchain、discovery、source revision）各 2 分钟，Vitest 40 分钟；`pnpm check` 阶段
 52 分钟，包括无独立上限的 native/format/lint/build 预留 5 分钟、两条辅助命令、Vitest、source
 revision 与收尾 1 分钟；job 至少 89 分钟，包括三个准备步骤、`--environment`、check 阶段与 runner
-action/上传预留 5 分钟，`check.yml` 设为 90 分钟。Vitest 上限由 #151 从 20 分钟提高：除少数纯逻辑 project 外都设
+action/上传预留 5 分钟，`check.yml` 设为 90 分钟；这些上限都按每个分片 job 计。聚合 job 的 `--aggregate` 步骤 5 分钟，
+加 runner action 预留共至少 10 分钟，`check.yml` 设为 15 分钟。Vitest 上限由 #151 从 20 分钟提高：除少数纯逻辑 project 外都设
 `maxWorkers: 1`，这些 project 依次执行，Vitest 实际串行，每个新增场景 suite 都把自身耗时全部加到总时长上；
-2026-10-21 macOS 绿色运行为 15.5–19.95 分钟。接近 30 分钟时应分片或并行，而不是再提高上限。外层上限按内层的配置上限而非实测耗时组合；只要无独立
+不分片的 macOS 绿色运行到 2026-10-21 已达 27.8 分钟（run 39696359165），#163 因此改为分片而非放开 `maxWorkers`
+（后者会改变 3 vCPU runner 上计时敏感的 PTY、浏览器、sshd 与用户服务 suite 的隔离）。分片的绿色运行接近 20 分钟时
+应增加分片，而不是再提高上限。外层上限按内层的配置上限而非实测耗时组合；只要无独立
 上限的工作不超出其预留，挂死时就由最内层上限先触发并写下证据；tooling 测试校验这一组合与 workflow 值。C1 原有 tooling 测试仍在；应用、完整 PTY
 生命周期与移动端测试必须随相应能力 PR 增补，当前绿色不表示这些能力已验证。B0 只补齐两个真实实验环境；C1
 实施记录见 [任务计划](tasks/m0-ci-gates.md)；此前 bootstrap 验证见 [原任务计划](tasks/engineering-bootstrap.md)。

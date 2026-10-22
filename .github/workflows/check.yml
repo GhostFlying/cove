@@ -23,12 +23,20 @@ concurrency:
   cancel-in-progress: ${{ inputs.diagnostic != 'browser-close-v1-l4' }}
 
 jobs:
-  check:
+  # The Vitest gate runs as ciShardCount (3) shards per OS (#163), each on its own runner with a
+  # disjoint part of the test files, so shards share no port, data directory, browser, sshd
+  # fixture or user-service label. Every shard runs the full `pnpm check` (format, lint, build,
+  # the whole discovery and inventory checks) and validates its own part; the `check` job below
+  # aggregates each OS's shards and is the required check. The shard list must be 1..ciShardCount
+  # and COVE_CI_SHARD must name the same count (a tooling test checks both).
+  check-shard:
     if: ${{ github.event_name != 'workflow_dispatch' || (inputs.diagnostic == '' && inputs.expected_sha == '') }}
+    name: check shard (${{ matrix.os }}, ${{ matrix.shard }}/3)
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
     # At least checkJobMinimumMs (89 minutes) from ciTimeBudget in ci-environment-setup.mjs. The
     # bounds nest: the Vitest run (40 minutes) < the `pnpm check` stage that runs the gate (52)
@@ -37,6 +45,7 @@ jobs:
     # the budget.
     timeout-minutes: 90
     env:
+      COVE_CI_SHARD: ${{ matrix.shard }}/3
       # m2 S1/S2 install a runtime closure and register a real user service (a LaunchAgent, a
       # systemd user unit) named after their temporary data directory; the runners have both
       # managers (verified for M2 T3). See apps/cli/tests/m2/s1-install-fixture.mjs.
@@ -75,10 +84,53 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: ci-${{ github.sha }}-${{ github.job }}-${{ matrix.os }}-${{ runner.arch }}
+          # The aggregation downloads ci-<sha>-check-<os>-shard-*. A rerun of a shard replaces its
+          # own artifact (overwrite), so the aggregation never sees two results for one shard.
+          name: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-${{ matrix.shard }}-${{ runner.arch }}
           path: .cache/ci/
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
+
+  # The required `check (<os>)` result. It runs even when a shard failed or was cancelled
+  # (always()), so a failed shard fails this job instead of leaving it skipped, and validates the
+  # shard artifacts with `ci-test-gate.mjs --aggregate`: every shard passed for this commit and
+  # run, ran exactly its planned files, and the merged report passes the complete inventory. It
+  # reads JSON only, so it runs on Linux for both OSes.
+  check:
+    needs: check-shard
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || (inputs.diagnostic == '' && inputs.expected_sha == '')) }}
+    name: check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
+    # At least aggregateJobMinimumMs (10 minutes) from ciTimeBudget; the aggregation step's own
+    # bound (5) is inside it. A tooling test checks both.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ci-${{ github.sha }}-check-${{ matrix.os }}-shard-*
+          path: .cache/ci-shards/
+          merge-multiple: false
+      - run: node scripts/ci-test-gate.mjs --aggregate .cache/ci-shards ${{ matrix.os }}
+        timeout-minutes: 5
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: ci-${{ github.sha }}-check-${{ matrix.os }}-aggregate
+          path: .cache/ci/aggregate/
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
 
   # cove-tsnet (native/tailscale) builds with Go, not pnpm, so it is a separate job with its own
   # small bound instead of a share of the check job's budget.
