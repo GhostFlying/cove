@@ -29,6 +29,11 @@ export const tendDoc = "docs/integrations/shepherd-tend.md";
 // - apps/cli/src/main.ts: the router, usage/help output and the top-level exit codes.
 // - apps/cli/src/session.ts: data directory and server discovery (--home, COVE_HOME,
 //   COVE_RENDEZVOUS) and the build identity a command checks.
+// - apps/cli/src/install/: `cove server install|prune|uninstall|service|restart|upgrade|status|
+//   impact` live in install/commands.ts outside commands/ (dispatched by commands/server.ts), and
+//   the rest of the directory decides what they print and how they fail: the service manager's
+//   unit status (the `unit` field), installed builds (`installedBuild`), the installation layout
+//   and lock, and the closure checks behind their errors and exit codes.
 // - packages/protocol/src/ RPC method table and envelope (rpc-methods.ts, rpc.ts) and the schemas
 //   the CLI prints: workspace.ts (M1 task/workspace domain), errors.ts (error kinds and data),
 //   auth.ts (M2 devices, entries and the service), bootstrap.ts (build identity in status).
@@ -43,6 +48,7 @@ export const tendDoc = "docs/integrations/shepherd-tend.md";
 // a tend surface is caught by review, not by this list; an unaffected change here uses the marker.
 export const tendFacingDirectories = Object.freeze([
   "apps/cli/src/commands/",
+  "apps/cli/src/install/",
   "apps/server/src/store/",
   "apps/server/src/operations/",
 ]);

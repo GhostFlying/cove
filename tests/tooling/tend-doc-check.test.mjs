@@ -51,6 +51,12 @@ test("selects the CLI, protocol RPC and schema, and server store and operations 
     "packages/protocol/src/bootstrap.ts",
     "apps/server/src/store/database.ts",
     "apps/server/src/operations/operation-receipts.ts",
+    // `server install|service|restart|upgrade|status` and what they print (installedBuild, unit,
+    // serverState) live outside commands/ (#166 review).
+    "apps/cli/src/install/commands.ts",
+    "apps/cli/src/install/service.ts",
+    "apps/cli/src/install/installer.ts",
+    "apps/cli/src/install/layout.ts",
     // The run and recipe environment (#160).
     "apps/server/src/domain/tabs.ts",
     "packages/terminal-worker/src/worker-execution.ts",
@@ -61,6 +67,8 @@ test("selects the CLI, protocol RPC and schema, and server store and operations 
   for (const path of [
     "apps/cli/src/harness-server.ts",
     "apps/cli/src/mainly.ts",
+    "apps/cli/src/installer.ts",
+    "apps/cli/tests/m2/s1-install-service.test.mjs",
     "packages/protocol/src/terminal.ts",
     "packages/protocol/src/pipe.ts",
     "apps/server/src/terminal/runtime.ts",
