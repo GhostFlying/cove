@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { open, lstat, stat, unlink, link, mkdir, rmdir } from "node:fs/promises";
-import { dirname, isAbsolute, normalize } from "node:path";
+import { dirname, isAbsolute, join, normalize } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
 import { checkManagedDirectory, HomeError } from "../store/home.js";
@@ -87,12 +87,11 @@ export class LocalRendezvous {
     }
   }
   // The directories Cove manages on the way to the rendezvous (#172; store/home.ts states the
-  // rule): every component strictly below the data directory down to the rendezvous directory,
-  // which the server creates itself when it is missing. An existing external --rendezvous parent,
-  // like the data directory and its ancestors, is user-owned rather than Cove-managed; its mode,
-  // owner and symlink spelling are not restricted. Only a missing external leaf we actually create
-  // is held to Cove's rule. verifyDirectory pins the target directory identity for publication and
-  // cleanup in both cases.
+  // rule): the known application-owned subtrees, including paths created on earlier starts.
+  // Mere containment below home does not make an arbitrary custom directory Cove's. Existing
+  // user-selected parents elsewhere (inside or outside home), home itself and its ancestors keep
+  // their owner, mode and symlink spelling. A missing leaf we actually create is held to Cove's
+  // rule. verifyDirectory pins the target directory identity for publication and cleanup.
   private managedComponents(parent: string): string[] {
     const home = this.homes.find(
       (candidate) =>
@@ -100,6 +99,15 @@ export class LocalRendezvous {
         parent.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`),
     );
     if (!home) return [];
+    // Server state, installation/launcher, client credentials, CLI operations/locks and the
+    // client's dial-node state have concrete Cove-owned layouts. User repo/workspace paths do not.
+    const known = ["server", "tsnet", "install", "bin", "client", "cli", "tsnet-client"].some(
+      (name) => {
+        const root = join(home, name);
+        return parent === root || parent.startsWith(`${root}/`);
+      },
+    );
+    if (!known) return [];
     const managed: string[] = [];
     for (let current = parent; current !== home; current = dirname(current))
       managed.unshift(current);

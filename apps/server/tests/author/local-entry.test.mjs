@@ -3076,7 +3076,7 @@ describe("D passive production local entry", () => {
     }
   });
 
-  it("publishes in existing external 0755/0777 directories and symlink parents without adopting them", async () => {
+  it("publishes in existing user-selected 0755/0777 directories and symlinks inside or outside home", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-external-rendezvous-"));
     const metadata = async (path) => {
       const info = await lstat(path);
@@ -3092,7 +3092,7 @@ describe("D passive production local entry", () => {
         await writeFile(join(target, "prior"), "user data\n");
         const before = await metadata(target);
         const aliasBefore = await metadata(alias);
-        for (const homes of [[], [join(root, "separate-home")]]) {
+        for (const homes of [[], [join(root, "separate-home")], [root]]) {
           for (const parent of [target, alias]) {
             const path = join(parent, "rendezvous");
             const file = new LocalRendezvous(path, homes);
@@ -3198,58 +3198,62 @@ describe("D passive production local entry", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it("D-A19 insecure and symlinked managed descendants refuse publication and preserve foreign bytes", async () => {
+  it("D-A19 known managed subtrees refuse insecure and symlinked descendants and preserve foreign bytes", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-refused-parent-"));
     try {
-      const insecure = join(root, "insecure");
-      const target = join(root, "target");
-      const alias = join(root, "alias");
-      await mkdir(insecure, { mode: 0o700 });
-      await chmod(insecure, 0o755);
-      await mkdir(target, { mode: 0o700 });
-      await symlink(target, alias);
-      await writeFile(join(insecure, "prior"), "foreign-insecure");
-      await writeFile(join(target, "prior"), "foreign-target");
-      for (const [name, parent] of [
-        ["insecure", insecure],
-        ["symlink", alias],
-      ]) {
-        const file = new LocalRendezvous(join(parent, "rendezvous"), [root]);
-        let error;
-        try {
-          await file.publish({
-            bootstrapVersion: 1,
-            ...launchIdentity(),
-            endpoint: "http://127.0.0.1:32123",
+      for (const name of ["server", "tsnet", "install", "bin", "client", "cli", "tsnet-client"]) {
+        const managed = join(root, name);
+        await mkdir(managed, { mode: 0o700 });
+        const insecure = join(managed, "run");
+        const target = join(root, `${name}-target`);
+        const alias = join(managed, "alias");
+        await mkdir(insecure, { mode: 0o700 });
+        await chmod(insecure, 0o755);
+        await mkdir(target, { mode: 0o700 });
+        await symlink(target, alias);
+        await writeFile(join(insecure, "prior"), "foreign-insecure");
+        await writeFile(join(target, "prior"), "foreign-target");
+        for (const [kind, parent] of [
+          ["insecure", insecure],
+          ["symlink", alias],
+        ]) {
+          const file = new LocalRendezvous(join(parent, "rendezvous"), [root]);
+          let error;
+          try {
+            await file.publish({
+              bootstrapVersion: 1,
+              ...launchIdentity(),
+              endpoint: "http://127.0.0.1:32123",
+            });
+          } catch (caught) {
+            error = caught;
+          } finally {
+            await file.close();
+          }
+          const info = await lstat(parent);
+          const names = await readdir(parent);
+          await recordAuthor(`A19-${name}-${kind}`, {
+            error: error?.message,
+            mode: info.mode & 0o777,
+            symlink: info.isSymbolicLink(),
+            names,
+            prior: await readFile(join(parent, "prior"), "utf8"),
           });
-        } catch (caught) {
-          error = caught;
-        } finally {
-          await file.close();
+          // The refusal names the directory, what it is and the rule (#172).
+          expect(error?.message).toBe(
+            `Local rendezvous publication failed: Cove directory ${parent} ` +
+              (kind === "insecure"
+                ? `has owner uid ${process.getuid()} and mode 0755`
+                : "is a symbolic link") +
+              "; Cove's own directories must be owned by the current user, have mode 0700 and " +
+              `not be symbolic links (uid ${process.getuid()}, mode 0700)`,
+          );
+          expect(names).toEqual(["prior"]);
         }
-        const info = await lstat(parent);
-        const names = await readdir(parent);
-        await recordAuthor(`A19-${name}`, {
-          error: error?.message,
-          mode: info.mode & 0o777,
-          symlink: info.isSymbolicLink(),
-          names,
-          prior: await readFile(join(parent, "prior"), "utf8"),
-        });
-        // The refusal names the directory, what it is and the rule (#172).
-        expect(error?.message).toBe(
-          `Local rendezvous publication failed: Cove directory ${parent} ` +
-            (name === "insecure"
-              ? `has owner uid ${process.getuid()} and mode 0755`
-              : "is a symbolic link") +
-            "; Cove's own directories must be owned by the current user, have mode 0700 and " +
-            `not be symbolic links (uid ${process.getuid()}, mode 0700)`,
-        );
-        expect(names).toEqual(["prior"]);
+        expect((await lstat(insecure)).mode & 0o777).toBe(0o755);
+        expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+        expect(await readFile(join(target, "prior"), "utf8")).toBe("foreign-target");
       }
-      expect((await lstat(insecure)).mode & 0o777).toBe(0o755);
-      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
-      expect(await readFile(join(target, "prior"), "utf8")).toBe("foreign-target");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
