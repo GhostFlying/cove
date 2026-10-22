@@ -2,6 +2,7 @@ import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, expect, test } from "vitest";
 import { waitFor } from "../recording-view.mjs";
+import { SSH_TARGET } from "./auth-fixtures.mjs";
 import { ECHO_LOOP, attachedTerminal } from "./ssh-scenario.mjs";
 import {
   alive,
@@ -70,10 +71,12 @@ test("an auth key from stdin logs the node in once; pairing and commands use it 
   expect(await modeOf(tsnetHome)).toBe(0o700);
   expect(await modeOf(join(tsnetHome, "state"))).toBe(0o700);
 
-  // Paired over tsnet: only the tsnet entry, at the business port, as the default.
+  // Paired over tsnet: tsnet, at the business port, is the default; the invitation's SSH target
+  // is recorded too, and no loopback (the client is on another host).
   expect(record.defaultEntry).toBe("tsnet");
   const saved = await scenario.fixture.credential(client, record.serverId);
   expect(saved.entries).toEqual({
+    ssh: { target: SSH_TARGET, port: businessPort },
     tsnet: { nodeId: node.self.stableNodeID, name: node.self.name, port: businessPort },
   });
 
