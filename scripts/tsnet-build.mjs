@@ -141,6 +141,22 @@ function parseFlags(args) {
   return flags;
 }
 
+// Whether this checkout's root is the top of a Git work tree (not a directory inside some other
+// repository, and not an export without .git). Any failure of git counts as no.
+export function ownGitWorkTree() {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  if (result.error || result.status !== 0) return false;
+  try {
+    return realpathSync(result.stdout.trim()) === realpathSync(root);
+  } catch {
+    return false;
+  }
+}
+
 export function defaultOutput(goos, goarch) {
   return join(moduleDir, "dist", `${goos}-${goarch}`, "cove-tsnet");
 }
@@ -154,6 +170,15 @@ function build(args) {
   }
   const out = resolve(flags.out ?? defaultOutput(goos, goarch));
   const ldflags = ["-s", "-w"];
+  // Go's VCS stamping (#175). A build with --build (an installed closure, the tests) takes its
+  // identity from that ID alone, so it is never stamped: the binary then depends only on the
+  // sources, the toolchain and these flags, the same for the placeholder and the final build of
+  // runtime-closure.mjs, and a checkout exported with `git archive` inside another repository
+  // builds instead of failing with "error obtaining VCS status". A development build reports
+  // `dev+<revision>` (buildinfo.go), which the dial daemon's replacement compares, so it is
+  // stamped when this checkout is a Git work tree of its own and left unstamped (`dev+unknown`)
+  // otherwise, rather than taking the revision of an enclosing repository.
+  const vcs = flags.build === undefined && ownGitWorkTree() ? "-buildvcs=auto" : "-buildvcs=false";
   if (flags.build !== undefined) {
     // One token of safe characters: it is spliced into -ldflags unquoted and must match
     // proto.ValidBuild, which the binary enforces at startup.
@@ -167,6 +192,7 @@ function build(args) {
     [
       "build",
       "-trimpath",
+      vcs,
       "-tags",
       buildTags,
       "-ldflags",
@@ -226,7 +252,16 @@ function testcontrol(args) {
   const out = resolve(flags.out);
   run(
     checkedGo(),
-    ["build", "-trimpath", "-tags", buildTags, "-o", out, "./cmd/cove-tsnet-testcontrol"],
+    [
+      "build",
+      "-trimpath",
+      "-buildvcs=false",
+      "-tags",
+      buildTags,
+      "-o",
+      out,
+      "./cmd/cove-tsnet-testcontrol",
+    ],
     goEnv({ CGO_ENABLED: "0" }),
   );
   console.log(`${out} (test control plane)`);
