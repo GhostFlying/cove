@@ -1,3 +1,5 @@
+import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import {
   AUTH_LIMITS,
   SshTargetSchema,
@@ -29,6 +31,7 @@ import {
   type DeviceVerdict,
   type EntryKind,
 } from "./devices.js";
+import type { TsnetInvitationEntry } from "../network/listeners.js";
 import { PairingListener } from "./pairing-listener.js";
 import { issueToken, newResourceId, newSecret, sameHash, secretHash } from "./tokens.js";
 
@@ -70,8 +73,9 @@ export type AuthServiceOptions = {
   // otherwise any free port (m2 T1; T3's entry configuration replaces this).
   host: "127.0.0.1" | "::1";
   pairingPort?: number;
-  // The SSH target invitations advertise (entry/m0-local-options.ts). Undefined: no entry can be
-  // advertised, so no invitation can be created (ENTRY_UNAVAILABLE).
+  // The SSH target invitations advertise (entry/m0-local-options.ts). Undefined: invitations
+  // advertise the tsnet node alone, and none can be created while it is not up either
+  // (ENTRY_UNAVAILABLE).
   sshTarget?: string;
   now?: () => number;
   log?: (event: Record<string, unknown>) => void;
@@ -94,6 +98,12 @@ function constantTimeEqual(expected: string, actual: string): boolean {
 // reload that finds no open invitation cannot close the listener under a creation that already
 // chose its port. A creation opens the listener before it commits: an invitation is never handed
 // out for a port nobody listens on, and when the port cannot be bound nothing is committed.
+//
+// The tsnet node serves the pairing port too (D6, D10): every opening and closing of the listener
+// is reported to it (onPortChange) and awaited inside the same serialized step, so by the time a
+// creation has its port the node has answered for it, and the invitation advertises the node
+// only if that answer shows the port open on a running node (advertiseTsnet). A node that is down
+// costs the invitation its tsnet entry, never the SSH one.
 export class AuthService {
   readonly devices: DeviceAuthenticator;
   readonly connections = new DeviceConnections();
@@ -106,6 +116,8 @@ export class AuthService {
   private expiryTimer: ReturnType<typeof setTimeout> | undefined;
   private businessPort: number | undefined;
   private disposed = false;
+  private readonly portListeners: (() => Promise<void>)[] = [];
+  private tsnetEntry: ((pairingPort: number) => TsnetInvitationEntry | null) | undefined;
 
   // `initial` is what loadAuthState read before the server composition was built.
   constructor(
@@ -123,7 +135,7 @@ export class AuthService {
         relayInstanceId: options.relayInstanceId,
         buildVersion: options.buildVersion,
       }),
-      redeem: (request) => this.redeem(request),
+      redeem: (request, entry) => this.redeem(request, entry),
     });
     this.devices.load(initial.devices);
     this.open = initial.openInvitations;
@@ -145,6 +157,24 @@ export class AuthService {
 
   get pairingPort(): number | undefined {
     return this.listener.port;
+  }
+
+  // A connection the tsnet node accepted on the pairing port.
+  accept(socket: Duplex): void {
+    this.listener.accept(socket as Socket);
+  }
+
+  onPortChange(listener: () => Promise<void>): void {
+    this.portListeners.push(listener);
+  }
+
+  // The tsnet entry an invitation for a pairing port advertises, or null when there is none now.
+  advertiseTsnet(entry: (pairingPort: number) => TsnetInvitationEntry | null): void {
+    this.tsnetEntry = entry;
+  }
+
+  private async portChanged(): Promise<void> {
+    for (const listener of this.portListeners) await listener().catch(() => undefined);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -200,11 +230,13 @@ export class AuthService {
     const recorded = await recordedWrite(this.context(), principal.principalId, method, params);
     if (recorded) return recorded;
     const target = SshTargetSchema.safeParse(this.options.sshTarget);
-    if (!target.success) return { error: domainError("ENTRY_UNAVAILABLE") };
+    if (!target.success && !this.tsnetEntry) return { error: domainError("ENTRY_UNAVAILABLE") };
     this.creating++;
     try {
       const pairingPort = await this.ensureListener();
       if (pairingPort === null) return { error: domainError("ENTRY_UNAVAILABLE") };
+      const tsnet = this.tsnetEntry?.(pairingPort) ?? null;
+      if (!target.success && !tsnet) return { error: domainError("ENTRY_UNAVAILABLE") };
       const inviteId = newResourceId();
       const secret = newSecret();
       const at = this.now();
@@ -215,7 +247,10 @@ export class AuthService {
         secret,
         expiresAtMs,
         pairingPort,
-        entries: { ssh: { target: target.data } },
+        entries: {
+          ...(target.success ? { ssh: { target: target.data } } : {}),
+          ...(tsnet ? { tsnet: { nodeId: tsnet.nodeId, name: tsnet.name } } : {}),
+        },
       });
       return await executeSecretWrite(
         this.context(),
@@ -386,6 +421,7 @@ export class AuthService {
   // invitation, with any device it left listed never-connected (D6).
   private async redeem(
     request: PairingRedeemRequest,
+    entry: EntryKind,
   ): Promise<PairingRedeemResult | PairingFailure> {
     const businessPort = this.businessPort;
     if (businessPort === undefined || businessPort < 1024)
@@ -416,7 +452,7 @@ export class AuthService {
     // the answer still goes out on this connection (pairing-listener.ts close).
     await this.reconcile();
     if (!redeemed.redeemed) return { type: "cove-pairing-error", kind: "INVITATION_UNAVAILABLE" };
-    this.log({ event: "device-paired", deviceId, entry: "loopback" });
+    this.log({ event: "device-paired", deviceId, entry });
     return {
       type: "cove-pairing-result",
       serverId: this.options.serverId,
@@ -448,6 +484,7 @@ export class AuthService {
           return null;
         }
         this.log({ event: "pairing-listener", state: "open", port: opened });
+        await this.portChanged();
         return opened;
       } catch {
         this.log({ event: "pairing-listener", state: "unavailable", port });
@@ -474,6 +511,7 @@ export class AuthService {
         if (this.open.length > 0 || this.creating > 0 || this.listener.port === undefined) return;
         this.listener.close();
         this.log({ event: "pairing-listener", state: "closed" });
+        await this.portChanged();
       });
   }
 

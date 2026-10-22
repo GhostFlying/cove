@@ -10,6 +10,7 @@ import { AuthService, loadAuthState, type AuthState } from "../auth/service.js";
 import { PortSchema } from "@cove/protocol/auth";
 import { buildId } from "../build-id.js";
 import { ListenerSet, tsnetBinaryPath } from "../network/listeners.js";
+import { TsnetNode } from "../network/tsnet.js";
 import { RuntimeRetainedBytes } from "../terminal/runtime-retained-bytes.js";
 import { RuntimeComposition } from "../terminal/runtime-composition.js";
 import { WorkerPool } from "../terminal/worker-pool.js";
@@ -496,11 +497,17 @@ export async function startLocalEntry(
       // Logging is best effort.
     }
   };
+  // The tsnet node is the server.tsnet.* methods' service and the source of the invitations'
+  // tsnet entry; the listener set starts and closes it in order with the other entries.
+  const tsnet = new TsnetNode();
+  local.core.tsnet = tsnet;
+  local.auth?.advertiseTsnet((pairingPort) => tsnet.invitationEntry(pairingPort));
   const listeners = new ListenerSet({
     host: local.options.host,
     businessPort: local.options.port,
     business: local.app,
     ...(local.auth ? { pairing: local.auth } : {}),
+    tsnetEntry: tsnet,
     tsnet: {
       home: local.options.home ?? "",
       hostname: local.entry?.initial.tsnetHostname ?? null,

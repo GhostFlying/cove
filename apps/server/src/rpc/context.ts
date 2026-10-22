@@ -4,6 +4,7 @@ import { RPC_METHODS } from "@cove/protocol/rpc";
 import type { AuthService } from "../auth/service.js";
 import type { EntryConfigService } from "../entry/entry-config.js";
 import type { ServiceState } from "../entry/service-state.js";
+import type { TsnetNode } from "../network/tsnet.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import type { TerminalOperations } from "../operations/terminal-operations.js";
 import type { ConfigService } from "../store/config.js";
@@ -35,6 +36,9 @@ export type LocalCore = {
   // CAPABILITY_UNAVAILABLE.
   entry?: EntryConfigService;
   service?: ServiceState;
+  // The server's tsnet node (m2 T5b; server.tsnet.*). Absent outside a served local entry; the
+  // tsnet methods then report CAPABILITY_UNAVAILABLE.
+  tsnet?: TsnetNode;
 };
 
 export const M0_LOCAL_PRINCIPAL_ID = "m0-local";

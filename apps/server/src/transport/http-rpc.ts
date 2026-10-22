@@ -25,6 +25,7 @@ import {
 import { localOwner, type LocalCore, type Principal } from "../rpc/context.js";
 import { dispatchRpc } from "../rpc/dispatch.js";
 import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
+import { entryOf } from "./connection-entry.js";
 
 export type { LocalCore } from "../rpc/context.js";
 const encoder = new TextEncoder();
@@ -535,17 +536,18 @@ export function registerHttpRpc(
             // Who is calling (m2 D7), verified again now that the body is read: a device revoked
             // meanwhile was refused just above. An admitted device is recorded as used and its
             // request registered for revocation in the same synchronous step
-            // (auth/connections.ts). Every request so far arrives on the loopback listener; T3/T5b
-            // tell their entries apart when they add them.
+            // (auth/connections.ts). The entry it came through (loopback, or a connection the tsnet
+            // node forwarded; raw-connections.ts entryOf) is recorded as the device's last use.
             //
             // The first use of a rotated token is confirmed by the store first (auth/devices.ts
             // promote): nothing is executed or answered as authenticated until the promotion
             // committed. The credential is then verified again, synchronously, so that a revocation
             // committed during the wait is seen before the request registers. A store that cannot
             // confirm now is answered UNAVAILABLE (retryable), never UNAUTHENTICATED.
+            const entry = entryOf(request.raw.socket);
             let credential = admission.credential("POST", path, headers(request));
             if (credential.kind === "device" && credential.confirm && core.auth) {
-              const confirmed = await core.auth.confirm(credential, "loopback");
+              const confirmed = await core.auth.confirm(credential, entry);
               if (owner.logicalClosed) return reply;
               if (confirmed.kind !== "device")
                 return sendHttpAdmissionFailure(reply, confirmed.kind);
@@ -562,7 +564,7 @@ export function registerHttpRpc(
                 principalId: localOwner(core).principalId,
                 deviceId: credential.deviceId,
               };
-              core.auth?.admitted(credential, "loopback");
+              core.auth?.admitted(credential, entry);
               const socket = request.raw.socket;
               const forget = core.auth?.connections.register(credential.deviceId, {
                 owner: principal,
