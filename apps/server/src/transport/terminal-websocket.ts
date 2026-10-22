@@ -23,6 +23,8 @@ import { actualHeaders, LocalAdmission, type LocalHeaders } from "./local-admiss
 import type { LocalCore } from "./http-rpc.js";
 import { encodeUtf8, originFormTarget, sendHttpAdmissionFailure } from "./http-rpc.js";
 import type { LocalTimer } from "../terminal/local-runtime-clock.js";
+import type { EntryKind } from "../auth/devices.js";
+import { entryOf } from "./connection-entry.js";
 
 export interface LocalSocket {
   send(bytes: Uint8Array | string, callback: (error?: Error) => void): void;
@@ -53,7 +55,9 @@ export class TerminalWebSocket {
     const claim = this.admission.claim("unauthenticated");
     return claim ? { kind, claim } : { kind: "busy" };
   }
-  accept(socket: LocalSocket, unauthenticated: Claim): void {
+  // `entry` is the entry the connection came through (raw-connections.ts entryOf), recorded as
+  // the device's last use.
+  accept(socket: LocalSocket, unauthenticated: Claim, entry: EntryKind = "loopback"): void {
     const decoder = createTerminalDecoder();
     let started: number;
     const connection: ConnectionRef = { connectionId: randomUUID(), generation: 1 };
@@ -132,7 +136,7 @@ export class TerminalWebSocket {
           return;
         }
         confirming = true;
-        void this.core.auth.confirm(verdict, "loopback").then(
+        void this.core.auth.confirm(verdict, entry).then(
           (outcome) => {
             confirming = false;
             if (retired || physicallyClosed) return;
@@ -254,7 +258,7 @@ export class TerminalWebSocket {
       // policy code, which ends its subscriptions and releases any control it held through
       // the ordinary disconnect path (no resize).
       if (verdict.kind === "device" && this.core.auth) {
-        this.core.auth.admitted(verdict, "loopback");
+        this.core.auth.admitted(verdict, entry);
         this.core.auth.connections.register(verdict.deviceId, {
           close: () => close(WS_CLOSE_CODES.policy),
           closed: physicalClose,
@@ -394,6 +398,7 @@ export function registerTerminalWebSocket(app: FastifyInstance, terminal: Termin
           },
         },
         claim,
+        entryOf(request.raw.socket),
       );
     },
   );

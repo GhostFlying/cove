@@ -9,7 +9,9 @@ import {
   type PairingRedeemResult,
 } from "@cove/protocol/auth";
 import { bootstrapIdentity, isLoopbackLiteralHost } from "@cove/protocol/bootstrap";
+import { entryOf } from "../transport/connection-entry.js";
 import { actualHeaders } from "../transport/local-admission.js";
+import type { EntryKind } from "./devices.js";
 
 // The pairing listener (m2 D6): a separate loopback port that exists only while an invitation is
 // open. It is reachable before authentication, so it is small and bounded on purpose:
@@ -33,7 +35,10 @@ export const PAIRING_BOUNDS = Object.freeze({
 
 export type PairingHandlers = {
   identity(): { serverId: string; relayInstanceId: string; buildVersion: string };
-  redeem(request: PairingRedeemRequest): Promise<PairingRedeemResult | PairingFailure>;
+  redeem(
+    request: PairingRedeemRequest,
+    entry: EntryKind,
+  ): Promise<PairingRedeemResult | PairingFailure>;
 };
 
 const STATUS: Record<PairingFailure["kind"], number> = {
@@ -108,6 +113,20 @@ export class PairingListener {
     setTimeout(() => {
       for (const socket of sockets) socket.destroy();
     }, PAIRING_BOUNDS.requestTimeoutMs).unref();
+  }
+
+  // A connection the tsnet node accepted on the pairing port (network/tsnet.ts), handed over with
+  // the rest of what it sent. It gets exactly the bounds and handling of one accepted here: the
+  // listener's `maxConnections` applies only to its own accepts, so the same cap is applied to
+  // the handed-over ones by count. A connection arriving while the listener is closed (its last
+  // invitation just ended) is closed unanswered.
+  accept(socket: Socket): void {
+    const server = this.server;
+    if (!server || this.sockets.size >= PAIRING_BOUNDS.connections) {
+      socket.destroy();
+      return;
+    }
+    server.emit("connection", socket);
   }
 
   // Destroys every connection now (server shutdown).
@@ -194,7 +213,7 @@ export class PairingListener {
         send(429, failure("BUSY"));
         return;
       }
-      this.handlers.redeem(request.data).then(
+      this.handlers.redeem(request.data, entryOf(req.socket)).then(
         (answer) =>
           answer.type === "cove-pairing-result"
             ? send(200, answer)

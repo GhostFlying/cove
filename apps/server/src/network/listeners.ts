@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { DomainError } from "@cove/protocol/errors";
 import { installedClosureRoot, workspaceRootOf } from "../build-id.js";
 import { createTsnetEntry } from "./tsnet.js";
+import type { ConnectionPeer } from "../transport/connection-entry.js";
 
 // The server's entries (m2 D3, D9, D10): every way a client reaches this server. SSH needs no
 // listener of its own: it forwards to the loopback ports (D3).
@@ -36,14 +37,24 @@ export type TsnetEntryContext = {
   // The pairing listener's port while it is open.
   pairingPort(): number | undefined;
   // Hands a connection the node accepted on the business port to the business server, which
-  // then applies the same admission as to a loopback connection.
-  acceptBusiness(socket: Duplex): void;
+  // then applies the same raw bounds and admission as to a loopback connection. `peer` is what
+  // WhoIs reported (display and audit only; transport/connection-entry.ts).
+  acceptBusiness(socket: Duplex, peer: ConnectionPeer | null): void;
+  // The same for the pairing port, while the pairing listener is open (closed otherwise).
+  acceptPairing(socket: Duplex, peer: ConnectionPeer | null): void;
+  // Registers the node's port sync: called, and awaited, each time the pairing listener opens or
+  // closes, before an invitation for the new port is created (D6; network/tsnet.ts "Ports").
+  onPairingPortChange(listener: () => Promise<void>): void;
   log(event: Record<string, unknown>): void;
 };
 
+// What an invitation advertises for the tsnet entry (InvitationPayloadSchema entries.tsnet).
+export type TsnetInvitationEntry = { readonly nodeId: string; readonly name: string };
+
 export interface TsnetEntry {
   readonly kind: "tsnet";
-  // Resolves once the node runs, or with the reason it does not (ENTRY_UNAVAILABLE).
+  // Resolves once the node is started (it may still be restoring), or with the reason it is not
+  // (ENTRY_UNAVAILABLE).
   start(context: TsnetEntryContext): Promise<{ error: DomainError } | void>;
   close(): Promise<void>;
 }
@@ -59,6 +70,10 @@ export type BusinessListener = {
 export type PairingEntry = {
   start(businessPort: number): Promise<void>;
   readonly pairingPort: number | undefined;
+  // A connection the tsnet node accepted on the pairing port.
+  accept?(socket: Duplex): void;
+  // See TsnetEntryContext onPairingPortChange.
+  onPortChange?(listener: () => Promise<void>): void;
   dispose(): Promise<void>;
 };
 
@@ -86,7 +101,7 @@ export function tsnetBinaryPath(): string | null {
 }
 
 export class ListenerSet {
-  private readonly tsnet: TsnetEntry = createTsnetEntry();
+  private readonly tsnet: TsnetEntry;
   private boundPort: number | undefined;
   private closing: Promise<boolean> | undefined;
 
@@ -97,10 +112,17 @@ export class ListenerSet {
       businessPort: number;
       business: BusinessListener;
       pairing?: PairingEntry;
-      tsnet: Omit<TsnetEntryContext, "businessPort" | "pairingPort" | "acceptBusiness">;
+      tsnet: Omit<
+        TsnetEntryContext,
+        "businessPort" | "pairingPort" | "acceptBusiness" | "acceptPairing" | "onPairingPortChange"
+      >;
+      // The tsnet entry; by default this build's (network/tsnet.ts).
+      tsnetEntry?: TsnetEntry;
       log: (event: Record<string, unknown>) => void;
     },
-  ) {}
+  ) {
+    this.tsnet = parts.tsnetEntry ?? createTsnetEntry();
+  }
 
   get businessPort(): number | undefined {
     return this.boundPort;
@@ -122,6 +144,9 @@ export class ListenerSet {
       businessPort: address.port,
       pairingPort: () => this.parts.pairing?.pairingPort,
       acceptBusiness: (socket) => business.server.emit("connection", socket),
+      acceptPairing: (socket) =>
+        this.parts.pairing?.accept ? this.parts.pairing.accept(socket) : socket.destroy(),
+      onPairingPortChange: (listener) => this.parts.pairing?.onPortChange?.(listener),
     });
     // The placeholder (and a host without cove-tsnet) is simply not an entry; anything else is
     // worth a log line. The business entry keeps serving either way.
