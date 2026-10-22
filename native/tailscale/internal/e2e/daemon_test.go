@@ -231,3 +231,22 @@ func TestSecretsAreNotAcceptedFromArgvOrEnv(t *testing.T) {
 		t.Fatalf("inherited TS_AUTHKEY logged the node in: %+v", st)
 	}
 }
+
+// A login availability probe may be followed by a refused operation receipt, so hello/status
+// without login must leave no state directory for the Node supervisor to auto-start later.
+func TestServeHelloWithoutLoginLeavesNoRestartMarker(t *testing.T) {
+	root := shortDir(t)
+	for attempt := 0; attempt < 2; attempt++ {
+		s := startServe(t, &tailnet{controlURL: "http://127.0.0.1:1"}, root, "no-login")
+		if status := s.status(); status.State != proto.StateLoggedOut {
+			t.Fatalf("status: %+v", status)
+		}
+		if _, err := os.Lstat(filepath.Join(s.home, "state")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hello created auto-start marker: %v", err)
+		}
+		if code := s.stop(); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		s.fwdLn.Close()
+	}
+}
