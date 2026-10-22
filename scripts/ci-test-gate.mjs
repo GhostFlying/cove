@@ -357,8 +357,8 @@ export const requiredSuites = [
     minimumTests: 4,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
-  { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 42 },
+  { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 8 },
   { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 11 },
   {
@@ -1154,6 +1154,124 @@ export async function readFileRegisteredSuites(
 // both ways is a duplicate and fails discovery.
 export async function readRequiredSuites(checkoutRoot = root) {
   return [...requiredSuites, ...(await readFileRegisteredSuites(checkoutRoot))];
+}
+
+// CI shards (#163). The Vitest run is serial: every project but the small pure ones sets
+// maxWorkers: 1, and Vitest runs the projects one after another, so a run takes the sum of its
+// files' durations (about 27.8 minutes on macOS at 161 files in run 39696359165). Lifting
+// maxWorkers would change the isolation of timing-sensitive PTY, browser, sshd and user-service
+// suites on a 3-vCPU runner. Instead check.yml runs the gate as ciShardCount jobs per OS, each on
+// its own runner (so no port, COVE_HOME, browser, sshd fixture or LaunchAgent/systemd label is
+// ever shared between shards) and each running a disjoint part of the files with the same
+// per-project settings. A last job per OS (`check (<os>)`, the required check) aggregates them.
+//
+// Correctness never depends on the plan's balance: every shard discovers the whole repository
+// and validates it as an unsharded run does, then runs and validates only its own files; the
+// aggregation recomputes the plan from the same discovery, requires every shard's files and
+// report to match it, merges the reports and validates the merged report against the complete
+// inventory with verifyInventory, exactly as one unsharded run. A file in no shard, in two
+// shards, or failing in any shard therefore fails the aggregation.
+export const ciShardCount = 3;
+
+// Planning weights in seconds, from the green macOS run 39696359165 (files of 15 s or more).
+// They only balance the shards: a stale or missing entry makes one shard slower, never drops or
+// duplicates a file. A file without an entry, such as a new per-file registered suite, weighs its
+// project's default (roughly the observed mean of that project's shorter files, rounded up).
+const shardWeightSeconds = new Map([
+  ["apps/cli/tests/m2/s1-install-service.test.mjs", 194],
+  ["packages/terminal-web/probes/query-input.test.mjs", 99],
+  ["packages/terminal-web/tests/view-lifecycle.test.mjs", 93],
+  ["apps/cli/tests/m2/s2-restart-impact.test.mjs", 87],
+  ["apps/cli/tests/harness-page.test.mjs", 78],
+  ["apps/server/tests/author/worktrees.test.mjs", 77],
+  ["apps/cli/tests/m2/s3-pairing.test.mjs", 69],
+  ["apps/cli/tests/slow-worker-liveness.test.mjs", 53],
+  ["apps/server/tests/author/workspaces.test.mjs", 52],
+  ["apps/cli/tests/m1/s6-bindings.test.mjs", 51],
+  ["apps/cli/tests/m1/cli-usability.test.mjs", 49],
+  ["apps/server/tests/author/repo-registration.test.mjs", 34],
+  ["packages/terminal-engine/probes/recovery-pragmatic.test.mjs", 33],
+  ["apps/cli/tests/m2/install-safety.test.mjs", 32],
+  ["apps/cli/tests/m1/s2-task-checkout-mounts.test.mjs", 31],
+  ["apps/cli/tests/m1/s10-storage-identity.test.mjs", 29],
+  ["tests/integration/terminal-worker/qualification-identity.test.mjs", 27],
+  ["apps/cli/tests/scenarios.test.mjs", 25],
+  ["packages/terminal-web/tests/view-input.test.mjs", 24],
+  ["apps/cli/tests/m1/s1-repo-registration.test.mjs", 20],
+  ["apps/cli/tests/m1/s4-worktree-failures.test.mjs", 20],
+  ["apps/cli/tests/m1/s5-tabs-runs.test.mjs", 20],
+  ["packages/terminal-web/tests/view-recovery.test.mjs", 19],
+  ["packages/client/tests/terminal-reentry.test.mjs", 18],
+  ["apps/cli/tests/m2/s4-revoke.test.mjs", 16],
+  ["packages/terminal-web/probes/environment.test.mjs", 16],
+]);
+const projectWeightSeconds = new Map([
+  ["cli", 8],
+  ["tooling", 6],
+  ["server", 2],
+  ["terminal-worker", 2],
+  ["terminal-engine-probes", 3],
+]);
+
+// Files that must share a shard. The terminal-web project's three V1 browser suites write one
+// browser cleanup evidence directory that is validated as a whole (recordViewEvidence), so the
+// project is one unit; every other file is its own unit.
+function shardUnit(project, file) {
+  return project === "terminal-web" ? `project:${project}` : `file:${file}`;
+}
+
+// `entries` are the discovered files as { project, file } with repository paths. Returns
+// `count` shards, each { index (1-based), files (sorted) }. Deterministic: units are placed
+// heaviest first, ties broken by name, each on the currently lightest shard (lowest index on a
+// tie), so every runner of the same discovery computes the same plan.
+export function planShards(entries, count) {
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error(`Invalid shard count: ${count}`);
+  const units = new Map();
+  const projects = new Map();
+  for (const { project, file } of entries) {
+    if (typeof project !== "string" || typeof file !== "string" || !project || !file)
+      throw new Error("Shard planning needs a project and file for every entry");
+    if (projects.has(file) && projects.get(file) !== project)
+      throw new Error(`Test file belongs to two projects: ${file}`);
+    if (projects.has(file)) continue;
+    projects.set(file, project);
+    const key = shardUnit(project, file);
+    const unit = units.get(key) ?? { key, files: [], weight: 0 };
+    unit.files.push(file);
+    unit.weight += shardWeightSeconds.get(file) ?? projectWeightSeconds.get(project) ?? 1;
+    units.set(key, unit);
+  }
+  if (units.size < count)
+    throw new Error(`Cannot split ${units.size} test units into ${count} non-empty shards`);
+  const shards = Array.from({ length: count }, (_, index) => ({
+    index: index + 1,
+    files: [],
+    weight: 0,
+  }));
+  const ordered = [...units.values()].sort(
+    (a, b) => b.weight - a.weight || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  );
+  for (const unit of ordered) {
+    const lightest = shards.reduce((best, shard) => (shard.weight < best.weight ? shard : best));
+    lightest.files.push(...unit.files);
+    lightest.weight += unit.weight;
+  }
+  return shards.map(({ index, files, weight }) => ({ index, files: files.sort(), weight }));
+}
+
+// COVE_CI_SHARD is `<index>/<count>`; unset means the whole run as one shard (`pnpm test`).
+export function parseShard(value) {
+  if (value === undefined || value === "") return { index: 1, count: 1 };
+  const match = /^([1-9]\d{0,2})\/([1-9]\d{0,2})$/.exec(value);
+  const index = Number(match?.[1]);
+  const count = Number(match?.[2]);
+  if (!match || index > count) throw new Error(`COVE_CI_SHARD must be <index>/<count>: ${value}`);
+  return { index, count };
+}
+
+// The discovered files of a `vitest list --json` result, as planShards entries.
+export function discoveredEntries(discovered) {
+  return discovered.map((test) => ({ project: test.projectName, file: repositoryPath(test.file) }));
 }
 
 function repositoryPath(path) {
@@ -2029,6 +2147,220 @@ async function browserCloseDiagnostic() {
   return verified.outcome === "passed";
 }
 
+// The gate's Vitest run, limited to `files` (repository paths) when there are any. A shard names
+// its files as absolute paths, which Vitest matches by prefix; anything the filter matched beyond
+// them fails validation as an unexpected result. They come before every option, so no option
+// that takes an optional value (`vitest list --json [path]` writes to a following file name) can
+// consume a file name as its value.
+export function vitestRunArgs(files) {
+  return [
+    vitest,
+    "run",
+    ...files.map((file) => join(root, file)),
+    "--reporter=default",
+    "--reporter=json",
+    "--reporter=junit",
+    `--outputFile.json=${resultPath}`,
+    `--outputFile.junit=${junitPath}`,
+  ];
+}
+
+const shardPlanName = "shard.json";
+const shardResultName = "shard-result.json";
+const aggregateDir = join(evidenceDir, "aggregate");
+// The check.yml matrix OS label of a shard set, and the platform its shards must report.
+const runnerPlatforms = new Map([
+  ["ubuntu-latest", "linux"],
+  ["macos-latest", "darwin"],
+]);
+
+function shardPath(path, shardRoot) {
+  if (typeof path !== "string" || !path.startsWith(`${shardRoot}/`))
+    throw new Error(`Shard result path is outside its shard checkout: ${path}`);
+  return join(root, path.slice(shardRoot.length + 1));
+}
+
+function canonicalDiscovery(discovered) {
+  if (!Array.isArray(discovered)) throw new Error("Shard discovery is absent");
+  return JSON.stringify(
+    discovered
+      .map(({ projectName, file, name }) => [projectName, file, name])
+      .sort((a, b) => (a.join("\0") < b.join("\0") ? -1 : a.join("\0") > b.join("\0") ? 1 : 0)),
+  );
+}
+
+async function readShardJson(directory, name, label) {
+  try {
+    return JSON.parse(await readFile(join(directory, name), "utf8"));
+  } catch (error) {
+    throw new Error(`Shard artifact ${label} has no readable ${name}`, { cause: error });
+  }
+}
+
+// Validates the shard artifacts of one OS, each extracted into its own subdirectory of
+// `directory`, and returns the complete inventory. The aggregation is as strict as one unsharded
+// run: every shard must have recorded a passing result for the same commit, run and platform from
+// the same discovery; that discovery must pass verifyDiscovery against this checkout's own source
+// scan and suite registrations; each shard must have run exactly the plan's files; and the merged
+// report must pass verifyInventory and the view evidence check against the complete inventory.
+// A shard that failed, never ran, ran the wrong files or left a file out fails it.
+export async function aggregateShards(
+  directory,
+  { platform, sourceCommit, githubRunId, sources, suites, count = ciShardCount },
+) {
+  const names = (await readdir(directory, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  if (names.length !== count)
+    throw new Error(`Expected ${count} shard artifacts, found ${names.length}`);
+  const shards = new Map();
+  for (const name of names) {
+    const shardDirectory = join(directory, name);
+    const plan = await readShardJson(shardDirectory, shardPlanName, name);
+    const label = `${plan?.index}/${plan?.count}`;
+    if (
+      plan?.schemaVersion !== 1 ||
+      plan.count !== count ||
+      !Number.isSafeInteger(plan.index) ||
+      plan.index < 1 ||
+      plan.index > count
+    )
+      throw new Error(`Shard artifact ${name} is not one of ${count} shards`);
+    if (shards.has(plan.index)) throw new Error(`Shard ${label} appears twice`);
+    if (
+      plan.sourceCommit !== sourceCommit ||
+      plan.platform !== platform ||
+      plan.githubRunId !== githubRunId ||
+      typeof plan.root !== "string" ||
+      !plan.root.startsWith("/")
+    )
+      throw new Error(`Shard ${label} is from another commit, run, platform or checkout`);
+    const result = await readShardJson(shardDirectory, shardResultName, name);
+    if (result?.passed !== true || result.index !== plan.index || result.count !== count)
+      throw new Error(`Shard ${label} did not record a passing result`);
+    const report = await readShardJson(shardDirectory, "vitest-results.json", name);
+    shards.set(plan.index, { directory: shardDirectory, plan, report, label });
+  }
+  const ordered = [...shards.values()].sort((a, b) => a.plan.index - b.plan.index);
+  const discovery = canonicalDiscovery(ordered[0].plan.discovered);
+  for (const shard of ordered) {
+    if (canonicalDiscovery(shard.plan.discovered) !== discovery)
+      throw new Error(`Shard ${shard.label} discovered different tests`);
+    if (JSON.stringify(shard.plan.sources) !== JSON.stringify(sources))
+      throw new Error(`Shard ${shard.label} scanned different test files than this checkout`);
+  }
+  const discovered = ordered[0].plan.discovered.map((test) => ({
+    projectName: test.projectName,
+    file: join(root, test.file),
+    name: test.name,
+  }));
+  verifyDiscovery(discovered, sources, suites);
+  const plan = planShards(discoveredEntries(discovered), count);
+  const merged = {
+    success: true,
+    numTotalTests: 0,
+    numPassedTests: 0,
+    numFailedTests: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    testResults: [],
+  };
+  let viewShard;
+  for (const shard of ordered) {
+    const files = plan[shard.plan.index - 1].files;
+    if (JSON.stringify(shard.plan.files) !== JSON.stringify(files))
+      throw new Error(`Shard ${shard.label} ran a different file set than the plan`);
+    const { report } = shard;
+    if (report?.success !== true || !Array.isArray(report.testResults))
+      throw new Error(`Shard ${shard.label} Vitest result is absent or unsuccessful`);
+    const owned = new Set(files);
+    for (const suite of report.testResults) {
+      const name = shardPath(suite?.name, shard.plan.root);
+      if (!owned.has(repositoryPath(name)))
+        throw new Error(
+          `Shard ${shard.label} has a result outside its plan: ${repositoryPath(name)}`,
+        );
+      merged.testResults.push({ ...suite, name });
+    }
+    for (const key of [
+      "numTotalTests",
+      "numPassedTests",
+      "numFailedTests",
+      "numPendingTests",
+      "numTodoTests",
+    ]) {
+      if (!Number.isSafeInteger(report[key]) || report[key] < 0)
+        throw new Error(`Shard ${shard.label} Vitest totals are incomplete`);
+      merged[key] += report[key];
+    }
+    if (
+      suites.some((suite) => suite.project === "terminal-web" && owned.has(suite.file)) &&
+      viewShard === undefined
+    )
+      viewShard = shard;
+  }
+  const inventory = verifyInventory(discovered, merged, sources, suites);
+  if (inventory.some((suite) => suite.project === "terminal-web")) {
+    if (!viewShard) throw new Error("No shard ran the V1 browser suites");
+    await verifyBrowserCleanupEvidence(
+      join(viewShard.directory, "browser-cleanup"),
+      sourceCommit,
+      viewEvidenceCases(merged, inventory),
+    );
+  }
+  return {
+    inventory,
+    shards: ordered.map((shard) => ({
+      index: shard.plan.index,
+      files: shard.plan.files.length,
+      tests: shard.report.numTotalTests,
+    })),
+  };
+}
+
+function checkoutCommit() {
+  const checkout = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+  if (checkout.status !== 0 || !/^[a-f0-9]{40}\n?$/.test(checkout.stdout))
+    throw new Error("The checkout's source commit is unavailable");
+  return checkout.stdout.trim();
+}
+
+async function aggregateMain(args) {
+  const [directory, os, ...rest] = args;
+  const platform = runnerPlatforms.get(os);
+  if (!directory || !platform || rest.length > 0)
+    throw new Error("Usage: ci-test-gate.mjs --aggregate <shard artifact directory> <matrix os>");
+  await rm(aggregateDir, { recursive: true, force: true });
+  await mkdir(aggregateDir, { recursive: true });
+  try {
+    const result = await aggregateShards(resolve(directory), {
+      platform,
+      sourceCommit: checkoutCommit(),
+      githubRunId: process.env.GITHUB_RUN_ID ?? null,
+      sources: await readVitestOwnedTestFiles(),
+      suites: await readRequiredSuites(),
+    });
+    await writeFile(
+      join(aggregateDir, "inventory.json"),
+      `${JSON.stringify({ os, platform, ...result }, null, 2)}\n`,
+    );
+    console.log(
+      `Required suite inventory passed across ${result.shards.length} ${os} shards ` +
+        `(${result.shards.map(({ index, files, tests }) => `${index}: ${files} files, ${tests} tests`).join("; ")}): ` +
+        result.inventory
+          .map(({ project, file, passed }) => `${project}:${file} (${passed})`)
+          .join(", "),
+    );
+  } catch (error) {
+    await writeFile(
+      join(aggregateDir, "failure.json"),
+      `${JSON.stringify({ stage: "aggregate", message: String(error?.message ?? error) }, null, 2)}\n`,
+    );
+    throw error;
+  }
+}
+
 async function main() {
   if (process.argv[2] === "--diagnostic-identity") return diagnosticIdentity();
   if (process.argv[2] === "--browser-close-diagnostic") {
@@ -2040,6 +2372,7 @@ async function main() {
       throw error;
     }
   }
+  if (process.argv[2] === "--aggregate") return aggregateMain(process.argv.slice(3));
   await mkdir(evidenceDir, { recursive: true });
   await rm(join(evidenceDir, "smoke"), { recursive: true, force: true });
   await Promise.all(
@@ -2053,6 +2386,8 @@ async function main() {
       "inventory.json",
       "failure.json",
       "view-evidence.json",
+      shardPlanName,
+      shardResultName,
     ].map((name) => rm(join(evidenceDir, name), { force: true })),
   );
   let stage = "environment";
@@ -2060,6 +2395,7 @@ async function main() {
     const toolchain = await environment();
     if (process.argv[2] === "--environment") return;
     if (process.argv.length > 2) throw new Error(`Unknown argument: ${process.argv[2]}`);
+    const shard = parseShard(process.env.COVE_CI_SHARD);
     const checkout = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
     if (checkout.status !== 0 || !/^[a-f0-9]{40}\n?$/.test(checkout.stdout))
       throw new Error("Browser cleanup evidence source commit is unavailable");
@@ -2083,7 +2419,34 @@ async function main() {
     const sources = await readVitestOwnedTestFiles();
     const suites = await readRequiredSuites();
     // Validate discovery before running, then validate actual execution from a fresh report.
+    // Every shard validates the whole discovery, so a shard never runs from a partial view.
     verifyDiscovery(discovered, sources, suites);
+    const plan = planShards(discoveredEntries(discovered), shard.count);
+    const selected = new Set(plan[shard.index - 1].files);
+    // What the aggregation needs from this shard, written before the run so that a shard whose
+    // run fails still says what it was meant to run. Paths are repository-relative, so the
+    // aggregation can check them from another checkout.
+    await writeFile(
+      join(evidenceDir, shardPlanName),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        index: shard.index,
+        count: shard.count,
+        root,
+        sourceCommit,
+        runId,
+        githubRunId: process.env.GITHUB_RUN_ID ?? null,
+        platform: toolchain.platform,
+        arch: toolchain.arch,
+        files: plan[shard.index - 1].files,
+        sources,
+        discovered: discovered.map((test) => ({
+          projectName: test.projectName,
+          file: repositoryPath(test.file),
+          name: test.name,
+        })),
+      })}\n`,
+    );
     stage = "qualification-evidence";
     process.env.COVE_QUALIFICATION_EVIDENCE_DIR = await prepareWorkerQualificationEvidence({
       sourceCommit,
@@ -2104,15 +2467,7 @@ async function main() {
     });
     stage = "vitest";
     process.env.COVE_D_QUALIFIED_OUTPUT ??= join(evidenceDir, "qualified-local-admission", runId);
-    const runArgs = [
-      vitest,
-      "run",
-      "--reporter=default",
-      "--reporter=json",
-      "--reporter=junit",
-      `--outputFile.json=${resultPath}`,
-      `--outputFile.junit=${junitPath}`,
-    ];
+    const runArgs = vitestRunArgs(shard.count === 1 ? [] : [...selected]);
     const result = await recordedCommand(
       stage,
       process.execPath,
@@ -2128,11 +2483,24 @@ async function main() {
     stage = "report-validation";
     const report = JSON.parse(await readFile(resultPath, "utf8"));
     if ((await stat(junitPath)).size === 0) throw new Error("Vitest JUnit report is empty");
-    const inventory = verifyInventory(discovered, report, sources, suites);
+    // This shard's part of the inventory, validated exactly as a whole run is; with one shard it
+    // is the whole inventory.
+    const inventory = verifyInventory(
+      discovered.filter((test) => selected.has(repositoryPath(test.file))),
+      report,
+      sources.filter((file) => selected.has(file)),
+      suites.filter((suite) => selected.has(suite.file)),
+    );
     await writeFile(join(evidenceDir, "inventory.json"), `${JSON.stringify(inventory, null, 2)}\n`);
-    await recordViewEvidence(report, inventory);
+    // The terminal-web project is one planning unit, so it is all here or all elsewhere.
+    if (inventory.some((suite) => suite.project === "terminal-web"))
+      await recordViewEvidence(report, inventory);
+    await writeFile(
+      join(evidenceDir, shardResultName),
+      `${JSON.stringify({ index: shard.index, count: shard.count, passed: true })}\n`,
+    );
     console.log(
-      `Required suite inventory passed: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
+      `Required suite inventory passed${shard.count === 1 ? "" : ` for shard ${shard.index}/${shard.count}`}: ${inventory.map(({ project, file, passed }) => `${project}:${file} (${passed})`).join(", ")}`,
     );
   } catch (error) {
     await writeFile(
