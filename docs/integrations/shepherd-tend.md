@@ -479,7 +479,7 @@ PENDING：
   `m0-local startup unavailable`。`cove server start` 原样转发这两行。worker 另保留 spawn/pipe/握手前断联类别、安全 errno 与确实观察到的退出码或信号；断联不代表退出，原因仍限 512 字符。
 - `server install`、`service start`、`restart`、`upgrade` 等待新实例时，服务日志中出现本次启动的失败原因即在 stderr 写
   `cove: the server failed to start: <原因>; waiting for the service manager to start it again` 并继续等待；服务管理器因反复崩溃
-  放弃重启时立即以 1 退出（此前等满 90 秒），错误含原因；超时错误同样带上最近的原因。
+  放弃重启时立即以 1 退出（此前等满 90 秒），错误含原因；超时错误同样带上最近的原因。等待中的 `systemctl show` 与所有 journal 查询均最多 5 秒，并服从剩余等待期限；无法读取仍为未知，journal 与日志尾部均按 UTF-8 字节限制为 64 KiB。
 - 非终端下 `restart`、`upgrade`、`service stop`、`uninstall` 拒绝时（退出 2，含对前台 server 的 `restart`/`upgrade`），stderr 另列出
   将结束的 run 与全部平台后果（与终端确认时显示的相同，含 `cgroup-processes-end` 一条）；stdout 的 JSON 不变。
 - 远程命令的 build 提示改为比较 source build（与平台、路径无关；pre-auth identity 新增可选的 `sourceBuild`）：同一提交在
@@ -574,3 +574,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `cb94496`；#172、#175（M2 修复，未合入）                                   | 新增 PENDING #172/#175：Cove 自己的目录（`<home>/server`、`run`、`<home>/tsnet`）不符合属主 / 0700 / 非符号链接时启动以 1 失败（不再静默修正），已存在的数据目录及其上级不再检查；启动失败时 stderr 有 `startup-failed` 事件与具体原因；`install`/`service start`/`restart`/`upgrade` 等待中报告启动失败原因，服务管理器放弃时立即失败；非终端拒绝时 stderr 列出全部后果；build 提示比较与平台无关的 `sourceBuild`（pre-auth identity 新增可选字段）并改变文本；`tsnet logout` 后停止 `cove-tsnet serve`                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 2026-10-22 | PR #179 correction round 1（未合入） | 补全严格管理目录检查与 home 根 rendezvous；保留原子发布、目录身份核对与延迟创建 tsnet/state 的语义。 |
 | 2026-10-22 | PR #179 correction round 1（未合入） | worker 启动原因保留安全 errno 与确实观察到的退出状态；断联不作退出证明。 |
+| 2026-10-22 | PR #179 correction round 1（未合入） | 服务管理器轮询服从剩余期限，输出按 UTF-8 字节限制；读取失败仍为未知。 |
