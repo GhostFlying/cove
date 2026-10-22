@@ -316,6 +316,29 @@ test("a forward socket that cannot be opened backs off as a failed start, not as
   await until("the helper to run", () => node.pid !== undefined, 15_000);
 }, 40_000);
 
+test("a login superseded by a later login or logout does not publish its failure", async () => {
+  const { node, seedState, startRunning } = rig();
+  await seedState();
+  await startRunning();
+  const failed = (status) => status.warnings.some((line) => line.includes("the last login failed"));
+  const slowFail = "tskey-slowfail-0123456789abcdef";
+  // Failure, then a success that started after it but ended first.
+  const superseded = node.login(slowFail, 5_000, 10_000);
+  expect((await node.login(KEY, 5_000, 10_000)).kind).toBe("answered");
+  expect(await superseded).toEqual({ kind: "refused", code: "LOGIN_FAILED" });
+  expect(failed(await node.status())).toBe(false);
+  // Failure, then a logout.
+  const beforeLogout = node.login(slowFail, 5_000, 10_000);
+  expect((await node.logout()).kind).toBe("answered");
+  expect((await beforeLogout).kind).toBe("refused");
+  expect(failed(await node.status())).toBe(false);
+  // The control: the latest login's failure is published.
+  expect((await node.login(slowFail, 5_000, 10_000)).kind).toBe("refused");
+  expect((await node.status()).warnings[0]).toBe(
+    "the last login failed (LOGIN_FAILED): rejected late",
+  );
+});
+
 test("shutdown does not wait for an exit that a failed spawn never emits", async () => {
   const { node, context, seedState, home } = rig();
   await seedState();

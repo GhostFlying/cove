@@ -6,7 +6,7 @@
 //
 // Node state is `<home>/state/node.json`. Auth keys: one starting `tskey-fail` is rejected
 // (LOGIN_FAILED), `tskey-other` logs in as another node than the enrolled one (IDENTITY_CHANGED),
-// `tskey-hang` is never answered, `tskey-slow` holds the node (no ports, LOGIN_UNCERTAIN) for
+// `tskey-hang` is never answered, `tskey-slowfail` is rejected SLOW_MS later, `tskey-slow` holds the node (no ports, LOGIN_UNCERTAIN) for
 // SLOW_MS before it logs in, any other logs in. Without a key the login is interactive and answers
 // with a URL; it completes at a status shortly after. Files in `<home>` change behavior while
 // they exist: `hang-setports` applies a port set without answering, `slow-logout` closes the
@@ -114,6 +114,10 @@ lines.on("line", (line) => {
         return;
       }
       if (key.startsWith("tskey-hang")) return;
+      if (key.startsWith("tskey-slowfail")) {
+        setTimeout(() => refuse(id, "LOGIN_FAILED", "rejected late"), SLOW_MS);
+        return;
+      }
       if (key.startsWith("tskey-slow")) {
         held = true;
         setTimeout(() => {

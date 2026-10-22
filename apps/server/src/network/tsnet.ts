@@ -375,6 +375,8 @@ export class TsnetNode implements TsnetEntry {
   private portsAcknowledged = -1;
   private controlGeneration = 0;
   private controls = 0;
+  // Logins and logouts started so far: the latest one alone may publish loginFailure.
+  private controlsStarted = 0;
   private syncing = 0;
   private portWork: Promise<void> = Promise.resolve();
 
@@ -553,6 +555,7 @@ export class TsnetNode implements TsnetEntry {
   // an answer requested meanwhile; once it ends the node is observed again. See "Advertisement".
   private async control<T>(request: () => Promise<T>): Promise<T> {
     this.controls++;
+    this.controlsStarted++;
     this.controlGeneration++;
     this.advertised = undefined;
     try {
@@ -570,6 +573,9 @@ export class TsnetNode implements TsnetEntry {
     deadlineMs: number,
   ): Promise<TsnetLoginOutcome> {
     this.loginFailure = undefined;
+    // A login or logout that starts after this one supersedes it: this one's failure, ending
+    // later, must not be published over that one's outcome (control() counts the starts).
+    const started = this.controlsStarted;
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     let answer: HelperStatus;
@@ -592,7 +598,10 @@ export class TsnetNode implements TsnetEntry {
         };
       }
       // The ordinary failures keep their reason for status; a hold reports its own there.
-      if (error.code === "LOGIN_FAILED" || error.code === "LOGIN_TIMEOUT")
+      if (
+        (error.code === "LOGIN_FAILED" || error.code === "LOGIN_TIMEOUT") &&
+        started === this.controlsStarted
+      )
         this.loginFailure = sanitizedText(
           `the last login failed (${error.code}): ${error.detail}`,
           TSNET_LIMITS.warningChars,
