@@ -97,3 +97,27 @@ func TestLockHeldObservesWithoutCreatingOrKeeping(t *testing.T) {
 	}
 	b.Close()
 }
+
+func TestEnsureManagedDirRefusesWithoutRepair(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "managed")
+	if err := EnsureManagedDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureManagedDir(dir); err == nil {
+		t.Fatal("accepted mode 0755")
+	}
+	if fi, _ := os.Lstat(dir); fi.Mode().Perm() != 0o755 {
+		t.Fatal("changed existing mode")
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureManagedDir(alias); err == nil {
+		t.Fatal("accepted symbolic link")
+	}
+}

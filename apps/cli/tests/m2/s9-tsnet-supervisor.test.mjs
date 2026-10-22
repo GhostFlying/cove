@@ -339,17 +339,27 @@ test("a helper that cannot be spawned is retried with a growing backoff and runs
   expect(logs.some((line) => line.includes("tsnet-helper-started"))).toBe(true);
 }, 40_000);
 
+test("an invalid managed forward directory fails start instead of scheduling retries", async () => {
+  const { node, context, home, seedState, logged } = rig();
+  await seedState();
+  writeFileSync(join(home, "tsnet", "run"), "");
+  await expect(node.start(context)).rejects.toThrow("is not a directory");
+  expect(node.pid).toBeUndefined();
+  expect(logged).toHaveLength(0);
+});
+
 test("a forward socket that cannot be opened backs off as a failed start, not as a long run", async () => {
   const { node, context, seedState, logged, home } = rig();
   await seedState();
-  // A file where the socket's directory belongs.
-  writeFileSync(join(home, "tsnet", "run"), "");
+  // The managed directory is valid; a directory at the socket path makes listen fail.
+  // Socket/helper outages remain retryable, while managed-directory violations are fatal.
+  await mkdir(join(home, "tsnet", "run", "forward.sock"), { recursive: true, mode: 0o700 });
   expect(await node.start(context)).toBeUndefined();
   const gaps = await gapsOf(logged, "tsnet-unavailable", 3);
   expect(gaps[0]).toBeGreaterThanOrEqual(900);
   expect(gaps[1]).toBeGreaterThanOrEqual(1_900);
   expect((await node.status()).warnings[0]).toMatch(/forward socket cannot be opened/);
-  rmSync(join(home, "tsnet", "run"));
+  rmSync(join(home, "tsnet", "run", "forward.sock"), { recursive: true });
   await until("the helper to run", () => node.pid !== undefined, 15_000);
 }, 40_000);
 

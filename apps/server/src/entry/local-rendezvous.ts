@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { open, lstat, unlink, link, mkdir, rmdir } from "node:fs/promises";
+import { open, lstat, stat, unlink, link, mkdir, rmdir } from "node:fs/promises";
 import { dirname, isAbsolute, normalize } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
@@ -38,7 +38,8 @@ function publicationCause(error: unknown): string {
 export class LocalRendezvous {
   private handle: FileHandle | undefined;
   private ownership: { dev: number; ino: number } | undefined;
-  private directory: { path: string; dev: number; ino: number; created: boolean } | undefined;
+  private directory:
+    { path: string; dev: number; ino: number; created: boolean; managed: boolean } | undefined;
   private pending: Promise<void> | undefined;
   private temporary: string | undefined;
   private published = false;
@@ -93,8 +94,10 @@ export class LocalRendezvous {
   // identity recorded for the rendezvous directory (verifyDirectory) keeps publication and cleanup
   // on the directory checked here.
   private managedComponents(parent: string): string[] {
-    const home = this.homes.find((candidate) =>
-      parent.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`),
+    const home = this.homes.find(
+      (candidate) =>
+        parent === candidate ||
+        parent.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`),
     );
     if (!home) return [parent];
     const managed: string[] = [];
@@ -106,7 +109,19 @@ export class LocalRendezvous {
     if (!isAbsolute(this.path) || normalize(this.path) !== this.path || this.path.endsWith("/"))
       throw new RendezvousPathError(`${this.path} is not a normalized absolute path`);
     const parent = dirname(this.path);
-    for (const current of this.managedComponents(parent)) {
+    const components = this.managedComponents(parent);
+    if (components.length === 0) {
+      // The pre-existing home may be a symlink. Follow it, then pin the target identity.
+      const info = await stat(parent);
+      this.directory = {
+        path: parent,
+        dev: info.dev,
+        ino: info.ino,
+        created: false,
+        managed: false,
+      };
+    }
+    for (const current of components) {
       let created = false;
       let info;
       try {
@@ -117,19 +132,19 @@ export class LocalRendezvous {
         created = true;
         info = await lstat(current);
         // Recorded before the check, so that cleanup removes the directory this start created.
-        this.directory = { path: parent, dev: info.dev, ino: info.ino, created };
+        this.directory = { path: parent, dev: info.dev, ino: info.ino, created, managed: true };
       }
       checkManagedDirectory(current, info);
       if (current === parent)
-        this.directory = { path: parent, dev: info.dev, ino: info.ino, created };
+        this.directory = { path: parent, dev: info.dev, ino: info.ino, created, managed: true };
     }
     await this.verifyDirectory();
   }
   private async verifyDirectory(): Promise<void> {
     const directory = this.directory;
     if (!directory) throw new RendezvousPathError("the rendezvous directory was not prepared");
-    const current = await lstat(directory.path);
-    checkManagedDirectory(directory.path, current);
+    const current = await (directory.managed ? lstat(directory.path) : stat(directory.path));
+    if (directory.managed) checkManagedDirectory(directory.path, current);
     if (current.dev !== directory.dev || current.ino !== directory.ino)
       throw new RendezvousPathError(
         `the rendezvous directory ${directory.path} was replaced during publication`,

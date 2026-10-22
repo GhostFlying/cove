@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { CLOSURE_CLI, CLOSURE_NODE, CLOSURE_SERVER } from "./closure.js";
 import { releaseLock, tryExclusiveLock } from "./os-lock.js";
@@ -89,6 +89,28 @@ export function launcherScript(layout: InstallLayout): string {
   ].join("\n");
 }
 
+// Same managed-directory rule as the server store: reject existing violations; never chmod.
+// The caller supplies only a Cove-owned descendant, with an already prepared parent.
+export async function ensureInstallDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const info = await lstat(path);
+  const uid = process.getuid?.();
+  if (
+    uid === undefined ||
+    !info.isDirectory() ||
+    info.isSymbolicLink() ||
+    info.uid !== uid ||
+    (info.mode & 0o777) !== 0o700
+  )
+    throw new Error(
+      `Cove directory ${path} has owner uid ${info.uid} and mode ${(info.mode & 0o777).toString(8).padStart(4, "0")}; Cove's own directories must be owned by the current user, have mode 0700 and not be symbolic links (uid ${uid}, mode 0700)`,
+    );
+}
+
 // One installation change at a time per data directory: installing, activating, starting or
 // stopping the service, restarting, upgrading, pruning and uninstalling. The lock is an OS lock
 // that ends with the holding process (os-lock.ts), so a crashed command leaves nothing to take
@@ -96,7 +118,7 @@ export function launcherScript(layout: InstallLayout): string {
 // for minutes (a closure build, a restart waiting for the new instance). Returns the release
 // function.
 export async function acquireInstallLock(layout: InstallLayout): Promise<() => void> {
-  await mkdir(layout.installDirectory, { recursive: true, mode: 0o700 });
+  await ensureInstallDirectory(layout.installDirectory);
   const held = await tryExclusiveLock(layout.lock);
   if (!held)
     throw new Error(
