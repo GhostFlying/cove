@@ -8,8 +8,8 @@
 - M0 实施于 2026-09-26 获批；M0 退出与 M1 进入于 2026-10-15 获批（[M1](milestones/m1.md)）。
 - 用户于 2026-10-21 批准 M1 退出与 M2 规划，同日决定 D1–D14 并批准 [M2 计划](milestones/m2.md)（PR #142）。
   D9 是范围变更：Cove 不使用系统 Tailscale，两端只用内嵌的 tsnet；D14：客户端 tsnet 用按需启动的常驻进程。
-- **M2 的实现任务 T0–T6 已全部合入；T7（设计文档写回与本交接）随其 PR 合入后，M2 的任务全部完成。**
-  下一步是用户在两台真实机器上的试用（[M2 验收场景](milestones/m2.md#验收场景)末尾），发现的问题修复后再提交 M2 阶段 review；
+- **M2 的实现任务 T0–T7 已全部合入。两台真实机器的首轮试用已完成，正在修复试用发现的问题（#178、#179）。**
+  修复合入并验证实际 main 后，补验受影响的实机场景与尚未执行项，再提交 M2 阶段 review；
   M2 退出与 M3 进入都需要用户明确批准，完成任务不等于批准进入下一阶段。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
@@ -19,7 +19,7 @@
 
 ## Main
 
-main 为 `379905d`（PR #165 合入）。M2 的 PR 与合入提交（rebase 后的最后一个提交）：
+main 为 `cb94496`（PR #170 合入）。M2 的 PR 与合入提交（rebase 后的最后一个提交）：
 
 | 任务 | PR   | 合入于    | 内容                                                                  |
 | ---- | ---- | --------- | --------------------------------------------------------------------- |
@@ -33,6 +33,7 @@ main 为 `379905d`（PR #165 合入）。M2 的 PR 与合入提交（rebase 后�
 | —    | #166 | `9878530` | Vitest 门禁按 OS 分 3 片并聚合（#163）                                |
 | T5b  | #167 | `60860bd` | server 的 tsnet 节点、`server tsnet`、业务端口原始连接上限（#156）    |
 | T4   | #165 | `379905d` | 客户端 tsnet（常驻 `cove-tsnet dial`）、`remote tsnet`、`--via tsnet` |
+| T7   | #170 | `cb94496` | M2 设计、使用说明、tend 集成说明与当前交接                            |
 
 M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（测试 flake）。
 
@@ -51,11 +52,26 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - 用法：[开发说明 · M2 远程 server](development.md#m2-远程-server安装配对与入口)；
   tend 可用的接口：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)（PENDING 为空）。
 
-## 实机试用（下一步，由用户执行）
+## 活动修复与协调接管
 
-按 [M2 验收场景](milestones/m2.md#验收场景) 末尾的清单，在笔记本与 devbox（或两台 Mac，都不装 tailscaled）上约一小时：
-安装与服务（退出 SSH、注销、重启后的行为）、两端 tsnet 登录、经 SSH 与 tsnet 各配对与操作一次、
-在终端中运行真实 agent、撤销与重新配对、安装新构建后查看重启影响。要点：
+- 用户于 2026-10-22 授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`。
+  原协调会话不再活跃；当前 root 是唯一协调者，只负责派发、review 路由、集成、合入与本交接。
+- F1：[#179](https://github.com/GhostFlying/cove/pull/179)，分支 `p/luchengxuan/m2-172-path-checks`，head `16576b1`；
+  独立工作树 `.claude/worktrees/agent-a97fbe1ecc4fe90aa`，由新 Claude 实现会话负责目录、安装与服务、构建标识修正。
+- F2：[#178](https://github.com/GhostFlying/cove/pull/178)，分支 `p/luchengxuan/m2-173-remote-entries`，head `20e486e`；
+  独立工作树 `.claude/worktrees/agent-a102d66c7c4848ceb`，由新 Claude 实现会话负责配对入口与 SSH 生命周期修正。
+- 两个 PR 的必需 CI 已通过；两路完整独立 review（Codex 与 TraeX）均已完成，原始完整报告与第一轮修正计划已补入各 PR。
+  #179 有 3 个 TraeX P1 待核实处理；#178 没有 P0/P1。修正后按新 head/base 做增量复审与 CI，再串行合入并验证实际 main。
+- 当前阻塞：两个新 Claude 会话在首次模型调用时均连续收到 503，尚未执行代码工具；等待通道恢复或用户决定替代实现角色。
+  不修改共享凭据、路由或池配置。原报告、修正计划与会话运行记录保留；后续恢复前再次核对进程及工作树状态。
+- 本机不再跑 stress/load 或长时间并行循环；局部检查使用低并发、短时限，广泛检查交给 CI，Linux 验证走 `ssh devbox`。
+
+## 实机试用与补验
+
+首轮试用在笔记本、smallbox 与 sgbox 上完成，结果与缺陷记录于 #172–#175；试用创建的远端服务、客户端节点与临时资源已清理。
+合入修复后按 [M2 验收场景](milestones/m2.md#验收场景) 补验：同一配对记录切换 SSH/tsnet、默认数据目录启动、
+启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建后的升级、共享机器注销/开机行为仍未执行，不能记为通过。
+终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
 
 - 已知限制 #173：从另一台主机配对时，配对记录目前只保存 `--via` 所用的那一个入口，同一客户端也不能再配对同一 server，
   因此在笔记本上用 `--via` 在 SSH 与 tsnet 之间切换要等 #173（改为记录邀请中的全部入口）修复后才能试用。
@@ -73,6 +89,7 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - harness 从不自动重试可能已生效的控制命令，也不在没有用户手势时重新取得控制权。
 - 协议首个正式版本（含 alpha）之前不提升协议版本、不承诺兼容（M2 D12：build 不同只在 stderr 警告）。
 - loopback 入口接受任何 loopback IP 字面量 Host，只拒绝域名 Host（2026-10-22）；同主机端口抢占冒充 server 是已记录的残留限制（2026-10-21）。
+- 远程配对的默认入口取配对时所用入口（`--via ssh`、`--via tsnet`，同机无 `--via` 时为 loopback），可用 `remote entry default` 修改；#178 同步 D11。
 - tend 集成方向已接受但未排期（[设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)）：
   经本机 CLI，worker 是 Cove tab，需要 `tab send`；具体 milestone 另行批准。
 
