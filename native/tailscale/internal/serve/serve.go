@@ -119,7 +119,9 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := fsutil.EnsureManagedDir(cfg.Home); err != nil {
 		return err
 	}
-	if err := fsutil.EnsureManagedDir(filepath.Join(cfg.Home, "state")); err != nil {
+	// State existence is the Node supervisor's auto-start marker. A hello/availability
+	// probe must not create it: only an actual Manager.Login may materialize fresh state.
+	if err := fsutil.CheckManagedDir(filepath.Join(cfg.Home, "state")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := fsutil.CheckSocketPath(cfg.ForwardSocket); err != nil {

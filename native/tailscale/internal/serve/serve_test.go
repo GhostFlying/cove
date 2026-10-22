@@ -291,3 +291,28 @@ func TestManagedDirectoryViolationPrecedesHello(t *testing.T) {
 		}
 	}
 }
+
+func TestHelloWithoutLoginLeavesStateAbsent(t *testing.T) {
+	root := shortDir(t)
+	home := filepath.Join(root, "tsnet")
+	for attempt := 0; attempt < 2; attempt++ {
+		started := false
+		out := &bytes.Buffer{}
+		err := Run(context.Background(), Config{Home: home, ForwardSocket: filepath.Join(root, "fwd.sock"), Build: "test", In: strings.NewReader(hello), Out: out, Start: func(node.Config, string) (node.Node, error) {
+			started = true
+			return nil, errors.New("unexpected node start")
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), `"mode":"serve"`) {
+			t.Fatalf("hello missing: %s", out)
+		}
+		if started {
+			t.Fatal("hello started a node without login")
+		}
+		if _, err := os.Lstat(filepath.Join(home, "state")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hello created auto-start marker: %v", err)
+		}
+	}
+}
