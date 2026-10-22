@@ -469,7 +469,23 @@ M2 T4 客户端 tsnet（PR #165，合入于 `379905d`；CLI `27cfdb3`、`762f633
 
 PENDING：
 
-当前没有。
+#172、#175（M2 试用修复，未合入）：请求、stdout 的 JSON 与退出码不变；stderr 与启动条件的变化如下。
+
+- 数据目录下 Cove 自己的目录（`<home>/server`、其 `run`、`<home>/tsnet` 及其 `run`）不属于当前用户、不是 0700 或是符号链接时，
+  server 不启动并以 1 退出（此前 `<home>/server` 会被静默改为 0700）；已存在的数据目录本身与其上级目录（包括 `$HOME`）
+  不再检查属主与权限，此前被拒绝的“上级目录属于其他账户或可被组写”现在可以启动。
+- server 启动失败时 stderr 先有一行 `{"event":"startup-failed","atMs","category","cleanup","detail"}`，再有
+  `cove-server: <原因>`（原因写明目录、属主 uid、权限与规则，或失败的系统调用与错误码；不含秘密）。此前只有
+  `m0-local startup unavailable`。`cove server start` 原样转发这两行。
+- `server install`、`service start`、`restart`、`upgrade` 等待新实例时，服务日志中出现本次启动的失败原因即在 stderr 写
+  `cove: the server failed to start: <原因>; waiting for the service manager to start it again` 并继续等待；服务管理器因反复崩溃
+  放弃重启时立即以 1 退出（此前等满 90 秒），错误含原因；超时错误同样带上最近的原因。
+- 非终端下 `restart`、`upgrade`、`service stop`、`uninstall` 拒绝时（退出 2，含对前台 server 的 `restart`/`upgrade`），stderr 另列出
+  将结束的 run 与全部平台后果（与终端确认时显示的相同，含 `cgroup-processes-end` 一条）；stdout 的 JSON 不变。
+- 远程命令的 build 提示改为比较 source build（与平台、路径无关；pre-auth identity 新增可选的 `sourceBuild`）：同一提交在
+  不同机器或 OS 上不再提示。提示文本为 `cove: warning: <别名> runs source build <X>, this CLI is source build <Y>`，任一方
+  没有 source build 时为 `... runs build <X>, this CLI is build <Y>`。
+- `server tsnet logout` 删除节点后，server 停止 `cove-tsnet serve`（下一次 `login` 再启动），`status` 照常报 `logged-out`。
 
 PLANNED：
 
@@ -555,3 +571,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `379905d`（#170 review 更正）                                              | 更正 §2：`restart`/`upgrade`/`service stop`/`uninstall` 只结束服务管理器运行的 server 的 run，前台 server 须在原处停止；设备 token 不能调用 local-owner 方法（`server.tsnet.login`/`logout`）；原始连接总数上限计入全部连接，正常客户端在满额时也会被拒绝；30 天是清除的下限，被引用的记录保留，tombstone 内容见协议 §11.3；`server tsnet status` 不接受选项；dial 进程按 OS 用户与数据目录唯一；`PEER_IDENTITY_MISMATCH`（1047）只是声明保留，对端核对失败报为 `ENTRY_UNAVAILABLE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | 2026-10-22 | main `379905d`（M2 实机试用更正）                                               | 更正 §2 T5b：经 SSH 隧道连接的设备 `lastEntry` 为 `loopback`（server 看到的是隧道的 loopback 连接），只有经 tsnet 的为 `tsnet`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | 2026-10-22 | main `cb94496`（#177 更正）                                                     | 更正 §2：前台 server 的 `restart`/`upgrade` 先照常确认（非终端无 `--yes` 时输出 impact 并以 2 退出），确认之后才以 1 退出；操作记录满 30 天后才可清除、仍被引用的除外，清除后留下永久 tombstone                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 2026-10-22 | main `cb94496`；#172、#175（M2 修复，未合入）                                   | 新增 PENDING #172/#175：Cove 自己的目录（`<home>/server`、`run`、`<home>/tsnet`）不符合属主 / 0700 / 非符号链接时启动以 1 失败（不再静默修正），已存在的数据目录及其上级不再检查；启动失败时 stderr 有 `startup-failed` 事件与具体原因；`install`/`service start`/`restart`/`upgrade` 等待中报告启动失败原因，服务管理器放弃时立即失败；非终端拒绝时 stderr 列出全部后果；build 提示比较与平台无关的 `sourceBuild`（pre-auth identity 新增可选字段）并改变文本；`tsnet logout` 后停止 `cove-tsnet serve`                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
