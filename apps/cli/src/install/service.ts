@@ -55,16 +55,45 @@ export interface ServiceBackend {
   // Whether the manager gave up restarting the server after repeated crashes at or after
   // `sinceMs` (stoppedAfterCrashes, but never an earlier episode's): a start that is definitively
   // over. `cove` waits for a started server with it (install/commands.ts waitForNewInstance).
-  gaveUpSince(sinceMs: number): boolean;
+  gaveUpSince(sinceMs: number, deadlineMs?: number): boolean;
   // The latest output of the service (the server's stderr), at most SERVICE_LOG_BYTES and
   // SERVICE_LOG_LINES, from about `sinceMs` on; null when it cannot be read. Bounded in time as
   // well: a journal that cannot answer quickly is null, never a hang.
-  recentOutput(sinceMs: number): string | null;
+  recentOutput(sinceMs: number, deadlineMs?: number): string | null;
 }
 
 export const SERVICE_LOG_BYTES = 64 * 1024;
 export const SERVICE_LOG_LINES = 200;
 const JOURNAL_TIMEOUT_MS = 5_000;
+
+function probeTimeout(deadlineMs = Infinity): number {
+  return Math.max(0, Math.min(JOURNAL_TIMEOUT_MS, deadlineMs - Date.now()));
+}
+
+// Slice raw UTF-8 before decoding and discard a partial leading line, including its partial
+// code point. The returned string therefore also respects the promised UTF-8 byte limit.
+export function serviceOutputTail(bytes: Buffer, maxBytes = SERVICE_LOG_BYTES): string {
+  const start = Math.max(0, bytes.length - maxBytes);
+  let tail = bytes.subarray(start);
+  if (start > 0) {
+    const newline = tail.indexOf(10);
+    tail = newline < 0 ? Buffer.alloc(0) : tail.subarray(newline + 1);
+  }
+  return tail.toString("utf8").split("\n").slice(-SERVICE_LOG_LINES).join("\n");
+}
+
+function journalOutput(args: string[], deadlineMs?: number): string | null {
+  const timeout = probeTimeout(deadlineMs);
+  if (timeout <= 0) return null;
+  const result = spawnSync("journalctl", args, {
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return !result.error && result.status === 0 && result.stdout
+    ? serviceOutputTail(result.stdout)
+    : null;
+}
 
 // The last `maxBytes` of a file, cut to whole lines, or null when it cannot be read.
 export function fileTail(path: string, maxBytes: number = SERVICE_LOG_BYTES): string | null {
@@ -75,10 +104,13 @@ export function fileTail(path: string, maxBytes: number = SERVICE_LOG_BYTES): st
     const length = Math.min(size, maxBytes);
     const buffer = Buffer.alloc(length);
     readSync(descriptor, buffer, 0, length, size - length);
-    let text = buffer.toString("utf8");
-    // A tail that starts inside a line drops that partial line.
-    if (length < size) text = text.slice(text.indexOf("\n") + 1);
-    return text.split("\n").slice(-SERVICE_LOG_LINES).join("\n");
+    let tail = buffer;
+    // Drop partial lines before decoding, including a split leading UTF-8 code point.
+    if (length < size) {
+      const newline = tail.indexOf(10);
+      tail = newline < 0 ? Buffer.alloc(0) : tail.subarray(newline + 1);
+    }
+    return serviceOutputTail(tail);
   } catch {
     return null;
   } finally {
@@ -239,8 +271,10 @@ class LaunchAgent implements ServiceBackend {
     return `${this.domain}/${this.unit}`;
   }
 
-  private loaded(): Result | null {
-    const result = run("/bin/launchctl", ["print", this.target]);
+  private loaded(deadlineMs?: number): Result | null {
+    const timeout = probeTimeout(deadlineMs);
+    if (timeout <= 0) return null;
+    const result = run("/bin/launchctl", ["print", this.target], timeout);
     return result.status === 0 ? result : null;
   }
 
@@ -314,9 +348,12 @@ class LaunchAgent implements ServiceBackend {
 
   // The crash-stop record outlives the episode it reports until a start serves, so only one
   // written since `sinceMs` counts.
-  gaveUpSince(sinceMs: number): boolean {
+  gaveUpSince(sinceMs: number, deadlineMs?: number): boolean {
     const stoppedAt = crashStoppedAtMs(this.layout.home);
-    return stoppedAt !== null && stoppedAt >= sinceMs && !this.status().running;
+    if (stoppedAt === null || stoppedAt < sinceMs) return false;
+    const printed = this.loaded(deadlineMs);
+    // A failed/missing manager probe is unknown, never proof that it stopped.
+    return printed !== null && !/^\s*state = running$/m.test(printed.stdout);
   }
 
   // launchd appends the server's stdout and stderr to service.log (launchAgentPlist); the
@@ -407,14 +444,15 @@ class SystemdUser implements ServiceBackend {
     return check("systemctl", ["--user", ...args]);
   }
 
-  private show(): Record<string, string> {
-    const result = run("systemctl", [
-      "--user",
-      "show",
-      "-p",
-      "LoadState,ActiveState,SubState,MainPID,Result",
-      this.unit,
-    ]);
+  private show(deadlineMs?: number): Record<string, string> {
+    const timeout = probeTimeout(deadlineMs);
+    if (timeout <= 0) return {};
+    const result = run(
+      "systemctl",
+      ["--user", "show", "-p", "LoadState,ActiveState,SubState,MainPID,Result", this.unit],
+      timeout,
+    );
+    if (result.status !== 0) return {};
     const values: Record<string, string> = {};
     for (const line of result.stdout.split("\n")) {
       const at = line.indexOf("=");
@@ -472,32 +510,33 @@ class SystemdUser implements ServiceBackend {
 
   // start() and restart() reset a failed unit first, so a unit failed at its start limit now
   // failed during this start.
-  gaveUpSince(_sinceMs: number): boolean {
-    return this.status().stoppedAfterCrashes;
+  gaveUpSince(_sinceMs: number, deadlineMs?: number): boolean {
+    const values = this.show(deadlineMs);
+    return (
+      values.ActiveState === "failed" &&
+      systemdGaveUp(values.Result, () => this.journal(deadlineMs))
+    );
   }
 
   // The unit's journal from `sinceMs` (whole seconds, so a little earlier; the caller filters by
   // the lines' own timestamps), bounded in lines and time.
-  recentOutput(sinceMs: number): string | null {
-    const result = run(
-      "journalctl",
+  recentOutput(sinceMs: number, deadlineMs?: number): string | null {
+    return journalOutput(
       [
         ...["--user", "-u", this.unit, "--since", `@${Math.floor(sinceMs / 1000)}`],
         ...["-n", String(SERVICE_LOG_LINES), "-o", "cat", "--no-pager"],
       ],
-      JOURNAL_TIMEOUT_MS,
+      deadlineMs,
     );
-    return result.status === 0 ? result.stdout.slice(-SERVICE_LOG_BYTES) : null;
   }
 
   // The unit's latest journal messages (systemd's own lines among them), or null when the journal
   // cannot be read.
-  private journal(): string | null {
-    const result = run("journalctl", [
-      ...["--user", "-u", this.unit, "-n", String(JOURNAL_LINES)],
-      ...["-o", "cat", "--no-pager"],
-    ]);
-    return result.status === 0 ? result.stdout : null;
+  private journal(deadlineMs?: number): string | null {
+    return journalOutput(
+      [...["--user", "-u", this.unit, "-n", String(JOURNAL_LINES)], ...["-o", "cat", "--no-pager"]],
+      deadlineMs,
+    );
   }
 
   async unregister(): Promise<void> {
