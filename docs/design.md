@@ -40,11 +40,13 @@
 - 一期不做 managed agent，也不做 agent 原生 session 的无损迁移或远端数据库改写。
   跨设备时可考虑复制 rollout；是否实现及具体格式支持仍待定。
 - Mobile 提供相同核心工作流。
-- 初版 mobile 不内嵌 Tailscale，使用手机系统的 Tailnet 路径；移动端 SSH 后续评估。
+- Desktop 与 Mobile 经各自内嵌的 tsnet 客户端连接 server，不依赖设备上的系统 Tailscale（[M2 D9](milestones/m2.md#d9-网络入口不使用系统-tailscale范围变更)，
+  取代原先“初版 mobile 不内嵌 Tailscale”）；Electron 与 RN 如何承载 tsnet 在 M3 规划时决定。移动端 SSH 后续评估。
 - 单用户、多设备，设备凭据可撤销；host 网络与 Tailscale 共用相同授权规则。
 - 远程连接已选 SSH/Tailscale 提供通道加密与对端验证，Cove 保留一次性邀请和独立设备 token。
-  首期不提供裸 LAN/公网明文入口，不实现应用层 E2EE 或自建证书体系；本机使用 Unix socket/loopback。
-  Web 入口建议使用 Tailscale 自动管理证书的 HTTPS/WSS，详见 Server 架构 §9.5。
+  首期不提供裸 LAN/公网明文入口，不实现应用层 E2EE 或自建证书体系；本机使用 loopback（M2 未选 Unix socket）。
+  Web 入口原建议使用 Tailscale 自动管理证书的 HTTPS/WSS，其中依赖系统 tailscaled 的部分与 D9 冲突，
+  二期重新评估，详见 [Server 架构 §9.5](server-architecture.md#95-web-app-与-electron-共享边界)。
 - Cove 原生 CLI 是 first-class operator，按领域划分子命令，覆盖能力全集；后续新增能力必须提供完整 CLI 操作与配置。
   GUI 是同一能力的交互映射；agent 可使用 CLI，不依赖用户维护配置文件。
 - 初期不提供通用设置 UI，允许 CLI 与客户端通过同一授权 API 远程修改 server 设置。

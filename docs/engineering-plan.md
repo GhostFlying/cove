@@ -116,8 +116,9 @@ M0 即开始采集输入延迟和队列内存；移动端输入等后续风险�
 4. ~~数据库执行位置、schema migration 与 CLI bootstrap~~ 已由 M1 D5–D7 决定；执行库为 better-sqlite3。
 5. 平台构建、服务安装发现与升级策略；独立本地 server 的稳定安装目录是必要条件（M1 D7 留给 M2）。
 
-已确定的工具链选择不等于已完成集成：M0/M1 的本机 server 与 CLI 已实现并在 macOS/Ubuntu CI 上运行，
-Desktop、Mobile、远程接入与远端测试尚未实现。
+已确定的工具链选择不等于已完成集成：M0/M1 的本机 server 与 CLI、M2 的安装与用户服务、设备配对和 CLI 经 SSH 与 tsnet 的远程接入
+已实现并在 macOS/Ubuntu CI 上运行（tsnet 部分在 Tailscale 测试控制面上）；Desktop、Mobile 客户端及其接入、迁移与数据传输尚未实现，
+真实 Tailnet 与两台机器的远程验证留给 M2 的实机试用。
 
 ## 6. 多 agent 并行开发
 
@@ -239,7 +240,7 @@ Handoff 至少包含：当前获批阶段/范围、主干与活动分支、任�
 
 ### 6.7 原子提交与注释
 
-使用 Conventional Commits：`type(scope): subject`，scope 可省略；分支使用 `p/luchengxuan/<milestone>-<issue>-<topic>`。
+使用 Conventional Commits：`type(scope): subject`，scope 可省略；分支使用 `p/<user>/<milestone>-<issue>-<topic>`。
 一个提交解决一个明确问题，能独立理解、review 和回退；必要的对应测试和文档属于同一原子变更。
 不将无关改动打包，也不按文件机械拆分导致中间提交不可用。每个提交保持可构建、可检查。
 Rebase & merge 保留每个提交，因此不能依赖最后 squash 来清理提交；开发期也应保持清晰历史。
