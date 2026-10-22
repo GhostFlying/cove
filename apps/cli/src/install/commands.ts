@@ -251,7 +251,7 @@ const CONSEQUENCES: Record<string, string> = {
   "logout-stops-server": "logging out of macOS also stops the server and all its runs",
 };
 
-function describeImpact(impact: ServerImpactResult): string {
+export function describeImpact(impact: ServerImpactResult): string {
   const runs = impact.liveRuns.length
     ? impact.liveRuns
         .map((run) => `  run ${run.run.runId} (task ${run.taskId ?? "-"}, tab ${run.tabId ?? "-"})`)
@@ -321,6 +321,9 @@ async function confirmStop(
   if (args.flags.has("--yes")) return impact;
   if (!interactive) {
     print({ action, ...context, confirmed: false, state: "running", impact });
+    // Every consequence on stderr as well (#175), as a terminal would have been shown it: a
+    // script that reads only stderr must not miss, say, the end of its nohup'd processes.
+    process.stderr.write(describeImpact(impact));
     throw new StatusError(
       `${action} stops the running server: ${impact.liveRuns.length} live run(s) end. ` +
         `Confirm with --yes; ${done}`,
