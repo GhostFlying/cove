@@ -14,8 +14,10 @@ import { OpaqueIdSchema } from "@cove/protocol/identity";
 // The client's record of the servers it is paired with (m2 D5): one file per server,
 // `<home>/client/servers/<serverId>.json`, mode 0600 in 0700 directories, replaced atomically. It
 // holds the alias the operator addresses the server by, the device ID and token this client was
-// given at pairing (the only place the token is kept on disk), and the entries this client has
-// verified reach that server, with the default one (D11: never switched automatically).
+// given at pairing (the only place the token is kept on disk), and invitation-advertised candidate
+// entries (plus local loopback when paired on this host), with the default one (D11: never
+// switched automatically). Pairing need not have used every candidate; every use must verify
+// its channel identity and serverId before releasing credentials (see below).
 //
 // Entries (D11). Each names how this client reaches the server's loopback business port:
 // - loopback `{ port }`: the server is on this host (recorded when pairing over loopback);
