@@ -118,10 +118,10 @@ test("effective limits reject nonfinite, oversized and contradictory budgets", (
 });
 
 test("domain codes are complete and sequential without interpolating user bytes", () => {
-  // 21 M0 kinds keep their codes; the 21 M1 domain kinds and the 8 M2 kinds are appended.
-  expect(DOMAIN_ERROR_KINDS).toHaveLength(50);
+  // 21 M0 kinds keep their codes; the 21 M1 domain kinds and the 11 M2 kinds (8 of T0, 3 of the tsnet node) are appended.
+  expect(DOMAIN_ERROR_KINDS).toHaveLength(53);
   expect(DOMAIN_ERROR_KINDS.map((kind) => ERROR_CODES[kind])).toEqual(
-    Array.from({ length: 50 }, (_, index) => 1000 + index),
+    Array.from({ length: 53 }, (_, index) => 1000 + index),
   );
   expect(domainError("REPO_IN_USE")).toMatchObject({
     code: 1040,

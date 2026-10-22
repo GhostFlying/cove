@@ -108,7 +108,7 @@ const M2_RECORD_RESULT_KEYS: Readonly<Record<string, readonly string[]>> = Objec
   "auth.device.rotate": ["deviceId", "expiresAtMs", "secretDelivery"],
   "entry.set": ["resource", "appliesAfterRestart"],
   "server.tsnet.login": ["secretDelivery"],
-  "server.tsnet.logout": [],
+  "server.tsnet.logout": ["remoteLogoutConfirmed"],
 });
 function m2ProjectionHolds(value: z.infer<typeof OperationRecordFieldsSchema>): boolean {
   const keys = Object.keys(value.result ?? {});

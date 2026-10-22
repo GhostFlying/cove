@@ -79,6 +79,16 @@ export const DOMAIN_ERROR_KINDS = [
   // The operation ID is known but its full record was cleared after the retention period
   // (m2 D13). The request is never executed again under this ID.
   "OPERATION_HISTORY_EXPIRED",
+  // The server's tsnet node (m2 D10, T5b), appended likewise. A login of the node was refused
+  // and changed nothing: the control plane rejected the key, the login timed out before a node
+  // without state was enrolled (its partial state is removed), or the node is already logged in.
+  "TSNET_LOGIN_FAILED",
+  // A login of the enrolled node ended as another node. That node is stopped and serves nothing
+  // until a logout; paired clients pin the enrolled node's stable ID and must pair again.
+  "TSNET_IDENTITY_CHANGED",
+  // A login of the enrolled node did not finish and may still have completed. The node serves
+  // nothing until `server.tsnet.status` confirms its identity.
+  "TSNET_LOGIN_UNCERTAIN",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -183,6 +193,12 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   ENTRY_UNAVAILABLE: "none",
   // Inspect the resources the operation affected; the same ID is never executed again.
   OPERATION_HISTORY_EXPIRED: "refresh-resource",
+  // Another key, or log out first; the status says which (server.tsnet.status).
+  TSNET_LOGIN_FAILED: "fix-request",
+  // Log out, log in with the intended key, pair the clients again: the operator's decision.
+  TSNET_IDENTITY_CHANGED: "none",
+  // server.tsnet.status settles the hold; nothing is repeated on its own.
+  TSNET_LOGIN_UNCERTAIN: "none",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(

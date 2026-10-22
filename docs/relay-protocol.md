@@ -719,3 +719,18 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   Node 本体、native addon 与其他二进制不在其中。这是开发时的后备：安装版（m2 T3、D1）在安装时为完整闭包写入标识，
   提供后优先于运行时计算。它只用于诊断与版本提示，不参与兼容判定；runtime 与 worker 之间的 pipe 仍报 `0.0.0`，
   因为二者总来自同一构建。
+- server 的 tsnet 节点（m2 D10、T5b）：
+  - `server.tsnet.status` 的 `state` 为 `logged-out`（没有节点状态）、`stopped`、`starting`、`needs-login`、`running`
+    （节点后端状态），或 `failed`（节点或 `cove-tsnet` 助手不可用，第一条警告说明原因）。
+  - `hold` 为 `identity-changed`（一次登录以另一个节点结束，`nodeId` 是那个节点；只有登出能结束）、
+    `login-uncertain`（登录没有完成且可能已经完成，或交互登录尚未完成；之后的 `status` 会核实）或 `null`；
+    有 hold 时节点不监听任何端口。`ports` 是节点此刻在 Tailnet 上监听的端口（业务端口，有 `open` 邀请时加配对端口），
+    最多 16 个。`warnings` 最多 4 条、每条最多 512 个字符、不含控制字符，其中可能有控制面给出的第三方文本，
+    但不含 auth key 或登录 URL。
+  - `server.tsnet.logout` 的记录只保存 `remoteLogoutConfirmed`：`false` 表示节点状态已在本机删除，但控制面没有确认，
+    该节点可能仍列在 Tailnet 中，需在管理台移除。`server.tsnet.login` 的记录只保存 `secretDelivery`；
+    登录 URL 只在提交该操作的那次应答的 `secrets.loginUrl` 中出现。
+  - 登录失败的记录以固定消息的错误结束：`TSNET_LOGIN_FAILED`（被控制面拒绝、超时，或节点已登录；什么都没有改变，
+    没有状态的节点的半成品状态已删除）、`TSNET_IDENTITY_CHANGED`、`TSNET_LOGIN_UNCERTAIN`。原因的说明在
+    `server.tsnet.status` 的警告中，不进记录。登录进行中助手退出、或 server 重启，记录为 `requires_attention`
+    与 `RESULT_UNKNOWN`；结果用 `server.tsnet.status` 查看。

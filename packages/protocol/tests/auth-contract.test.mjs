@@ -27,6 +27,7 @@ import {
   SshTargetSchema,
   TsnetHostnameSchema,
   TsnetNodeIdSchema,
+  TsnetStatusResultSchema,
 } from "@cove/protocol/auth";
 import {
   DOMAIN_ERROR_KINDS,
@@ -153,8 +154,13 @@ test("M2 error kinds are appended with their codes and next actions", () => {
     ["PEER_IDENTITY_MISMATCH", "none"],
     ["ENTRY_UNAVAILABLE", "none"],
     ["OPERATION_HISTORY_EXPIRED", "refresh-resource"],
+    // The server's tsnet node (T5b), appended after the T0 kinds.
+    ["TSNET_LOGIN_FAILED", "fix-request"],
+    ["TSNET_IDENTITY_CHANGED", "none"],
+    ["TSNET_LOGIN_UNCERTAIN", "none"],
   ];
   expect(DOMAIN_ERROR_KINDS.slice(42)).toEqual(m2.map(([kind]) => kind));
+  expect(DOMAIN_ERROR_KINDS.at(-1)).toBe("TSNET_LOGIN_UNCERTAIN");
   m2.forEach(([kind, nextAction], index) => {
     const error = domainError(kind);
     expect(error).toMatchObject({ code: 1042 + index, nextAction, acceptance: "not-accepted" });
@@ -288,6 +294,7 @@ test("a record never stores a secret, and an M2 record fits its budget", () => {
     secretDelivery: "first-response-only",
     unclosedConnections: 65_536,
     appliesAfterRestart: true,
+    remoteLogoutConfirmed: false,
   };
   const projections = {
     "auth.invite.create": ["inviteId", "expiresAtMs", "secretDelivery"],
@@ -297,7 +304,7 @@ test("a record never stores a secret, and an M2 record fits its budget", () => {
     "auth.device.rotate": ["deviceId", "expiresAtMs", "secretDelivery"],
     "entry.set": ["resource", "appliesAfterRestart"],
     "server.tsnet.login": ["secretDelivery"],
-    "server.tsnet.logout": [],
+    "server.tsnet.logout": ["remoteLogoutConfirmed"],
   };
   for (const [method, keys] of Object.entries(projections)) {
     const largest = {
@@ -321,6 +328,56 @@ test("a record never stores a secret, and an M2 record fits its budget", () => {
   expect(Object.keys(projections)).toEqual(
     WRITE_RPC_METHODS.filter((method) => /^(auth|entry|server\.tsnet)\./.test(method)),
   );
+});
+
+test("the tsnet status reports the hold, ports and bounded warnings, and only a logout record says whether the control plane confirmed", () => {
+  const status = {
+    state: "running",
+    hostname: null,
+    nodeId: "nXXXXCNTRL",
+    nodeName: "cove-devbox.tailnet.ts.net",
+    hold: null,
+    ports: [7443, 7444],
+    warnings: [],
+  };
+  expect(TsnetStatusResultSchema.safeParse(status).success).toBe(true);
+  for (const state of ["logged-out", "stopped", "starting", "needs-login", "failed"])
+    expect(TsnetStatusResultSchema.safeParse({ ...status, state }).success).toBe(true);
+  for (const hold of ["identity-changed", "login-uncertain"])
+    expect(TsnetStatusResultSchema.safeParse({ ...status, hold }).success).toBe(true);
+  for (const invalid of [
+    { state: "LoggedOut" },
+    { hold: "IDENTITY_CHANGED" },
+    { ports: [0] },
+    { ports: Array.from({ length: 17 }, (_, index) => 1024 + index) },
+    { warnings: ["a\nb"] },
+    { warnings: ["x".repeat(513)] },
+    { warnings: ["a", "b", "c", "d", "e"] },
+    { hold: undefined },
+  ])
+    expect(TsnetStatusResultSchema.safeParse({ ...status, ...invalid }).success).toBe(false);
+
+  const logout = {
+    operationId: "o1",
+    method: "server.tsnet.logout",
+    revision: 3,
+    state: "succeeded",
+    result: { remoteLogoutConfirmed: false },
+  };
+  expect(validateOperationRecord(logout, encoder)).toEqual(logout);
+  for (const method of ["server.tsnet.login", "auth.device.revoke", "config.set"])
+    expect(validateOperationRecord({ ...logout, method }, encoder)).toBeNull();
+  // The tsnet errors a login record can end with are fixed-message domain errors.
+  for (const kind of ["TSNET_LOGIN_FAILED", "TSNET_IDENTITY_CHANGED", "TSNET_LOGIN_UNCERTAIN"]) {
+    const failed = {
+      operationId: "o2",
+      method: "server.tsnet.login",
+      revision: 2,
+      state: "failed",
+      error: domainError(kind, "accepted"),
+    };
+    expect(validateOperationRecord(failed, encoder)).toEqual(failed);
+  }
 });
 
 test("M2 schemas bound third-party and operator input", () => {
