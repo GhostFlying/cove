@@ -1,3 +1,4 @@
+import { sourceBuildId } from "../build-id.js";
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import {
@@ -134,6 +135,7 @@ export class AuthService {
         serverId: options.serverId,
         relayInstanceId: options.relayInstanceId,
         buildVersion: options.buildVersion,
+        sourceBuild: sourceBuildId(),
       }),
       redeem: (request, entry) => this.redeem(request, entry),
     });

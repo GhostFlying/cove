@@ -251,6 +251,10 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
   build ID 覆盖闭包全部内容与 cove-tsnet 本身：用占位 ID 构建一次 cove-tsnet 并计入其摘要，再用最终 ID 重建，所以 Go
   源码、工具链、构建参数、`GOAMD64`/`GOARM64` 等环境与 Go 嵌入的 VCS 信息（提交、工作区是否修改）都会改变 build ID。
   同一提交在不同路径的 checkout 中构建出的 build ID 不同（pnpm 按源路径命名 workspace 包），只多一个安装目录。
+- stamp 另记录来源 checkout 的 source build（`source`，#175）：开发 build ID 的文件加 cove-tsnet 的 Go 源码，不含 Node、
+  原生模块与路径，同一提交在任何机器、OS 与路径上都相同。远程命令的 build 提示（D12）在 CLI 与 server 都有 source build
+  时比较它，不同才在 stderr 写 `cove: warning: <别名> runs source build <X>, this CLI is source build <Y>`；任一方没有时
+  比较 build ID（`runs build <X>, this CLI is build <Y>`）。不同平台的同一提交因此不再每次提示。
   已安装的同名 build 只有内容摘要相同才复用，否则拒绝安装。
 - 安装新 build 不替换正在运行的 server：`server status` 显示 `pendingBuild`，`server restart`（或一步完成的
   `server upgrade`）之后才生效。

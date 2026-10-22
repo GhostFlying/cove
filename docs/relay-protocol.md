@@ -721,7 +721,9 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)），T1–T5b 实现了
   存储暂时无法提交时，该请求以 `UNAVAILABLE`（HTTP 503，WS 发送失败后以 capacity 关闭）拒绝且不执行，
   两个 token 都保持原状，客户端稍后重试；有效 token 不会因此得到 `UNAUTHENTICATED`。
 - 认证前身份 `cove-bootstrap-identity`：对合法 bootstrap 请求只返回 `bootstrapVersion`、`protocolVersion`、
-  `buildVersion`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
+  `buildVersion`、可选的 `sourceBuild`、`serverId` 与 `relayInstanceId`，供客户端在发送设备 token 前核对 serverId。
+  `sourceBuild`（#175，首次发布前加入，`protocolVersion` 不变）与 `buildVersion` 同样公开、同样有界，是 server 的
+  source build（见下文 `buildVersion` 一条）；server 不知道自己的 source build 时省略它。
   serverId 只用于识别 server，不能证明对端就是它：loopback 入口上，同一主机的其他进程（例如另一个系统用户）
   先占用业务端口或配对端口并回报相同的 serverId 时，客户端无法分辨。同主机端口抢占不在 T1 的防护范围内，
   这是已记录的残留限制（2026-10-21 用户决定）；跨主机入口的对端认证由 SSH（T2）与 tsnet（T4）提供。
@@ -737,7 +739,11 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)），T1–T5b 实现了
   取前 16 位，每个进程缓存一次。server 与 CLI 对同一构建得到同一值；找不到 workspace 根目录时为 `unidentified`。
   Node 本体、native addon 与其他二进制不在其中。这是开发时的后备：安装版（m2 T3、D1）在安装时为完整闭包写入标识，
   提供后优先于运行时计算。它只用于诊断与版本提示，不参与兼容判定；runtime 与 worker 之间的 pipe 仍报 `0.0.0`，
-  因为二者总来自同一构建。
+  因为二者总来自同一构建。安装版的 build ID 包含 Node、原生模块与 cove-tsnet，随平台不同，是安装身份。
+- source build（#175）格式与 `buildVersion` 相同，覆盖开发 build ID 的全部文件加 cove-tsnet 的 Go 源码
+  （`native/tailscale` 下非测试的 `.go`、`go.mod`、`go.sum`，不含 `dist/`），按相对路径计算，不含 Node、原生模块与任何路径，
+  所以同一提交在任何机器、OS 与路径上都相同。开发构建在运行时计算；安装版取 stamp 的 `source`（组装闭包时对来源
+  checkout 计算）。CLI 的 D12 提示在双方都有 source build 时比较它，否则比较 `buildVersion`；两者都只是提示。
 - server 的 tsnet 节点（m2 D10、T5b）：
   - `server.tsnet.status` 的 `state` 为 `logged-out`（没有节点状态）、`stopped`、`starting`、`needs-login`、`running`
     （节点后端状态），或 `failed`（节点或 `cove-tsnet` 助手不可用，第一条警告说明原因）。
