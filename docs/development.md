@@ -397,6 +397,9 @@ cove --home A server tsnet logout    # 删除节点状态；控制面未确认�
   不启动任何进程、不连控制面。server 启动不等节点就绪。`cove-tsnet` 意外退出或无法启动（例如可执行文件缺失）后按 1 秒起、
   翻倍到 60 秒的退避重启（实际运行满 60 秒后才回到 1 秒，status 说明无法启动的原因），恢复原状态而不重新登录；PTY、run 与 loopback、SSH 入口不受影响。本机协议不兼容时不重启，
   status 说明原因。server 停止时关闭它的 stdin（有序停止），最多等 20 秒后才强制结束。
+- logout 删除节点状态后（#175），没有其他 login 或 logout 进行时，server 以同样的有序停止结束 `cove-tsnet`，不再重启，
+  status 在本地回答 `logged-out`；下一次 login 等这次停止结束后启动新的 `cove-tsnet`。失败或结果不明的 login 之后不停止它
+  （交互登录可能仍在浏览器中完成）。
 - 节点只监听业务端口（与 loopback 业务端口同号）以及有未结束邀请时的配对端口（同号）；每个连接由 `cove-tsnet` 转交给对应的
   监听，与 loopback 连接经过同样的原始连接上限、凭据检查与准入，WhoIs 对端只用于显示与设备的最后入口记录。节点运行、无身份保留
   且两个端口都已开放时，邀请写入 `entries.tsnet = { nodeId, name }`；节点不可用时邀请只有 SSH 入口，两者都没有时为 `ENTRY_UNAVAILABLE`。
