@@ -360,7 +360,7 @@ export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 38 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 3 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 8 },
-  { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 8 },
+  { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 11 },
   {
     project: "terminal-engine",
     file: "packages/terminal-engine/tests/terminal-model.test.mjs",
