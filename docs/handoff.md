@@ -57,13 +57,14 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - 用户于 2026-10-22 授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`。
   原协调会话不再活跃；当前 root 是唯一协调者，只负责派发、review 路由、集成、合入与本交接。
 - F1：[#179](https://github.com/GhostFlying/cove/pull/179)，分支 `p/luchengxuan/m2-172-path-checks`，head `16576b1`；
-  独立工作树 `.claude/worktrees/agent-a97fbe1ecc4fe90aa`，由新 Claude 实现会话负责目录、安装与服务、构建标识修正。
+  独立工作树 `.claude/worktrees/agent-a97fbe1ecc4fe90aa`，由当前协调者的原生 subagent F1 负责目录、安装与服务、构建标识修正。
 - F2：[#178](https://github.com/GhostFlying/cove/pull/178)，分支 `p/luchengxuan/m2-173-remote-entries`，head `20e486e`；
-  独立工作树 `.claude/worktrees/agent-a102d66c7c4848ceb`，由新 Claude 实现会话负责配对入口与 SSH 生命周期修正。
+  独立工作树 `.claude/worktrees/agent-a102d66c7c4848ceb`，由当前协调者的原生 subagent F2 负责配对入口与 SSH 生命周期修正。
 - 两个 PR 的必需 CI 已通过；两路完整独立 review（Codex 与 TraeX）均已完成，原始完整报告与第一轮修正计划已补入各 PR。
   #179 有 3 个 TraeX P1 待核实处理；#178 没有 P0/P1。修正后按新 head/base 做增量复审与 CI，再串行合入并验证实际 main。
-- 当前阻塞：两个新 Claude 会话在首次模型调用时均连续收到 503，尚未执行代码工具；等待通道恢复或用户决定替代实现角色。
-  不修改共享凭据、路由或池配置。原报告、修正计划与会话运行记录保留；后续恢复前再次核对进程及工作树状态。
+- 用户于 2026-10-22 明确要求用当前协调者自己的 subagent 代替 Claude；此项执行者决定优先于工程 §6.1 的历史工具安排。
+  F1、F2 已派发，正在进行第一轮批量修正。此前 Claude 会话均因 503 退出且未执行代码工具，不再等待该通道或额外批准。
+  不修改共享凭据、路由或池配置。原报告、修正计划与会话运行记录保留；接管任务资源前核对进程及工作树状态。
 - 本机不再跑 stress/load 或长时间并行循环；局部检查使用低并发、短时限，广泛检查交给 CI，Linux 验证走 `ssh devbox`。
 
 ## 实机试用与补验
