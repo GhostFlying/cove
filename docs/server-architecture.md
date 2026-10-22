@@ -1,11 +1,14 @@
 # 独立 Server、接入与同步
 
 状态：设计草案。M0 实现了本机 server、terminal worker 与 CLI 的终端链路，M1 实现了本机持久存储、
-repo/task/workspace/tab 领域与操作记录（[M1](milestones/m1.md)）；远程接入、配对、迁移等仍未实现。
-独立持久服务、多客户端直连、内置 Tailscale/host 网络、
+repo/task/workspace/tab 领域与操作记录（[M1](milestones/m1.md)），M2 实现了本机安装与用户服务、设备配对与撤销，
+以及 loopback、SSH 与两端内嵌 tsnet 三种入口（[M2](milestones/m2.md)）；Desktop/Mobile 客户端、迁移与数据传输仍未实现。
+独立持久服务、多客户端直连、内嵌 Tailscale（tsnet）/host 网络、
 断开客户端后终端继续存活是已确认需求。数据同步与模块划分是建议方案。
 首期 server 支持 macOS/Linux；单用户多设备、可撤销设备凭据、统一网络入口授权已确认。
-远程连接已选择 SSH/Tailscale 安全通道，Cove 保留设备授权；首期不实现应用层 E2EE 或自建证书体系；二期 Web 入口建议委托 Tailscale 管理 HTTPS 证书。
+远程连接已选择 SSH/Tailscale 安全通道，Cove 保留设备授权；首期不实现应用层 E2EE 或自建证书体系。
+Cove 不使用系统 Tailscale（tailscaled），server 与客户端都只用自己内嵌的 tsnet 节点（[M2 D9](milestones/m2.md#d9-网络入口不使用系统-tailscale范围变更)，2026-10-21 用户决定）；
+二期 Web 入口原设想的 Tailscale 证书集成需按此重新评估（§9.5）。
 
 ## 1. Relay 的定位
 
@@ -14,7 +17,7 @@ repo/task/workspace/tab 领域与操作记录（[M1](milestones/m1.md)）；远�
 
 ```text
 Desktop ──┐
-Mobile  ──┼── SSH / system or embedded Tailscale ── Cove Server
+Mobile  ──┼── SSH / embedded tsnet (Tailscale) ──── Cove Server
 Web/CLI ──┘                                         ├── repo 注册
                                                     ├── task / workspace / 操作记录
                                                     ├── 多端状态同步
@@ -80,36 +83,70 @@ M1 已落实持久的操作身份：记录以 `(serverId, principalId, operation
 
 ## 4. Host 网络和内置 Tailscale
 
-两个接入方式指向同一个 serverId、数据库、relay 实例和终端集。
+所有入口指向同一个 serverId、数据库、relay 实例和终端集。Cove 不使用系统 Tailscale：server 与客户端都只用
+自己内嵌的 tsnet 节点，不要求、也不调用 tailscaled 或 `tailscale` CLI（[M2 D9](milestones/m2.md#d9-网络入口不使用系统-tailscale范围变更)，
+2026-10-21 用户决定，理由是有些设备无法安装 tailscaled）。原先“Host 已有系统 Tailscale 时经受限的 Tailnet 入口接入”的设计由此取消。
 
 ### Host 网络
 
-本机使用 Unix socket 或 loopback；远端经 SSH 转发到执行主机本地入口。
-Host 若已有系统 Tailscale，可通过受限的 Tailnet 入口接入，不必再注册一个内置节点。
-首期不提供裸 LAN/公网明文直连；配对入口同样只在上述安全边界内开放。
 已选择 HTTP + WebSocket；提供一致的认证、协议握手和状态同步，具体分工见 [通信载体](relay-protocol.md#41-通信载体已选择-http--websocket)。
+首期不提供裸 LAN/公网明文直连；配对入口同样只在下述安全边界内开放。
 监听范围需要显式配置，不因网络故障自动扩大到公网或其他接口。
-已实现（[M2 D3](milestones/m2.md#d3-本机入口与稳定端口选-a)）：本机入口是固定的 loopback 业务端口与配对端口，存于 server 的入口配置，
-`cove server install` 时选定，经 `cove server entry set` 修改并在下次启动时生效；SSH 转发到同一业务端口。
-server 的监听集合（`apps/server/src/network/listeners.ts`）统一启动与关闭 loopback 业务、配对与 tsnet 入口。
+
+M2 已实现（[D3](milestones/m2.md#d3-本机入口与稳定端口选-a)）：
+
+- 本机入口是固定的 loopback TCP 业务端口与配对端口，存于 server 的入口配置（`businessPort`、`pairingPort`、
+  `sshTarget`、`tsnetHostname`），`cove server install` 时在未配置时选定空闲端口，经 `cove server entry get/set/reset`
+  修改；端口与 tsnet 主机名在 server 下次启动时生效，`sshTarget` 用于下一个邀请。没有选择 Unix socket 作为主入口。
+- SSH 入口没有自己的监听：客户端用系统 `ssh -N -L` 把客户端 loopback 上的端口转发到执行主机 loopback 上的同一业务端口
+  （配对时转发到配对端口），验证 SSH host key。用法见[开发说明](development.md#设备配对与---server)。
+- 经隧道的请求以隧道本地端口作 Host，因此 loopback 入口接受任何 loopback IP 字面量 Host（`127.0.0.1:<端口>`、`[::1]:<端口>`），
+  只拒绝域名 Host（含 `localhost`）与格式错误的 Host（用户决定 2026-10-22，见 [relay-protocol §11.1](relay-protocol.md#111-入口身份和版本)）。
+  Host 校验只防 DNS rebinding；server 无法区分本机流量与本机隧道转发的流量，信任来自每个业务请求必需的设备 token 或本机秘密。
+- 业务端口在 HTTP 解析之前有原始连接上限：全部连接 128 条，尚未发完请求头的 64 条，请求头期限 5 秒（#156）；
+  满额时先关闭等待请求头最久的连接，以免不发完请求头的对端占满文件描述符。经 tsnet 转交的连接进入同一监听，受同样的上限。
+- 配对监听是单独的端口，只在有 `open` 邀请时开放（§9.3），不经上述原始连接上限，而有自己的上限：同时 8 个连接、
+  请求期限 5 秒、所有邀请合计每 60 秒 20 次兑换尝试，请求与响应各不超过 4 KiB。
+- server 的监听集合（`apps/server/src/network/listeners.ts`）按业务端口、配对端口、tsnet 的顺序启动，逆序关闭；
+  配对端口或 tsnet 节点无法启动时只记录日志，业务入口照常服务。
 
 ### 内置 Tailscale
 
-Server 可自行加入 Tailnet，作为独立节点提供入口，不要求另行部署系统 tailscaled。
-内置节点使用 Go tsnet 组件；业务 server 使用已选定的 TypeScript/Node.js。
+Server 自行加入 Tailnet，作为独立节点提供入口；内置节点使用 Go tsnet 组件（`native/tailscale` 构建的 `cove-tsnet`），
+业务 server 使用已选定的 TypeScript/Node.js。
 
-- 内置节点身份和状态使用持久目录，普通更新不重建节点。
-- 内置节点与系统 Tailscale 的状态分开，不覆盖 host 已有的节点配置。
-- Tailnet 可达性与 Cove 业务访问权限分层；两个入口遵守相同的配对和授权原则。
-- 初版 mobile 不内嵌 Tailscale，使用手机系统提供的 Tailnet 路径；server 内置节点不自动赋予手机可达性。移动端 SSH 接入留待后续评估。
+- 内置节点身份和状态使用持久目录（server 为 `<home>/tsnet/`，0700），普通重启不重建节点、不重新登录。
+- 内置节点不读写主机上 tailscaled 的状态与配置；主机上是否装有 tailscaled 与 Cove 无关。
+- Tailnet 可达性与 Cove 业务访问权限分层；各入口遵守相同的配对和授权原则，Tailnet 节点身份不替代 Cove 设备 token。
 - Tailscale 暂不可用时，终端继续运行；已启用且可达的 SSH 入口仍可独立服务，不降级到裸网络连接。
 
-可以单独启用一种入口，也可同时提供两种；这是配置能力，不是两套 server。
-自动选路是否进入一期待定。切换入口必须验证持久 server 身份，重新握手并恢复订阅，
+M2 已实现（[D10](milestones/m2.md#d10-tsnet-的进程边界选-a)、T5b）：
+
+- `cove-tsnet serve` 是 server 启动并监督的子进程（`apps/server/src/network/tsnet.ts`），不是独立服务，也不是载入 Node 的共享库。
+  节点有状态时随 server 启动；从未登录的 server 不启动任何进程、不连控制面。server 启动不等节点就绪。
+- 意外退出或无法启动后按 1 秒起、翻倍到 60 秒的退避重启，连续运行满 60 秒后回到 1 秒；重启后的进程从状态恢复节点，不重新登录。
+  本机协议不兼容时不重启。server 停止时关闭它的 stdin 作为有序停止，最多等 20 秒后强制结束。
+  PTY、run 与 loopback、SSH 入口都不等待它，它的崩溃或重新登录只影响 tsnet 入口。
+- 节点默认主机名为 `cove-<主机名第一个点之前的部分>`（入口配置 `tsnetHostname` 可改）；只在 Tailnet 上监听与 loopback 同号的业务端口，
+  以及有 `open` 邀请时的配对端口。接受的连接经 0700 目录中的 Unix socket 逐条转交 Node，附带 WhoIs 得到的对端节点，
+  只用于显示与设备的最后入口记录，不作授权。
+- 登录用 auth key（只经 stdin 帧传给 `cove-tsnet`）或交互登录 URL，由本机 CLI 的 `cove server tsnet login/status/logout`
+  执行（local-owner 方法，见 [relay-protocol §11.8](relay-protocol.md#118-m2-方法凭据与秘密边界)）。
+- 客户端也有自己的 tsnet 节点：CLI 经每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程连接 server 节点，
+  状态在客户端的 `<home>/tsnet-client/`，客户端节点不监听任何端口；每条流建立前按配对时记录的 server 节点稳定 ID 用 WhoIs 核对对端，
+  从不只凭 MagicDNS 名称信任对端（[D14](milestones/m2.md#d14-客户端-tsnet-节点的并发所有权选-b按需启动的常驻客户端进程)）。
+- Mobile 与 Desktop 同样经内嵌 tsnet 连接 server，不依赖设备上的系统 Tailscale；这推翻了原先“初版 mobile 不内嵌 Tailscale，
+  使用手机系统提供的 Tailnet 路径”的设计。Electron 与 RN 如何承载 tsnet 客户端（进程、原生模块、平台网络策略）在 M3 规划时决定，
+  M2 没有为它们预建代码或接口（[M2 对 M3 的影响](milestones/m2.md#对-m3-的影响不在-m2-实现)）。移动端 SSH 接入留待后续评估。
+
+可以单独启用一种入口，也可同时提供多种；这是配置能力，不是多套 server。
+自动选路不进入首期：CLI 用 `--via ssh|tsnet` 或配对记录中固定的默认入口，入口失败时直接失败并列出可用入口，
+读写命令都不自动换入口（[D11](milestones/m2.md#d11-cli-作为远程-operator选-a)）。切换入口必须验证持久 server 身份：
+客户端先核实通道对端（SSH host key 或 tsnet 节点稳定 ID）与 serverId，再发送设备凭据，
 不能只凭同名 host 认定同一服务，不能创建重复 task 或 relay。
 
-网络 listener 的关闭、重新登录或重建不能顺带 dispose PTY。
-网络层依赖升级如何与 PTY 持有进程隔离，属于后续进程划分评估。
+网络 listener 的关闭、重新登录或重建不能顺带 dispose PTY。tsnet 已按 D10 放在独立子进程中；
+其他网络层依赖升级如何与 PTY 持有进程隔离，属于后续进程划分评估。
 
 ## 5. 持久服务与 PTY 的存活边界
 
@@ -117,16 +154,21 @@ Server 可自行加入 Tailnet，作为独立节点提供入口，不要求另�
 Server 内部由 runtime 处理业务与连接，有界 terminal worker 子进程池处理终端。
 一期不再增加可跨 runtime 重启存活并被重新接管的 PTY daemon；worker 的进程隔离不等于 keeper 承诺。
 Desktop 退出、崩溃或更新不能隐式重启 server。服务入口与运行文件需要稳定存放，不能依赖
-Desktop 更新时会被替换的临时路径或开发 checkout；具体安装和服务管理方式后续选型。
-M1 仍从仓库构建产物前台运行（`cove server start`），稳定安装目录与服务管理留给 M2
-（[M1 D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)）。
-M2 已实现（[D1](milestones/m2.md#d1-安装目录布局选-a)、[D2](milestones/m2.md#d2-服务管理器与各平台的运行保证macos-launchagentlinux-systemd-user--linger停止清理用默认值)）：
+Desktop 更新时会被替换的临时路径或开发 checkout。
+M1 从仓库构建产物前台运行（`cove server start`，[M1 D7](milestones/m1.md#d7-cli-bootstrap安装目录与-server-生命周期选-a)），
+没有 systemd user 的主机（容器等）仍可这样运行。M2 已实现（[D1](milestones/m2.md#d1-安装目录布局选-a)、[D2](milestones/m2.md#d2-服务管理器与各平台的运行保证macos-launchagentlinux-systemd-user--linger停止清理用默认值)）：
 `cove server install` 把一次构建的完整运行闭包（含固定版本的 Node、原生模块与 `cove-tsnet`）装到 `<home>/install/<build>/`，
-`current` 原子切换，服务单元只引用 `current`；macOS 用 LaunchAgent，Linux 用 systemd user unit（默认 `KillMode`，需 linger）。
+`current` 原子切换，服务单元与 `<home>/bin/cove` 只引用 `current`；切换前用目标 build 检查数据库 schema，不兼容时拒绝且数据库不变。
+macOS 用 LaunchAgent（gui 域，登录时启动、注销时停止），Linux 用 systemd user unit（默认 `KillMode=control-group`，
+注销后与开机后运行需要 linger，CLI 只提示 `loginctl enable-linger`）。服务脱离启动它的 shell、SSH 会话与任何客户端。
+`cove server status` 报告已安装与正在运行的 build、尚未生效的 build（`pendingBuild`）、服务状态与上次启动原因。
 安装新版本不替换运行中的 server，`cove server restart` 先列出将结束的 run 与平台后果（`server.impact`），确认后才执行；
 连不上但仍持有实例锁的 server 视为可能在运行，不当作已停止（不跳过确认，prune 不删 build）。
-崩溃重启有上限：systemd 用单元的启动次数限制，launchd 下由 server 按启动记录计数，超出后有序停止并以 0 退出。
-用法与回退步骤见[开发说明](development.md#m2-安装与用户服务t3)。
+崩溃重启有上限（300 秒内 5 次）：systemd 用单元的启动次数限制，launchd 下由 server 按启动记录计数，超出后有序停止并以 0 退出；
+两者都在 `cove server service status` 中显示为 `stoppedAfterCrashes`，`cove server service start` 重新开始。
+systemd 停止或重启服务会结束 cgroup 内全部进程，包括 Cove 终端里用 `nohup`、tmux 脱离的进程，这一后果列在重启影响中；
+launchd 下脱离的进程在测试中保留，但这是 launchd 的行为，不是承诺。
+用法与回退步骤见[开发说明](development.md#安装与用户服务)。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。
 
 Server 独立启动，可按目标 OS 集成为后台服务。即使没有客户端或没有 PTY，也不因空闲退出。
@@ -238,7 +280,9 @@ Schedule/Run 持久化，操作记录用于重启后核实；具体补跑、并�
 命令名与内部存储尚未冻结，下面是候选契约而非已实现的 CLI。
 M1 只实现了其中一小部分：server 配置存入本机 SQLite（[D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)），
 `cove config get/set/reset workspaceRoot` 带 `--expected-revision` 与 `--operation-id`，服务未运行时用
-`cove server init` 初始化（D7）；schema/validate/status、desired/effective 与远程修改仍是候选。
+`cove server init` 初始化（D7）。M2 增加了入口配置（`cove server entry get/set/reset`，同样带 revision 与 operationId，
+需要重启生效的项在输出中以 `restartRequired` 标明），并让已配对设备经 `--server` 走同一 RPC 领域方法远程读取与修改
+这两类配置（[M2 D11](milestones/m2.md#d11-cli-作为远程-operator选-a)）；schema/validate/status 与 desired/effective 仍是候选。
 
 ### 9.1 按作用域保存配置
 
@@ -286,7 +330,7 @@ Server 身份与设备身份分开；serverId 是标识，不是身份的密码�
   邀请由 server 签发和核销，不能用 desktop 自己的长期凭据代替。
 - Mobile 配对后使用自己的凭据直接连接 server，不依赖 desktop 继续在线。
 
-已确认的配对约束，具体字段、端口和重试机制尚未冻结：
+已确认的配对约束（具体字段、端口与响应丢失的处理由 M2 D6 决定并实现，见本节末）：
 
 - 邀请有短期有效期、单次兑换约束及取消能力。仅存在有效邀请时开放配对监听；
   最后一个邀请已兑换、过期或取消后关闭监听，不影响业务端口、已连接设备和 PTY。
@@ -295,9 +339,10 @@ Server 身份与设备身份分开；serverId 是标识，不是身份的密码�
   客户端先验证 SSH/Tailscale 通道对端再提交 secret；首期不引入 Cove 自有加密公钥。
   兑换后使用独立长期设备 token，邀请 secret 不能继续充当设备凭据。
   若未来提供短数字码，需要单独设计抗猜测和首次信任流程，不将其等同于高熵 token。
-- 实现建议：邀请核销与设备注册原子完成；配对响应丢失后的重试需绑定同一申请设备，不能让第二台设备复用邀请。
+- 邀请核销与设备注册在一个事务内原子完成。配对响应丢失后不重试（M2 D6，用户决定）：用户重新邀请，
+  丢失响应留下的设备标为 never-connected，可以撤销。
 - 创建邀请需要配对管理权限；设备撤销后不能继续签发邀请。由 desktop 邀请的 mobile 是独立设备，
-  撤销 desktop 不隐式撤销 mobile；未兑换邀请的撤销关联规则另定。
+  撤销 desktop 不隐式撤销 mobile；撤销一台设备同时取消它创建且未兑换的邀请（M2 D8）。
 - serverId 与 SSH/Tailscale 通道身份分开建模；通道凭据轮换不改变 serverId。
   客户端将 serverId 关联到经过验证的通道入口；新增入口或对端身份变化必须验证信任关系，
   不能凭同名 ID 静默接受。通道身份重置后重新建立信任，不自动删除 Cove 的 task 或设备记录。
@@ -305,36 +350,55 @@ Server 身份与设备身份分开；serverId 是标识，不是身份的密码�
 在 Tailnet 可达并不自动成为 Cove 管理设备，host 网络也不因是局域网而省略授权。
 Server 间迁移单独授予操作范围内的传输/交接权限，不复制发起客户端的长期密钥。
 
+M2 已实现（[D4](milestones/m2.md#d4-设备凭据格式与-server-端存储选-a)–[D8](milestones/m2.md#d8-撤销对活动连接的语义选-a)，
+流程与状态见 [M2 配对流程](milestones/m2.md#配对流程与状态)）：
+
+- `cove auth invite create` 签发邀请字符串 `cove-invite:v1:<base64url>`，含 serverId、入口（SSH 目标、server tsnet 节点的
+  稳定 ID 与名称）、配对端口、inviteId、256 位一次性 secret 与到期时间（默认 10 分钟，最长 24 小时）；
+  每个邀请错误 secret 达到 5 次后作废，另有全局速率上限（§4）。已配对设备可经 `--server` 远程签发。
+- `cove remote add` 只从隐藏提示或 stdin 读入邀请，不经命令行参数；先核实通道对端与 serverId，再提交 secret。
+  兑换成功得到长期设备 token `cove_d1_<deviceId>.<secret>`，server 只存 secret 的 SHA-256 并常数时间比较；
+  客户端把 token 与已核实的入口存在 `<home>/client/servers/<serverId>.json`（0600）。
+- 本机 CLI 不用设备 token，仍用数据目录中的每次启动秘密，是不可撤销的本机所有者（D7）。所有设备权限相同；
+  服务的安装、启停与 tsnet 登录只能在本机执行。
+- 撤销在一个事务内标记设备并取消它未兑换的邀请；提交后拒绝它的新请求（`DEVICE_REVOKED`），以撤销原因关闭它的全部 WebSocket，
+  释放它持有的终端控制权（不 resize）；它已受理的操作照常完成。`cove auth device revoke` 有界等待这些连接关闭，
+  超时报告未关闭的连接数并以失败退出，而不是报告成功。撤销不移除该设备的 Tailnet 节点。
+- `cove auth device rotate` 两阶段轮换本客户端自己的 token：新 token 首次认证成功前旧 token 仍有效。
+
 ### 9.4 安全通道与设备授权（已选择 SSH/Tailscale）
 
 首期由 SSH/Tailscale 提供传输加密、通道对端验证和网络准入；Cove 提供一次性邀请、
 每设备长期 token、业务授权及撤销。Cove 不实现应用层 E2EE，不要求用户管理 Cove TLS 证书。
 HTTP JSON-RPC、业务事件 WS、终端 WS 和 HTTP 文件传输保持原有契约，全部置于安全通道内。
 
-| 场景            | 已选择的接入边界                                                           |
-| --------------- | -------------------------------------------------------------------------- |
-| 本机            | Unix socket 或 loopback，保留相应本机/设备授权                             |
-| SSH             | 转发到运行 Cove 的主机本地入口，验证 SSH host key                          |
-| 内嵌 Tailscale  | tsnet listener 接收 Tailnet 流量，再经同机受控 IPC 转交 Node               |
-| 系统 Tailscale  | 限定 Tailnet 入口，执行网络访问策略和 Cove 设备授权                        |
-| Mobile          | 首期依赖手机系统 Tailscale，独立连接 server；移动端 SSH 后续评估           |
-| Web App（二期） | 当前只考虑经 Tailscale；建议同源 HTTPS/WSS 入口，证书由 Tailscale 集成管理 |
-| Server 间迁移   | 经 SSH/Tailscale，使用操作范围内的传输授权                                 |
+| 场景            | 已选择的接入边界                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| 本机            | loopback（M2 未选 Unix socket），本机秘密或设备 token                                                 |
+| SSH             | 系统 `ssh -L` 转发到运行 Cove 的主机 loopback 入口，验证 SSH host key                                 |
+| 内嵌 Tailscale  | server 的 tsnet 节点接收 Tailnet 流量，再经同机受控 IPC 转交 Node；客户端经自己的 tsnet 节点连接      |
+| Mobile/Desktop  | 经各自内嵌的 tsnet 客户端独立连接 server，不依赖系统 Tailscale；承载方式 M3 决定，移动端 SSH 后续评估 |
+| Web App（二期） | 原设想经系统 Tailscale 的同源 HTTPS/WSS 入口；与 D9 冲突，二期重新评估（§9.5）                        |
+| Server 间迁移   | 经 SSH/Tailscale，使用操作范围内的传输授权                                                            |
 
 配对监听仅在有效邀请期间开放，并遵守同样的通道边界。通道中断或不可用时不退回裸 LAN/公网地址，
 也不扩大监听范围；持久 server 与 PTY 继续运行。首期不提供无安全通道的远程直连。
 
 普通 SSH 端口转发后的 HTTP 请求不自动携带原始 SSH 用户身份；Tailscale 节点身份也不等同于
 Cove 应用设备身份。因此业务请求仍校验 Cove 设备 token，撤销同时失效活跃连接和传输权限。
-设备 token 的生成、存储、重试兑换和失效传播细节在实现设计中确定；不为首期引入 JWT 或客户端证书。
+设备 token 的生成、存储、兑换和失效传播已由 M2 D4–D8 确定并实现（§9.3）；不为首期引入 JWT 或客户端证书。
 转发请求的 Host 是隧道本地端口，server 因此接受任何 loopback IP 字面量 Host，只拒绝域名 Host（用户决定 2026-10-22，
 见 [relay-protocol §11.1](relay-protocol.md)），客户端不需要改写 Host 的中继。
 
 通道必须保护到 Cove 所在主机；经 subnet router 或 SSH 跳板后再明文跨主机转发，不自动满足这个条件。
-系统 Tailscale 模式不能仅根据来源属于 100.64.0.0/10 判断可信；代理提供的身份信息只能来自受控入口，
-不能接受普通请求自行声明的身份 header。Cove 撤销不等同于撤销 SSH 账号或 Tailscale 节点权限。
+不能仅根据来源属于 100.64.0.0/10 判断可信；对端节点信息只来自 `cove-tsnet` 在受控 IPC 上附带的 WhoIs 结果，只用于显示与审计，
+不能接受普通请求自行声明的身份 header。Cove 撤销不等同于撤销 SSH 账号或 Tailscale 节点权限：被撤销设备的 Tailnet 节点
+需用户在 Tailscale 管理台另行移除。
 
-客户端持久记录 serverId 及其已验证入口，换入口前验证通道对端，再发送设备凭据。
+客户端持久记录 serverId 及其已验证入口，换入口前验证通道对端，再发送设备凭据。M2 中客户端在发送 token 前核对：
+SSH 入口由 ssh 按用户的 known_hosts 验证 host key（`StrictHostKeyChecking=yes`）；tsnet 入口由 dial 进程按配对时记录的
+server 节点稳定 ID 用 WhoIs 核对对端；各入口再核对 bootstrap 回报的 serverId。loopback 入口只核对 serverId，
+同一主机上其他进程抢占端口并冒充 server 是已记录的残留限制（[relay-protocol §11.8](relay-protocol.md#118-m2-方法凭据与秘密边界)）。
 Mobile 仍需验证 iOS/Android 对 HTTP/WS 的平台网络策略、重连和文件续传；系统 VPN 加密不会改变 URL scheme。
 是否由 RN 网络层或 WebView 承载终端连接，依接入和性能验证确定，不因本次决策锁定数据桥接方案。
 
@@ -345,11 +409,14 @@ Cove 自建公共 CA 签发流程、自签名证书固定信任、应用层 E2EE
 依据：[OpenSSH 转发](https://man.openbsd.org/ssh.1)、
 [Tailscale 加密](https://tailscale.com/docs/concepts/tailscale-encryption)、
 [tsnet 身份与监听接口](https://tailscale.com/docs/reference/tsnet-server-api)、
-[React Native 网络限制](https://reactnative.dev/docs/network)。以上为已选设计，尚无 Cove 接入实现验证。
+[React Native 网络限制](https://reactnative.dev/docs/network)。CLI 的 SSH 与 tsnet 接入已在 M2 实现，
+并由自起 sshd 与 Tailscale 测试控制面上的场景测试覆盖；真实 Tailnet 与两台机器的验证属于 M2 的实机试用，Mobile/Desktop 接入尚无实现。
 
 ### 9.5 Web App 与 Electron 共享边界
 
 已确认：macOS desktop 使用 Electron；Web App 纳入二期，当前仅考虑经 Tailscale 访问。
+下面的接入建议写于 M2 D9 之前：其中依赖系统 tailscaled 的部分（浏览器设备上的系统 Tailnet 路径、Tailscale Serve）
+与“Cove 不使用系统 Tailscale”冲突，二期规划时重新评估（[M2 对 M3 的影响](milestones/m2.md#对-m3-的影响不在-m2-实现)）。
 Web 不要求 desktop 在线，不在浏览器内嵌 Tailscale 或提供 SSH 客户端。
 浏览器所在设备须有可用的系统 Tailnet 路径，且满足访问策略。
 一期保持共享 UI/client 与宿主能力分离；Web 静态资源部署、浏览器会话和 HTTPS 集成在二期实现。
