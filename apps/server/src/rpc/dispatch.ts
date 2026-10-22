@@ -17,6 +17,7 @@ import {
   type Principal,
   type RpcCall,
   type RpcHandler,
+  type ResponseDelivery,
   type RpcHandlerResult,
 } from "./context.js";
 import { handle as auth } from "./auth.js";
@@ -95,12 +96,13 @@ function guardSecrets(
 }
 
 // Routes a validated call to the module that owns its method, as `principal` (the local owner
-// unless the transport authenticated a device).
+// unless the transport authenticated a device), with the transport's `delivery` of its answer.
 export function dispatchRpc(
   core: LocalCore,
   method: RpcMethod,
   params: Record<string, unknown>,
   principal: Principal = localOwner(core),
+  delivery?: ResponseDelivery,
 ): Promise<RpcHandlerResult> {
   return callHandler(
     RPC_HANDLERS[RPC_METHODS[method].domain] as RpcHandler<RpcDomain>,
@@ -108,6 +110,7 @@ export function dispatchRpc(
     method,
     params,
     principal,
+    delivery,
   );
 }
 
@@ -119,6 +122,7 @@ export async function callHandler(
   method: RpcMethod,
   params: Record<string, unknown>,
   principal: Principal,
+  delivery?: ResponseDelivery,
 ): Promise<RpcHandlerResult> {
   const spec = RPC_METHODS[method];
   // Refused before anything runs, so nothing was accepted (m2 D7).
@@ -132,6 +136,7 @@ export async function callHandler(
     ...(declaresInput && secrets ? { secrets } : {}),
     principalId: principal.principalId,
     principal,
+    ...(delivery ? { delivery } : {}),
   } as RpcCall<RpcDomain>;
   return guardSecrets(method, await handler(core, call), declaresInput ? secrets : undefined);
 }

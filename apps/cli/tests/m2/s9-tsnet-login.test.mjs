@@ -1,11 +1,16 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { connect } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { createClient } from "@cove/client";
+import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { createNodePorts } from "../../dist/node-ports.js";
+import { cliBuildVersion } from "../../dist/session.js";
 import { cli } from "../m1/fixtures.mjs";
 import { waitFor } from "../recording-view.mjs";
 import { bootstrapRequest, createAuthFixture, payloadOf, portOf } from "./auth-fixtures.mjs";
@@ -298,3 +303,94 @@ test("Ctrl-C or Ctrl-D at the hidden auth-key prompt cancels before anything is 
     "logged-out",
   );
 }, 60_000);
+
+// A login request as the local owner, sent straight to the server's HTTP RPC.
+const loginRequest = (operationId) =>
+  JSON.stringify({ jsonrpc: "2.0", id: 1, method: "server.tsnet.login", params: { operationId } });
+async function finalRecord(home, operationId) {
+  let record;
+  await waitFor(
+    "the login's terminal record",
+    async () => {
+      const read = await fixture.coveJson(["operation", "get", operationId], { home });
+      record = read.operation ?? read;
+      return record.state !== "accepted" && record.state !== "running";
+    },
+    15_000,
+  );
+  return record;
+}
+
+test("a login URL whose client went away or timed out is never recorded as delivered", async () => {
+  // The helper answers an interactive login 1.5 s after it was asked.
+  fixture.env.FAKE_TSNET_LOGIN_URL_MS = "1500";
+  const home = fixture.home("server");
+  const server = await fixture.startAuthServer(home);
+  const { record } = server;
+  const port = portOf(server);
+
+  // A client that disconnects while the helper is still working.
+  const gone = randomUUID();
+  const socket = connect(port, "127.0.0.1");
+  socket.on("error", () => undefined);
+  socket.write(
+    httpPost(port, "/rpc", loginRequest(gone), {
+      "cove-protocol": String(PROTOCOL_VERSION),
+      "cove-server-id": record.serverId,
+      "cove-instance-id": record.relayInstanceId,
+      authorization: `Bearer ${record.secret}`,
+    }),
+  );
+  await new Promise((done) => setTimeout(done, 500));
+  socket.destroy();
+  const disconnected = await finalRecord(home, gone);
+  expect(disconnected).toMatchObject({
+    state: "failed",
+    error: { kind: "TSNET_LOGIN_UNCERTAIN" },
+  });
+  expect(disconnected.result).toBeUndefined();
+  // The stand-in completes a pending interactive login at a later status; start over each time.
+  const logout = async () =>
+    expect(
+      (await fixture.coveJson(["server", "tsnet", "logout"], { home })).operation,
+    ).toMatchObject({ state: "succeeded" });
+  await logout();
+
+  // A client whose request times out first (the CLI's own client, with a short timeout).
+  const client = createClient({
+    expectedServerId: record.serverId,
+    expectedRelayInstanceId: record.relayInstanceId,
+    buildVersion: cliBuildVersion(),
+    credentials: () => ({
+      authorization: `Bearer ${record.secret}`,
+      terminalSecret: record.secret,
+    }),
+    codec: createUtf8Codec(),
+    createOpaqueId: () => randomUUID(),
+    scheduler: createDefaultScheduler(),
+    rpcTimeoutMs: 500,
+    ...createNodePorts(record.endpoint),
+  });
+  try {
+    const connected = await client.connect();
+    expect(connected).toMatchObject({ ok: true });
+    const timedOut = randomUUID();
+    const outcome = await client.call("server.tsnet.login", { operationId: timedOut });
+    expect(outcome.ok).toBe(false);
+    const late = await finalRecord(home, timedOut);
+    expect(late).toMatchObject({ state: "failed", error: { kind: "TSNET_LOGIN_UNCERTAIN" } });
+    expect(late.result).toBeUndefined();
+  } finally {
+    client.dispose();
+  }
+  await logout();
+
+  // The control: a client that waits gets the URL, and only then is it recorded as delivered.
+  const waited = await fixture.coveInput(["server", "tsnet", "login"], "", { home });
+  expect({ code: waited.code, stderr: waited.stderr }).toMatchObject({ code: 0 });
+  expect(waited.stderr).toContain(LOGIN_URL);
+  expect(JSON.parse(waited.stdout).operation).toMatchObject({
+    state: "succeeded",
+    result: { secretDelivery: "first-response-only" },
+  });
+}, 90_000);

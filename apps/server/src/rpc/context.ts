@@ -61,6 +61,18 @@ export type DomainMethod<D extends RpcDomain> = {
   [M in RpcMethod]: (typeof RPC_METHODS)[M]["domain"] extends D ? M : never;
 }[RpcMethod];
 
+// The response that will carry a call's answer, as its transport reports it (relay-protocol
+// §11.8, "送达"). `open` says whether a response can still be sent at all (the connection and the
+// response are not closed). `sent` resolves once the transport is done with the response: true
+// only if a complete response holding this call's answer was handed to the operating system,
+// false if it closed first, was never sent or carried an error instead. Handing over is all a
+// server can observe: whether the client then read the bytes is beyond it. Absent where no
+// transport sends the answer (a notification, an in-process dispatch): nothing can be confirmed.
+export type ResponseDelivery = {
+  open(): boolean;
+  readonly sent: Promise<boolean>;
+};
+
 export type RpcCall<D extends RpcDomain> = {
   method: DomainMethod<D>;
   // Already validated against the method's params schema, without its `secrets` member: a
@@ -72,6 +84,7 @@ export type RpcCall<D extends RpcDomain> = {
   // principal.principalId; kept for the M1 handlers.
   principalId: string;
   principal: Principal;
+  delivery?: ResponseDelivery;
 };
 
 // A handler returns the method's result (validated against the result schema before it is sent)

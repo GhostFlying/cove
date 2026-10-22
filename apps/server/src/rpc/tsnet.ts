@@ -9,7 +9,7 @@ import type { TsnetLoginOutcome, TsnetLogoutOutcome, TsnetNode } from "../networ
 import { recordedWrite, type DatabaseWriteContext } from "../operations/database-operations.js";
 import type { OperationReceipts } from "../operations/operation-receipts.js";
 import { uncertainStoreOutcome } from "../store/store-errors.js";
-import { capabilityUnavailable, type RpcHandler } from "./context.js";
+import { capabilityUnavailable, type ResponseDelivery, type RpcHandler } from "./context.js";
 
 // The server tsnet node module (server.tsnet.login/status/logout; m2 T5b, D10). The node itself
 // is network/tsnet.ts; these handlers turn its control requests into operations.
@@ -24,20 +24,30 @@ import { capabilityUnavailable, type RpcHandler } from "./context.js";
 // these methods): whether the node logged in is then read from `server tsnet status`, never
 // assumed, and the request is never repeated on its own.
 //
-// The live answer waits up to TSNET_WRITE_TIMING.liveWaitMs for the helper; the CLI's request timeout is longer
-// (apps/cli commands/_tsnet.ts). A login that takes longer (an auth-key login may take up to the
-// helper's 60 s) answers with the running record and completes in the background; the CLI then
-// follows the record with operation.get.
+// The live answer is given within the response budget (TSNET_WRITE_TIMING.liveWaitMs, counted
+// from the call's arrival); the CLI's request timeout is longer (apps/cli commands/_tsnet.ts). A
+// login that takes longer (an auth-key login may take up to the helper's 60 s) answers with the
+// running record and completes in the background; the CLI then follows the record with
+// operation.get.
 //
-// Delivery of the login URL. A record that says `secretDelivery: "first-response-only"` must be
-// one whose URL that first response really carried: the operator who did not get it can only
-// learn from the record that it existed. So the terminal record and the live answer are decided
-// together: when the helper's answer is ready while the live answer is still open, the work
-// claims the live answer (it then waits for the record's commit and carries the URL); once the
-// live wait has ended unclaimed, a URL that arrives is never delivered and the record is
-// TSNET_LOGIN_UNCERTAIN (an interactive login was started, and whoever has its URL could still
-// complete it), never succeeded. The interactive deadlines are also kept inside the live wait,
-// so this happens only when the helper answers late.
+// Delivery of the login URL (relay-protocol §11.8). `secretDelivery: "first-response-only"` on
+// a succeeded login says that the URL went out in the first response and only there. It is
+// written only after the transport reported that response handed over, never before, so the
+// order is conservative: first the response, then the record.
+// 1. The helper's answer with a URL arrives. If the budget is spent, or the transport says the
+//    response can no longer be sent (the client timed out or went away; ResponseDelivery.open),
+//    the URL is dropped and the record is TSNET_LOGIN_UNCERTAIN: an interactive login was
+//    started, and it is not known who could complete it.
+// 2. Otherwise the live answer goes out at once, with the running record (committed before the
+//    helper was asked) and the URL: no store write stands between the decision and the response.
+// 3. When the transport is done with the response (ResponseDelivery.sent), the terminal record
+//    is written: succeeded with secretDelivery if a complete response holding the URL was handed
+//    to the OS, TSNET_LOGIN_UNCERTAIN otherwise. A server that stops in between leaves the
+//    record running, which the next start makes requires_attention (RESULT_UNKNOWN).
+// The remaining window is after the handover: bytes the OS accepted can still be lost, or arrive
+// after the client stopped waiting. Within the budget the CLI is still waiting; a client that did
+// not get the URL sees secretDelivery without it and runs the login again. Without a transport
+// to confirm the handover (an in-process dispatch), nothing is recorded as delivered.
 //
 // Secret boundary. The auth key is the call's input secret (call.secrets, never params): it goes
 // to the helper inside the login frame and nowhere else. It is not in the canonical intent (the
@@ -48,19 +58,22 @@ import { capabilityUnavailable, type RpcHandler } from "./context.js";
 // remoteLogoutConfirmed). The login URL is returned only as the live answer's output secret, by
 // the call that ran the login; a resend, operation.get or a background completion never has it.
 
-// How long the live answer waits, and how long the helper may take: an auth-key login waits for
-// the node to run (PROTOCOL.md login); an interactive login answers as soon as the URL is known.
-// `deadlineMs` bounds the request itself (the helper's own timeout plus its answer). The
-// interactive deadline is shorter than the live wait, so that its URL can still be delivered.
+// The response budget (from the call's arrival), and how long the helper may take: an auth-key
+// login waits for the node to run (PROTOCOL.md login); an interactive login answers as soon as
+// the URL is known. `deadlineMs` bounds the request itself (the helper's own timeout plus its
+// answer). The interactive deadline is shorter than the budget, so that its URL can be delivered.
+// `sentWaitMs` bounds the wait for the transport's report on a response (it always reports).
 export type TsnetWriteTiming = {
   readonly liveWaitMs: number;
   readonly key: { readonly timeoutMs: number; readonly deadlineMs: number };
   readonly interactive: { readonly timeoutMs: number; readonly deadlineMs: number };
+  readonly sentWaitMs: number;
 };
 export const TSNET_WRITE_TIMING: TsnetWriteTiming = {
   liveWaitMs: 25_000,
   key: { timeoutMs: 60_000, deadlineMs: 75_000 },
   interactive: { timeoutMs: 15_000, deadlineMs: 20_000 },
+  sentWaitMs: 60_000,
 };
 
 const encoder = new TextEncoder();
@@ -95,6 +108,7 @@ export const handle: RpcHandler<"tsnet"> = async (core, call) => {
         call.method,
         call.params as { operationId: string },
         authKey,
+        call.delivery,
       );
     }
   }
@@ -108,8 +122,10 @@ export async function runWrite(
   method: WriteMethod,
   params: { operationId: string },
   authKey: string | undefined,
+  delivery: ResponseDelivery | undefined,
   timing: TsnetWriteTiming = TSNET_WRITE_TIMING,
 ): Promise<LiveAnswer> {
+  const arrived = Date.now();
   const context: DatabaseWriteContext = {
     serverId: receipts.composition.serverId,
     receipts,
@@ -168,11 +184,21 @@ export async function runWrite(
     return { error: domainError("RESULT_UNKNOWN", "unknown") };
   }
 
-  // Whether the live answer is still open, was claimed by the work (it carries the work's
-  // outcome) or ended with the running record; see "Delivery of the login URL".
-  let live: "open" | "claimed" | "ended" = "open";
-  let loginUrl: string | undefined;
-  const work = (async (): Promise<OperationRecord> => {
+  // Whether the live answer is still open, was taken by the work (it carries the work's answer)
+  // or ended with the running record when the budget was spent.
+  let live: "open" | "taken" | "ended" = "open";
+  const commit = async (terminal: OperationRecord, forbidden: string[]): Promise<boolean> => {
+    // The record is fixed by kind; this check guards the boundary against a later change.
+    const record = holdsSecret(terminal, forbidden) ? unknown(running) : terminal;
+    try {
+      return await receipts.update(key, record);
+    } catch {
+      // A failed store stops the server; the receipt stays running and the next start makes it
+      // requires_attention.
+      return false;
+    }
+  };
+  const work = (async (): Promise<LiveAnswer> => {
     let terminal: OperationRecord;
     let url: string | undefined;
     if (method === "server.tsnet.login") {
@@ -181,40 +207,50 @@ export async function runWrite(
       terminal = loginRecord(running, outcome, authKey !== undefined);
       if (outcome.kind === "answered") url = outcome.loginUrl;
     } else terminal = logoutRecord(running, await tsnet.logout());
-    // Decided synchronously with the claim, so the timer cannot end the live answer in between.
-    if (live === "open") live = "claimed";
-    else if (url) terminal = failed(running, "TSNET_LOGIN_UNCERTAIN");
-    if (live === "claimed") loginUrl = url;
-    const forbidden = url ? [...secrets, url] : secrets;
-    // The record is fixed by kind above; this check guards the boundary against a later change.
-    if (holdsSecret(terminal, forbidden)) terminal = unknown(running);
-    try {
-      if (await receipts.update(key, terminal)) return terminal;
-    } catch {
-      // A failed store stops the server; the receipt stays running and the next start makes it
-      // requires_attention.
+    // Decided synchronously, so the budget's timer cannot end the live answer in between.
+    const deliverable = live === "open" && delivery !== undefined && delivery.open();
+    if (live === "open") live = "taken";
+    if (!url) {
+      // Nothing to deliver: the terminal record, committed, is the answer.
+      return { operation: (await commit(terminal, secrets)) ? terminal : running };
     }
-    return running;
+    const forbidden = [...secrets, url];
+    if (!deliverable) {
+      // Step 1 of "Delivery of the login URL": the URL is dropped.
+      const uncertain = failed(running, "TSNET_LOGIN_UNCERTAIN");
+      return { operation: (await commit(uncertain, forbidden)) ? uncertain : running };
+    }
+    // Steps 2 and 3: the response first, the record once the transport reported on it.
+    void (async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const sent = await Promise.race([
+        delivery.sent,
+        new Promise<false>((done) => (timer = setTimeout(() => done(false), timing.sentWaitMs))),
+      ]);
+      clearTimeout(timer);
+      await commit(sent ? terminal : failed(running, "TSNET_LOGIN_UNCERTAIN"), forbidden);
+    })();
+    return { operation: running, secrets: { loginUrl: url } };
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const settled = await Promise.race([
     work,
     new Promise<null>(
       (done) =>
-        (timer = setTimeout(() => {
-          // A claimed answer waits for the work's commit instead.
-          if (live !== "open") return;
-          live = "ended";
-          done(null);
-        }, timing.liveWaitMs)),
+        (timer = setTimeout(
+          () => {
+            // A taken answer waits for the work instead: it is committing a record without a
+            // URL, or already returning the URL's response.
+            if (live !== "open") return;
+            live = "ended";
+            done(null);
+          },
+          Math.max(0, timing.liveWaitMs - (Date.now() - arrived)),
+        )),
     ),
   ]);
   clearTimeout(timer);
-  if (!settled) return { operation: running };
-  // The URL goes out only with the record that says it was delivered in this answer.
-  if (settled.state === "succeeded" && settled.result?.secretDelivery && loginUrl)
-    return { operation: settled, secrets: { loginUrl } };
-  return { operation: settled };
+  return settled ?? { operation: running };
 }
 
 function failed(running: OperationRecord, kind: DomainErrorKind): OperationRecord {

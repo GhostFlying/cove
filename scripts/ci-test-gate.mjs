@@ -268,6 +268,7 @@ export const requiredSuites = [
   { project: "server", file: "apps/server/tests/author/build-id-stamp.test.mjs", minimumTests: 4 },
   { project: "server", file: "apps/server/tests/author/entry-config.test.mjs", minimumTests: 5 },
   { project: "server", file: "apps/server/tests/author/service-state.test.mjs", minimumTests: 7 },
+  { project: "server", file: "apps/server/tests/author/tsnet-write.test.mjs", minimumTests: 6 },
   {
     project: "server",
     file: "apps/server/tests/author/operation-receipts.test.mjs",
