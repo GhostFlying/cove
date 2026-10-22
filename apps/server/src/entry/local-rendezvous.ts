@@ -1,8 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { open, lstat, unlink, link, mkdir, rmdir } from "node:fs/promises";
-import { dirname, parse, join, isAbsolute, normalize } from "node:path";
+import { dirname, isAbsolute, normalize } from "node:path";
 import type { FileHandle } from "node:fs/promises";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
+import { checkManagedDirectory, HomeError } from "../store/home.js";
 
 export function launchIdentity(): { serverId: string; relayInstanceId: string; secret: string } {
   return {
@@ -10,6 +11,27 @@ export function launchIdentity(): { serverId: string; relayInstanceId: string; s
     relayInstanceId: randomUUID(),
     secret: randomBytes(32).toString("base64url"),
   };
+}
+
+// A publication failure with its cause (#172): a refused directory or a failed system call is what
+// the person starting the server has to fix. The cause names paths, uids, modes and system call
+// codes only; the record's contents (the secret) never appear in it.
+export class RendezvousPublicationError extends Error {
+  constructor(cause: string) {
+    super(`Local rendezvous publication failed: ${cause}`);
+    this.name = "RendezvousPublicationError";
+  }
+}
+
+// A refusal of this module's own, whose message is safe to report.
+class RendezvousPathError extends Error {}
+
+function publicationCause(error: unknown): string {
+  if (error instanceof HomeError || error instanceof RendezvousPathError) return error.message;
+  const errno = error as NodeJS.ErrnoException | undefined;
+  if (typeof errno?.code === "string")
+    return `${errno.syscall ?? "a file operation"}${errno.path ? ` ${errno.path}` : ""} failed with ${errno.code}`;
+  return "an unexpected error";
 }
 
 // The open handle's identity prevents cleanup from removing a replaced foreign file.
@@ -22,7 +44,11 @@ export class LocalRendezvous {
   private published = false;
   private retired = false;
   private closing: Promise<void> | undefined;
-  constructor(readonly path: string) {}
+  // `homes`: the data directory in each spelling the rendezvous path may use (managedComponents).
+  constructor(
+    readonly path: string,
+    private readonly homes: readonly string[] = [],
+  ) {}
   async publish(input: unknown): Promise<void> {
     const parsed = RendezvousSchema.safeParse(input);
     if (!parsed.success) throw new Error("Invalid local rendezvous");
@@ -41,29 +67,46 @@ export class LocalRendezvous {
       await this.handle.chmod(0o600);
       await this.handle.writeFile(JSON.stringify(data), "utf8");
       await this.handle.sync();
-      if (this.retired) throw new Error("Rendezvous retired before publication");
+      if (this.retired) throw new RendezvousPathError("the server stopped before publication");
       // A complete inode is published atomically; link refuses a pre-existing path.
       await this.verifyDirectory();
       await link(this.temporary, this.path);
       this.published = true;
       await this.removeOwned(this.temporary);
       this.temporary = undefined;
-    } catch {
+    } catch (error) {
       this.retired = true;
-      await this.cleanup();
-      throw new Error("Local rendezvous publication failed");
+      let cleanup = "";
+      try {
+        await this.cleanup();
+      } catch {
+        cleanup = "; removing its own files is unverifiable";
+      }
+      throw new RendezvousPublicationError(`${publicationCause(error)}${cleanup}`);
     }
+  }
+  // The directories Cove manages on the way to the rendezvous (#172; store/home.ts states the
+  // rule): every component strictly below the data directory down to the rendezvous directory,
+  // which the server creates itself when it is missing. A rendezvous outside the data directory
+  // (an explicit --rendezvous) has only that directory as Cove's. Components at or above the data
+  // directory are not checked, not even for symbolic links: Cove does not manage them, and the
+  // identity recorded for the rendezvous directory (verifyDirectory) keeps publication and cleanup
+  // on the directory checked here.
+  private managedComponents(parent: string): string[] {
+    const home = this.homes.find((candidate) =>
+      parent.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`),
+    );
+    if (!home) return [parent];
+    const managed: string[] = [];
+    for (let current = parent; current !== home; current = dirname(current))
+      managed.unshift(current);
+    return managed;
   }
   private async prepareDirectory(): Promise<void> {
     if (!isAbsolute(this.path) || normalize(this.path) !== this.path || this.path.endsWith("/"))
-      throw new Error("Invalid local rendezvous path");
-    const uid = process.getuid?.();
-    if (uid === undefined) throw new Error("Local directory ownership unavailable");
+      throw new RendezvousPathError(`${this.path} is not a normalized absolute path`);
     const parent = dirname(this.path);
-    const root = parse(parent).root;
-    let current = root;
-    for (const part of parent.slice(root.length).split(/[\\/]/).filter(Boolean)) {
-      current = join(current, part);
+    for (const current of this.managedComponents(parent)) {
       let created = false;
       let info;
       try {
@@ -73,36 +116,24 @@ export class LocalRendezvous {
         await mkdir(current, { mode: 0o700 });
         created = true;
         info = await lstat(current);
+        // Recorded before the check, so that cleanup removes the directory this start created.
         this.directory = { path: parent, dev: info.dev, ino: info.ino, created };
       }
-      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Unsafe rendezvous path");
-      if (current === parent) {
-        if (info.uid !== uid || (info.mode & 0o777) !== 0o700)
-          throw new Error("Unsafe rendezvous directory");
+      checkManagedDirectory(current, info);
+      if (current === parent)
         this.directory = { path: parent, dev: info.dev, ino: info.ino, created };
-      } else if (
-        (info.uid !== uid && info.uid !== 0) ||
-        ((info.mode & 0o022) !== 0 && !(info.uid === 0 && (info.mode & 0o1000) !== 0))
-      ) {
-        // A root-owned sticky temp ancestor still requires an owned 0700 leaf.
-        throw new Error("Unsafe rendezvous ancestor");
-      }
     }
     await this.verifyDirectory();
   }
   private async verifyDirectory(): Promise<void> {
     const directory = this.directory;
-    if (!directory) throw new Error("Rendezvous directory ownership unavailable");
+    if (!directory) throw new RendezvousPathError("the rendezvous directory was not prepared");
     const current = await lstat(directory.path);
-    if (
-      !current.isDirectory() ||
-      current.isSymbolicLink() ||
-      current.dev !== directory.dev ||
-      current.ino !== directory.ino ||
-      current.uid !== process.getuid?.() ||
-      (current.mode & 0o777) !== 0o700
-    )
-      throw new Error("Rendezvous directory ownership changed");
+    checkManagedDirectory(directory.path, current);
+    if (current.dev !== directory.dev || current.ino !== directory.ino)
+      throw new RendezvousPathError(
+        `the rendezvous directory ${directory.path} was replaced during publication`,
+      );
   }
   private async removeOwned(path: string): Promise<void> {
     await this.verifyDirectory();

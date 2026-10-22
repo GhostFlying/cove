@@ -171,6 +171,8 @@ macOS 用 LaunchAgent（gui 域，登录时启动、注销时停止），Linux �
 两者都在 `cove server service status` 中显示为 `stoppedAfterCrashes`，`cove server service start` 重新开始。
 systemd 停止或重启服务会结束 cgroup 内全部进程，包括 Cove 终端里用 `nohup`、tmux 脱离的进程，这一后果列在重启影响中；
 launchd 下脱离的进程在测试中保留，但这是 launchd 的行为，不是承诺。
+数据目录下 Cove 自己的目录必须属于当前用户、0700、不是符号链接，否则启动以写明目录与规则的原因失败；已存在的数据目录
+本身与其上级目录不做属主与权限检查（#172）。
 用法与回退步骤见[开发说明](development.md#安装与用户服务)。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。
 

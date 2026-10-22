@@ -86,7 +86,7 @@ function rig({ withState = false } = {}) {
     handed,
     ops,
     async seedState() {
-      await mkdir(join(home, "tsnet", "state"), { recursive: true });
+      await mkdir(join(home, "tsnet", "state"), { recursive: true, mode: 0o700 });
       await writeFile(
         join(home, "tsnet", "state", "node.json"),
         JSON.stringify({ id: "nSeed1CNTRL" }),
