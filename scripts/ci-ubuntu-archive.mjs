@@ -50,6 +50,8 @@ export function officialUbuntuSource(source, mirrors, osRelease, arch) {
       }
       fields.set(match[1], match[2].trim());
     }
+    // deb822 files can contain comment-only paragraphs between source stanzas.
+    if (!fields.size) continue;
     const uri = fields.get("URIs");
     if (
       !knownUris.has(uri) ||
