@@ -254,6 +254,11 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
   已安装的同名 build 只有内容摘要相同才复用，否则拒绝安装。
 - 安装新 build 不替换正在运行的 server：`server status` 显示 `pendingBuild`，`server restart`（或一步完成的
   `server upgrade`）之后才生效。
+- 启动等待：`install`、`service start`、`restart` 与 `upgrade` 启动服务后最多等 90 秒，直到新实例应答。其间服务输出
+  （macOS 为 `service.log` 的末尾，Linux 为 `journalctl --user -u`，读取有字节、行数与时间上限，读不到时不影响命令）中
+  出现本次启动之后的 `startup-failed` 事件时，立即在 stderr 写
+  `cove: the server failed to start: <原因>; waiting for the service manager to start it again`，
+  仍继续等待（服务管理器会再启动它）；服务管理器因反复崩溃放弃重启时立即以 1 失败；超时的错误也带上最近一次的原因。
 - server 是否在运行：能连上即为运行；连不上时看它的实例锁（`<home>/server/cove.lock`，server 存活期间一直持有）：
   没有进程持有才算已停止。锁被持有却连不上（握手超时、容量拒绝、启动中或卡住）时状态未知：`restart`、`upgrade`、
   `service stop` 与 `uninstall` 照样要求确认，但无法列出 run，`--yes` 才继续（这也是停止一个不再应答的 server 的办法）；

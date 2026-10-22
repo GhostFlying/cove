@@ -19,7 +19,13 @@ import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installClosure } from "../../dist/install/installer.js";
 import { installLayout } from "../../dist/install/layout.js";
-import { systemdGaveUp, systemdUnit } from "../../dist/install/service.js";
+import { startupFailureSince } from "../../dist/install/commands.js";
+import {
+  fileTail,
+  SERVICE_LOG_LINES,
+  systemdGaveUp,
+  systemdUnit,
+} from "../../dist/install/service.js";
 
 // m2 T3 safety of the installation commands, against the compiled CLI and modules, without a
 // service manager or a runtime closure (S1 and S2 cover those):
@@ -373,4 +379,37 @@ test("an installed build is reused only when its contents are the closure's", as
   expect(
     (await readdir(join(home, "install"))).filter((name) => name.startsWith(".staging-")),
   ).toEqual([]);
+});
+
+// #172: the cause a wait for a started server reports is this start's, bounded and printable.
+test("a startup failure is read from the service output only from this start on", () => {
+  const event = (atMs, detail, category = "rendezvous") =>
+    JSON.stringify({ event: "startup-failed", atMs, category, cleanup: "verified", detail });
+  const output = [
+    event(100, "an earlier start's cause"),
+    "cove-server: an earlier start's cause",
+    '{"event":"stopping","liveRuns":[]}',
+    "not json {",
+    event(200, "the first failure of this start"),
+    event(300, "the latest\u0007 failure\nof this start"),
+    "",
+  ].join("\n");
+  expect(startupFailureSince(output, 150)).toBe("the latest? failure?of this start");
+  expect(startupFailureSince(output, 400)).toBeNull();
+  expect(startupFailureSince(null, 0)).toBeNull();
+  expect(startupFailureSince(event(500, null, "worker"), 0)).toBe(
+    "the server's worker step failed",
+  );
+  expect(startupFailureSince(event(500, "x".repeat(5000)), 0)).toHaveLength(600);
+});
+
+test("the service log is read as a bounded tail of whole lines", async () => {
+  const path = join(fixture.root, "service.log");
+  await writeFile(path, `${"a".repeat(100)}\n${"b\n".repeat(SERVICE_LOG_LINES + 50)}`);
+  const tail = fileTail(path, 1024);
+  expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(1024);
+  expect(tail.startsWith("b")).toBe(true);
+  const lines = fileTail(path);
+  expect(lines.split("\n").length).toBeLessThanOrEqual(SERVICE_LOG_LINES);
+  expect(fileTail(join(fixture.root, "no-such.log"))).toBeNull();
 });

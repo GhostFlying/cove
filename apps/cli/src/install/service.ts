@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
@@ -52,6 +52,50 @@ export interface ServiceBackend {
   status(): UnitStatus;
   // Stops the server and removes the unit; the data directory is untouched.
   unregister(): Promise<void>;
+  // Whether the manager gave up restarting the server after repeated crashes at or after
+  // `sinceMs` (stoppedAfterCrashes, but never an earlier episode's): a start that is definitively
+  // over. `cove` waits for a started server with it (install/commands.ts waitForNewInstance).
+  gaveUpSince(sinceMs: number): boolean;
+  // The latest output of the service (the server's stderr), at most SERVICE_LOG_BYTES and
+  // SERVICE_LOG_LINES, from about `sinceMs` on; null when it cannot be read. Bounded in time as
+  // well: a journal that cannot answer quickly is null, never a hang.
+  recentOutput(sinceMs: number): string | null;
+}
+
+export const SERVICE_LOG_BYTES = 64 * 1024;
+export const SERVICE_LOG_LINES = 200;
+const JOURNAL_TIMEOUT_MS = 5_000;
+
+// The last `maxBytes` of a file, cut to whole lines, or null when it cannot be read.
+export function fileTail(path: string, maxBytes: number = SERVICE_LOG_BYTES): string | null {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, "r");
+    const size = fstatSync(descriptor).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    readSync(descriptor, buffer, 0, length, size - length);
+    let text = buffer.toString("utf8");
+    // A tail that starts inside a line drops that partial line.
+    if (length < size) text = text.slice(text.indexOf("\n") + 1);
+    return text.split("\n").slice(-SERVICE_LOG_LINES).join("\n");
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+// When the crash-stop record (CRASH_STOP) says the server stopped itself, or null.
+function crashStoppedAtMs(home: string): number | null {
+  try {
+    const record = JSON.parse(readFileSync(join(home, CRASH_STOP), "utf8")) as {
+      stoppedAtMs?: unknown;
+    } | null;
+    return typeof record?.stoppedAtMs === "number" ? record.stoppedAtMs : null;
+  } catch {
+    return null;
+  }
 }
 
 // Longer than the plist's ExitTimeOut, after which launchd kills a server that does not stop.
@@ -63,10 +107,12 @@ function sleep(ms: number): Promise<void> {
 
 type Result = { status: number | null; stdout: string; stderr: string };
 
-function run(command: string, args: string[]): Result {
+function run(command: string, args: string[], timeout = 60_000): Result {
   const result = spawnSync(command, args, {
     encoding: "utf8",
-    timeout: 60_000,
+    timeout,
+    // The journal read is bounded by SERVICE_LOG_*; this only keeps a runaway output finite.
+    maxBuffer: 4 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
   });
   return {
@@ -265,6 +311,19 @@ class LaunchAgent implements ServiceBackend {
     };
   }
 
+  // The crash-stop record outlives the episode it reports until a start serves, so only one
+  // written since `sinceMs` counts.
+  gaveUpSince(sinceMs: number): boolean {
+    const stoppedAt = crashStoppedAtMs(this.layout.home);
+    return stoppedAt !== null && stoppedAt >= sinceMs && !this.status().running;
+  }
+
+  // launchd appends the server's stdout and stderr to service.log (launchAgentPlist); the
+  // caller tells this start's lines by their own timestamps.
+  recentOutput(_sinceMs: number): string | null {
+    return fileTail(join(this.layout.logDirectory, "service.log"));
+  }
+
   async unregister(): Promise<void> {
     await this.stop();
     await rm(this.unitPath, { force: true });
@@ -408,6 +467,26 @@ class SystemdUser implements ServiceBackend {
       stoppedAfterCrashes:
         values.ActiveState === "failed" && systemdGaveUp(values.Result, () => this.journal()),
     };
+  }
+
+  // start() and restart() reset a failed unit first, so a unit failed at its start limit now
+  // failed during this start.
+  gaveUpSince(_sinceMs: number): boolean {
+    return this.status().stoppedAfterCrashes;
+  }
+
+  // The unit's journal from `sinceMs` (whole seconds, so a little earlier; the caller filters by
+  // the lines' own timestamps), bounded in lines and time.
+  recentOutput(sinceMs: number): string | null {
+    const result = run(
+      "journalctl",
+      [
+        ...["--user", "-u", this.unit, "--since", `@${Math.floor(sinceMs / 1000)}`],
+        ...["-n", String(SERVICE_LOG_LINES), "-o", "cat", "--no-pager"],
+      ],
+      JOURNAL_TIMEOUT_MS,
+    );
+    return result.status === 0 ? result.stdout.slice(-SERVICE_LOG_BYTES) : null;
   }
 
   // The unit's latest journal messages (systemd's own lines among them), or null when the journal
