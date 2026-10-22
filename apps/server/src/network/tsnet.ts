@@ -512,9 +512,15 @@ export class TsnetNode implements TsnetEntry {
     return (await this.whenReady()) ? { ok: true } : { ok: false, reason: this.downReason() };
   }
 
-  // One login request (PROTOCOL.md `login`). The key travels in the frame alone.
-  login(authKey: string | undefined, timeoutMs: number): Promise<TsnetLoginOutcome> {
-    return this.control(() => this.loginRequest(authKey, timeoutMs));
+  // One login request (PROTOCOL.md `login`): the helper's own `timeoutMs`, and the `deadlineMs`
+  // after which its answer is no longer awaited (the outcome is then lost). The key travels in
+  // the frame alone.
+  login(
+    authKey: string | undefined,
+    timeoutMs: number,
+    deadlineMs: number,
+  ): Promise<TsnetLoginOutcome> {
+    return this.control(() => this.loginRequest(authKey, timeoutMs, deadlineMs));
   }
 
   logout(): Promise<TsnetLogoutOutcome> {
@@ -540,6 +546,7 @@ export class TsnetNode implements TsnetEntry {
   private async loginRequest(
     authKey: string | undefined,
     timeoutMs: number,
+    deadlineMs: number,
   ): Promise<TsnetLoginOutcome> {
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
@@ -547,7 +554,7 @@ export class TsnetNode implements TsnetEntry {
     try {
       answer = (await channel.request(
         { op: "login", ...(authKey ? { authKey } : {}), timeoutMs },
-        timeoutMs + 15_000,
+        deadlineMs,
       )) as HelperStatus;
     } catch (error) {
       if (!(error instanceof HelperRefused)) return { kind: "lost" };

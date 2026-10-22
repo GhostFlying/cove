@@ -116,7 +116,7 @@ test("a node without state starts no helper and reports logged-out; a login star
   expect(existsSync(join(home, "tsnet", "fake-ops.jsonl"))).toBe(false);
 
   expect(await node.available()).toEqual({ ok: true });
-  const outcome = await node.login(KEY, 5_000);
+  const outcome = await node.login(KEY, 5_000, 10_000);
   expect(outcome.kind).toBe("answered");
   expect(outcome.status).toMatchObject({
     state: "running",
@@ -169,7 +169,7 @@ test("a logout or a reauth in flight is never advertised from the status cached 
 
   // A reauth holds the node and closes its listeners from its first moment; an invitation created
   // meanwhile reuses the open pairing listener, with no port sync.
-  const reauth = node.login("tskey-slow-0123456789abcdef", 5_000);
+  const reauth = node.login("tskey-slow-0123456789abcdef", 5_000, 10_000);
   expect(node.invitationEntry(42001)).toBeNull();
   await node.status();
   expect(node.invitationEntry(42001)).toBeNull();
