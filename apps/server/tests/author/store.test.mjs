@@ -4,9 +4,11 @@ import { constants } from "node:fs";
 import {
   cp,
   mkdtemp,
+  lstat,
   open as openFile,
   readFile,
   readdir,
+  readlink,
   rm,
   stat,
   writeFile,
@@ -212,10 +214,41 @@ describe("store opening, migrations and the data directory lock", () => {
   }
 
   async function digests(directory) {
-    const names = (await readdir(directory)).sort();
-    return Object.fromEntries(
-      await Promise.all(names.map(async (name) => [name, await sha256(join(directory, name))])),
-    );
+    const entries = {};
+    // Refusal must preserve the complete tree, including managed directories. lstat avoids
+    // following links, and dev/ino catches replacement even when bytes are identical. Omit only
+    // atime: snapshot reads may update it themselves; mutation times remain part of acceptance.
+    const visit = async (relative) => {
+      const path = relative ? join(directory, relative) : directory;
+      const info = await lstat(path, { bigint: true });
+      const kind = info.isDirectory()
+        ? "directory"
+        : info.isFile()
+          ? "file"
+          : info.isSymbolicLink()
+            ? "symlink"
+            : "unsupported";
+      if (kind === "unsupported") throw new Error(`Unexpected snapshot entry: ${path}`);
+      entries[relative || "."] = {
+        kind,
+        dev: info.dev.toString(),
+        ino: info.ino.toString(),
+        mode: info.mode.toString(8),
+        uid: info.uid.toString(),
+        gid: info.gid.toString(),
+        size: info.size.toString(),
+        links: info.nlink.toString(),
+        mtimeNs: info.mtimeNs.toString(),
+        ctimeNs: info.ctimeNs.toString(),
+        ...(kind === "file" ? { sha256: await sha256(path) } : {}),
+        ...(kind === "symlink" ? { target: await readlink(path) } : {}),
+      };
+      if (kind === "directory")
+        for (const name of (await readdir(path)).sort())
+          await visit(relative ? `${relative}/${name}` : name);
+    };
+    await visit("");
+    return entries;
   }
 
   it("refuses a newer schema committed only to a crash-left WAL without touching any file", async () => {
