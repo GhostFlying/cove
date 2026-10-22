@@ -253,12 +253,37 @@ export const TsnetLoginSecretsSchema = z.object({
   loginUrl: z.string().regex(/^https:\/\/[\x21-\x7e]{8,2040}$/),
 });
 export const TsnetStatusParamsSchema = NoParamsSchema;
+export const TSNET_LIMITS = Object.freeze({
+  // Tailnet ports one status lists (the business and the pairing port in practice); the helper
+  // accepts at most 16 (native/tailscale/PROTOCOL.md).
+  ports: 16,
+  warnings: 4,
+  warningChars: 512,
+});
+// The node's identity hold (native/tailscale/PROTOCOL.md "Identity hold"): while its identity is
+// not known to be the enrolled one the node serves nothing. identity-changed: a login ended as
+// another node (nodeId is that node); only a logout ends it. login-uncertain: a login did not
+// finish, or an interactive login is pending; a later status settles it.
+export const TsnetHoldSchema = z.enum(["identity-changed", "login-uncertain"]);
+// A warning is the helper's or the server's explanation, third-party text in part (control-plane
+// errors): bounded, without control characters, and never holding an auth key or a login URL.
+export const TsnetWarningSchema = z
+  .string()
+  .max(TSNET_LIMITS.warningChars)
+  .refine((value) => ![...value].some((char) => char < " " || char === "\u007f"));
 export const TsnetStatusResultSchema = z.object({
-  state: z.enum(["stopped", "starting", "needs-login", "running", "failed"]),
+  // logged-out: no node state; stopped, starting, needs-login, running: the node's backend state;
+  // failed: the node or its helper is not available (the first warning says why).
+  state: z.enum(["logged-out", "stopped", "starting", "needs-login", "running", "failed"]),
   hostname: TsnetHostnameSchema.nullable(),
   // The node's stable ID and MagicDNS name once it is logged in.
   nodeId: TsnetNodeIdSchema.nullable(),
   nodeName: TsnetNodeNameSchema.nullable(),
+  hold: TsnetHoldSchema.nullable(),
+  // The tailnet ports the node listens on now: the business port, and the pairing port while an
+  // invitation is open (D6). Empty while logged out or held.
+  ports: z.array(z.number().int().min(1).max(65535)).max(TSNET_LIMITS.ports),
+  warnings: z.array(TsnetWarningSchema).max(TSNET_LIMITS.warnings),
 });
 export const TsnetLogoutParamsSchema = z.object({ operationId: OpaqueIdSchema });
 
@@ -275,6 +300,9 @@ export const M2_RESULT_FIELDS = {
   unclosedConnections: z.number().int().min(0).max(65_536).optional(),
   // entry.set: some changed setting takes effect only when the server next starts.
   appliesAfterRestart: z.literal(true).optional(),
+  // server.tsnet.logout: whether the control plane acknowledged the logout. false: the node state
+  // was deleted locally, but the node may still be listed in the tailnet (remove it there).
+  remoteLogoutConfirmed: z.boolean().optional(),
 } as const;
 export const M2_RESULT_KEYS = Object.keys(M2_RESULT_FIELDS) as (keyof typeof M2_RESULT_FIELDS)[];
 
