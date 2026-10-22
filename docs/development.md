@@ -1,7 +1,8 @@
 # 开发环境与工程检查
 
-当前可构建并启动本机的 Cove server（`cove-server`）与 `cove` CLI：M0 的终端链路与测试 harness，加上 M1 的本机
-task/workspace 闭环（见[下文](#m1-本机试用与-cli-用法)）。还没有远程接入、配对、Desktop 或 Mobile。
+当前可构建并启动本机的 Cove server（`cove-server`）与 `cove` CLI：M0 的终端链路与测试 harness，M1 的本机
+task/workspace 闭环（见[下文](#m1-本机试用与-cli-用法)），以及 M2 的本机安装与用户服务、设备配对与经 SSH、tsnet 的远程操作
+（见[下文](#m2-远程-server安装配对与入口)）。还没有 Desktop 或 Mobile 客户端。
 
 ## 固定工具版本
 
@@ -189,117 +190,29 @@ cove mount delete-worktree <taskId> --yes                # 删除唯一的托管
 - 两者因 `LIVE_RUNS_PRESENT` 被拒或停下时，stderr 为每个阻塞 run 写一行，给出其 tab 与可直接复制的
   `cove tab stop <tabId>`；不属于任何 tab 的终端 run 给出 `cove terminal stop <runId>`。
 
-## M2 设备配对与 `--server`（loopback、SSH 与 tsnet 入口）
+## M2 远程 server：安装、配对与入口
 
-范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。loopback 入口是同一主机上的 server（T1），SSH 入口经系统 `ssh`
-连到另一台主机（T2），tsnet 入口经客户端自己的 Tailnet 节点（T4，见下文“tsnet 客户端”）。
+范围、场景与决定见 [M2](milestones/m2.md)。M2 让每台执行主机在本机安装 server 并作为用户服务运行，其他设备经一次性邀请配对后，
+用 `--server <别名>` 经 SSH 或 tsnet 入口远程操作它；Desktop 不在线也可操作。Cove 不使用系统 Tailscale：server 与客户端都只用
+自己内嵌的 tsnet 节点（D9），主机上不需要安装 tailscaled。tend 等脚本依赖的接口见 [Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
+设计见 [Server 架构 §§4、5、9](server-architecture.md#4-host-网络和内置-tailscale)。
 
-```sh
-# server 端（数据目录 A）。--ssh-target 是邀请中写入的 SSH 目标，省略时取 <用户>@<主机名>；
-# --pairing-port 固定配对端口，省略时沿用未结束邀请记录的端口，或取任意空闲端口。
-# 两者都是临时参数，T3 的 entry.set 将取代它们。
-node apps/server/dist/entry/main.js --mode m0-local --host 127.0.0.1 --port 0 \
-  --rendezvous A/server/run/rendezvous.json --home A --ssh-target user@example.test
-cove --home A auth invite create [--ttl-minutes N]   # 输出邀请，只显示这一次
-# 客户端（数据目录 B），从提示或 stdin 粘贴邀请，不经命令行参数
-cove --home B remote add box [--name laptop]
-cove --home B --server box status                    # 或 COVE_SERVER=box
-cove --home A auth device list                        # 本机所有者也能管理设备
-cove --home B --server box auth device rotate         # 轮换本客户端自己的 token
-cove --home A auth device revoke <deviceId>
-# 另一台主机上的客户端（数据目录 C）经邀请中的 SSH 目标配对，之后默认走 SSH
-cove --home C remote add devbox --via ssh
-cove --home C --server devbox status
-cove --home B --server box --via ssh status           # 同一主机配对的记录也有 ssh 入口
-cove --home B remote entry default box ssh            # 改默认入口；失败时从不自动换入口
-```
-
-SSH 入口：
-
-- 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
-  ssh 在 `sh` 监督进程下运行，监督进程在 CLI 的管道关闭时结束 ssh，不留下孤儿进程。
-- 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
-  `NoHostAuthenticationForLocalhost=no`、`ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，
-  并关闭连接复用（ControlMaster）；ssh 认识时还固定 `NoHostAuthenticationForProxyCommand=no`（Apple 的 ssh）与
-  `ForkAfterAuthentication=no`（OpenSSH 8.7 起）。命令行选项优先于用户配置，因此用户配置中的 `GatewayPorts yes`、
-  `ControlPersist`、跳过本机或 ProxyCommand 目标 host key 检查的设置以及 `ForkAfterAuthentication yes`，都不会关闭
-  host key 检查、让转发监听非 loopback 地址或在命令后继续存在。每次建隧道前先用 `ssh -G` 解析目标的实际配置：
-  ssh 不认识的可选项不加，解析结果中 host 认证未开启、会 fork 或固定项未生效时，命令报 `ENTRY_UNAVAILABLE` 且不连接。
-  CLI 不写 known_hosts：第一次连接某台主机前，先用普通 `ssh <目标>` 确认并记录它的 host key。
-- host key 未知或不符时，ssh 在建立转发前失败，命令报 `ENTRY_UNAVAILABLE` 与 ssh 的最后一行输出，不发送 token 或邀请。
-  隧道建立后先核对 serverId，再交出 token。
-- 经隧道的请求以隧道本地端口作 Host。server 接受任何 loopback IP 字面量 Host（`127.0.0.1:<端口>`、`[::1]:<端口>`，
-  用户决定 2026-10-22），只拒绝域名 Host（DNS rebinding 必然带域名）与 `localhost`，因此 CLI 不改写 Host。
-- 入口失败时命令以 1 退出，列出记录中的入口；不会改用其他入口，需要时用 `--via` 或 `remote entry default`。
-
-SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixture.mjs` 自起一个非特权 sshd：独立配置、
-测试生成的 host key 与客户端 key、127.0.0.1 上的高端口、`UsePAM no`。客户端经 PATH 上的 `ssh` 包装加 `-F`
-使用夹具自己的 ssh 配置与 known_hosts，不读取操作者的 `~/.ssh`。找不到 sshd 时这些用例以原因失败而不是跳过（门禁把跳过的必需用例算作失败）。
-
-- loopback 入口只核对 server 回报的 serverId：它识别 server，但不证明对端就是它。同一主机上的其他进程抢先占用端口
-  并冒充 server 的情况不在防护范围内（见 [relay-protocol §11.8](relay-protocol.md)）。
-- 配对监听是单独的 loopback 端口，只在有未结束的邀请时开放。邀请默认 10 分钟有效，最长 24 小时，
-  错误 secret 达到 5 次后作废。兑换的响应丢失时不能重试：重新创建邀请，那次留下的设备显示为 never-connected，可以撤销。
-- token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
-  `remote remove` 只删除本机记录，不撤销 server 上的设备。修改记录的命令（`auth device rotate`、`remote entry default`、
-  `remote remove`）持有同目录下 `<serverId>.lock.sqlite` 上的锁并合并到最新记录，因此并发执行时依次进行，最后保存的 token 就是有效的那个；
-  rotate 从读取 token 到新 token 首次使用一直持有该锁。这是随持有进程存在的 OS 锁（SQLite 排他事务）：
-  持有者无论怎样退出，锁都由内核释放，不需要接管；锁文件不含内容，`remote remove` 后也保留，不要手工删除。
-- `--server` 模式下路径参数是 server 主机上的路径：相对路径与 `~` 是用法错误，不发送；绝对路径原样发送，
-  `terminal create` 必须给 `--cwd`。CLI 不在本机文件系统上解析这些路径：`mount delete-worktree PATH` 要在本机
-  解析真实路径，因此 `--server` 模式下以 2 拒绝，须改用 `<taskId> <mountId>`。`server` 与 `remote` 两组命令只作用于本机，不接受 `--server`。
-- 撤销会立即拒绝该设备的所有请求，并关闭它的连接（终端连接持有的控制权随之释放）；它已受理的操作照常完成。
-  `auth device revoke` 等这些连接关闭后才返回，响应中的 `unclosedConnections` 是等待期限内仍未关闭的连接数，
-  不为 0 时命令以 1 退出。设备撤销自己时同样如此：server 先关闭它除承载这次撤销的请求之外的所有连接（包括 CLI
-  自己的终端连接），再应答，应答发出后才结束那个请求；CLI 因此用一个不依赖终端连接的单独 HTTP 请求发送自我撤销。
-
-### tsnet 客户端（D9、D14）
-
-客户端的 Tailnet 节点由每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程承载，状态在 `<home>/tsnet-client/`
-（0700），不需要系统 Tailscale。CLI 找 `cove-tsnet` 的顺序：安装闭包的 `bin/cove-tsnet`，再是开发 checkout 的
-`native/tailscale/dist/<平台>-<架构>/cove-tsnet`（`pnpm tsnet:build`）；都没有时 tsnet 入口报 `ENTRY_UNAVAILABLE`。
+一次两台机器的典型流程（devbox 是执行主机，laptop 是客户端；每台主机都在本机用自己的 CLI 安装）：
 
 ```sh
-cove --home B remote tsnet login          # auth key 从隐藏提示或 stdin 读；输入为空则在 stderr 显示登录 URL 并等待
-cove --home B remote tsnet status         # 节点状态、活动流与 dial 进程（pid、build）
-cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet
-cove --home B --server box --via tsnet status # 同一主机配对时也记录邀请中的 tsnet 入口
-cove --home B remote tsnet logout [--yes] # 有活动流时不带 --yes 列出它们并以 1 退出；带 --yes 先关闭再登出
-cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；从不启动；锁被占用而无应答时以 1 退出
-cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（默认 10m），下次启动生效
+# devbox：在一个单独的构建 checkout 中 pnpm install --frozen-lockfile、pnpm native:prepare、pnpm build 之后
+node apps/cli/dist/main.js server install            # 安装闭包、注册并启动用户服务
+~/.cove/bin/cove server entry set sshTarget me@devbox.example   # 邀请中写入的 SSH 目标（经 SSH 配对时需要）
+~/.cove/bin/cove server tsnet login                  # 可选：让 server 节点加入 Tailnet（auth key 经提示或 stdin）
+~/.cove/bin/cove auth invite create                  # 输出一次性邀请，只显示这一次
+# laptop：同样安装（或用构建 checkout 中的 CLI），先用普通 ssh 记录 devbox 的 host key
+cove remote tsnet login                              # 只在经 tsnet 配对或连接时需要
+cove remote add devbox --via ssh                     # 在提示中粘贴邀请；或 --via tsnet
+cove --server devbox task list                       # 之后所有业务命令都可远程执行
+cove --server devbox --via tsnet task list           # 换入口：同一 serverId、同一份 task 与 run
 ```
 
-- 每条经 tsnet 的命令先连 `<home>/tsnet-client/run/dial.sock`（0600），连不上时以脱离的方式启动 dial 进程并在
-  10 秒总期限内循环连接与重新启动（一个绝对期限，识别可执行文件、连接、hello 与替换旧版本的 stop 共用；自己启动的进程
-  正常退出、退出码 75 或被信号结束时重新启动，退出码 1、2 立即失败）；期限用尽报 `ENTRY_UNAVAILABLE`，附 `run/dial.log` 的末尾。
-  `remote tsnet stop` 用 `cove-tsnet dial-owned` 查看锁：只有没有 hello 且锁空闲时才报告没有 dial 进程。重试只发生在提交请求之前；
-  流建立并转发字节后，连接中断就是连接中断，不重发。dial 进程没有活动流时空闲 10 分钟退出，先删 socket 再释放锁。
-- 每条流按配对记录中 server 节点的稳定 ID 请求，dial 进程用 WhoIs 核对对端后才转发（`PEER_MISMATCH` 时拒绝），
-  CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。后续连接的流被拒时（身份保留、`PEER_MISMATCH`），
-  该连接不转发任何字节，命令失败时的错误给出原因；配对时同样如此；命令自己处理的失败（例如写已受理、读回失败时输出回执并以 1 退出）
-  另在 stderr 写出原因，回执与退出码不变。
-- 版本：dial 进程的 build 与 CLI 将启动的 `cove-tsnet` 不同时，没有活动流就请它退出并启动当前版本；
-  有活动流时绝不替换——本机协议兼容则沿用并在 stderr 警告，不兼容则报错并列出活动流（等待其结束或 `remote tsnet stop --yes`）。
-- 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
-  `LOGIN_UNCERTAIN`（未完成且可能已生效，先看 status）以 1 退出；status 中的 `hold` 表示节点在此期间拒绝流；
-  logout 的 `remoteLogoutConfirmed: false` 表示本地状态已删除但控制面未确认，需要在管理控制台删除该节点。
-- auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
-- 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
-  （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。它们只在开发 workspace 中生效；
-  安装闭包（T3 的 `<home>/install/<build>/`，根目录有 `cove-install.json`）中设置了它们时，tsnet 入口在启动 dial 进程、
-  发送任何内容之前以错误退出（`remote tsnet` 命令在读取输入之前；`remote add` 此时已在本机读过邀请，但没有发送），
-  并始终使用闭包自己的 `bin/cove-tsnet`。CLI 与 server 用同一个查找（`@cove/server/build-id` 的 `tsnetBinaryPath`）。
-
-tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
-同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
-需要 `native/tailscale/go.mod` 固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。
-所有节点只加入 testcontrol 的测试 Tailnet（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`）。`s8-tsnet-server-node` 用 server
-自己的 tsnet 节点（T5b）：`server tsnet login` 后按邀请的 `entries.tsnet` 经 tsnet 配对并运行命令。其余场景为了单独
-控制 server 节点（占用名称、重启、记录收到的字节），自己运行 `cove-tsnet serve`，把业务端口与配对端口转发到 server 的
-同号 loopback 端口，并把 serve 节点写入邀请；协议不兼容、身份冻结、未确认的登出与 `PEER_MISMATCH` 用脚本化的假
-dial 进程（`tsnet-fake-dial.mjs`）覆盖。
-
-## M2 安装与用户服务（T3）
+### 安装与用户服务
 
 范围与决定见 [M2](milestones/m2.md)（D1–D3、S1、S2）。前提：本 checkout 已 `pnpm build`、`pnpm native:prepare`，
 `pnpm` 与 Go（`COVE_GO` 或 PATH 上的 `go`，版本见 `native/tailscale/go.mod`）可用，并用 `.node-version` 的 Node 运行 CLI。
@@ -352,7 +265,85 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
 - 测试：`apps/cli/tests/m2/s1-*`、`s2-*` 注册真实的用户服务，名称取自临时数据目录，只在 `COVE_TEST_SERVICE_MANAGER=1`
   时运行（CI 的 check job 设置它）；本机运行它们会在当前用户的 gui 域或 systemd user 管理器中短暂注册并移除测试服务。
 
-## M2 server 的 tsnet 节点（T5b）
+### 入口配置
+
+入口配置保存在 server 的数据库中，`cove server entry get` 输出 `{ revision, settings, restartRequired }`：
+
+| 项              | 含义                                                                   | 生效            |
+| --------------- | ---------------------------------------------------------------------- | --------------- |
+| `businessPort`  | loopback 业务端口（HTTP RPC 与终端 WS）；SSH 与 tsnet 都转发到它       | server 下次启动 |
+| `pairingPort`   | loopback 配对端口，只在有未结束的邀请时监听                            | server 下次启动 |
+| `sshTarget`     | 邀请中写入的 SSH 目标 `[user@]host`；未设置时没有 SSH 入口，不自动推断 | 下一个邀请      |
+| `tsnetHostname` | server tsnet 节点的主机名，默认 `cove-<主机名第一个点之前的部分>`      | server 下次启动 |
+
+`cove server entry set <名> <值>` 与 `entry reset <名>` 是普通写（可带 `--expected-revision`、`--operation-id`），需要重启的项在
+stderr 提示 `cove server restart`。`server entry`、`server status` 与 `server impact` 也可经 `--server` 远程使用，其他 `server`
+子命令只作用于本机。`cove server start` 不带 `--port` 时绑定配置的业务端口，`--port N` 只覆盖这一次启动。
+既没有 `sshTarget`、server 的 tsnet 节点也不可用时，`auth invite create` 以 `ENTRY_UNAVAILABLE` 失败。
+
+### 设备配对与 `--server`
+
+范围与决定见 [M2](milestones/m2.md)（D4–D8、D11）。loopback 入口是同一主机上的 server，SSH 入口经系统 `ssh` 连到另一台主机，
+tsnet 入口经客户端自己的 Tailnet 节点（见下文“客户端 tsnet”）。下面用同一台机器上的两个数据目录模拟两台设备：
+
+```sh
+cove --home A server start                           # 或已安装的服务；前台运行时在另一个 shell 中执行下面的命令
+cove --home A server entry set sshTarget me@devbox.example
+cove --home A auth invite create [--ttl-minutes N]   # 输出邀请，只显示这一次
+# 客户端（数据目录 B），从提示或 stdin 粘贴邀请，不经命令行参数
+cove --home B remote add box [--name laptop]         # 不带 --via：同一主机，默认 loopback，另记邀请中的 ssh 与 tsnet 入口
+cove --home B --server box status                    # 或 COVE_SERVER=box
+cove --home A auth device list                       # 本机所有者也能管理设备
+cove --home B --server box auth device rotate        # 轮换本客户端自己的 token
+cove --home A auth device revoke <deviceId>
+# 另一台主机上的客户端（数据目录 C）经邀请中的 SSH 目标配对，之后默认走 SSH
+cove --home C remote add devbox --via ssh
+cove --home C --server devbox status
+cove --home B --server box --via ssh status          # 同一主机配对的记录也有 ssh 入口
+cove --home B remote entry default box ssh           # 改默认入口；失败时从不自动换入口
+```
+
+- loopback 入口只核对 server 回报的 serverId：它识别 server，但不证明对端就是它。同一主机上的其他进程抢先占用端口
+  并冒充 server 的情况不在防护范围内（见 [relay-protocol §11.8](relay-protocol.md)）。
+- 配对监听是单独的 loopback 端口，只在有未结束的邀请时开放。邀请默认 10 分钟有效，最长 24 小时，
+  错误 secret 达到 5 次后作废。兑换的响应丢失时不能重试：重新创建邀请，那次留下的设备显示为 never-connected，可以撤销。
+- token 保存在 `<home>/client/servers/<serverId>.json` 中（0600，所在目录 0700），server 只保存其哈希。
+  `remote remove` 只删除本机记录，不撤销 server 上的设备。修改记录的命令（`auth device rotate`、`remote entry default`、
+  `remote remove`）持有同目录下 `<serverId>.lock.sqlite` 上的锁并合并到最新记录，因此并发执行时依次进行，最后保存的 token 就是有效的那个；
+  rotate 从读取 token 到新 token 首次使用一直持有该锁。这是随持有进程存在的 OS 锁（SQLite 排他事务）：
+  持有者无论怎样退出，锁都由内核释放，不需要接管；锁文件不含内容，`remote remove` 后也保留，不要手工删除。
+- `--server` 模式下路径参数是 server 主机上的路径：相对路径与 `~` 是用法错误，不发送；绝对路径原样发送，
+  `terminal create` 必须给 `--cwd`。CLI 不在本机文件系统上解析这些路径：`mount delete-worktree PATH` 要在本机
+  解析真实路径，因此 `--server` 模式下以 2 拒绝，须改用 `<taskId> <mountId>`。`remote` 组与除 `server entry/status/impact`
+  之外的 `server` 子命令只作用于本机，给 `--server` 时以 2 退出。
+- 撤销会立即拒绝该设备的所有请求，并关闭它的连接（终端连接持有的控制权随之释放）；它已受理的操作照常完成。
+  `auth device revoke` 等这些连接关闭后才返回，响应中的 `unclosedConnections` 是等待期限内仍未关闭的连接数，
+  不为 0 时命令以 1 退出。设备撤销自己时同样如此：server 先关闭它除承载这次撤销的请求之外的所有连接（包括 CLI
+  自己的终端连接），再应答，应答发出后才结束那个请求；CLI 因此用一个不依赖终端连接的单独 HTTP 请求发送自我撤销。
+
+### SSH 入口
+
+- 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
+  ssh 在 `sh` 监督进程下运行，监督进程在 CLI 的管道关闭时结束 ssh，不留下孤儿进程。
+- 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
+  `NoHostAuthenticationForLocalhost=no`、`ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，
+  并关闭连接复用（ControlMaster）；ssh 认识时还固定 `NoHostAuthenticationForProxyCommand=no`（Apple 的 ssh）与
+  `ForkAfterAuthentication=no`（OpenSSH 8.7 起）。命令行选项优先于用户配置，因此用户配置中的 `GatewayPorts yes`、
+  `ControlPersist`、跳过本机或 ProxyCommand 目标 host key 检查的设置以及 `ForkAfterAuthentication yes`，都不会关闭
+  host key 检查、让转发监听非 loopback 地址或在命令后继续存在。每次建隧道前先用 `ssh -G` 解析目标的实际配置：
+  ssh 不认识的可选项不加，解析结果中 host 认证未开启、会 fork 或固定项未生效时，命令报 `ENTRY_UNAVAILABLE` 且不连接。
+  CLI 不写 known_hosts：第一次连接某台主机前，先用普通 `ssh <目标>` 确认并记录它的 host key。
+- host key 未知或不符时，ssh 在建立转发前失败，命令报 `ENTRY_UNAVAILABLE` 与 ssh 的最后一行输出，不发送 token 或邀请。
+  隧道建立后先核对 serverId，再交出 token。
+- 经隧道的请求以隧道本地端口作 Host。server 接受任何 loopback IP 字面量 Host（`127.0.0.1:<端口>`、`[::1]:<端口>`，
+  用户决定 2026-10-22），只拒绝域名 Host（DNS rebinding 必然带域名）与 `localhost`，因此 CLI 不改写 Host。
+- 入口失败时命令以 1 退出，列出记录中的入口；不会改用其他入口，需要时用 `--via` 或 `remote entry default`。
+
+SSH 场景测试（`apps/cli/tests/m2/s5-*`、`s6-*`、`s7-*`）用 `sshd-fixture.mjs` 自起一个非特权 sshd：独立配置、
+测试生成的 host key 与客户端 key、127.0.0.1 上的高端口、`UsePAM no`。客户端经 PATH 上的 `ssh` 包装加 `-F`
+使用夹具自己的 ssh 配置与 known_hosts，不读取操作者的 `~/.ssh`。找不到 sshd 时这些用例以原因失败而不是跳过（门禁把跳过的必需用例算作失败）。
+
+### server 的 tsnet 节点
 
 范围与决定见 [M2](milestones/m2.md)（D6、D9、D10、S9）。server 自己的 Tailnet 节点由它监督的子进程 `cove-tsnet serve`
 承载（[本机协议](../native/tailscale/PROTOCOL.md)），状态在 `<home>/tsnet/`（0700），不需要也不使用系统 Tailscale。
@@ -387,6 +378,52 @@ cove --home A server tsnet logout    # 删除节点状态；控制面未确认�
 `cove-tsnet`（`s9-fake-tsnet.mjs`）；`s9-tsnet-node.test.mjs` 是 S9，用真实 `cove-tsnet` 与一个对端节点加入 testcontrol 的测试 Tailnet
 （`TS_PANIC_IF_HIT_MAIN_CONTROL=1`），可执行文件构建到 `.cache/tsnet-test/<源码摘要>/`，需要 `native/tailscale/go.mod`
 固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。真实 Tailnet 与两台机器的验证在 CI 之外进行。
+
+### 客户端 tsnet
+
+客户端的 Tailnet 节点由每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程承载，状态在 `<home>/tsnet-client/`
+（0700），不需要系统 Tailscale。CLI 找 `cove-tsnet` 的顺序：安装闭包的 `bin/cove-tsnet`，再是开发 checkout 的
+`native/tailscale/dist/<平台>-<架构>/cove-tsnet`（`pnpm tsnet:build`）；都没有时 tsnet 入口报 `ENTRY_UNAVAILABLE`。
+
+```sh
+cove --home B remote tsnet login          # auth key 从隐藏提示或 stdin 读；输入为空则在 stderr 显示登录 URL 并等待
+cove --home B remote tsnet status         # 节点状态、活动流与 dial 进程（pid、build）
+cove --home C remote add devbox --via tsnet   # 经邀请中 server 节点的稳定 ID 配对，之后默认走 tsnet
+cove --home B --server box --via tsnet status # 同一主机配对时也记录邀请中的 tsnet 入口
+cove --home B remote tsnet logout [--yes] # 有活动流时不带 --yes 列出它们并以 1 退出；带 --yes 先关闭再登出
+cove --home B remote tsnet stop [--yes]   # 只结束 dial 进程（状态保留）；从不启动；锁被占用而无应答时以 1 退出
+cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（默认 10m），下次启动生效
+```
+
+- 每条经 tsnet 的命令先连 `<home>/tsnet-client/run/dial.sock`（0600），连不上时以脱离的方式启动 dial 进程并在
+  10 秒总期限内循环连接与重新启动（一个绝对期限，识别可执行文件、连接、hello 与替换旧版本的 stop 共用；自己启动的进程
+  正常退出、退出码 75 或被信号结束时重新启动，退出码 1、2 立即失败）；期限用尽报 `ENTRY_UNAVAILABLE`，附 `run/dial.log` 的末尾。
+  `remote tsnet stop` 用 `cove-tsnet dial-owned` 查看锁：只有没有 hello 且锁空闲时才报告没有 dial 进程。重试只发生在提交请求之前；
+  流建立并转发字节后，连接中断就是连接中断，不重发。dial 进程没有活动流时空闲 10 分钟退出，先删 socket 再释放锁。
+- 每条流按配对记录中 server 节点的稳定 ID 请求，dial 进程用 WhoIs 核对对端后才转发（`PEER_MISMATCH` 时拒绝），
+  CLI 再核对 serverId，之后才发送 token 或邀请 secret。节点名称只用于显示。后续连接的流被拒时（身份保留、`PEER_MISMATCH`），
+  该连接不转发任何字节，命令失败时的错误给出原因；配对时同样如此；命令自己处理的失败（例如写已受理、读回失败时输出回执并以 1 退出）
+  另在 stderr 写出原因，回执与退出码不变。
+- 版本：dial 进程的 build 与 CLI 将启动的 `cove-tsnet` 不同时，没有活动流就请它退出并启动当前版本；
+  有活动流时绝不替换——本机协议兼容则沿用并在 stderr 警告，不兼容则报错并列出活动流（等待其结束或 `remote tsnet stop --yes`）。
+- 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
+  `LOGIN_UNCERTAIN`（未完成且可能已生效，先看 status）以 1 退出；status 中的 `hold` 表示节点在此期间拒绝流；
+  logout 的 `remoteLogoutConfirmed: false` 表示本地状态已删除但控制面未确认，需要在管理控制台删除该节点。
+- auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
+- 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
+  （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。它们只在开发 workspace 中生效；
+  安装闭包（T3 的 `<home>/install/<build>/`，根目录有 `cove-install.json`）中设置了它们时，tsnet 入口在启动 dial 进程、
+  发送任何内容之前以错误退出（`remote tsnet` 命令在读取输入之前；`remote add` 此时已在本机读过邀请，但没有发送），
+  并始终使用闭包自己的 `bin/cove-tsnet`。CLI 与 server 用同一个查找（`@cove/server/build-id` 的 `tsnetBinaryPath`）。
+
+tsnet 场景测试（`apps/cli/tests/m2/s7-tsnet-*`、`s8-*`）用 `scripts/tsnet-build.mjs` 把当前 build、另一 build ID 的
+同一源码（模拟旧版本）与仅供测试的 `cove-tsnet-testcontrol` 构建到 `.cache/tsnet-test/<源码摘要>/`，同一轮测试共用；
+需要 `native/tailscale/go.mod` 固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。
+所有节点只加入 testcontrol 的测试 Tailnet（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`）。`s8-tsnet-server-node` 用 server
+自己的 tsnet 节点（T5b）：`server tsnet login` 后按邀请的 `entries.tsnet` 经 tsnet 配对并运行命令。其余场景为了单独
+控制 server 节点（占用名称、重启、记录收到的字节），自己运行 `cove-tsnet serve`，把业务端口与配对端口转发到 server 的
+同号 loopback 端口，并把 serve 节点写入邀请；协议不兼容、身份冻结、未确认的登出与 `PEER_MISMATCH` 用脚本化的假
+dial 进程（`tsnet-fake-dial.mjs`）覆盖。
 
 ## B0 实验环境
 
