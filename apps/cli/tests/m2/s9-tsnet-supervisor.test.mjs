@@ -159,6 +159,55 @@ test("ports follow the pairing listener, and an invitation advertises only a nod
   expect((await node.status()).ports).toEqual([41001]);
 });
 
+test("a logout or a reauth in flight is never advertised from the status cached before it", async () => {
+  const { node, home, seedState, setPairing, startRunning } = rig();
+  await seedState();
+  await startRunning();
+  await setPairing(42001);
+  const entry = { nodeId: "nSeed1CNTRL", name: "cove-unit.tail.example" };
+  expect(node.invitationEntry(42001)).toEqual(entry);
+
+  // A reauth holds the node and closes its listeners from its first moment; an invitation created
+  // meanwhile reuses the open pairing listener, with no port sync.
+  const reauth = node.login("tskey-slow-0123456789abcdef", 5_000);
+  expect(node.invitationEntry(42001)).toBeNull();
+  await node.status();
+  expect(node.invitationEntry(42001)).toBeNull();
+  expect((await reauth).kind).toBe("answered");
+  // Observed again once it ended.
+  await until("the node to be advertised again", () => node.invitationEntry(42001) !== null);
+
+  // A logout closes the listeners before it deletes the node.
+  writeFileSync(join(home, "tsnet", "slow-logout"), "");
+  const logout = node.logout();
+  expect(node.invitationEntry(42001)).toBeNull();
+  await node.status();
+  expect(node.invitationEntry(42001)).toBeNull();
+  expect((await logout).kind).toBe("answered");
+  await node.status();
+  expect(node.invitationEntry(42001)).toBeNull();
+});
+
+test("a port update that timed out is not advertised until the helper acknowledges the set", async () => {
+  const { node, home, seedState, setPairing, startRunning, ops } = rig();
+  await seedState();
+  await startRunning();
+  await setPairing(42001);
+  expect(node.invitationEntry(42001)).not.toBeNull();
+  // The helper applies the set but its answer never comes.
+  const hang = join(home, "tsnet", "hang-setports");
+  writeFileSync(hang, "");
+  await setPairing(42002);
+  expect(node.invitationEntry(42002)).toBeNull();
+  // Its status now shows the new port open, but the set was never acknowledged.
+  expect((await node.status()).ports).toEqual([41001, 42002]);
+  expect(node.invitationEntry(42002)).toBeNull();
+  rmSync(hang);
+  // An invitation that found the set unacknowledged sent it again; a later one advertises.
+  await until("the set to be acknowledged", () => node.invitationEntry(42002) !== null, 15_000);
+  expect((await ops()).filter((op) => op.op === "setPorts").length).toBeGreaterThanOrEqual(4);
+}, 30_000);
+
 test("a helper that dies is restarted with the current ports, and close stops it", async () => {
   const { node, context, ops, seedState, setPairing, logs, startRunning } = rig();
   await seedState();

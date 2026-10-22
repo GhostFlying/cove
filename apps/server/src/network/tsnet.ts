@@ -42,9 +42,20 @@ import type { TsnetEntry, TsnetEntryContext, TsnetInvitationEntry } from "./list
 // Ports (D6). The helper's port set is declarative: the business port always, and the pairing
 // port while the pairing listener is open. The pairing listener reports each change and waits
 // for the helper's answer (bounded), so an invitation is created only after the tailnet side of
-// its pairing port is open, and the invitation advertises this node only when the helper's
-// latest answer shows both ports open on a running, unheld node (invitationEntry). A helper that
-// is down is sent the set when it starts again.
+// its pairing port is open. A helper that is down is sent the set when it starts again.
+//
+// Advertisement. An invitation advertises this node (invitationEntry) only from a status the
+// helper reported after the last change that could have altered it, never from a cached answer
+// that a change has since made stale: a logout closes the node's listeners before it deletes the
+// node, a reauth holds the node, and a port update can time out, while an invitation reuses an
+// open pairing listener without any port sync. So three generations are kept: of the helper
+// process, of the desired port set (each sync), and of control requests (each login or logout,
+// at its start and its end). Each such change drops the advertisement first. A status or setPorts
+// answer becomes the advertisement only when the generations it was requested under are still
+// current, the helper acknowledged the current port set with a setPorts answer, and no login or
+// logout is in flight; and invitationEntry advertises only a running, unheld node that this
+// answer shows listening on both ports. A login or logout that ends asks for a fresh status, so
+// the node is advertised again once it is observed.
 //
 // Shutdown order (listeners.ts closes this entry first): no restart is scheduled any more, the
 // helper's stdin is closed, which is its orderly stop (it cancels a pending login, answers what it
@@ -337,8 +348,15 @@ export class TsnetNode implements TsnetEntry {
   private backoffMs = BACKOFF_INITIAL_MS;
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
   private incompatible: string | undefined;
-  // The helper's latest answer carrying a status (setPorts, status, login), for invitationEntry.
-  private latest: HelperStatus | undefined;
+  // See "Advertisement" in the module comment.
+  private advertised: HelperStatus | undefined;
+  private helperGeneration = 0;
+  private portGeneration = 0;
+  // The port generation the current helper acknowledged with a setPorts answer.
+  private portsAcknowledged = -1;
+  private controlGeneration = 0;
+  private controls = 0;
+  private syncing = 0;
   private portWork: Promise<void> = Promise.resolve();
 
   // The helper's directory under the data directory; its state is `<tsnetHome>/state`.
@@ -393,30 +411,48 @@ export class TsnetNode implements TsnetEntry {
   // Sends the current port set to a running helper and waits for its answer (bounded). Calls are
   // applied in order; this never rejects.
   syncPorts(): Promise<void> {
+    // A desired-port transition: what the helper last reported no longer describes it.
+    const generation = ++this.portGeneration;
+    this.advertised = undefined;
+    this.syncing++;
     const work = this.portWork.then(async () => {
       const channel = this.channel;
       if (!channel || this.closing || !(await this.isReady())) return;
+      const at = this.generations();
       try {
-        this.latest = (await channel.request(
+        const answer = (await channel.request(
           { op: "setPorts", ports: this.desiredPorts() },
           PORTS_TIMEOUT_MS,
         )) as HelperStatus;
+        // A newer sync, or another helper, makes this answer describe an older set.
+        if (generation === this.portGeneration && at.helper === this.helperGeneration)
+          this.portsAcknowledged = generation;
+        this.observed(answer, at);
       } catch (error) {
-        // LISTEN_FAILED keeps the desired set in the helper; its status reports what is open.
+        // LISTEN_FAILED keeps the desired set in the helper; its status reports what is open. A
+        // timeout leaves the set unacknowledged: nothing is advertised until a later sync is.
         if (error instanceof HelperRefused)
           this.context?.log({ event: "tsnet-ports", outcome: error.code });
       }
     });
-    this.portWork = work;
+    this.portWork = work.finally(() => this.syncing--);
     return work;
   }
 
-  // The node an invitation may advertise for `pairingPort`: only when the helper's latest answer
-  // shows it running, unheld and listening on the business and that pairing port.
+  // The node an invitation may advertise for `pairingPort`: only from a current answer (see
+  // "Advertisement" in the module comment) that shows it running, unheld and listening on the
+  // business port and that pairing port.
   invitationEntry(pairingPort: number): TsnetInvitationEntry | null {
     const context = this.context;
-    if (!context || !this.latest || !this.channel) return null;
-    const status = apiStatus(this.latest, context.hostname);
+    if (!context || !this.channel) return null;
+    // A port set the helper never acknowledged (its update timed out) is sent again, so that a
+    // later invitation can advertise the node; this one does without.
+    if (this.portsAcknowledged !== this.portGeneration) {
+      if (this.syncing === 0) void this.syncPorts();
+      return null;
+    }
+    if (!this.advertised || this.controls > 0) return null;
+    const status = apiStatus(this.advertised, context.hostname);
     if (
       status.state !== "running" ||
       status.hold !== null ||
@@ -448,12 +484,13 @@ export class TsnetNode implements TsnetEntry {
       };
     if (!(await this.whenReady(STATUS_READY_WAIT_MS)))
       return unavailableStatus(hostname, this.downReason());
+    const at = this.generations();
     try {
       const answer = (await this.channel!.request(
         { op: "status" },
         STATUS_TIMEOUT_MS,
       )) as HelperStatus;
-      this.latest = answer;
+      this.observed(answer, at);
       return apiStatus(answer, hostname);
     } catch (error) {
       if (error instanceof HelperRefused)
@@ -476,7 +513,34 @@ export class TsnetNode implements TsnetEntry {
   }
 
   // One login request (PROTOCOL.md `login`). The key travels in the frame alone.
-  async login(authKey: string | undefined, timeoutMs: number): Promise<TsnetLoginOutcome> {
+  login(authKey: string | undefined, timeoutMs: number): Promise<TsnetLoginOutcome> {
+    return this.control(() => this.loginRequest(authKey, timeoutMs));
+  }
+
+  logout(): Promise<TsnetLogoutOutcome> {
+    return this.control(() => this.logoutRequest());
+  }
+
+  // A login or logout: the node may change from its first moment (a reauth holds it, a logout
+  // closes its listeners first), so nothing is advertised from before it, while it runs or from
+  // an answer requested meanwhile; once it ends the node is observed again. See "Advertisement".
+  private async control<T>(request: () => Promise<T>): Promise<T> {
+    this.controls++;
+    this.controlGeneration++;
+    this.advertised = undefined;
+    try {
+      return await request();
+    } finally {
+      this.controls--;
+      this.controlGeneration++;
+      if (this.controls === 0 && !this.closing) void this.status();
+    }
+  }
+
+  private async loginRequest(
+    authKey: string | undefined,
+    timeoutMs: number,
+  ): Promise<TsnetLoginOutcome> {
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     let answer: HelperStatus;
@@ -489,7 +553,6 @@ export class TsnetNode implements TsnetEntry {
       if (!(error instanceof HelperRefused)) return { kind: "lost" };
       // The login itself completed; only opening a listener failed (serve.go login).
       if (error.code === "LISTEN_FAILED") {
-        void this.status();
         return {
           kind: "answered",
           status: unavailableStatus(
@@ -501,19 +564,17 @@ export class TsnetNode implements TsnetEntry {
       }
       return { kind: "refused", code: error.code };
     }
-    this.latest = answer;
     const secrets = authKey ? [authKey] : [];
     const status = apiStatus(answer, this.context?.hostname ?? null, secrets);
     const url = TsnetLoginSecretsSchema.shape.loginUrl.safeParse(answer.authURL);
     return { kind: "answered", status, ...(url.success ? { loginUrl: url.data } : {}) };
   }
 
-  async logout(): Promise<TsnetLogoutOutcome> {
+  private async logoutRequest(): Promise<TsnetLogoutOutcome> {
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     try {
       const answer = (await channel.request({ op: "logout" }, LOGOUT_TIMEOUT_MS)) as HelperStatus;
-      this.latest = answer;
       return { kind: "answered", remoteLogoutConfirmed: answer.remoteLogoutConfirmed === true };
     } catch (error) {
       return error instanceof HelperRefused
@@ -525,6 +586,35 @@ export class TsnetNode implements TsnetEntry {
   // The helper's process ID, for tests and diagnostics only.
   get pid(): number | undefined {
     return this.child?.pid;
+  }
+
+  // The generations an answer is requested under; see "Advertisement".
+  private generations(): { helper: number; ports: number; control: number } {
+    return {
+      helper: this.helperGeneration,
+      ports: this.portGeneration,
+      control: this.controlGeneration,
+    };
+  }
+
+  // A status the helper answered to a request made under `at`: the advertisement, if it is
+  // current (see "Advertisement").
+  private observed(answer: HelperStatus, at: ReturnType<TsnetNode["generations"]>): void {
+    if (
+      this.controls === 0 &&
+      at.helper === this.helperGeneration &&
+      at.ports === this.portGeneration &&
+      at.control === this.controlGeneration &&
+      this.portsAcknowledged === this.portGeneration
+    )
+      this.advertised = answer;
+  }
+
+  // The current helper is gone: nothing it reported describes the next one.
+  private retired(): void {
+    this.helperGeneration++;
+    this.portsAcknowledged = -1;
+    this.advertised = undefined;
   }
 
   private hasState(): boolean {
@@ -624,6 +714,7 @@ export class TsnetNode implements TsnetEntry {
         return;
       }
       this.child = child;
+      this.helperGeneration++;
       const startedAt = Date.now();
       const channel = new HelperChannel(child);
       this.channel = channel;
@@ -642,7 +733,7 @@ export class TsnetNode implements TsnetEntry {
         if (this.child !== child) return;
         this.child = undefined;
         this.channel = undefined;
-        this.latest = undefined;
+        this.retired();
         context.log({ event: spawned ? "tsnet-helper-exited" : "tsnet-helper-failed", ...outcome });
         // Only a helper that really ran for STABLE_RUN_MS earns an immediate restart; a spawn
         // that failed ran nothing, and must not look like a long stable run.
