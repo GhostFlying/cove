@@ -6,8 +6,11 @@
 //
 // Node state is `<home>/state/node.json`. Auth keys: one starting `tskey-fail` is rejected
 // (LOGIN_FAILED), `tskey-other` logs in as another node than the enrolled one (IDENTITY_CHANGED),
-// `tskey-hang` is never answered, any other logs in. Without a key the login is interactive and
-// answers with a URL; it completes at a status shortly after. Every request is appended to `<home>/fake-ops.jsonl` as its op, whether it
+// `tskey-hang` is never answered, `tskey-slow` holds the node (no ports, LOGIN_UNCERTAIN) for
+// SLOW_MS before it logs in, any other logs in. Without a key the login is interactive and answers
+// with a URL; it completes at a status shortly after. Files in `<home>` change behavior while
+// they exist: `hang-setports` applies a port set without answering, `slow-logout` closes the
+// ports at once and answers the logout SLOW_MS later. Every request is appended to `<home>/fake-ops.jsonl` as its op, whether it
 // carried a key and its ports, never the key itself. FAKE_TSNET_PROTOCOL overrides the protocol
 // hello answers with.
 import {
@@ -37,6 +40,9 @@ let pendingUrl = null;
 // as if someone had opened it.
 const INTERACTIVE_COMPLETES_MS = 300;
 let pendingSince = 0;
+let held = false;
+const SLOW_MS = 800;
+const flagged = (name) => existsSync(join(home, name));
 const node = () => (existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : null);
 
 appendFileSync(
@@ -55,7 +61,8 @@ function status() {
     self: running
       ? { stableNodeID: current.id, name: `${flag("--hostname") ?? "cove-fake"}.tail.example.` }
       : null,
-    ports: running ? ports : [],
+    ports: running && !held ? ports : [],
+    ...(held ? { hold: "LOGIN_UNCERTAIN" } : {}),
     streams: [],
     warnings: [],
   };
@@ -94,7 +101,7 @@ lines.on("line", (line) => {
       return;
     case "setPorts":
       ports = [...request.ports];
-      answer(id, status());
+      if (!flagged("hang-setports")) answer(id, status());
       return;
     case "login": {
       const key = request.authKey;
@@ -106,6 +113,14 @@ lines.on("line", (line) => {
         return;
       }
       if (key.startsWith("tskey-hang")) return;
+      if (key.startsWith("tskey-slow")) {
+        held = true;
+        setTimeout(() => {
+          held = false;
+          answer(id, status());
+        }, SLOW_MS);
+        return;
+      }
       if (key.startsWith("tskey-fail")) return refuse(id, "LOGIN_FAILED");
       const enrolled = node();
       if (key.startsWith("tskey-other") && enrolled) return refuse(id, "IDENTITY_CHANGED");
@@ -115,12 +130,18 @@ lines.on("line", (line) => {
       answer(id, status());
       return;
     }
-    case "logout":
-      rmSync(join(home, "state"), { recursive: true, force: true });
-      pendingUrl = null;
+    case "logout": {
+      const finish = () => {
+        rmSync(join(home, "state"), { recursive: true, force: true });
+        pendingUrl = null;
+        answer(id, { ...status(), remoteLogoutConfirmed: true });
+      };
+      // Like the helper, the listeners close before the control plane is told.
       ports = [];
-      answer(id, { ...status(), remoteLogoutConfirmed: true });
+      if (flagged("slow-logout")) setTimeout(finish, SLOW_MS);
+      else finish();
       return;
+    }
     default:
       refuse(id, "BAD_REQUEST");
   }
