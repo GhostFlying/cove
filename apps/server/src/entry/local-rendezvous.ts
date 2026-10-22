@@ -150,8 +150,14 @@ export class LocalRendezvous {
           throw error;
         }
         for (const ancestor of ancestors) {
-          if (ancestor.actual === actualRoot)
-            include(root, join(root, relative(ancestor.path, parent)));
+          if (below(ancestor.actual, actualRoot)) {
+            // An outside alias can enter below the root, then leave through a managed
+            // symlink. Keep both segments so lstat checks that full managed traversal.
+            include(
+              root,
+              join(root, relative(actualRoot, ancestor.actual), relative(ancestor.path, parent)),
+            );
+          }
         }
         if (below(target, actualRoot)) {
           // realpath uses native FS spelling, so CLIENT aliases client only on a case-folding
