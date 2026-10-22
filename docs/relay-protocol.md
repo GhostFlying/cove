@@ -82,8 +82,9 @@ Server 的各网络入口必须执行一致的协议协商和授权规则；不�
 已实现（M0 握手，M2 认证与入口；字段见 §11.1、§11.8）：
 
 - bootstrap 是固定路径上的 JSON（HTTP `POST /bootstrap`，终端 WebSocket 的首帧），`bootstrapVersion` 为 1，
-  与业务 `protocolVersion`（当前为 2）分开；版本不符时以 `cove-bootstrap-error` 应答（HTTP 409，`kind`、`message`
-  与 `supportedVersions`），不进入业务解码。
+  与业务 `protocolVersion`（当前为 2）分开。失败以 `cove-bootstrap-error`（`kind`、`message` 与 `supportedVersions`）应答，
+  不进入业务解码：请求不是本 bootstrap 版本的合法请求（含不支持的 `bootstrapVersion`）为 `BOOTSTRAP_UNSUPPORTED`，HTTP 400；
+  `protocolVersion` 不符为 `PROTOCOL_MISMATCH`、期望的 serverId 或 relayInstanceId 不符为 `INSTANCE_MISMATCH`，两者为 HTTP 409。
 - 认证没有采用挑战-应答：凭据是 `Authorization: Bearer`（终端 WS 首帧的 `secret`）中的本机秘密或设备 token，
   每个请求都携带并单独校验；握手成功不使后续请求跳过检查。缺凭据或凭据错误为 `UNAUTHENTICATED`、已撤销为
   `DEVICE_REVOKED`（HTTP 401，WS 以 policy 关闭），两者不区分设备不存在与秘密错误。
@@ -456,8 +457,8 @@ JSON-RPC 2.0 定义关联 ID、结果/错误、通知和 batch，不替代 Cove 
 - 每次调用声明 `Cove-Protocol`；服务端先完成认证和协议检查，再解码并分发业务调用。
   握手结果不能成为后续 HTTP 请求跳过检查的理由。
 - 版本不匹配通过稳定 bootstrap 错误格式返回，包含支持版本及 recovery 提示；不需要读懂当前业务 envelope。
-  准入失败的 HTTP 状态：malformed 400、unauthenticated 与 revoked 401、forbidden 403、版本不符 409、过大 413、
-  busy 429、unavailable 503（`ADMISSION_STATUS`）；首次正式发布前仍可调整。
+  准入失败的 HTTP 状态：malformed 400（含 `BOOTSTRAP_UNSUPPORTED`）、unauthenticated 与 revoked 401、forbidden 403、
+  协议或实例不符 409、过大 413、busy 429、unavailable 503（`ADMISSION_STATUS`）；首次正式发布前仍可调整。
 - 业务响应复用请求中的 `Cove-Server-Id`、`Cove-Instance-Id` 和 `Cove-Protocol` 三个 header，
   分别携带 `serverId`、`relayInstanceId` 和 `protocolVersion`；header 名按 HTTP 规则不区分大小写。
   响应不回显 `Authorization`，也不给标准 JSON-RPC envelope 增加必需 meta 字段；客户端逐次验证原服务身份。
