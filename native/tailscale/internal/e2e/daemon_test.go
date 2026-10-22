@@ -183,8 +183,11 @@ func TestServeRefusesSharedForwardDirectory(t *testing.T) {
 	if err := d.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if code := d.wait(10 * time.Second); code != 1 || !strings.Contains(d.stderr.String(), "no group or other access") {
+	if code := d.wait(10 * time.Second); code != 1 || !strings.Contains(d.stderr.String(), "mode 0755") || !strings.Contains(d.stderr.String(), "Cove's own directories must be owned by the current user") {
 		t.Fatalf("code %d, output:\n%s", code, d.stderr)
+	}
+	if info, err := os.Stat(fwd); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("serve changed the refused directory: info %v, error %v", info, err)
 	}
 }
 
