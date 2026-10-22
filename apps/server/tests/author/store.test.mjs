@@ -348,8 +348,12 @@ describe("store opening, migrations and the data directory lock", () => {
       // SQLite's own recovery, on a copy.
       const copy = await mkdtemp(join(tmpdir(), "cove-wal-copy-"));
       directories.push(copy);
-      for (const file of Object.keys(before))
-        if (file !== "cove.db-shm") await cp(join(directory, file), join(copy, file));
+      // The snapshot also records the root and nested directories; this oracle needs only
+      // direct regular files. Omit shm so SQLite rebuilds its own WAL shared-memory index.
+      for (const [file, entry] of Object.entries(before))
+        if (entry.kind === "file" && !file.includes("/") && file !== "cove.db-shm")
+          await cp(join(directory, file), join(copy, file));
+      expect(await readdir(copy)).not.toContain("cove.db-shm");
       const Database = require("better-sqlite3");
       const db = new Database(join(copy, "cove.db"));
       const recovered = db.pragma("user_version", { simple: true });
