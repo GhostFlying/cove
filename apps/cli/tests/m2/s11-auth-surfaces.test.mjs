@@ -9,6 +9,7 @@ import {
   REQUIRED_CAPABILITIES,
 } from "@cove/protocol/bootstrap";
 import { BASELINE_ENCODING, PROFILE } from "@cove/protocol/profile";
+import { sourceBuildId } from "@cove/server/build-id";
 import { waitFor } from "../recording-view.mjs";
 import {
   alteredInvitation,
@@ -149,9 +150,12 @@ test("credentials that do not authenticate are refused on HTTP and WebSocket wit
       "protocolVersion",
       "relayInstanceId",
       "serverId",
+      // The source build (#175), public like buildVersion; this server runs from a checkout.
+      "sourceBuild",
       "type",
     ].sort(),
   );
+  expect(anonymous.json.sourceBuild).toBe(sourceBuildId());
   // The real token still works on both channels.
   const accepted = await post(port, "/rpc", rpcRequest, {
     ...business,

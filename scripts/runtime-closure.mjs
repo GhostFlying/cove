@@ -26,7 +26,9 @@
 // records a digest of the final contents, cove-tsnet included, which `cove server install
 // --closure` checks before it installs a copy. Two checkouts of one commit at different paths get
 // different IDs: pnpm names its virtual store entries of workspace packages after their source
-// paths. That only costs a second install directory, never a wrong match.
+// paths. That only costs a second install directory, never a wrong match. The stamp also records
+// the checkout's source build (`source`, #175), which does not depend on the path or the platform:
+// it is what a CLI and an installed server compare for the D12 warning.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -68,6 +70,15 @@ function capture(command, args, options = {}) {
   return result.stdout;
 }
 
+// The source build of this checkout (apps/server build-id.ts computeSourceBuildId), from its
+// compiled server package: the same function the CLI and a development server use, so a closure
+// and the checkout it came from report one source build.
+async function checkoutSourceBuild() {
+  const module = join(root, "apps/server/dist/build-id.js");
+  if (!existsSync(module)) fail("apps/server is not built; run `pnpm build` first");
+  return (await import(pathToFileURL(module).href)).computeSourceBuildId(root);
+}
+
 async function closureLib() {
   if (!existsSync(closureModule)) fail("apps/cli is not built; run `pnpm build` first");
   return import(pathToFileURL(closureModule).href);
@@ -80,7 +91,7 @@ function storeEntry(nodeModules, prefix) {
   return names[0];
 }
 
-function assemble(out) {
+function assemble(out, sourceBuild) {
   const pinned = readFileSync(join(root, ".node-version"), "utf8").trim();
   if (process.version !== `v${pinned}`)
     fail(
@@ -95,7 +106,7 @@ function assemble(out) {
   const target = join(parent, basename(out));
   mkdirSync(target, { mode: 0o755 });
   try {
-    assembleInto(target);
+    assembleInto(target, sourceBuild);
   } catch (error) {
     // A failed assembly leaves nothing half made at the requested path.
     rmSync(target, { recursive: true, force: true });
@@ -104,7 +115,7 @@ function assemble(out) {
   return target;
 }
 
-function assembleInto(target) {
+function assembleInto(target, sourceBuild) {
   const app = join(target, "app");
   run(process.env.COVE_PNPM || "pnpm", ["--filter", "@cove/cli", "deploy", "--prod", app], {
     cwd: root,
@@ -197,6 +208,10 @@ function assembleInto(target) {
         platform: process.platform,
         arch: process.arch,
         node: process.version,
+        // The source build of the checkout the closure is assembled from (#175; apps/server
+        // build-id.ts computeSourceBuildId), which the seal records in the stamp: the installed
+        // server reports it for the D12 comparison, where the build ID would differ per platform.
+        sourceBuild,
       },
       null,
       2,
@@ -292,6 +307,9 @@ async function seal(dir) {
     platform: manifest.platform,
     arch: manifest.arch,
     node: manifest.node,
+    // Recorded at assembly (closure.json); a closure assembled before it was recorded has none,
+    // and its server then reports no source build (the D12 comparison falls back to the build).
+    ...(typeof manifest.sourceBuild === "string" ? { source: manifest.sourceBuild } : {}),
     contentsSha256: await lib.contentsDigest(closure),
   };
   if (!lib.parseStamp(JSON.stringify(stamp))) fail(`invalid stamp ${JSON.stringify(stamp)}`);
@@ -312,13 +330,15 @@ if (invokedDirectly) {
   const [command, ...rest] = process.argv.slice(2);
   try {
     if (command === "assemble")
-      console.log(JSON.stringify({ assembled: assemble(option(rest, "--out")) }));
+      console.log(
+        JSON.stringify({ assembled: assemble(option(rest, "--out"), await checkoutSourceBuild()) }),
+      );
     else if (command === "seal") {
       if (rest.length !== 1) fail("usage: runtime-closure.mjs seal DIR");
       console.log(JSON.stringify(await seal(resolve(rest[0]))));
     } else if (command === "build") {
       const out = option(rest, "--out");
-      const target = assemble(out);
+      const target = assemble(out, await checkoutSourceBuild());
       try {
         console.log(JSON.stringify({ dir: target, ...(await seal(target)) }));
       } catch (error) {

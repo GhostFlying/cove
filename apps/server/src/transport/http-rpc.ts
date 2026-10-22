@@ -1,3 +1,4 @@
+import { sourceBuildId } from "../build-id.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import {
@@ -622,6 +623,7 @@ export function registerHttpRpc(
                   ? bootstrapIdentity(parsed, {
                       ...admission.identity,
                       buildVersion: core.buildVersion,
+                      sourceBuild: sourceBuildId(),
                     })
                   : negotiateBootstrap(parsed, {
                       ...admission.identity,

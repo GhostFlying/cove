@@ -1,10 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isBuildId } from "@cove/protocol/bootstrap";
-import { buildId, computeBuildId } from "../../dist/build-id.js";
+import {
+  buildId,
+  computeBuildId,
+  computeSourceBuildId,
+  sourceBuildId,
+  stampedSource,
+} from "../../dist/build-id.js";
 
 // m2 T0: the build ID is a digest of the build's compiled files (apps/server/src/build-id.ts).
 
@@ -70,5 +76,60 @@ describe("build ID", () => {
     expect(id).toBe(computeBuildId(checkout));
     expect(isBuildId(id)).toBe(true);
     expect(buildId()).toBe(id);
+  });
+});
+
+// #175: the source build, which the D12 warning compares (a CLI and a server of one commit on
+// different machines, OSes or paths must match).
+describe("source build", () => {
+  it("covers the build ID's files and cove-tsnet's Go sources, not their outputs or tests", async () => {
+    await write("native/tailscale/go.mod", "module x\n");
+    await write("native/tailscale/go.sum", "");
+    await write("native/tailscale/cmd/cove-tsnet/main.go", "package main\n");
+    const first = computeSourceBuildId(root);
+    expect(first).toMatch(/^1\.2\.3\+[0-9a-f]{16}$/);
+    expect(first).not.toBe(computeBuildId(root));
+    // Build outputs, tests and documentation of the Go module change nothing.
+    await write("native/tailscale/dist/linux-amd64/cove-tsnet", "binary");
+    await write("native/tailscale/cmd/cove-tsnet/main_test.go", "package main\n");
+    await write("native/tailscale/PROTOCOL.md", "doc\n");
+    expect(computeSourceBuildId(root)).toBe(first);
+    // A Go source, go.sum or a compiled file of a package does.
+    await write("native/tailscale/cmd/cove-tsnet/main.go", "package main // changed\n");
+    const go = computeSourceBuildId(root);
+    expect(go).not.toBe(first);
+    await write("native/tailscale/go.sum", "x v1 h1:\n");
+    const sum = computeSourceBuildId(root);
+    expect(sum).not.toBe(go);
+    await write("apps/server/dist/entry/main.js", "console.log(2);\n");
+    expect(computeSourceBuildId(root)).not.toBe(sum);
+  });
+
+  it("does not depend on where the checkout is", async () => {
+    await write("native/tailscale/go.mod", "module x\n");
+    await write("native/tailscale/internal/a/a.go", "package a\n");
+    const other = await mkdtemp(join(tmpdir(), "cove-build-id-elsewhere-"));
+    try {
+      const copy = join(other, "a", "deeper", "checkout");
+      await cp(root, copy, { recursive: true });
+      expect(computeSourceBuildId(copy)).toBe(computeSourceBuildId(root));
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+  });
+
+  it("is read from an install stamp only when the stamp records a valid one", () => {
+    const stamp = { type: "cove-install", build: "0.0.0+0123456789abcdef" };
+    expect(stampedSource(JSON.stringify({ ...stamp, source: "0.0.0+fedcba9876543210" }))).toBe(
+      "0.0.0+fedcba9876543210",
+    );
+    expect(stampedSource(JSON.stringify(stamp))).toBeNull();
+    expect(stampedSource(JSON.stringify({ ...stamp, source: "not a build" }))).toBeNull();
+    expect(stampedSource("{")).toBeNull();
+  });
+
+  it("is this checkout's for a development build", () => {
+    const checkout = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+    expect(sourceBuildId()).toBe(computeSourceBuildId(checkout));
   });
 });

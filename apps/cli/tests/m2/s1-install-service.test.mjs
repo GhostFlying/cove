@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { afterAll, beforeAll, expect, test } from "vitest";
 import { waitFor } from "../recording-view.mjs";
 import { cli, createM1Fixture } from "../m1/fixtures.mjs";
-import { readRendezvous } from "../../dist/session.js";
+import { computeSourceBuildId, sourceBuildId } from "@cove/server/build-id";
+import { buildMismatch, cliBuildVersion, readRendezvous } from "../../dist/session.js";
+import { preAuthIdentity } from "../../dist/remote/entries.js";
 import {
   CLOSURE_CLI,
   contentsDigest,
@@ -113,6 +115,11 @@ test("the sealed closure holds every runtime part and runs alone, with no Node o
   // from the checkout.
   const stamp = await readStamp(dir);
   expect(stamp).toMatchObject({ type: "cove-install", build: closure.build, schemaVersion: 7 });
+  // The source build (#175) is the checkout's, as this checkout's CLI computes it, while the
+  // build ID is the closure's own.
+  expect(stamp.source).toBe(computeSourceBuildId(repositoryRoot));
+  expect(stamp.source).toBe(sourceBuildId());
+  expect(stamp.source).not.toBe(closure.build);
   expect(await contentsDigest(dir)).toBe(stamp.contentsSha256);
   expect(await escapingLink(dir)).toBeNull();
   const checkout = Buffer.from(repositoryRoot);
@@ -180,6 +187,15 @@ test("the sealed closure holds every runtime part and runs alone, with no Node o
     const status = await fixture.coveJson(["status"], { home });
     expect(status.buildVersion).toBe(closure.build);
     expect(status.workerCount).toBe(1);
+    // Its pre-auth identity reports both: the install build and the stamped source build, which
+    // this checkout's CLI compares for the D12 warning and finds equal.
+    const identity = await preAuthIdentity(
+      (await readRendezvous(rendezvous)).endpoint,
+      cliBuildVersion(),
+      "the closure's server",
+    );
+    expect(identity).toMatchObject({ buildVersion: closure.build, sourceBuild: stamp.source });
+    expect(buildMismatch(identity, cliBuildVersion(), sourceBuildId())).toBeNull();
     // The store answered (status above) and a PTY run in the worker writes its marker.
     const { tabs } = await liveRuns(fixture, home, "alone", 1);
     const tab = await fixture.coveJson(["tab", "get", tabs[0].tabId], { home });
