@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import {
+  chmod,
+  lstat,
   cp,
   mkdir,
   readdir,
@@ -18,7 +20,11 @@ import { waitFor } from "../recording-view.mjs";
 import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
 import { installClosure } from "../../dist/install/installer.js";
-import { installLayout } from "../../dist/install/layout.js";
+import {
+  acquireInstallLock,
+  ensureInstallDirectory,
+  installLayout,
+} from "../../dist/install/layout.js";
 import { describeImpact, startupFailureSince } from "../../dist/install/commands.js";
 import {
   fileTail,
@@ -79,6 +85,7 @@ function stampFor(build, contentsSha256) {
 // holds nothing to run; this test never starts an installed build.
 async function placeBuild(home, build) {
   const dir = join(home, "install", build);
+  await mkdir(join(home, "install"), { recursive: true, mode: 0o700 });
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, INSTALL_STAMP), JSON.stringify(stampFor(build, "0".repeat(64))));
 }
@@ -432,3 +439,25 @@ test("the service log is read as a bounded tail of whole lines", async () => {
   expect(lines.split("\n").length).toBeLessThanOrEqual(SERVICE_LOG_LINES);
   expect(fileTail(join(fixture.root, "no-such.log"))).toBeNull();
 });
+
+test("install adoption rejects managed modes and symlinks without changing them", async () => {
+  const home = await dataDirectory("strict-install");
+  const layout = installLayout(home);
+  for (const name of ["install", "bin", "server", "server/service", "server/log"]) {
+    const path = join(home, name);
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    await chmod(path, 0o755);
+    await expect(ensureInstallDirectory(path)).rejects.toThrow(
+      `Cove directory ${path} has owner uid`,
+    );
+    expect((await lstat(path)).mode & 0o777).toBe(0o755);
+    await chmod(path, 0o700);
+  }
+  await chmod(layout.installDirectory, 0o755);
+  await expect(acquireInstallLock(layout)).rejects.toThrow("mode 0755");
+  await chmod(layout.installDirectory, 0o700);
+  const alias = join(home, "alias");
+  await symlink(join(home, "bin"), alias);
+  await expect(ensureInstallDirectory(alias)).rejects.toThrow("not be symbolic links");
+});
+

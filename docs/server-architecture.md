@@ -173,8 +173,9 @@ systemd 停止或重启服务会结束 cgroup 内全部进程，包括 Cove 终�
 launchd 下脱离的进程在测试中保留，但这是 launchd 的行为，不是承诺。
 两种构建身份（#175）：build ID 是安装身份（含 Node、原生模块与 `cove-tsnet`，随平台不同），安装、重启与 prune 比较它；
 source build 只覆盖源码构建（编译产物、清单、lockfile 与 Go 源码），与平台和路径无关，CLI 对远程 server 的 build 提示比较它。
-数据目录下 Cove 自己的目录必须属于当前用户、0700、不是符号链接，否则启动以写明目录与规则的原因失败；已存在的数据目录
-本身与其上级目录不做属主与权限检查（#172）。服务启动失败的原因写入服务日志，`install`、`service start` 与 `restart`
+数据目录下 Cove 自己的目录（server/service、server/backups、tsnet/state 及安装目录也包括在内）必须属于当前用户、0700、不是符号链接，否则启动以写明目录与规则的原因失败；已存在的数据目录
+本身与其上级目录不做属主与权限检查（#172）；rendezvous 直接放在既有 home 内也遵循这一点，仍核对目录 inode 与文件原子发布。
+服务启动失败的原因写入服务日志，`install`、`service start` 与 `restart`
 在等待新实例时读取并报告它。
 用法与回退步骤见[开发说明](development.md#安装与用户服务)。
 Desktop 更新后先协商协议，兼容则重新连接，不兼容则明确提示升级与会话影响，不自动替换活跃 server。

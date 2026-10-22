@@ -62,8 +62,11 @@ type Node interface {
 type Config struct {
 	// StateDir holds the node key and state (tsnet's file store). The caller
 	// creates it 0700.
-	StateDir string
-	Hostname string
+	// StrictStateDirectory selects the server rule: existing directories are
+	// checked, never chmodded. Dial clients retain EnsurePrivateDir behavior.
+	StrictStateDirectory bool
+	StateDir             string
+	Hostname             string
 	// ControlURL selects the coordination server; empty uses Tailscale's.
 	ControlURL string
 	// Logf receives verbose backend logs; nil discards them. Backend logs

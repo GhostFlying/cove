@@ -259,3 +259,35 @@ func TestEOFCancelsABlockedLogin(t *testing.T) {
 		t.Fatalf("login reply %+v", r)
 	}
 }
+
+func TestManagedDirectoryViolationPrecedesHello(t *testing.T) {
+	for _, component := range []string{"home", "state"} {
+		root := shortDir(t)
+		home := filepath.Join(root, "home")
+		if err := os.Mkdir(home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		state := filepath.Join(home, "state")
+		if err := os.Mkdir(state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		bad := home
+		if component == "state" {
+			bad = state
+		}
+		if err := os.Chmod(bad, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out := &bytes.Buffer{}
+		err := Run(context.Background(), Config{Home: home, Build: "test", In: strings.NewReader(hello), Out: out})
+		if err == nil || !strings.Contains(err.Error(), "mode 0755") {
+			t.Fatalf("error: %v", err)
+		}
+		if out.Len() != 0 {
+			t.Fatal("published helper readiness before directory rejection")
+		}
+		if info, _ := os.Lstat(bad); info.Mode().Perm() != 0o755 {
+			t.Fatal("repaired invalid directory")
+		}
+	}
+}

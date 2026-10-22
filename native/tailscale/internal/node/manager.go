@@ -78,6 +78,13 @@ func (m *Manager) placeHold(h *hold) {
 	}
 }
 
+func (m *Manager) ensureStateDirectory() error {
+	if m.cfg.StrictStateDirectory {
+		return fsutil.EnsureManagedDir(m.cfg.StateDir)
+	}
+	return fsutil.EnsurePrivateDir(m.cfg.StateDir)
+}
+
 // Boot starts the node from persisted state, if there is any. Without state
 // it does nothing: a fresh node only contacts the control plane once the
 // owner asks to log in.
@@ -85,7 +92,7 @@ func (m *Manager) Boot() {
 	if !HasState(m.cfg.StateDir) {
 		return
 	}
-	if err := fsutil.EnsurePrivateDir(m.cfg.StateDir); err != nil {
+	if err := m.ensureStateDirectory(); err != nil {
 		m.bootErr = err
 		return
 	}
@@ -253,7 +260,7 @@ func (m *Manager) Login(ctx context.Context, authKey string, timeout time.Durati
 			return st, e
 		}
 	}
-	if err := fsutil.EnsurePrivateDir(m.cfg.StateDir); err != nil {
+	if err := m.ensureStateDirectory(); err != nil {
 		return proto.Status{}, err
 	}
 	if authKey == "" {

@@ -81,6 +81,16 @@ export function checkManagedDirectory(path: string, info: DirectoryFacts): void 
     throw new HomeError(`Cove directory ${path} ${found}; ${MANAGED_RULE} (uid ${uid}, mode 0700)`);
 }
 
+// Validate an existing component without materializing lazy state (a state's existence is also
+// the tsnet supervisor's startup signal). Missing state remains missing until an explicit login.
+export async function checkExistingManagedDirectory(path: string): Promise<void> {
+  try {
+    checkManagedDirectory(path, await lstat(path));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 // Creates one Cove-managed directory (0700; its parent must exist) or checks the one already
 // there. Returns whether this call created it.
 export async function ensureManagedDirectory(path: string): Promise<boolean> {
@@ -95,7 +105,8 @@ export async function ensureManagedDirectory(path: string): Promise<boolean> {
   return created;
 }
 
-// Prepares `<home>` and `<home>/server` and returns the layout under the home's real path, so the
+// Prepares `<home>` and Cove-managed persistent descendants, returning the layout under the
+// home's real path, so the
 // database, the lock and the rendezvous are reached through one spelling. A missing home is created
 // 0700 (with any missing ancestors, which Cove then made, so 0700 as well) and held to the rule; an
 // existing one only has to resolve to a directory, possibly through a symbolic link.
@@ -119,5 +130,13 @@ export async function prepareHome(home: string): Promise<HomeLayout> {
   const canonical = await realpath(absolute);
   const layout = homeLayout(canonical);
   await ensureManagedDirectory(layout.serverDirectory);
+  await checkExistingManagedDirectory(layout.runDirectory);
+  await checkExistingManagedDirectory(join(layout.serverDirectory, "log"));
+  // Validate known persistent descendants before any service can publish readiness.
+  for (const path of [layout.backupDirectory, join(layout.serverDirectory, "service")])
+    await ensureManagedDirectory(path);
+  await ensureManagedDirectory(join(canonical, "tsnet"));
+  await ensureManagedDirectory(join(canonical, "tsnet", "run"));
+  await checkExistingManagedDirectory(join(canonical, "tsnet", "state"));
   return layout;
 }

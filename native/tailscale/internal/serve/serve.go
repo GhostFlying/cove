@@ -116,22 +116,26 @@ func Run(ctx context.Context, cfg Config) error {
 	if !proto.ValidBuild(cfg.Build) {
 		return fmt.Errorf("invalid build identifier %q", cfg.Build)
 	}
-	if err := fsutil.EnsurePrivateDir(cfg.Home); err != nil {
+	if err := fsutil.EnsureManagedDir(cfg.Home); err != nil {
+		return err
+	}
+	if err := fsutil.EnsureManagedDir(filepath.Join(cfg.Home, "state")); err != nil {
 		return err
 	}
 	if err := fsutil.CheckSocketPath(cfg.ForwardSocket); err != nil {
 		return err
 	}
-	if err := fsutil.CheckPrivateDir(filepath.Dir(cfg.ForwardSocket)); err != nil {
+	if err := fsutil.EnsureManagedDir(filepath.Dir(cfg.ForwardSocket)); err != nil {
 		return fmt.Errorf("forward socket directory: %w", err)
 	}
 	s := &server{
 		cfg: cfg,
 		mgr: node.NewManager(node.Config{
-			StateDir:   filepath.Join(cfg.Home, "state"),
-			Hostname:   cfg.Hostname,
-			ControlURL: cfg.ControlURL,
-			Logf:       cfg.NodeLogf,
+			StrictStateDirectory: true,
+			StateDir:             filepath.Join(cfg.Home, "state"),
+			Hostname:             cfg.Hostname,
+			ControlURL:           cfg.ControlURL,
+			Logf:                 cfg.NodeLogf,
 		}, cfg.Start),
 		listeners: map[int]net.Listener{},
 		out:       cfg.Out,

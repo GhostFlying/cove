@@ -41,6 +41,26 @@ func EnsurePrivateDir(path string) error {
 	return nil
 }
 
+// EnsureManagedDir is the server's strict managed-directory rule. Unlike the
+// client daemon's EnsurePrivateDir, it never repairs an existing directory.
+func EnsureManagedDir(path string) error {
+	if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("Cove directory %s: ownership unavailable", path)
+	}
+	if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || int(st.Uid) != os.Geteuid() || fi.Mode().Perm() != 0o700 {
+		return fmt.Errorf("Cove directory %s has owner uid %d and mode %04o; Cove's own directories must be owned by the current user, have mode 0700 and not be symbolic links (uid %d, mode 0700)", path, st.Uid, fi.Mode().Perm(), os.Geteuid())
+	}
+	return nil
+}
+
 // CheckPrivateDir verifies, without changing anything, that path is a
 // directory owned by the current user with no group or other permissions.
 // It is used for directories another process (the Node server) created.

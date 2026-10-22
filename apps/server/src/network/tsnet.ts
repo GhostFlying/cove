@@ -14,7 +14,7 @@ import {
   type TsnetStatusResultSchema,
 } from "@cove/protocol/auth";
 import { installedClosureRoot, workspaceRootOf } from "../build-id.js";
-import { ensureManagedDirectory, HomeError } from "../store/home.js";
+import { checkExistingManagedDirectory, ensureManagedDirectory, HomeError } from "../store/home.js";
 import { markEntry } from "../transport/connection-entry.js";
 import type { TsnetEntry, TsnetEntryContext, TsnetInvitationEntry } from "./listeners.js";
 
@@ -405,6 +405,13 @@ export class TsnetNode implements TsnetEntry {
     // A composition without a data directory (some tests) has nowhere to keep node state.
     this.launch = context.home ? launchOf(context.binary) : { refused: "no data directory" };
     this.home = TsnetNode.homeOf(context.home);
+    // Directory violations are deterministic startup refusals, even before a first login.
+    // Network/helper outages remain isolated from business readiness below.
+    if (context.home) {
+      await ensureManagedDirectory(this.home);
+      await ensureManagedDirectory(join(this.home, "run"));
+      await checkExistingManagedDirectory(join(this.home, "state"));
+    }
     context.onPairingPortChange(() => this.syncPorts());
     if ("refused" in this.launch) {
       if (this.hasState() || process.env.COVE_TSNET_BINARY || process.env.COVE_TSNET_CONTROL_URL)
