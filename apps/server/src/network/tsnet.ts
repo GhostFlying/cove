@@ -615,7 +615,9 @@ export class TsnetNode implements TsnetEntry {
     this.advertised = undefined;
     try {
       // A helper stopped after an earlier logout is started again (resume) for this request.
-      if (await this.resume()) await this.whenReady();
+      await this.resume();
+      // Concurrent callers may share a resume started by another request. All must await hello.
+      await this.whenReady();
       return await request(started);
     } finally {
       this.controls--;

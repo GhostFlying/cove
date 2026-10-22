@@ -485,7 +485,7 @@ PENDING：
 - 远程命令的 build 提示改为比较 source build（与平台、路径无关；pre-auth identity 新增可选的 `sourceBuild`）：同一提交在
   不同机器或 OS 上不再提示。提示文本为 `cove: warning: <别名> runs source build <X>, this CLI is source build <Y>`，任一方
   没有 source build 时为 `... runs build <X>, this CLI is build <Y>`。
-- `server tsnet logout` 删除节点后，server 停止 `cove-tsnet serve`（下一次 `login` 再启动），`status` 照常报 `logged-out`。
+- `server tsnet logout` 删除节点后，server 停止 `cove-tsnet serve`（下一次 `login` 再启动），`status` 照常报 `logged-out`。logout 后并发的控制请求均等待同一个新 helper 就绪。
 
 PLANNED：
 
@@ -575,3 +575,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | PR #179 correction round 1（未合入） | 补全严格管理目录检查与 home 根 rendezvous；保留原子发布、目录身份核对与延迟创建 tsnet/state 的语义。 |
 | 2026-10-22 | PR #179 correction round 1（未合入） | worker 启动原因保留安全 errno 与确实观察到的退出状态；断联不作退出证明。 |
 | 2026-10-22 | PR #179 correction round 1（未合入） | 服务管理器轮询服从剩余期限，输出按 UTF-8 字节限制；读取失败仍为未知。 |
+| 2026-10-22 | PR #179 correction round 1（未合入） | logout 后并发控制请求共用 helper 就绪过程。 |
