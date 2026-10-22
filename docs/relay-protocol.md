@@ -730,9 +730,9 @@ M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首
   - `server.tsnet.logout` 的记录只保存 `remoteLogoutConfirmed`：`false` 表示节点状态已在本机删除，但控制面没有确认，
     该节点可能仍列在 Tailnet 中，需在管理台移除。`server.tsnet.login` 的记录只保存 `secretDelivery`；
     登录 URL 只在提交该操作的那次应答的 `secrets.loginUrl` 中出现。
-  - 登录失败的记录以固定消息的错误结束：`TSNET_LOGIN_FAILED`（被控制面拒绝、超时，或节点已登录；什么都没有改变，
-    没有状态的节点的半成品状态已删除）、`TSNET_IDENTITY_CHANGED`、`TSNET_LOGIN_UNCERTAIN`（还包括 URL 在实时应答
-    结束后才到，因而没有送达）。
+  - 登录失败的记录以固定消息的错误结束：`TSNET_LOGIN_FAILED`（被控制面拒绝、auth key 登录超时，或节点已登录；
+    什么都没有改变，没有状态的节点的半成品状态已删除）、`TSNET_IDENTITY_CHANGED`、`TSNET_LOGIN_UNCERTAIN`（还包括
+    交互登录在给出 URL 前超时：节点不回滚，已登记的节点保持 hold；以及 URL 在实时应答结束后才到，因而没有送达）。
     记录只在同一次实时应答确实带出 `secrets.loginUrl` 时才写 `secretDelivery`。原因的说明在
     `server.tsnet.status` 的警告中，不进记录。登录进行中助手退出、或 server 重启，记录为 `requires_attention`
     与 `RESULT_UNKNOWN`；结果用 `server.tsnet.status` 查看。

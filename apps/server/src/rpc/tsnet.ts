@@ -178,7 +178,7 @@ export async function runWrite(
     if (method === "server.tsnet.login") {
       const limits = authKey ? timing.key : timing.interactive;
       const outcome = await tsnet.login(authKey, limits.timeoutMs, limits.deadlineMs);
-      terminal = loginRecord(running, outcome);
+      terminal = loginRecord(running, outcome, authKey !== undefined);
       if (outcome.kind === "answered") url = outcome.loginUrl;
     } else terminal = logoutRecord(running, await tsnet.logout());
     // Decided synchronously with the claim, so the timer cannot end the live answer in between.
@@ -234,7 +234,11 @@ function unknown(running: OperationRecord): OperationRecord {
 // What the helper says did not change the node fails the operation; an answer that leaves the
 // effect unknown (no answer at all, a helper fault, a login cut short by shutdown) is
 // requires_attention, never failure: an enrolled node's cut-short login may still complete.
-function loginRecord(running: OperationRecord, outcome: TsnetLoginOutcome): OperationRecord {
+function loginRecord(
+  running: OperationRecord,
+  outcome: TsnetLoginOutcome,
+  withKey: boolean,
+): OperationRecord {
   switch (outcome.kind) {
     case "answered":
       // listenFailed: the node logged in but a port did not open; status says which.
@@ -250,10 +254,15 @@ function loginRecord(running: OperationRecord, outcome: TsnetLoginOutcome): Oper
           return failed(running, "TSNET_IDENTITY_CHANGED");
         case "LOGIN_UNCERTAIN":
           return failed(running, "TSNET_LOGIN_UNCERTAIN");
-        // Rejected, timed out (a new node's partial state is deleted), already running, or
-        // refused before acting: the node is as it was.
-        case "LOGIN_FAILED":
+        // An auth-key login that timed out deleted a new node's partial state (an enrolled
+        // node's reports LOGIN_UNCERTAIN instead). An interactive one deletes nothing and keeps
+        // its node started (and an enrolled node held): the control plane may still produce a
+        // login URL, so the node is not known to be as it was (no rollback, reported as it is;
+        // 2026-10-21 user decision). manager.go loginInteractive.
         case "LOGIN_TIMEOUT":
+          return failed(running, withKey ? "TSNET_LOGIN_FAILED" : "TSNET_LOGIN_UNCERTAIN");
+        // Rejected, already running, or refused before acting: the node is as it was.
+        case "LOGIN_FAILED":
         case "ALREADY_LOGGED_IN":
         case "NOT_LOGGED_IN":
         case "BAD_REQUEST":

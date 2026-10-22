@@ -391,3 +391,35 @@ func TestReplacementLoginKeepsTheEnrolledIdentity(t *testing.T) {
 		})
 	}
 }
+
+// An interactive login whose URL never came is not undone: the node it
+// started keeps running, and an enrolled node stays held, since the control
+// plane may still produce the URL and the login may still complete. The
+// server therefore reports this timeout as uncertain, not as an unchanged
+// node (apps/server rpc/tsnet.ts loginRecord).
+func TestInteractiveLoginTimeoutLeavesTheNodeAsItIs(t *testing.T) {
+	t.Run("fresh", func(t *testing.T) {
+		fn := &fakenode.Node{State: proto.StateNeedsLogin}
+		m := node.NewManager(node.Config{StateDir: filepath.Join(t.TempDir(), "state")},
+			func(node.Config, string) (node.Node, error) { return fn, nil })
+		_, err := m.Login(context.Background(), "", 300*time.Millisecond)
+		wantCode(t, err, proto.CodeLoginTimeout)
+		if m.Usable() == nil || fn.Closed {
+			t.Fatal("the started node was stopped")
+		}
+		if st, err := m.Status(context.Background()); err != nil || st.State != proto.StateNeedsLogin {
+			t.Fatalf("got %+v %v", st, err)
+		}
+	})
+	t.Run("enrolled", func(t *testing.T) {
+		fn := &fakenode.Node{State: proto.StateNeedsLogin, Self: proto.NodeInfo{StableNodeID: "nClient"}}
+		starts := 0
+		m := node.NewManager(node.Config{StateDir: enrolled(t)}, starter(t, fn, &starts))
+		m.Boot()
+		_, err := m.Login(context.Background(), "", 300*time.Millisecond)
+		wantCode(t, err, proto.CodeLoginTimeout)
+		if st, err := m.Status(context.Background()); err != nil || st.Hold != proto.CodeLoginUncertain || m.Usable() != nil {
+			t.Fatalf("got %+v %v", st, err)
+		}
+	})
+}

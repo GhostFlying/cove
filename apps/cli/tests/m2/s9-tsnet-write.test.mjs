@@ -15,6 +15,7 @@ const { runWrite, TSNET_WRITE_TIMING } = await import(
 );
 
 const LOGIN_URL = "https://login.example.test/a/write-0123456789";
+const KEY = "tskey-auth-write0123456789abcdef";
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 const timing = (liveWaitMs) => ({
   liveWaitMs,
@@ -114,4 +115,21 @@ test("an answer claimed within the live wait is delivered even when its commit o
     result: { secretDelivery: "first-response-only" },
   });
   expect(receipts.records.at(-1)).toEqual(answer.operation);
+});
+
+test("an interactive login that timed out is uncertain; an auth-key one left the node unchanged", async () => {
+  const timedOut = { kind: "refused", code: "LOGIN_TIMEOUT" };
+  // Whether the node had state or not: the helper keeps the started node, and an enrolled one
+  // held, so it is not known to be as it was.
+  const interactiveAnswer = await login(scripted(timedOut), store(), undefined);
+  expect(interactiveAnswer.operation).toMatchObject({
+    state: "failed",
+    error: { kind: "TSNET_LOGIN_UNCERTAIN" },
+  });
+  const keyAnswer = await login(scripted(timedOut), store(), KEY);
+  expect(keyAnswer.operation).toMatchObject({
+    state: "failed",
+    error: { kind: "TSNET_LOGIN_FAILED" },
+  });
+  expect(JSON.stringify(keyAnswer)).not.toContain(KEY);
 });
