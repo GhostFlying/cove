@@ -407,7 +407,7 @@ PENDING：
     - 登录或登出进行中时以 1 退出，stderr 提示 busy。
   - `login` 输出 `{ operation, status }`：
     - auth key 只从隐藏提示或 stdin 读（tend-runner 不应把它放进 argv 或环境变量），输入为空则在 stderr 显示一次登录 URL（不进 JSON）并等待完成；
-    - 在终端提示处按 Ctrl-C 或 Ctrl-D 时不发送请求、不保存待定记录，以 130 退出；
+    - 在终端提示处按 Ctrl-C、Ctrl-D，或输入在回车前结束（包括已输入一部分 key）时不发送请求、不保存待定记录，以 130 退出；
     - 记录不保存 key，因此不能 `operation resend`。
   - `logout` 输出 `{ operation }`，其 `result.remoteLogoutConfirmed` 为 false 时以 0 退出并在 stderr 警告；
     节点未登录且没有给 `--operation-id` 时不发送写，输出 `{ status }` 并以 0 退出。

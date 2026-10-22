@@ -26,16 +26,16 @@ import { acceptWrite, operationIdFor } from "./_pending.js";
 // is never saved (the pending record omits it, so the request cannot be resent: the operator runs
 // the command again). Empty input starts an interactive login: the server answers with a login
 // URL, shown here once on stderr; whoever opens it decides which tailnet the node joins. At the
-// prompt that is an empty line submitted with Enter; Ctrl-C, or Ctrl-D (end of input), cancels
-// the command before anything is saved or sent, since starting a login on an enrolled node holds
-// it until the login is settled.
+// prompt that is an empty line submitted with Enter; Ctrl-C, Ctrl-D, or input that ends before
+// Enter cancels the command before anything is saved or sent, since starting a login on an
+// enrolled node holds it until the login is settled.
 export const usage = `  server tsnet login [--operation-id ID]
   server tsnet status
   server tsnet logout [--operation-id ID]
 
 server tsnet login reads an auth key from a hidden prompt, or from stdin when it is not a
 terminal; empty input (Enter at the prompt) starts an interactive login and prints its URL once;
-Ctrl-C or Ctrl-D at the prompt cancels without sending anything. The node then serves
+Ctrl-C, Ctrl-D or input ending before Enter cancels without sending anything. The node then serves
 the business port, and the pairing port while an invitation is open. server tsnet logout removes
 the node's state; if the control plane did not confirm it, remove the node in the admin console.`;
 
@@ -51,7 +51,7 @@ const INTERACTIVE_WAIT_MS = 5 * 60_000;
 const POLL_MS = 500;
 const KEY_INPUT_BYTES = 1024;
 
-export async function run(args: Arguments): Promise<number> {
+export async function run(args: Arguments, input: KeyInput = process.stdin): Promise<number> {
   const sub = args.words[2];
   if (args.command) throw new UsageError("server tsnet takes no command after --");
   if (sub === "status") {
@@ -65,7 +65,7 @@ export async function run(args: Arguments): Promise<number> {
   if (sub === "login") {
     takeFlags(args, ["--operation-id"]);
     if (args.words.length !== 3) throw new UsageError("server tsnet login takes no arguments");
-    return login(args);
+    return login(args, input);
   }
   if (sub === "logout") {
     takeFlags(args, ["--operation-id"]);
@@ -116,14 +116,22 @@ async function currentStatus(client: Client): Promise<TsnetStatus> {
   return unwrap("server.tsnet.status", outcome) as TsnetStatus;
 }
 
+// Where the key is read from: stdin, or in tests a stream that says whether it is a terminal.
+type KeyInput = NodeJS.ReadableStream & { readonly isTTY?: boolean };
+
 // Reads the key without it ever being an argument: a prompt that does not echo when stdin is a
 // terminal, otherwise stdin itself, bounded. Never printed, not even in an error. Null when the
 // prompt was cancelled; undefined for an interactive login.
-async function readAuthKey(): Promise<string | undefined | null> {
+//
+// At the prompt only a line ended with Enter is an answer. readline also ends a typed but
+// unterminated line as a `line` when its input ends (EOF, a hangup); that text was never
+// submitted, so it cancels like Ctrl-C, Ctrl-D at an empty prompt and a terminal that fails.
+// Non-terminal stdin is read to its end as before, so a key piped without a newline still works.
+async function readAuthKey(input: KeyInput): Promise<string | undefined | null> {
   let text: string;
-  if (process.stdin.isTTY) {
+  if (input.isTTY) {
     const prompt = createInterface({
-      input: process.stdin,
+      input,
       output: process.stderr,
       terminal: true,
     });
@@ -133,11 +141,15 @@ async function readAuthKey(): Promise<string | undefined | null> {
     let answer: string | null;
     try {
       answer = await new Promise<string | null>((resolve) => {
-        prompt.once("line", resolve);
+        // The input has ended when readline flushes an unterminated line at EOF.
+        const ended = (): boolean => (input as { readableEnded?: boolean }).readableEnded === true;
+        prompt.once("line", (line) => resolve(ended() ? null : line));
         // Without a SIGINT listener readline turns Ctrl-C into a close, which must not read as
         // an empty answer; a close without a line (Ctrl-D, a lost terminal) is no answer either.
         prompt.once("SIGINT", () => resolve(null));
         prompt.once("close", () => resolve(null));
+        // readline passes an error of its input (a terminal that failed) on to the interface.
+        prompt.on("error", () => resolve(null));
       });
     } finally {
       prompt.close();
@@ -148,7 +160,7 @@ async function readAuthKey(): Promise<string | undefined | null> {
   } else {
     const chunks: Buffer[] = [];
     let size = 0;
-    for await (const chunk of process.stdin as AsyncIterable<Buffer>) {
+    for await (const chunk of input as AsyncIterable<Buffer>) {
       size += chunk.byteLength;
       if (size > KEY_INPUT_BYTES) throw new Error("the input is too long for an auth key");
       chunks.push(chunk);
@@ -249,9 +261,9 @@ async function explainFailure(client: Client, operation: OperationRecord): Promi
   }
 }
 
-async function login(args: Arguments): Promise<number> {
+async function login(args: Arguments, input: KeyInput): Promise<number> {
   const operationId = operationIdFor(args);
-  const authKey = await readAuthKey();
+  const authKey = await readAuthKey(input);
   if (authKey === null) {
     process.stderr.write("cove: the login was cancelled; nothing was sent\n");
     return 130;
