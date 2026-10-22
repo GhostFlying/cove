@@ -147,11 +147,65 @@ async function rendezvousInstance(layout: InstallLayout): Promise<string | null>
   }
 }
 
+// How often a wait for a started server reads the service manager and the service's output.
+const START_CHECK_MS = 1_000;
+const STARTUP_CAUSE_CHARS = 600;
+
+// The cause in the latest startup-failed event (apps/server/src/entry/main.ts failStart) the
+// service wrote at or after `sinceMs`, or null. Only the events' own timestamps decide which start
+// an event belongs to, so an earlier start's failure is never shown as this one's. The log is not
+// trusted further than that: the cause is bounded and its control characters replaced before it
+// is printed.
+export function startupFailureSince(output: string | null, sinceMs: number): string | null {
+  let found: string | null = null;
+  for (const line of output?.split("\n") ?? []) {
+    if (!line.startsWith('{"event":"startup-failed"')) continue;
+    let event: { atMs?: unknown; category?: unknown; detail?: unknown };
+    try {
+      event = JSON.parse(line) as typeof event;
+    } catch {
+      continue;
+    }
+    if (typeof event.atMs !== "number" || event.atMs < sinceMs) continue;
+    const cause =
+      typeof event.detail === "string"
+        ? event.detail
+        : `the server's ${typeof event.category === "string" ? event.category : "startup"} step failed`;
+    found = Array.from(cause.slice(0, STARTUP_CAUSE_CHARS), (c) =>
+      c.charCodeAt(0) < 0x20 || c.charCodeAt(0) === 0x7f ? "?" : c,
+    ).join("");
+  }
+  return found;
+}
+
 // Waits until a server instance other than `previous` answers at the data directory's rendezvous,
 // and returns its status. A new instance ID is the only proof that the start happened: the
 // service manager accepting the command is not.
-async function waitForNewInstance(layout: InstallLayout, previous: string | null) {
+//
+// Meanwhile the start may fail (#172). A startup-failed event the service wrote since `sinceMs`
+// is shown on stderr as soon as it appears, but is not taken as the end: the service manager
+// starts a failed server again, and a cause that was transient (a port still held by the
+// previous server) can pass. The wait ends early only when the manager gave up after repeated
+// crashes (gaveUpSince), which nothing but `cove server service start` undoes; otherwise it ends
+// at START_WAIT_MS. Either error names the latest cause.
+async function waitForNewInstance(
+  layout: InstallLayout,
+  previous: string | null,
+  backend: ServiceBackend,
+  sinceMs: number,
+) {
   const deadline = Date.now() + START_WAIT_MS;
+  let cause: string | null = null;
+  let checked = 0;
+  const latestCause = (): void => {
+    const found = startupFailureSince(backend.recentOutput(sinceMs), sinceMs);
+    if (found !== null && found !== cause)
+      process.stderr.write(
+        `cove: the server failed to start: ${found}; waiting for the service manager to start it again\n`,
+      );
+    cause = found ?? cause;
+  };
+  const because = (): string => (cause === null ? "" : `; the last start failed: ${cause}`);
   while (Date.now() < deadline) {
     const instance = await rendezvousInstance(layout);
     if (instance !== null && instance !== previous) {
@@ -161,10 +215,20 @@ async function waitForNewInstance(layout: InstallLayout, previous: string | null
           unwrap("server.status", await client.call("server.status", {})),
         );
     }
+    if (Date.now() - checked >= START_CHECK_MS) {
+      checked = Date.now();
+      latestCause();
+      if (backend.gaveUpSince(sinceMs))
+        throw new Error(
+          `the server did not start: the service manager stopped restarting it after repeated ` +
+            `failed starts${because()}. Fix the cause, then run \`cove server service start\``,
+        );
+    }
     await sleep(200);
   }
+  latestCause();
   throw new Error(
-    `no new server instance answered within ${START_WAIT_MS / 1000} s; ` +
+    `no new server instance answered within ${START_WAIT_MS / 1000} s${because()}; ` +
       `check \`cove server service status\` and the service log`,
   );
 }
@@ -351,9 +415,10 @@ export async function serverInstall(args: Arguments): Promise<number> {
         // A server that already runs (under the service or in the foreground) is left alone: the
         // new build takes effect at an explicit restart. Otherwise the service starts now.
         const previous = await rendezvousInstance(layout);
+        const since = Date.now();
         if (!session) await requestStart(layout);
         await found.backend.register(!session);
-        if (!session) await waitForNewInstance(layout, previous);
+        if (!session) await waitForNewInstance(layout, previous, found.backend, since);
         service = found.backend.status();
         warnLinger(service);
       }
@@ -492,10 +557,11 @@ export async function serviceCommand(args: Arguments): Promise<number> {
       throw new Error("a server is already running for this data directory");
     if (local.state === "unknown") throw new Error(`not started: ${unconfirmed(local)}`);
     const previous = await rendezvousInstance(layout);
+    const since = Date.now();
     await requestStart(layout);
     if (backend.status().registered) await backend.start();
     else await backend.register(true);
-    const status = await waitForNewInstance(layout, previous);
+    const status = await waitForNewInstance(layout, previous, backend, since);
     print({ ...backend.status(), relayInstanceId: status.relayInstanceId });
     warnLinger(backend.status());
     return 0;
@@ -525,10 +591,11 @@ async function restartable(local: LocalServer): Promise<RunningServer | null> {
 async function restartService(layout: InstallLayout, before: RunningServer | null) {
   const backend = backendOrThrow(layout);
   const stale = before?.relayInstanceId ?? (await rendezvousInstance(layout));
+  const since = Date.now();
   await requestStart(layout);
   if (backend.status().registered) await backend.restart();
   else await backend.register(true);
-  const after = await waitForNewInstance(layout, stale);
+  const after = await waitForNewInstance(layout, stale, backend, since);
   return {
     serverId: after.serverId,
     previousRelayInstanceId: before?.relayInstanceId ?? null,
