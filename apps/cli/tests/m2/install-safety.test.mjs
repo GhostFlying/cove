@@ -16,7 +16,7 @@ import {
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { createM1Fixture } from "../m1/fixtures.mjs";
+import { cli, createM1Fixture } from "../m1/fixtures.mjs";
 import { waitFor } from "../recording-view.mjs";
 import { removeService } from "./s1-install-fixture.mjs";
 import { contentsDigest, INSTALL_STAMP } from "../../dist/install/closure.js";
@@ -523,3 +523,175 @@ test("journal tails enforce the UTF-8 byte limit and discard partial leading lin
   await writeFile(log, "汉".repeat(SERVICE_LOG_BYTES));
   expect(fileTail(log)).toBe("");
 });
+
+// Run the actual compiled CLI router, mocking only the host service-manager subprocesses. Every
+// path and persistent marker belongs to this fixture; no real launchctl/systemctl mutation runs.
+async function publicCommandRig(home, name, registered = true) {
+  const root = join(fixture.root, name);
+  await mkdir(root);
+  const state = join(root, "service.json");
+  const effects = join(root, "effects.jsonl");
+  const preload = join(root, "service-mock.mjs");
+  const initial = JSON.stringify({ registered, running: registered });
+  await writeFile(state, initial);
+  await writeFile(effects, "");
+  await writeFile(
+    preload,
+    `
+    import cp from "node:child_process";
+    import {readFileSync, writeFileSync, appendFileSync} from "node:fs";
+    import {syncBuiltinESMExports} from "node:module";
+    const original = cp.spawnSync;
+    cp.spawnSync = (command, args, options) => {
+      if (command !== "/bin/launchctl" && command !== "systemctl") return original(command,args,options);
+      const state = JSON.parse(readFileSync(${JSON.stringify(state)}, "utf8"));
+      const result = (status, stdout="") => ({status, stdout, stderr:""});
+      if (command === "/bin/launchctl") {
+        if (args[0] === "print") {
+          if (!args[1].includes("/dev.cove.server.")) return result(0);
+          return state.registered ? result(0, "state = " + (state.running ? "running" : "waiting") + "\\n") : result(1);
+        }
+      } else {
+        if (args.includes("show-environment")) return result(0);
+        if (args.includes("show")) return result(0, "LoadState=" + (state.registered ? "loaded" : "not-found") + "\\nActiveState=" + (state.running ? "active" : "inactive") + "\\nSubState=" + (state.running ? "running" : "dead") + "\\n");
+      }
+      appendFileSync(${JSON.stringify(effects)}, JSON.stringify([command,...args]) + "\\n");
+      if (args.includes("bootout") || args.includes("disable")) {state.registered=false; state.running=false;}
+      else if (args.includes("start") || args.includes("restart") || args.includes("bootstrap") || args.includes("kickstart")) {state.registered=true; state.running=true;}
+      writeFileSync(${JSON.stringify(state)}, JSON.stringify(state));
+      return result(0);
+    };
+    syncBuiltinESMExports();
+  `,
+  );
+  return {
+    initial,
+    state,
+    effects: async () => (await readFile(effects, "utf8")).trim(),
+    run: (args) =>
+      new Promise((done) =>
+        childProcess.execFile(
+          process.execPath,
+          ["--import", preload, cli, "--home", home, ...args],
+          { env: fixture.env, timeout: 5_000, killSignal: "SIGKILL" },
+          (error, stdout, stderr) =>
+            done({
+              code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+              stdout,
+              stderr,
+            }),
+        ),
+      ),
+  };
+}
+
+// A tiny executable closure whose schema probe succeeds; copying, checking and activating it
+// still use the production implementation. It contains no service or long-running process.
+async function runnableClosure(dir, build) {
+  await mkdir(join(dir, "bin"), { recursive: true });
+  await writeFile(
+    join(dir, "bin/node"),
+    `#!/bin/sh\nprintf '%s\\n' '{"database":0,"supported":7}'\n`,
+    { mode: 0o755 },
+  );
+  await writeFile(
+    join(dir, INSTALL_STAMP),
+    JSON.stringify(stampFor(build, await contentsDigest(dir))),
+  );
+}
+
+async function invalidParent(path, kind, name) {
+  const external = join(fixture.root, name);
+  await mkdir(external);
+  await writeFile(join(external, "cove"), "unrelated launcher\n");
+  await writeFile(join(external, "service.log"), "unrelated log\n");
+  if (kind === "symlink") await symlink(external, path);
+  else {
+    await mkdir(path, { mode: 0o700 });
+    await chmod(path, 0o755);
+  }
+  return external;
+}
+
+test("public activation and uninstall refuse invalid bin before current or service changes", async () => {
+  for (const kind of ["mode", "symlink"]) {
+    for (const operation of ["activate", "uninstall"]) {
+      const home = await dataDirectory(`${kind}-${operation}`);
+      const layout = installLayout(home);
+      await mkdir(layout.installDirectory, { mode: 0o700 });
+      await runnableClosure(join(layout.installDirectory, BUILD_A), BUILD_A);
+      await runnableClosure(join(layout.installDirectory, BUILD_B), BUILD_B);
+      await symlink(BUILD_A, layout.current);
+      const external = await invalidParent(
+        join(home, "bin"),
+        kind,
+        `${kind}-${operation}-external`,
+      );
+      const mock = await publicCommandRig(home, `${kind}-${operation}-manager`);
+      const args =
+        operation === "activate"
+          ? ["server", "install", "--activate", BUILD_B]
+          : ["server", "uninstall", "--yes"];
+      const result = await mock.run(args);
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain(`Cove directory ${join(home, "bin")}`);
+      expect(await readlink(layout.current)).toBe(BUILD_A);
+      expect(await readFile(join(external, "cove"), "utf8")).toBe("unrelated launcher\n");
+      expect(await mock.effects()).toBe("");
+      expect(await readFile(mock.state, "utf8")).toBe(mock.initial);
+      expect(existsSync(join(layout.installDirectory, BUILD_A, INSTALL_STAMP))).toBe(true);
+      expect(existsSync(join(layout.installDirectory, BUILD_B, INSTALL_STAMP))).toBe(true);
+    }
+  }
+});
+
+test("public uninstall leaves an absent bin absent", async () => {
+  const home = await dataDirectory("no-bin");
+  const layout = installLayout(home);
+  await mkdir(layout.installDirectory, { mode: 0o700 });
+  await runnableClosure(join(layout.installDirectory, BUILD_A), BUILD_A);
+  await symlink(BUILD_A, layout.current);
+  const mock = await publicCommandRig(home, "no-bin-manager", false);
+  const result = await mock.run(["server", "uninstall", "--yes"]);
+  expect({ code: result.code, stderr: result.stderr }).toEqual({ code: 0, stderr: "" });
+  expect(existsSync(join(home, "bin"))).toBe(false);
+  expect(existsSync(layout.current)).toBe(false);
+});
+
+test.runIf(process.platform === "darwin")(
+  "public launchd commands preflight invalid logs before activation or service effects",
+  async () => {
+    for (const kind of ["mode", "symlink"]) {
+      for (const operation of ["start", "restart", "upgrade", "install"]) {
+        const home = await dataDirectory(`${kind}-log-${operation}`);
+        const layout = installLayout(home);
+        await mkdir(layout.installDirectory, { mode: 0o700 });
+        await runnableClosure(join(layout.installDirectory, BUILD_A), BUILD_A);
+        await symlink(BUILD_A, layout.current);
+        await mkdir(join(home, "server"), { mode: 0o700 });
+        const external = await invalidParent(
+          layout.logDirectory,
+          kind,
+          `${kind}-log-${operation}-external`,
+        );
+        const source = join(fixture.root, `${kind}-log-${operation}-closure`);
+        await runnableClosure(source, BUILD_B);
+        const mock = await publicCommandRig(home, `${kind}-log-${operation}-manager`);
+        const commands = {
+          start: ["server", "service", "start"],
+          restart: ["server", "restart", "--yes"],
+          upgrade: ["server", "upgrade", "--yes", "--closure", source],
+          install: ["server", "install", "--closure", source],
+        };
+        const result = await mock.run(commands[operation]);
+        expect(result.code).toBe(1);
+        expect(result.stderr).toContain(`Cove directory ${layout.logDirectory}`);
+        expect(await readlink(layout.current)).toBe(BUILD_A);
+        expect(await readFile(join(external, "service.log"), "utf8")).toBe("unrelated log\n");
+        expect(await mock.effects()).toBe("");
+        expect(await readFile(mock.state, "utf8")).toBe(mock.initial);
+        expect(existsSync(join(layout.installDirectory, BUILD_B))).toBe(false);
+      }
+    }
+  },
+);

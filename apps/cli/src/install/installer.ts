@@ -25,7 +25,7 @@ import {
   type InstallStamp,
 } from "./closure.js";
 import { closurePath, launcherScript, type InstallLayout } from "./layout.js";
-import { ensureInstallDirectory } from "./layout.js";
+import { checkInstallDirectory, ensureInstallDirectory } from "./layout.js";
 
 // Installing and activating closures in a data directory (m2 D1). Callers hold the install lock.
 
@@ -217,6 +217,8 @@ export async function activate(layout: InstallLayout, build: string): Promise<Sc
         "records written since then are lost), then run `cove server install --activate " +
         `${build}\` again. See docs/development.md.`,
     );
+  // A refused launcher parent must not leave the service pointing at a new build.
+  await ensureInstallDirectory(dirname(layout.launcher));
   const link = join(layout.installDirectory, `.current-${randomBytes(6).toString("hex")}`);
   await symlink(build, link);
   try {
@@ -255,10 +257,11 @@ export async function prune(layout: InstallLayout, keep: ReadonlySet<string>): P
 // Removes every installed build, `current` and the launcher; the data directory stays (S1). The
 // install lock file stays too: the caller holds it, and a lock file is never removed (os-lock.ts).
 export async function removeInstallation(layout: InstallLayout): Promise<void> {
+  const hasLauncherDirectory = await checkInstallDirectory(dirname(layout.launcher));
   for (const name of await readdir(layout.installDirectory).catch(() => [] as string[]))
     if (join(layout.installDirectory, name) !== layout.lock)
       await rm(join(layout.installDirectory, name), { recursive: true, force: true });
-  await rm(layout.launcher, { force: true });
+  if (hasLauncherDirectory) await rm(layout.launcher, { force: true });
 }
 
 // Two free loopback ports in 20000-29999 for a data directory without configured ones (D3):
