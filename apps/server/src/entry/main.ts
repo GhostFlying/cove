@@ -23,6 +23,7 @@ import { SESSION_CONTROL_RESERVE } from "../terminal/worker-pipe-session.js";
 import { WorkerProcess, type WorkerSpawn } from "../terminal/worker-process.js";
 import { LocalRuntimeClock, type LocalTimer } from "../terminal/local-runtime-clock.js";
 import { LocalAdmission } from "../transport/local-admission.js";
+import { RawConnectionGate } from "../transport/raw-connections.js";
 import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/terminal-websocket.js";
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
@@ -272,9 +273,16 @@ export function createLocalApplication(
     logger: false,
     bodyLimit: budgets.rpcRequestBytes,
     requestTimeout: 5000,
+    // Below the raw gate's header deadline (transport/raw-connections.ts), so an idle kept-alive
+    // socket is ended by the HTTP server, which advertises this timeout to the client, rather
+    // than cut by the gate while a client may be about to reuse it.
+    keepAliveTimeout: 4000,
     // The top-level disableRequestLogging option is deprecated (FSTDEP023).
     logController: new LogController({ disableRequestLogging: true }),
   });
+  // Every socket of the business listener, loopback and tsnet-forwarded, passes the raw gate
+  // before the HTTP parser (#156).
+  new RawConnectionGate().attach(app.server);
   // Register the plugin before routes; business handlers attach synchronously on upgrade.
   const terminalRoutes = terminal;
   app.register(async (routes) => {
