@@ -44,13 +44,23 @@ import { RemoteError } from "./entry-types.js";
 //
 // Lifetime. The tunnel lives as long as the command. ssh runs under a small POSIX sh supervisor
 // in a session and process group of its own (spawn `detached`), whose stdin is a pipe from this
-// process: the supervisor waits for that pipe's end-of-file and then ends ssh. The pipe's write end
-// is held only by this process, so its end-of-file comes when the command closes the tunnel and
-// also when the command dies in any way, SIGKILL included; no ssh process outlives the command.
-// close() ends the pipe and waits, then signals the group (TERM, then KILL), bounded. When the
-// reader ends ssh it first writes why to ssh's stderr (`cove-ssh: ...`: a line on the pipe, or its
-// end-of-file or a read error with read's status and message), and an open that fails that way
-// names it, since this process never closes the pipe while it opens the tunnel.
+// process. The supervisor ends ssh on either of two facts:
+// - a line on that pipe: close() writes one (a requested end), then ends the pipe and waits, then
+//   signals the group (TERM, then KILL), bounded;
+// - this process is gone: the pipe's write end is held only by this process, so the pipe ends
+//   when the command dies in any way, SIGKILL included, and the supervisor is then no longer this
+//   process's child (it was reparented); no ssh process outlives the command.
+// An end of the pipe alone is not proof that the command ended (#174): the reader has read an
+// end-of-file (read status 1) within ~0.2 s of the spawn while the command still ran and had not
+// asked for one, and ending ssh then failed a healthy command with status 143. What ends the pipe
+// then is not known (seen only rarely, on macOS, under load). So after an end of the pipe without
+// a line, the reader checks whether its supervisor's parent is still this process
+// (`ps -o ppid=`, or `kill -0` where ps is missing) and, while it is, waits and checks again
+// every second instead of ending ssh; it reports that wait on ssh's stderr. A command that dies
+// therefore ends its ssh within about a second of the pipe's end; one that lives keeps its tunnel
+// until close(), whose escalation to signals does not depend on the pipe. When the reader ends
+// ssh it first writes why to ssh's stderr (`cove-ssh: ...`), and an open that fails that way
+// names it.
 //
 // Readiness. ssh opens the local listener only after authentication and the host-key check; the
 // tunnel is ready when that port accepts a connection while ssh still runs, within readyTimeoutMs.
@@ -125,21 +135,38 @@ const NO_WHERE_KNOWN = ["nohostauthenticationforproxycommand", "forkafterauthent
 let rejectedKeywords = new Set<string>();
 
 // The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process
-// and fd 4 the stderr pipe, which only ssh and the reader's `cove-ssh:` reason write to: the
-// shell's own stderr goes to /dev/null, so its job messages (bash reports the reader it kills as
+// and fd 4 the stderr pipe, which only ssh and the reader's `cove-ssh:` lines write to: the shell's
+// own stderr goes to /dev/null, so its job messages (bash reports the reader it kills as
 // "Terminated") never become the error line shown for ssh. ssh runs in the background with stdin
-// from /dev/null; a reader waits for the pipe's EOF and then ends ssh; the supervisor exits with
-// ssh's status. Arguments reach ssh as "$@", never through the shell's parser. Before the reader
-// ends ssh it reports why on fd 4.
+// from /dev/null; a reader ends ssh after a line on the pipe, or after the pipe's end once this
+// process is gone (see Lifetime above); the supervisor exits with ssh's status. Arguments reach ssh
+// as "$@", never through the shell's parser. `$PPID` is this process: the shell sets it at start
+// and a subshell keeps it, while `ps -o ppid= -p $$` reads the main shell's current parent, which
+// changes when this process dies (to init or a subreaper); a pid reused later is never that
+// parent, so the check cannot mistake another process for this one. Without ps, `kill -0` is the
+// fallback, which a zombie or a reused pid can keep true; the close() escalation still applies.
 export const SUPERVISOR = [
   "exec 3<&0 4>&2 </dev/null 2>/dev/null",
   '"$@" 2>&4 &',
   "ssh_pid=$!",
+  "cli_runs() {",
+  '  if parent=$(ps -o ppid= -p "$$" 2>/dev/null) && [ -n "$parent" ]; then',
+  '    [ $parent -eq "$PPID" ]',
+  '  else kill -0 "$PPID" 2>/dev/null; fi',
+  "}",
   // The reader ignores SIGPIPE: once this process died nobody reads fd 4, and writing the reason
   // must not cost the kill that follows it.
   "{ trap '' PIPE",
   '  if read -r _ <&3 2>&4; then why="a line on the supervisor pipe"',
-  '  else why="the end of the supervisor pipe or a read error (read status $?)"; fi',
+  "  else",
+  "    status=$?",
+  "    if cli_runs; then",
+  '      printf "cove-ssh: the supervisor pipe ended (read status %s) while the CLI runs; ' +
+    'waiting for the CLI to end\\n" "$status" >&4',
+  "      while cli_runs; do sleep 1; done",
+  "    fi",
+  '    why="the end of the supervisor pipe (read status $status) after the CLI ended"',
+  "  fi",
   '  printf "cove-ssh: ending ssh after %s\\n" "$why" >&4',
   '  kill -TERM "$ssh_pid" 2>/dev/null',
   "} &",
@@ -319,11 +346,12 @@ export async function resolvedPins(target: string): Promise<string[]> {
   );
 }
 
-// Ends a supervised ssh: end-of-file on the supervisor's pipe, then TERM and KILL to its group
+// Ends a supervised ssh: a line and end-of-file on the supervisor's pipe, then TERM and KILL to its group
 // while the supervisor (the group's leader, so the group is still this tunnel's) has not exited.
 async function stop({ child, ended }: Started): Promise<void> {
   const running = () => child.exitCode === null && child.signalCode === null;
-  child.stdin?.end();
+  // The line is the request; the end of the pipe alone does not end ssh while this process runs.
+  child.stdin?.end("stop\n");
   if ((await within(ended, CLOSE_GRACE_MS)) !== "timeout" || !running()) return;
   const signal = (name: NodeJS.Signals) => {
     try {
