@@ -21,7 +21,7 @@ import { OperationReceipts } from "../operations/operation-receipts.js";
 import { TerminalOperations } from "../operations/terminal-operations.js";
 import { createRecoveryVerifiers } from "../operations/recovery-verifiers.js";
 import { SESSION_CONTROL_RESERVE } from "../terminal/worker-pipe-session.js";
-import { WorkerProcess, type WorkerSpawn } from "../terminal/worker-process.js";
+import { WorkerProcess, WorkerStartupError, type WorkerSpawn } from "../terminal/worker-process.js";
 import { LocalRuntimeClock, type LocalTimer } from "../terminal/local-runtime-clock.js";
 import { LocalAdmission } from "../transport/local-admission.js";
 import { RawConnectionGate } from "../transport/raw-connections.js";
@@ -358,6 +358,7 @@ export class LocalEntryStartupError extends Error {
 // never by its message text or an argument.
 function startupCause(error: unknown): string | undefined {
   if (
+    error instanceof WorkerStartupError ||
     error instanceof StoreError ||
     error instanceof HomeError ||
     error instanceof RendezvousPublicationError ||

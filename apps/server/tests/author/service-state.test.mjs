@@ -403,6 +403,72 @@ describe("Cove-managed directories", () => {
     }
   }, 60_000);
 
+  it("reports safe worker spawn, pipe and confirmed early exit causes in process output", async () => {
+    for (const kind of ["spawn", "pipe", "exit"]) {
+      const home = await realpath(await temporary());
+      const argv = [
+        "--mode",
+        "m0-local",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--home",
+        home,
+        "--rendezvous",
+        join(home, "server/run/rendezvous.json"),
+      ];
+      const source = `
+        import cp from "node:child_process";
+        import { syncBuiltinESMExports } from "node:module";
+        const original = cp.spawn;
+        cp.spawn = (bin, ...args) => {
+          if (!bin.endsWith("cove-terminal-worker")) return original(bin, ...args);
+          if (${JSON.stringify(kind)} === "spawn") return original("/missing-cove-worker", [], {stdio:["pipe","pipe","pipe"]});
+          const child = original(process.execPath, ["-e", "process.exit(17)"], {stdio:["pipe","pipe","pipe"]});
+          if (${JSON.stringify(kind)} === "pipe") {
+            const error = Object.assign(new Error("PRIVATE-ERROR-MESSAGE"), {code:"EPIPE", syscall:"write"});
+            child.once("spawn", () => child.stdout.emit("error", error));
+          }
+          return child;
+        };
+        syncBuiltinESMExports();
+        const {runServerProcess} = await import(${JSON.stringify(new URL("../../dist/entry/main.js", import.meta.url).href)});
+        runServerProcess(${JSON.stringify(argv)});
+      `;
+      const result = await new Promise((done, fail) =>
+        execFile(
+          process.execPath,
+          ["--input-type=module", "-e", source],
+          { env: isolated(home), timeout: 20_000 },
+          (error, _stdout, stderr) =>
+            error && typeof error.code !== "number"
+              ? fail(error)
+              : done({ code: error?.code ?? 0, stderr }),
+        ),
+      );
+      expect(result.code).toBe(1);
+      const events = result.stderr
+        .split("\n")
+        .filter((line) => line.startsWith('{"event":"startup-failed"'))
+        .map(JSON.parse);
+      expect(events).toHaveLength(1);
+      const detail = events[0].detail;
+      expect(events[0].category).toBe("worker");
+      const expected = {
+        spawn: "spawn /missing-cove-worker failed with ENOENT",
+        pipe: "pipe failure: write failed with EPIPE",
+        exit: "directly spawned child exited with code 17, signal none",
+      }[kind];
+      expect(detail).toContain(expected);
+      expect(detail.length).toBeLessThanOrEqual(512);
+      expect(result.stderr).toContain(
+        `cove-server: ${detail}${events[0].cleanup === "unverifiable" ? "; its cleanup is unverifiable" : ""}\n`,
+      );
+      expect(result.stderr).not.toContain("PRIVATE-ERROR-MESSAGE");
+    }
+  }, 60_000);
+
   it("starts under a writable ancestor and reports a refused Cove directory as its startup cause", async () => {
     const root = await realpath(await temporary());
     const shared = join(root, "shared");

@@ -3868,7 +3868,7 @@ describe("D passive production local entry", () => {
           lowerPid123NotNativeBirth: true,
         });
         expect(error).toBe(rig.failure);
-        await expect(rig.worker.ready).rejects.toThrow("Worker startup unavailable");
+        await expect(rig.worker.ready).rejects.toThrow("Worker startup pipe failure");
         expect(rig.worker.snapshot().ready).toBe(false);
         expect(rig.worker.snapshot().contact).toBe("unverifiable");
         expect(rig.worker.session.snapshot().physicalBytes).toBe(0);
