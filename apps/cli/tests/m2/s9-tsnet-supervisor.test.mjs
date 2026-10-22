@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -39,6 +39,8 @@ async function until(what, check, ms = 10_000) {
 function rig({ withState = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), "cove-tsnet-unit-"));
   const logs = [];
+  // When each event was logged, for the backoff checks.
+  const logged = [];
   const handed = [];
   const portListeners = [];
   let pairingPort;
@@ -59,7 +61,10 @@ function rig({ withState = false } = {}) {
     acceptBusiness: (socket, peer) => hand("business", socket, peer),
     acceptPairing: (socket, peer) => hand("pairing", socket, peer),
     onPairingPortChange: (listener) => portListeners.push(listener),
-    log: (event) => logs.push(JSON.stringify(event)),
+    log: (event) => {
+      logs.push(JSON.stringify(event));
+      logged.push({ event: event.event, at: Date.now() });
+    },
   };
   cleanup.push(async () => {
     await node.close();
@@ -76,6 +81,7 @@ function rig({ withState = false } = {}) {
     node,
     context,
     logs,
+    logged,
     handed,
     ops,
     async seedState() {
@@ -212,6 +218,53 @@ test("forwarded connections are handed to the listener of their port with the by
   expect(handed.find((entry) => entry.port === "pairing").peer).toBeNull();
   await until("the refused connections to close", () => unknownPort.closed && badProtocol.closed);
 });
+
+// The gaps between successive events named `name`, once there are `count` of them.
+async function gapsOf(logged, name, count) {
+  await until(
+    `${count} ${name} events`,
+    () => logged.filter((entry) => entry.event === name).length >= count,
+    20_000,
+  );
+  const times = logged.filter((entry) => entry.event === name).map((entry) => entry.at);
+  return times.slice(1, count).map((at, index) => at - times[index]);
+}
+
+test("a helper that cannot be spawned is retried with a growing backoff and runs once it can be", async () => {
+  const { node, context, seedState, logs, logged, home } = rig();
+  await seedState();
+  const binary = join(home, "cove-tsnet");
+  context.binary = binary;
+  expect(await node.start(context)).toBeUndefined();
+  // ENOENT arrives as the child's `error` event, then `close`, never `exit`.
+  const gaps = await gapsOf(logged, "tsnet-helper-failed", 3);
+  expect(gaps[0]).toBeGreaterThanOrEqual(900);
+  expect(gaps[1]).toBeGreaterThanOrEqual(1_900);
+  expect(logs.find((line) => line.includes("tsnet-helper-failed"))).toContain('"code":"ENOENT"');
+  expect(node.pid).toBeUndefined();
+  const down = await node.status();
+  expect(down.state).toBe("failed");
+  expect(down.warnings[0]).toMatch(/could not be started \(ENOENT\)/);
+
+  symlinkSync(FAKE, binary);
+  await until("the helper to run", () => node.pid !== undefined, 15_000);
+  await until("the node to run", async () => (await node.status())?.state === "running");
+  expect(logs.some((line) => line.includes("tsnet-helper-started"))).toBe(true);
+}, 40_000);
+
+test("a forward socket that cannot be opened backs off as a failed start, not as a long run", async () => {
+  const { node, context, seedState, logged, home } = rig();
+  await seedState();
+  // A file where the socket's directory belongs.
+  writeFileSync(join(home, "tsnet", "run"), "");
+  expect(await node.start(context)).toBeUndefined();
+  const gaps = await gapsOf(logged, "tsnet-unavailable", 3);
+  expect(gaps[0]).toBeGreaterThanOrEqual(900);
+  expect(gaps[1]).toBeGreaterThanOrEqual(1_900);
+  expect((await node.status()).warnings[0]).toMatch(/forward socket cannot be opened/);
+  rmSync(join(home, "tsnet", "run"));
+  await until("the helper to run", () => node.pid !== undefined, 15_000);
+}, 40_000);
 
 test("a helper speaking another protocol is not restarted", async () => {
   const { node, context, seedState, logs } = rig();

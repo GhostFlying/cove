@@ -332,7 +332,8 @@ export class TsnetNode implements TsnetEntry {
   // Resolves true once the current helper answered hello (its ports are sent next), false when it
   // exited first or speaks another protocol.
   private ready: Promise<boolean> = Promise.resolve(false);
-  private startedAt = 0;
+  // Why the last start failed, until a helper answers hello again (downReason).
+  private failure: string | undefined;
   private backoffMs = BACKOFF_INITIAL_MS;
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
   private incompatible: string | undefined;
@@ -540,6 +541,7 @@ export class TsnetNode implements TsnetEntry {
     if (this.incompatible) return this.incompatible;
     if (this.closing) return "the server is stopping";
     if (this.child) return "the tsnet helper is starting";
+    if (this.failure) return this.failure;
     return "the tsnet helper is not running; it is restarted after a backoff";
   }
 
@@ -588,6 +590,7 @@ export class TsnetNode implements TsnetEntry {
       this.forward = server;
       return true;
     } catch {
+      this.failure = "the forward socket cannot be opened; it is retried after a backoff";
       this.context?.log({
         event: "tsnet-unavailable",
         reason: "the forward socket cannot be opened",
@@ -614,27 +617,45 @@ export class TsnetNode implements TsnetEntry {
       let child: ChildProcess;
       try {
         child = spawn(launch.binary, args, { stdio: ["pipe", "pipe", "pipe"] });
-      } catch {
+      } catch (error) {
+        context.log({ event: "tsnet-helper-failed", code: this.spawnFailure(error) });
         readyNow(false);
         this.scheduleRestart();
         return;
       }
       this.child = child;
-      this.startedAt = Date.now();
+      const startedAt = Date.now();
       const channel = new HelperChannel(child);
       this.channel = channel;
       this.logStderr(child);
-      child.once("error", () => undefined);
-      child.once("exit", (code, signal) => {
+      // The one way a helper process ends here, whichever event reports it first. A spawn that
+      // fails asynchronously (ENOENT, EACCES, EAGAIN) emits `error` and then `close`, never `exit`;
+      // a helper that ran emits `exit` and then `close`. Missing any of these would leave `child`
+      // set forever: no restart, and status saying the helper is starting. Idempotent, so the
+      // events that follow the first change nothing.
+      let retired = false;
+      const retire = (outcome: Record<string, unknown>, spawned: boolean): void => {
+        if (retired) return;
+        retired = true;
         channel.fail();
         readyNow(false);
         if (this.child !== child) return;
         this.child = undefined;
         this.channel = undefined;
         this.latest = undefined;
-        context.log({ event: "tsnet-helper-exited", code, signal });
+        context.log({ event: spawned ? "tsnet-helper-exited" : "tsnet-helper-failed", ...outcome });
+        // Only a helper that really ran for STABLE_RUN_MS earns an immediate restart; a spawn
+        // that failed ran nothing, and must not look like a long stable run.
+        if (spawned && Date.now() - startedAt >= STABLE_RUN_MS) this.backoffMs = BACKOFF_INITIAL_MS;
         this.scheduleRestart();
+      };
+      child.on("error", (error) => {
+        // `error` also reports a failed kill or write of a running helper, whose `exit` follows;
+        // only a process that never started is retired here.
+        if (child.pid === undefined) retire({ code: this.spawnFailure(error) }, false);
       });
+      child.once("exit", (code, signal) => retire({ code, signal }, true));
+      child.once("close", (code, signal) => retire({ code, signal }, child.pid !== undefined));
       try {
         const hello = (await channel.request(
           { op: "hello", protocol: HELPER_PROTOCOL, build: context.buildVersion },
@@ -651,6 +672,7 @@ export class TsnetNode implements TsnetEntry {
         // runtime-closure.mjs); a difference means the closure was altered. Logged only.
         if (installedClosureRoot() && hello.build !== context.buildVersion)
           context.log({ event: "tsnet-helper-build-mismatch" });
+        this.failure = undefined;
         context.log({ event: "tsnet-helper-started", pid: child.pid });
         readyNow(true);
         await this.syncPorts();
@@ -661,9 +683,19 @@ export class TsnetNode implements TsnetEntry {
     })();
   }
 
+  // Why the helper could not be started, kept for status: the error's code alone (ENOENT,
+  // EACCES, ...), never its message, which names paths and is not bounded.
+  private spawnFailure(error: unknown): string {
+    const code = (error as { code?: unknown } | null)?.code;
+    const fixed = typeof code === "string" && /^[A-Z0-9_]{1,32}$/.test(code) ? code : "UNKNOWN";
+    this.failure = `the tsnet helper could not be started (${fixed}); it is retried after a backoff`;
+    return fixed;
+  }
+
+  // Schedules the next start after the current backoff, which doubles each time. Whether a run was
+  // long enough to reset it is decided where a helper is retired (spawnHelper).
   private scheduleRestart(): void {
     if (this.closing || !this.wanted || this.incompatible || this.restartTimer) return;
-    if (Date.now() - this.startedAt >= STABLE_RUN_MS) this.backoffMs = BACKOFF_INITIAL_MS;
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 2, BACKOFF_MAX_MS);
     this.restartTimer = setTimeout(() => {
