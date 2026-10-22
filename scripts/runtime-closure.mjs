@@ -20,8 +20,9 @@
 // final binary cannot be part of the digest it embeds; the placeholder build stands for it. It is
 // the same build but for the ID string (scripts/tsnet-build.mjs, reproducible: -trimpath, static),
 // so it reflects every input that shapes the binary: the Go sources and toolchain, the build
-// flags and tags of the build script, GOAMD64/GOARM64 and the rest of the Go environment, and the
-// VCS information Go embeds (the commit, and whether the checkout was modified). Listing those
+// flags and tags of the build script, GOAMD64/GOARM64 and the rest of the Go
+// environment. Sealed placeholder/final builds exclude VCS metadata (-buildvcs=false);
+// eligible development builds alone retain automatic VCS stamping. Listing those
 // inputs instead would silently miss any that a later Go or build script adds. The stamp also
 // records a digest of the final contents, cove-tsnet included, which `cove server install
 // --closure` checks before it installs a copy. Two checkouts of one commit at different paths get
