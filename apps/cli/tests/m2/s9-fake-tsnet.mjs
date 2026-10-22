@@ -70,10 +70,8 @@ function status() {
 
 const answer = (id, result) =>
   process.stdout.write(`${JSON.stringify({ id, ok: true, result })}\n`);
-const refuse = (id, code) =>
-  process.stdout.write(
-    `${JSON.stringify({ id, ok: false, error: { code, message: code.toLowerCase() } })}\n`,
-  );
+const refuse = (id, code, message = code.toLowerCase()) =>
+  process.stdout.write(`${JSON.stringify({ id, ok: false, error: { code, message } })}\n`);
 
 const lines = createInterface({ input: process.stdin });
 lines.on("line", (line) => {
@@ -121,7 +119,13 @@ lines.on("line", (line) => {
         }, SLOW_MS);
         return;
       }
-      if (key.startsWith("tskey-fail")) return refuse(id, "LOGIN_FAILED");
+      // A control plane's message that echoes the key and a URL, which the server must not show.
+      if (key.startsWith("tskey-fail"))
+        return refuse(
+          id,
+          "LOGIN_FAILED",
+          `invalid key ${key}, see https://login.example.test/a/help`,
+        );
       const enrolled = node();
       if (key.startsWith("tskey-other") && enrolled) return refuse(id, "IDENTITY_CHANGED");
       mkdirSync(join(home, "state"), { recursive: true, mode: 0o700 });
