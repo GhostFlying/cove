@@ -88,18 +88,18 @@ export class LocalRendezvous {
   }
   // The directories Cove manages on the way to the rendezvous (#172; store/home.ts states the
   // rule): every component strictly below the data directory down to the rendezvous directory,
-  // which the server creates itself when it is missing. A rendezvous outside the data directory
-  // (an explicit --rendezvous) has only that directory as Cove's. Components at or above the data
-  // directory are not checked, not even for symbolic links: Cove does not manage them, and the
-  // identity recorded for the rendezvous directory (verifyDirectory) keeps publication and cleanup
-  // on the directory checked here.
+  // which the server creates itself when it is missing. An existing external --rendezvous parent,
+  // like the data directory and its ancestors, is user-owned rather than Cove-managed; its mode,
+  // owner and symlink spelling are not restricted. Only a missing external leaf we actually create
+  // is held to Cove's rule. verifyDirectory pins the target directory identity for publication and
+  // cleanup in both cases.
   private managedComponents(parent: string): string[] {
     const home = this.homes.find(
       (candidate) =>
         parent === candidate ||
         parent.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`),
     );
-    if (!home) return [parent];
+    if (!home) return [];
     const managed: string[] = [];
     for (let current = parent; current !== home; current = dirname(current))
       managed.unshift(current);
@@ -111,14 +111,24 @@ export class LocalRendezvous {
     const parent = dirname(this.path);
     const components = this.managedComponents(parent);
     if (components.length === 0) {
-      // The pre-existing home may be a symlink. Follow it, then pin the target identity.
-      const info = await stat(parent);
+      // Existing user directories may be symlinks; follow and pin their target. If this
+      // publication creates a missing leaf, record ownership before validating for cleanup.
+      let created = false;
+      let info;
+      try {
+        info = await stat(parent);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        await mkdir(parent, { mode: 0o700 });
+        created = true;
+        info = await lstat(parent);
+      }
       this.directory = {
         path: parent,
         dev: info.dev,
         ino: info.ino,
-        created: false,
-        managed: false,
+        created,
+        managed: created,
       };
     }
     for (const current of components) {
@@ -145,6 +155,8 @@ export class LocalRendezvous {
     if (!directory) throw new RendezvousPathError("the rendezvous directory was not prepared");
     const current = await (directory.managed ? lstat(directory.path) : stat(directory.path));
     if (directory.managed) checkManagedDirectory(directory.path, current);
+    else if (!current.isDirectory())
+      throw new RendezvousPathError(`the rendezvous parent ${directory.path} is not a directory`);
     if (current.dev !== directory.dev || current.ino !== directory.ino)
       throw new RendezvousPathError(
         `the rendezvous directory ${directory.path} was replaced during publication`,
