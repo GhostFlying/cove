@@ -398,6 +398,30 @@ PENDING：
   `running`、`stopped` 或 `unknown`（此时 `serverError` 给出原因），`server` 是 `server.status` 的结果，不在运行时为 null。
   `cove server prune` 输出 `{ kept, removed }`；状态未知时以 1 退出，不删除任何 build。`cove server tsnet ...` 以 `CAPABILITY_UNAVAILABLE` 失败并以 1 退出。
 
+#167（M2 T5b server 的 tsnet 节点与原始连接上限，#155、#156，未合入）：现有命令的请求与 JSON 输出不变；`server tsnet` 不再是 `CAPABILITY_UNAVAILABLE`。
+
+- 新增 `cove server tsnet login|status|logout [--operation-id ID]`，只作用于本机（拒绝 `--server`）。
+  - `status` 输出 `{ state, hostname, nodeId, nodeName, hold, ports, warnings }`：
+    - `state` 为 `logged-out|stopped|starting|needs-login|running|failed`；
+    - `hold` 为 `identity-changed|login-uncertain|null`。
+    - 登录或登出进行中时以 1 退出，stderr 提示 busy。
+  - `login` 输出 `{ operation, status }`：
+    - auth key 只从隐藏提示或 stdin 读（tend-runner 不应把它放进 argv 或环境变量），输入为空则在 stderr 显示一次登录 URL（不进 JSON）并等待完成；
+    - 记录不保存 key，因此不能 `operation resend`。
+  - `logout` 输出 `{ operation }`，其 `result.remoteLogoutConfirmed` 为 false 时以 0 退出并在 stderr 警告；
+    节点未登录且没有给 `--operation-id` 时不发送写，输出 `{ status }` 并以 0 退出。
+- 新增错误 kind，以 1 退出：
+  - `TSNET_LOGIN_FAILED`（1050，节点不变，包括已经登录）；
+  - `TSNET_IDENTITY_CHANGED`（1051）；
+  - `TSNET_LOGIN_UNCERTAIN`（1052）。
+  - 结果不确定的 login/logout 记录为 `requires_attention`（`RESULT_UNKNOWN`），不会自动重做。
+- 节点登录后，`auth invite create` 的邀请可含 `entries.tsnet`；没有 SSH 目标但节点可用时也能创建邀请。
+  `auth device list` 中经 tsnet 连接的设备 `lastEntry` 为 `tsnet`。
+- 业务端口在头部解析前有原始连接上限（总数 128，未发完请求头的 64 条，请求头期限 5 秒，#156）。
+  - 只影响不发完请求头的连接；
+  - CLI 与正常客户端不变。
+- `COVE_TSNET_BINARY`、`COVE_TSNET_CONTROL_URL` 只在开发 workspace 中生效；安装闭包中设置时 server 不启动 tsnet 节点。tend-runner 不应设置它们。
+
 PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
@@ -474,3 +498,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `4d55063`；#162（M2 T3，未合入）           | 更正 PENDING #162：结束 run 的命令的确认输出新增 `state`，连不上但持有数据目录的 server（`state: "unknown"`，`impact: null`）同样要求确认；`server status` 新增 `serverState`/`serverError`；`service status` 新增 `stoppedAfterCrashes`（崩溃重启有上限）；状态未知时 `prune` 与 `service start` 以 1 退出                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | 2026-10-22 | main `eea6b9b`；#162（M2 T3，未合入）           | 更正 PENDING #162：`server upgrade` 在重启前再查一次 server，安装期间状态或实例变了就重新确认（没有 `--yes` 且不在终端中时以 2 退出，输出另带 `build`，新 build 已安装并激活但未重启）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 2026-10-22 | main `eea6b9b`；#162（M2 T3，未合入）           | 更正 PENDING #162：systemd 下 `stoppedAfterCrashes` 只在单元 journal 记录了启动次数限制（且其后没有再启动或停止）时为 true，请求的停止失败不再算作崩溃后停止                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 2026-10-22 | main `9878530`；#167（M2 T5b，未合入）          | 新增 PENDING #167：`server tsnet login/status/logout`（auth key 只从提示或 stdin 读，登录 URL 只在 stderr；结果不确定为 `requires_attention`）；新增错误 kind `TSNET_LOGIN_FAILED`、`TSNET_IDENTITY_CHANGED`、`TSNET_LOGIN_UNCERTAIN`（1050–1052）；邀请可含 `entries.tsnet`；业务端口的原始连接上限与请求头期限                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |

@@ -306,6 +306,40 @@ node scripts/runtime-closure.mjs build --out DIR    # 只构建一个封好的�
 - 测试：`apps/cli/tests/m2/s1-*`、`s2-*` 注册真实的用户服务，名称取自临时数据目录，只在 `COVE_TEST_SERVICE_MANAGER=1`
   时运行（CI 的 check job 设置它）；本机运行它们会在当前用户的 gui 域或 systemd user 管理器中短暂注册并移除测试服务。
 
+## M2 server 的 tsnet 节点（T5b）
+
+范围与决定见 [M2](milestones/m2.md)（D6、D9、D10、S9）。server 自己的 Tailnet 节点由它监督的子进程 `cove-tsnet serve`
+承载（[本机协议](../native/tailscale/PROTOCOL.md)），状态在 `<home>/tsnet/`（0700），不需要也不使用系统 Tailscale。
+
+```sh
+cove --home A server tsnet login     # auth key 从隐藏提示或 stdin 读；输入为空则在 stderr 显示一次登录 URL 并等待完成
+cove --home A server tsnet status    # { state, hostname, nodeId, nodeName, hold, ports, warnings }
+cove --home A server tsnet logout    # 删除节点状态；控制面未确认时在 stderr 提示到管理控制台删除该节点
+```
+
+- 只作用于本机（不接受 `--server`），方法为 local-owner：远程登录或登出可能切断请求本身所走的入口。
+- 节点有状态（`<home>/tsnet/state` 存在）时随 server 启动，否则直到第一次 login 才启动 `cove-tsnet`，从未登录的 server
+  不启动任何进程、不连控制面。server 启动不等节点就绪。`cove-tsnet` 意外退出后按 1 秒起、翻倍到 60 秒的退避重启
+  （稳定运行 60 秒后回到 1 秒），恢复原状态而不重新登录；PTY、run 与 loopback、SSH 入口不受影响。本机协议不兼容时不重启，
+  status 说明原因。server 停止时关闭它的 stdin（有序停止），最多等 20 秒后才强制结束。
+- 节点只监听业务端口（与 loopback 业务端口同号）以及有未结束邀请时的配对端口（同号）；每个连接由 `cove-tsnet` 转交给对应的
+  监听，与 loopback 连接经过同样的原始连接上限、凭据检查与准入，WhoIs 对端只用于显示与设备的最后入口记录。节点运行、无身份保留
+  且两个端口都已开放时，邀请写入 `entries.tsnet = { nodeId, name }`；节点不可用时邀请只有 SSH 入口，两者都没有时为 `ENTRY_UNAVAILABLE`。
+- login 与 logout 是有操作记录的写：结果不确定（`cove-tsnet` 无应答或中途退出，server 中途停止）时记录为 `requires_attention`
+  （`RESULT_UNKNOWN`），用 `server tsnet status` 判断节点状态，不自动重做。`TSNET_IDENTITY_CHANGED`（登录成了另一个节点：先 logout，
+  再用正确的 key 登录，并重新配对客户端）、`TSNET_LOGIN_UNCERTAIN`（未完成且可能已生效，status 会澄清）与 `TSNET_LOGIN_FAILED`
+  （节点不变，包括已经登录）以 1 退出。登录或登出进行中 status 报 `BUSY`，稍后再问。
+- auth key 只在请求的输入秘密中，经 stdin 帧交给 `cove-tsnet`，不进 argv、环境变量、日志、数据库、操作记录与 CLI 待定记录
+  （因此这次请求不能 `operation resend`，重新运行命令即可）；登录 URL 只出现在发起这次登录的应答中，CLI 只写到 stderr。
+  `cove-tsnet` 的 stderr 写入 server 日志前替换其中的 URL。
+- 开发与测试专用的环境变量与客户端相同：`COVE_TSNET_BINARY`（`cove-tsnet` 的绝对路径）与 `COVE_TSNET_CONTROL_URL`
+  （测试控制面）只在开发 workspace 中生效；安装闭包中设置了它们时 server 不启动 tsnet 节点（status 说明原因）。
+
+测试：`apps/cli/tests/m2/s9-tsnet-supervisor.test.mjs` 与 `s9-tsnet-login.test.mjs` 用脚本化的假
+`cove-tsnet`（`s9-fake-tsnet.mjs`）；`s9-tsnet-node.test.mjs` 是 S9，用真实 `cove-tsnet` 与一个对端节点加入 testcontrol 的测试 Tailnet
+（`TS_PANIC_IF_HIT_MAIN_CONTROL=1`），可执行文件构建到 `.cache/tsnet-test/<源码摘要>/`，需要 `native/tailscale/go.mod`
+固定的 Go（`COVE_GO` 或 PATH 上的 `go`），找不到时以原因失败而不是跳过。真实 Tailnet 与两台机器的验证在 CI 之外进行。
+
 ## B0 实验环境
 
 Q1 浏览器查询与输入实验使用编译出口 `@cove/terminal-web/probes/query-input`，从同一 Vite fixture 的 `query-input` 模式启动托管 Chromium。命令 `pnpm --filter @cove/terminal-web --fail-if-no-match test` 运行十项必需浏览器测试；单独复现可在构建和安装浏览器后执行 `node packages/terminal-web/dist/probes/node/query-input.js queries`（也可用 `keyboard`、`paste`、`mouse`、`split-mixed`、`lifetime`）。探针输出合成字节、浏览器版本和动作证据；它只证明浏览器侧 xterm 输入来源和查询抑制，不连接真实 PTY。
