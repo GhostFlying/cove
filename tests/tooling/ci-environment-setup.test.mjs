@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fstatSync, readFileSync } from "node:fs";
 import filesystem, {
@@ -55,7 +56,11 @@ test("CI time bounds nest inside each other using configured allowances", async 
     ciTimeBudget.checkFinalizeReserveMs;
   expect(checkStageMs).toBeGreaterThanOrEqual(checkStageNeeds);
   const jobNeeds =
-    3 * ciTimeBudget.setupStageMs + gate + checkStageNeeds + ciTimeBudget.jobActionsReserveMs;
+    2 * (ciTimeBudget.setupStageMs + ciTimeBudget.setupFinalizeReserveMs) +
+    ciTimeBudget.browserStepMs +
+    gate +
+    checkStageNeeds +
+    ciTimeBudget.jobActionsReserveMs;
   expect(checkJobMinimumMs).toBeGreaterThanOrEqual(jobNeeds);
   const workflow = await readFile(
     resolve(import.meta.dirname, "../../.github/workflows/check.yml"),
@@ -63,6 +68,13 @@ test("CI time bounds nest inside each other using configured allowances", async 
   );
   const shardJob = workflowJob(workflow, "check-shard");
   expect(jobTimeoutMs(shardJob)).toBeGreaterThanOrEqual(jobNeeds);
+  for (const job of [shardJob, workflowJob(workflow, "browser-close-diagnostic")]) {
+    const browserStep = /--browser\n {8}timeout-minutes: (\d+)\n/.exec(job)?.[1];
+    expect(Number(browserStep) * 60_000).toBe(ciTimeBudget.browserStepMs);
+  }
+  expect(ciTimeBudget.browserStepMs).toBeGreaterThan(
+    ciTimeBudget.setupStageMs + ciTimeBudget.setupFinalizeReserveMs,
+  );
 
   // The aggregating job: its step bound, then the runner actions, inside the job's bound.
   const aggregateNeeds = ciTimeBudget.aggregateStepMs + ciTimeBudget.jobActionsReserveMs;
@@ -689,4 +701,190 @@ test("outer check preserves the fixed 786432-byte successful binary streams", as
     expect(sink.observations.maxChunk).toBeLessThanOrEqual(65536);
     expect(sink.observations.backpressure).toBeGreaterThan(0);
   }
+});
+
+test("setup publishes pending metadata and uncapped raw output before a child finishes", async () => {
+  const directory = await isolatedDirectory();
+  const ready = join(directory, "ready");
+  const release = join(directory, "release");
+  const running = runRecordedSetup(
+    "browser",
+    process.execPath,
+    [
+      "--eval",
+      `
+    const fs = require("node:fs");
+    process.stdout.write(Buffer.alloc(3 * 1024 * 1024, 65), () => {
+      process.stderr.write("partial stderr\\n", () => fs.writeFileSync(${JSON.stringify(ready)}, "ready"));
+    });
+    const timer = setInterval(() => {
+      if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(timer); }
+    }, 10);
+  `,
+    ],
+    directory,
+    directory,
+    5000,
+  );
+  try {
+    for (let i = 0; i < 200; i++) {
+      if (await stat(ready).catch(() => null)) break;
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    expect(await readFile(ready, "utf8")).toBe("ready");
+    const pending = JSON.parse(await readFile(join(directory, "browser.json"), "utf8"));
+    expect(pending).toMatchObject({ status: "in-progress", exitCode: null, timeoutMs: 5000 });
+    expect(Date.parse(pending.deadline) - Date.parse(pending.startedAt)).toBe(5000);
+    expect((await readFile(join(directory, "browser.stdout.bin"))).length).toBe(3 * 1024 * 1024);
+    expect(await readFile(join(directory, "browser.stderr.bin"), "utf8")).toBe("partial stderr\n");
+  } finally {
+    await writeFile(release, "release");
+    await running;
+  }
+  expect(JSON.parse(await readFile(join(directory, "browser.json"), "utf8"))).toMatchObject({
+    status: "succeeded",
+    exitCode: 0,
+    timedOut: false,
+  });
+});
+
+test.each(["ignore-term", "descendant-pipe"])(
+  "setup wait is bounded for %s under an independent watchdog",
+  async (mode) => {
+    const directory = await isolatedDirectory();
+    const pidPath = join(directory, "owned-group-pid");
+    const childProgram = `
+    const fs = require("node:fs");
+    fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    process.stdout.write("before timeout\\n");
+    process.stderr.write("stderr before timeout\\n");
+    if (${JSON.stringify(mode)} === "descendant-pipe") {
+      require("node:child_process").spawn(process.execPath, ["--eval",
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "inherit" });
+      process.exit(0);
+    } else {
+      process.on("SIGTERM", () => {});
+      setInterval(() => {}, 1000);
+    }
+  `;
+    const moduleUrl = pathToFileURL(
+      resolve(import.meta.dirname, "../../scripts/ci-environment-setup.mjs"),
+    ).href;
+    const wrapper = `
+    import { runRecordedSetup } from ${JSON.stringify(moduleUrl)};
+    try {
+      await runRecordedSetup("browser", process.execPath, ["--eval", ${JSON.stringify(childProgram)}],
+        ${JSON.stringify(directory)}, ${JSON.stringify(directory)}, 800);
+      process.exitCode = 8;
+    } catch (error) {
+      if (error.code !== "ETIMEDOUT") { console.error(error); process.exitCode = 9; }
+    }
+  `;
+    let result;
+    try {
+      // This independent process has SIGKILL as its watchdog, not the supervisor under test.
+      result = spawnSync(process.execPath, ["--input-type=module", "--eval", wrapper], {
+        encoding: "utf8",
+        timeout: 5000,
+        killSignal: "SIGKILL",
+      });
+      expect(result.error).toBeUndefined();
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      const record = JSON.parse(await readFile(join(directory, "browser.json"), "utf8"));
+      expect(record).toMatchObject({
+        status: "failed",
+        timedOut: true,
+        errorCode: "ETIMEDOUT",
+        cleanup: "unconfirmed-after-group-signals",
+      });
+      expect(Date.parse(record.finishedAt) - Date.parse(record.startedAt)).toBeLessThan(4000);
+      expect(await readFile(join(directory, "browser.stdout.bin"), "utf8")).toContain(
+        "before timeout",
+      );
+      expect(await readFile(join(directory, "browser.stderr.bin"), "utf8")).toContain(
+        "stderr before timeout",
+      );
+    } finally {
+      const pid = Number(await readFile(pidPath, "utf8").catch(() => ""));
+      if (pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch (error) {
+          expect(error.code).toBe("ESRCH");
+        }
+      }
+    }
+  },
+);
+
+test("setup refuses to run when raw output cannot be opened", async () => {
+  const directory = await isolatedDirectory();
+  await mkdir(join(directory, "browser.stdout.bin"));
+  const marker = join(directory, "should-not-run");
+  await expect(
+    runRecordedSetup(
+      "browser",
+      process.execPath,
+      ["--eval", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "bad")`],
+      directory,
+      directory,
+      50,
+    ),
+  ).rejects.toMatchObject({ code: "EEXIST" });
+  expect(await stat(marker).catch(() => null)).toBe(null);
+  expect(JSON.parse(await readFile(join(directory, "browser.json"), "utf8"))).toMatchObject({
+    status: "failed",
+    errorCode: "EEXIST",
+  });
+});
+
+test("setup raw write errors remain failures even when child termination succeeds", async () => {
+  const directory = await isolatedDirectory();
+  const readonly = join(directory, "readonly");
+  await writeFile(readonly, "fixture");
+  const originalOpen = filesystem.open;
+  const mocked = vi
+    .spyOn(filesystem, "open")
+    .mockImplementation((path, flags, ...rest) =>
+      path === join(directory, "browser.stdout.bin")
+        ? originalOpen(readonly, "r")
+        : originalOpen(path, flags, ...rest),
+    );
+  try {
+    await expect(
+      runRecordedSetup(
+        "browser",
+        process.execPath,
+        ["--eval", 'process.stdout.write("output"); setInterval(() => {}, 1000)'],
+        directory,
+        directory,
+        2000,
+      ),
+    ).rejects.toMatchObject({ code: "EBADF" });
+    expect(JSON.parse(await readFile(join(directory, "browser.json"), "utf8"))).toMatchObject({
+      status: "failed",
+      errorCode: "EBADF",
+      cleanup: "unconfirmed-after-group-signals",
+    });
+  } finally {
+    mocked.mockRestore();
+  }
+});
+
+test("setup final metadata failure cannot report success", async () => {
+  const directory = await isolatedDirectory();
+  const metadata = join(directory, "browser.json");
+  const program = `const fs = require("node:fs");
+    fs.unlinkSync(${JSON.stringify(metadata)}); fs.mkdirSync(${JSON.stringify(metadata)});
+    process.stdout.write("retained output");`;
+  await expect(
+    runRecordedSetup("browser", process.execPath, ["--eval", program], directory, directory, 2000),
+  ).rejects.toMatchObject({
+    ciOutputAttempt: {
+      status: "failed",
+      exitCode: 0,
+      custodyErrors: [expect.objectContaining({ phase: "metadata" })],
+    },
+  });
+  expect(await readFile(join(directory, "browser.stdout.bin"), "utf8")).toBe("retained output");
 });

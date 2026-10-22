@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, writeSync } from "node:fs";
 import filesystem from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -14,12 +14,16 @@ const minute = 60_000;
 
 // One budget for every CI time bound. Each bound must contain the configured allowances of
 // everything inside it, not just their observed durations. While work without its own bound
-// stays within its stated reserve, a hung command is then stopped by the innermost bound and the
-// gate writes its evidence before an outer timeout or a job cancel.
+// stays within its stated reserve, these allowances leave room to record ordinary failures.
+// Only the async setup stages below bound their wait after termination; synchronous check/gate
+// children can ignore TERM. Workflow cancellation is the final containment, not cleanup proof.
 // tests/tooling/ci-environment-setup.test.mjs checks the composition and the workflow value.
 export const ciTimeBudget = Object.freeze({
   // Each of the install, native and browser setup steps (observed: at most 25 s on macOS).
   setupStageMs: 10 * minute,
+  // The workflow browser step also contains route preparation and bounded termination/finalization.
+  browserStepMs: 12 * minute,
+  setupFinalizeReserveMs: minute,
   // Each auxiliary gate command: the toolchain probe, discovery and the source revision.
   gateCommandMs: 2 * minute,
   // The vitest run. #111 raised it from 12 to 20 minutes when green macOS runs took 11.1-11.8.
@@ -57,7 +61,8 @@ export const checkStageMs =
 // Each `check-shard` job: three setup steps, the `--environment` toolchain probe, the check stage
 // and the runner actions. `.github/workflows/check.yml` must allow at least this long.
 export const checkJobMinimumMs =
-  3 * ciTimeBudget.setupStageMs +
+  2 * (ciTimeBudget.setupStageMs + ciTimeBudget.setupFinalizeReserveMs) +
+  ciTimeBudget.browserStepMs +
   ciTimeBudget.gateCommandMs +
   checkStageMs +
   ciTimeBudget.jobActionsReserveMs;
@@ -297,31 +302,168 @@ export async function runRecordedSetup(
 ) {
   if (stage === "check")
     return fileRecordedCheck(stage, binary, args, directory, cwd, timeoutMs, outputs);
-  const result = spawnSync(binary, args, {
-    cwd,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    maxBuffer: 2 * 1024 * 1024,
-    env: process.env,
-  });
+  await mkdir(directory, { recursive: true });
+  const startedAt = new Date();
   const attempt = {
     stage,
     argv: [binary, ...args],
-    exitCode: result.status,
-    signal: result.signal,
-    errorCode: result.error?.code ?? null,
-    timedOut: result.error?.code === "ETIMEDOUT",
+    sourceSha: process.env.GITHUB_SHA ?? null,
+    runId: process.env.GITHUB_RUN_ID ?? null,
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+    status: "in-progress",
+    startedAt: startedAt.toISOString(),
+    deadline: new Date(startedAt.getTime() + timeoutMs).toISOString(),
+    timeoutMs,
+    exitCode: null,
+    signal: null,
+    errorCode: null,
+    timedOut: false,
+    // Raw streams are copied into files while the child runs, with no output-size cap.
+    stdoutPath: `${stage}.stdout.bin`,
+    stderrPath: `${stage}.stderr.bin`,
   };
-  await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, `${stage}.json`), `${JSON.stringify(attempt, null, 2)}\n`);
-  await writeFile(
-    join(directory, `${stage}.log`),
-    `${result.stdout?.slice(-64_000) ?? ""}${result.stderr?.slice(-64_000) ?? ""}`,
-  );
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${stage} exited ${result.status}`);
+  const metadata = join(directory, `${stage}.json`);
+  // Publish the attempt before even opening output files or launching a subprocess. A workflow
+  // cancellation can leave this record in-progress; it must never be interpreted as success.
+  await writeFile(metadata, `${JSON.stringify(attempt, null, 2)}\n`, { flag: "wx" });
+  const handles = [];
+  let primary;
+  let child;
+  const custodyErrors = [];
+  try {
+    for (const path of [attempt.stdoutPath, attempt.stderrPath]) {
+      handles.push(await filesystem.open(join(directory, path), "wx"));
+    }
+    const outcome = await new Promise((settle) => {
+      let deadlineTimer;
+      let killTimer;
+      let finalTimer;
+      let done = false;
+      const finish = (result) => {
+        if (done) return;
+        done = true;
+        clearTimeout(deadlineTimer);
+        clearTimeout(killTimer);
+        clearTimeout(finalTimer);
+        settle(result);
+      };
+      const signalGroup = (signal) => {
+        (attempt.terminationSignals ??= []).push(signal);
+        try {
+          // A new group contains only this setup command and its descendants. Privileged apt
+          // descendants can refuse these signals; record that uncertainty, do not wait forever.
+          if (process.platform === "win32") child.kill(signal);
+          else process.kill(-child.pid, signal);
+        } catch (error) {
+          if (error.code !== "ESRCH") {
+            custodyErrors.push({
+              phase: "termination",
+              signal,
+              code: error.code,
+              message: error.message,
+            });
+          }
+        }
+      };
+      try {
+        child = spawn(binary, args, {
+          cwd,
+          detached: process.platform !== "win32",
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      } catch (error) {
+        finish({ error });
+        return;
+      }
+      attempt.childPid = child.pid ?? null;
+      let outputFailure;
+      for (const [index, stream] of [child.stdout, child.stderr].entries()) {
+        stream.on("data", (chunk) => {
+          if (outputFailure) return;
+          try {
+            let offset = 0;
+            while (offset < chunk.length) {
+              const written = writeSync(handles[index].fd, chunk, offset, chunk.length - offset);
+              if (!written) throw new Error("Setup raw output write made no progress");
+              offset += written;
+            }
+          } catch (error) {
+            outputFailure = error;
+            signalGroup("SIGKILL");
+          }
+        });
+        stream.on("error", (error) => {
+          outputFailure ??= error;
+        });
+      }
+      child.once("error", (error) => finish({ error }));
+      child.once("close", () => {
+        if (!attempt.timedOut) finish({ error: outputFailure });
+      });
+      child.once("exit", (code, signal) => {
+        attempt.exitCode = code;
+        attempt.signal = signal;
+        // On timeout allow the scheduled KILL to reach remaining group members even if the
+        // immediate child has already exited. The final deadline closes descendant-held pipes.
+      });
+      deadlineTimer = setTimeout(() => {
+        attempt.timedOut = true;
+        signalGroup("SIGTERM");
+        killTimer = setTimeout(() => {
+          signalGroup("SIGKILL");
+          finalTimer = setTimeout(() => {
+            child.stdout.destroy();
+            child.stderr.destroy();
+            child.unref();
+            finish({
+              error:
+                outputFailure ??
+                Object.assign(new Error(`${stage} timed out`), { code: "ETIMEDOUT" }),
+            });
+          }, 250);
+        }, 250);
+      }, timeoutMs);
+    });
+    primary = outcome.error;
+    if (!primary && attempt.exitCode !== 0)
+      primary = new Error(`${stage} exited ${attempt.exitCode}`);
+  } catch (error) {
+    primary = error;
+  } finally {
+    for (const handle of handles) {
+      try {
+        await handle.close();
+      } catch (error) {
+        custodyErrors.push({ phase: "close", code: error.code, message: error.message });
+      }
+    }
+  }
+  Object.assign(attempt, {
+    status: primary || custodyErrors.length ? "failed" : "succeeded",
+    finishedAt: new Date().toISOString(),
+    errorCode: primary?.code ?? null,
+    error: primary ? { name: primary.name, message: primary.message } : null,
+    // Parent exit and closed output pipes do not prove privileged/detached descendants exited.
+    // Runner teardown, not this controller, ultimately contains those processes.
+    cleanup: attempt.terminationSignals?.length
+      ? "unconfirmed-after-group-signals"
+      : "not-inspected",
+    custodyErrors,
+  });
+  try {
+    await writeFile(metadata, `${JSON.stringify(attempt, null, 2)}\n`);
+  } catch (error) {
+    custodyErrors.push({ phase: "metadata", code: error.code, message: error.message });
+    attempt.status = "failed";
+  }
+  // Do not replay output after completion; the raw files retain partial output on cancellation.
+  // The raw files are the authoritative output and the workflow always uploads their directory.
+  if (primary || custodyErrors.length) {
+    const error = primary ?? new Error(`${stage} evidence could not be finalized`);
+    error.ciOutputAttempt = attempt;
+    throw error;
+  }
   return attempt;
 }
 
@@ -362,11 +504,7 @@ async function main() {
       ["install", "--frozen-lockfile", "--config.side-effects-cache=false"],
     ],
     "--native": ["native", "pnpm", ["native:prepare"]],
-    "--browser": [
-      "browser",
-      "pnpm",
-      ["--filter", "@cove/terminal-web", "--fail-if-no-match", "browser:install"],
-    ],
+    "--browser": ["browser", process.execPath, [join(root, "scripts/ci-ubuntu-archive.mjs")]],
     "--check": ["check", "pnpm", ["check"]],
   };
   const selected = stages[command];
