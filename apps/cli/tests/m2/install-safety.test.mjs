@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import childProcess, { spawn } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -28,6 +29,9 @@ import {
 import { describeImpact, startupFailureSince } from "../../dist/install/commands.js";
 import {
   fileTail,
+  serviceBackend,
+  serviceOutputTail,
+  SERVICE_LOG_BYTES,
   SERVICE_LOG_LINES,
   systemdGaveUp,
   systemdUnit,
@@ -461,3 +465,61 @@ test("install adoption rejects managed modes and symlinks without changing them"
   await expect(ensureInstallDirectory(alias)).rejects.toThrow("not be symbolic links");
 });
 
+test("startup polling bounds both manager probes by the remaining deadline and keeps failures unknown", async () => {
+  const calls = [];
+  const original = childProcess.spawnSync;
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  let denied = false;
+  childProcess.spawnSync = (command, args, options) => {
+    calls.push({ command, args, options });
+    if (args.includes("show-environment")) return { status: 0, stdout: "", stderr: "" };
+    if (denied)
+      return {
+        status: 1,
+        stdout: "ActiveState=failed\nResult=start-limit-hit\n",
+        stderr: "denied",
+      };
+    if (command === "systemctl")
+      return { status: 0, stdout: "ActiveState=failed\nResult=exit-code\n", stderr: "" };
+    return {
+      status: 0,
+      stdout: Buffer.from("Started Cove.\nStart request repeated too quickly.\n"),
+      stderr: Buffer.alloc(0),
+    };
+  };
+  Object.defineProperty(process, "platform", { value: "linux" });
+  syncBuiltinESMExports();
+  try {
+    const { backend } = serviceBackend(installLayout(await dataDirectory("bounded-probes")));
+    calls.length = 0;
+    const deadline = Date.now() + 37;
+    expect(backend.recentOutput(0, deadline)).toContain("Started Cove");
+    expect(backend.gaveUpSince(0, deadline)).toBe(true);
+    expect(calls.map((call) => call.command)).toEqual(["journalctl", "systemctl", "journalctl"]);
+    for (const { options } of calls) expect(options.timeout).toBeGreaterThan(0);
+    for (const { options } of calls) expect(options.timeout).toBeLessThanOrEqual(37);
+    calls.length = 0;
+    expect(backend.gaveUpSince(0, Date.now() - 1)).toBe(false);
+    expect(backend.recentOutput(0, Date.now() - 1)).toBeNull();
+    expect(calls).toHaveLength(0);
+    denied = true;
+    expect(backend.gaveUpSince(0, Date.now() + 100)).toBe(false);
+    expect(backend.recentOutput(0, Date.now() + 100)).toBeNull();
+  } finally {
+    childProcess.spawnSync = original;
+    Object.defineProperty(process, "platform", platform);
+    syncBuiltinESMExports();
+  }
+});
+
+test("journal tails enforce the UTF-8 byte limit and discard partial leading lines", async () => {
+  const bytes = Buffer.from(("汉😀".repeat(100) + "\n").repeat(250));
+  const text = serviceOutputTail(bytes);
+  expect(Buffer.byteLength(text)).toBeLessThanOrEqual(SERVICE_LOG_BYTES);
+  expect(text).not.toContain("�");
+  expect(text.split("\n").length).toBeLessThanOrEqual(SERVICE_LOG_LINES);
+  expect(serviceOutputTail(Buffer.from("汉".repeat(SERVICE_LOG_BYTES)))).toBe("");
+  const log = join(fixture.root, "single-line.log");
+  await writeFile(log, "汉".repeat(SERVICE_LOG_BYTES));
+  expect(fileTail(log)).toBe("");
+});

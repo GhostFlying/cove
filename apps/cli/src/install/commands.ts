@@ -200,7 +200,7 @@ async function waitForNewInstance(
   let cause: string | null = null;
   let checked = 0;
   const latestCause = (): void => {
-    const found = startupFailureSince(backend.recentOutput(sinceMs), sinceMs);
+    const found = startupFailureSince(backend.recentOutput(sinceMs, deadline), sinceMs);
     if (found !== null && found !== cause)
       process.stderr.write(
         `cove: the server failed to start: ${found}; waiting for the service manager to start it again\n`,
@@ -220,7 +220,7 @@ async function waitForNewInstance(
     if (Date.now() - checked >= START_CHECK_MS) {
       checked = Date.now();
       latestCause();
-      if (backend.gaveUpSince(sinceMs))
+      if (backend.gaveUpSince(sinceMs, deadline))
         throw new Error(
           `the server did not start: the service manager stopped restarting it after repeated ` +
             `failed starts${because()}. Fix the cause, then run \`cove server service start\``,
@@ -228,7 +228,7 @@ async function waitForNewInstance(
     }
     await sleep(200);
   }
-  latestCause();
+  // Do not start another synchronous manager probe after the startup deadline.
   throw new Error(
     `no new server instance answered within ${START_WAIT_MS / 1000} s${because()}; ` +
       `check \`cove server service status\` and the service log`,
