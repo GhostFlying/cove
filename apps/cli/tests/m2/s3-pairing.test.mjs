@@ -211,3 +211,39 @@ test("an invitation a paired device creates over RPC pairs another client", asyn
       .currentDeviceId,
   ).toBe(other.deviceId);
 });
+
+test("duplicate aliases and server IDs give re-pair guidance without using the invitation", async () => {
+  const serverHome = fixture.home("server");
+  await fixture.startAuthServer(serverHome);
+  const client = fixture.home("client");
+  const paired = await fixture.pairOk(client, "box", (await fixture.invite(serverHome)).invitation);
+  const saved = await fixture.credential(client, paired.serverId);
+  const invitation = (await fixture.invite(serverHome)).invitation;
+  const { inviteId } = payloadOf(invitation);
+
+  // The existing alias is rejected before reading stdin: even absent invitation input gives the
+  // useful guidance. A different alias reads a valid invitation, but never redeems it.
+  for (const [alias, input, reason] of [
+    ["box", "", "a server is already named box"],
+    ["other", invitation, "this client is already paired with that server as box"],
+  ]) {
+    const result = await fixture.pair(client, alias, input);
+    expect(result).toMatchObject({ code: 1, stdout: "" });
+    expect(result.stderr).toContain(reason);
+    expect(result.stderr).toContain(`entries: ${Object.keys(saved.entries).join(", ")}`);
+    expect(result.stderr).toContain("cove remote remove box");
+    expect(result.stderr).toContain(`revoke its device (${paired.deviceId}) on the server`);
+    expect(result.stderr).toContain("The invitation was not used");
+    expect((await inviteStates(serverHome))[inviteId]).toBe("open");
+    expect(await fixture.credential(client, paired.serverId)).toEqual(saved);
+  }
+  expect(
+    (await fixture.coveJson(["auth", "device", "list"], { home: serverHome })).devices.map(
+      (device) => device.deviceId,
+    ),
+  ).toEqual([paired.deviceId]);
+  // The same invitation is still redeemable by a different client.
+  expect((await fixture.pairOk(fixture.home("other-client"), "box", invitation)).deviceId).not.toBe(
+    paired.deviceId,
+  );
+});

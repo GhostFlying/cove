@@ -95,6 +95,14 @@ function alias(value: string | undefined): string {
   return value;
 }
 
+function alreadyPaired(record: ServerRecord, reason: string): Error {
+  return new Error(
+    `${reason} (entries: ${Object.keys(record.entries).join(", ")}); one record holds every entry ` +
+      `of a server. To pair again, run \`cove remote remove ${record.alias}\` first and ` +
+      `revoke its device (${record.deviceId}) on the server. The invitation was not used`,
+  );
+}
+
 async function add(args: Arguments): Promise<number> {
   takeFlags(args, ["--name"]);
   if (args.words.length !== 3 || args.command) throw new UsageError("remote add takes one alias");
@@ -104,15 +112,14 @@ async function add(args: Arguments): Promise<number> {
     throw new UsageError(`--name is 1-${AUTH_LIMITS.deviceNameChars} printable characters`);
   const via = flag(args, "--via") as Via | undefined;
   const home = homeDirectory(args);
-  if (await findServer(home, name)) throw new Error(`a server is already named ${name}`);
+  const named = await findServer(home, name);
+  if (named) throw alreadyPaired(named, `a server is already named ${name}`);
   const payload = parseInvitation(await readInvitation());
   const existing = (await listServers(home)).find((record) => record.serverId === payload.serverId);
   if (existing)
-    throw new Error(
-      `this client is already paired with that server as ${existing.alias} ` +
-        `(entries: ${Object.keys(existing.entries).join(", ")}); one record holds every entry ` +
-        `of a server. To pair again, run \`cove remote remove ${existing.alias}\` first and ` +
-        `revoke its device (${existing.deviceId}) on the server. The invitation was not used`,
+    throw alreadyPaired(
+      existing,
+      `this client is already paired with that server as ${existing.alias}`,
     );
   const result = await redeemInvitation(payload, deviceName, via, cliBuildVersion(), home);
   // The entries this pairing reached and the invitation's (remote/pairing.ts pairedRecord).
