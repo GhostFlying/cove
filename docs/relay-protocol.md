@@ -1,7 +1,9 @@
 # Relay 协议与生命周期
 
-状态：设计草案，尚无实现。协议独立版本、同版本兼容、跨版本显式 recovery/reset
-是已确认要求；本文中的字段名、发现方式和具体恢复步骤是建议方案。
+状态：设计草案。协议独立版本、同版本兼容、跨版本显式 recovery/reset
+是已确认要求；本文中的字段名、发现方式和具体恢复步骤是建议方案，已实现的部分逐节注明。
+M0 实现了 bootstrap 握手、HTTP RPC 与终端 WebSocket 的本机链路，M1 实现了持久操作记录（§11），
+M2 实现了设备凭据、配对监听与 loopback、SSH、tsnet 三种入口上的同一套握手与授权（§4、§11.8）。
 
 ## 1. 必须成立的行为
 
@@ -74,8 +76,23 @@ Bootstrap 格式与业务 `protocolVersion` 分开演进。最初的版本探测
 未知响应不能交给另一个版本的业务解码器尝试执行。
 
 认证前不泄露 task、路径、终端输出或会话清单，也不开放 reset。
-通信载体已选择 HTTP + WebSocket；具体序列化、认证机制及各客户端接入细节另行确定。
-Server 的两个网络入口必须执行一致的协议协商和授权规则；不能因换入口绕过版本检查。
+通信载体已选择 HTTP + WebSocket；Desktop/Mobile 的接入细节另行确定。
+Server 的各网络入口必须执行一致的协议协商和授权规则；不能因换入口绕过版本检查。
+
+已实现（M0 握手，M2 认证与入口；字段见 §11.1、§11.8）：
+
+- bootstrap 是固定路径上的 JSON（HTTP `POST /bootstrap`，终端 WebSocket 的首帧），`bootstrapVersion` 为 1，
+  与业务 `protocolVersion`（当前为 2）分开；版本不符时以 `cove-bootstrap-error` 应答（HTTP 409，`kind`、`message`
+  与 `supportedVersions`），不进入业务解码。
+- 认证没有采用挑战-应答：凭据是 `Authorization: Bearer`（终端 WS 首帧的 `secret`）中的本机秘密或设备 token，
+  每个请求都携带并单独校验；握手成功不使后续请求跳过检查。缺凭据或凭据错误为 `UNAUTHENTICATED`、已撤销为
+  `DEVICE_REVOKED`（HTTP 401，WS 以 policy 关闭），两者不区分设备不存在与秘密错误。
+- 认证前可读的只有 bootstrap 身份：不带 `Authorization`、也不带 `Origin` 的 `POST /bootstrap` 只返回
+  `cove-bootstrap-identity`（bootstrap/协议版本、build、serverId 与 relayInstanceId），供客户端在发送 token 前核对 serverId；
+  带 `Origin` 的浏览器请求不带凭据时仍为 `UNAUTHENTICATED`。带凭据的 bootstrap 才返回能力与预算。
+- 配对监听不经业务 RPC 解码器，只接受 `/bootstrap` 与 `/pair` 两个 POST（§11.8）。
+- loopback、SSH 转发与 tsnet 转交的连接进入同一个业务监听，执行同样的原始连接上限、Host/Origin 校验、凭据检查与协议协商；
+  SSH 与 tsnet 入口不另设监听或另一套规则（[Server 架构 §4](server-architecture.md#4-host-网络和内置-tailscale)）。
 
 ### 4.1 通信载体（已选择 HTTP + WebSocket）
 
@@ -98,10 +115,11 @@ RPC 按领域命名方法，CLI、desktop、mobile 复用同一契约；文件�
 schema 工具已选择 Zod，共享业务契约使用可导出的 JSON 子集；转换与领域规则单独处理。
 业务消息格式已选择标准 JSON-RPC 2.0 over HTTP；具体路径与实现库另定。
 这不把业务事件 WS 或终端二进制帧改成 JSON-RPC，也不将 JSON-RPC 的版本号用作 Cove 协议版本。
-已选择 SSH/Tailscale 负责通道加密与对端验证，Cove 负责设备 token 授权。
+已选择 SSH/Tailscale 负责通道加密与对端验证，Cove 负责设备 token 授权；Cove 不使用系统 Tailscale，
+两端都只用内嵌的 tsnet（[M2 D9](milestones/m2.md#d9-网络入口不使用系统-tailscale范围变更)）。
 所有远程通道（包括配对和文件传输）必须经过安全入口；断线不降级为裸网络连接。
-本机使用 Unix socket/loopback；首期不实现应用层 E2EE 或自建 TLS 证书体系。
-Web App 已纳入二期，当前仅经 Tailscale；建议 Web 入口使用 Tailscale 管理证书的同源 HTTPS/WSS。
+本机使用 loopback（M2 未选 Unix socket）；首期不实现应用层 E2EE 或自建 TLS 证书体系。
+Web App 已纳入二期，当前仅经 Tailscale；原建议的 Tailscale 管理证书的同源 HTTPS/WSS 依赖系统 tailscaled，二期重新评估。
 浏览器会话仍映射到独立 Cove 设备授权，并参与统一撤销；具体 cookie/请求防伪与 WS 认证绑定另定。
 Web 入口与 Electron 共享边界见 [Web App 设计](server-architecture.md#95-web-app-与-electron-共享边界)。
 稳定 bootstrap 和必要配对入口不依赖普通业务 RPC 解码器。
@@ -438,7 +456,8 @@ JSON-RPC 2.0 定义关联 ID、结果/错误、通知和 batch，不替代 Cove 
 - 每次调用声明 `Cove-Protocol`；服务端先完成认证和协议检查，再解码并分发业务调用。
   握手结果不能成为后续 HTTP 请求跳过检查的理由。
 - 版本不匹配通过稳定 bootstrap 错误格式返回，包含支持版本及 recovery 提示；不需要读懂当前业务 envelope。
-  HTTP 状态与 bootstrap 错误字段的准确映射仍需在身份/配对设计中冻结。
+  准入失败的 HTTP 状态：malformed 400、unauthenticated 与 revoked 401、forbidden 403、版本不符 409、过大 413、
+  busy 429、unavailable 503（`ADMISSION_STATUS`）；首次正式发布前仍可调整。
 - 业务响应复用请求中的 `Cove-Server-Id`、`Cove-Instance-Id` 和 `Cove-Protocol` 三个 header，
   分别携带 `serverId`、`relayInstanceId` 和 `protocolVersion`；header 名按 HTTP 规则不区分大小写。
   响应不回显 `Authorization`，也不给标准 JSON-RPC envelope 增加必需 meta 字段；客户端逐次验证原服务身份。
@@ -667,8 +686,7 @@ HTTP 响应与 WS 事件谁先到都合法。操作 ID 关联结果与事件，�
 
 ### 11.8 M2 方法、凭据与秘密边界
 
-M2 T0 定义下列契约（[m2 计划](milestones/m2.md)）。协议仍处于首次发布前，`protocolVersion` 不变（m2 D12）。
-处理器在对应任务合入前以 `CAPABILITY_UNAVAILABLE` 拒绝。
+M2 T0 定义下列契约（[m2 计划](milestones/m2.md)），T1–T5b 实现了全部处理器。协议仍处于首次发布前，`protocolVersion` 不变（m2 D12）。
 
 | 方法                                                        | 类别  | 权限          | 秘密字段（输入 / 输出） |
 | ----------------------------------------------------------- | ----- | ------------- | ----------------------- |
