@@ -359,6 +359,8 @@ export class TsnetNode implements TsnetEntry {
   private ready: Promise<boolean> = Promise.resolve(false);
   // Why the last start failed, until a helper answers hello again (downReason).
   private failure: string | undefined;
+  // Settles when the current helper is retired (spawnHelper), for close.
+  private retirement: Promise<void> | undefined;
   // Why the last login failed, sanitized, until the next login or logout: shown in status, since
   // the operation's record keeps only a fixed, secret-free error.
   private loginFailure: string | undefined;
@@ -407,13 +409,15 @@ export class TsnetNode implements TsnetEntry {
     if (this.closing) return;
     this.closing = true;
     clearTimeout(this.restartTimer);
+    // Awaited is the helper's retirement (spawnHelper), not its `exit`: a child whose spawn
+    // failed asynchronously never emits `exit`, only `error` and `close`.
     const child = this.child;
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise<void>((done) => child.once("exit", () => done()));
+    const retirement = this.retirement;
+    if (child && retirement) {
       this.channel?.close();
       const timer = setTimeout(() => child.kill("SIGKILL"), STOP_WAIT_MS);
       timer.unref();
-      await exited;
+      await retirement;
       clearTimeout(timer);
     }
     for (const socket of this.waiting) socket.destroy();
@@ -767,9 +771,12 @@ export class TsnetNode implements TsnetEntry {
       // set forever: no restart, and status saying the helper is starting. Idempotent, so the
       // events that follow the first change nothing.
       let retired = false;
+      let retirementDone: () => void = () => undefined;
+      this.retirement = new Promise((done) => (retirementDone = done));
       const retire = (outcome: Record<string, unknown>, spawned: boolean): void => {
         if (retired) return;
         retired = true;
+        retirementDone();
         channel.fail();
         readyNow(false);
         if (this.child !== child) return;
