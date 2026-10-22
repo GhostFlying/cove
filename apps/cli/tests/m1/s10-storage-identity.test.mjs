@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, expect, test } from "vitest";
@@ -23,14 +23,47 @@ afterEach(async () => {
 });
 
 async function snapshot(directory) {
-  const files = {};
-  for (const name of (await readdir(directory)).sort()) {
-    if (name === "run" || name === "backups") continue;
-    files[name] = createHash("sha256")
-      .update(await readFile(join(directory, name)))
-      .digest("hex");
-  }
-  return files;
+  const entries = {};
+  // Refusal must preserve the complete tree, including managed directories. lstat avoids
+  // following links, and dev/ino catches replacement even when bytes are identical. Omit only
+  // atime: snapshot reads may update it themselves; mutation times remain part of acceptance.
+  const visit = async (relative) => {
+    const path = relative ? join(directory, relative) : directory;
+    const info = await lstat(path, { bigint: true });
+    const kind = info.isDirectory()
+      ? "directory"
+      : info.isFile()
+        ? "file"
+        : info.isSymbolicLink()
+          ? "symlink"
+          : "unsupported";
+    if (kind === "unsupported") throw new Error(`Unexpected snapshot entry: ${path}`);
+    entries[relative || "."] = {
+      kind,
+      dev: info.dev.toString(),
+      ino: info.ino.toString(),
+      mode: info.mode.toString(8),
+      uid: info.uid.toString(),
+      gid: info.gid.toString(),
+      size: info.size.toString(),
+      links: info.nlink.toString(),
+      mtimeNs: info.mtimeNs.toString(),
+      ctimeNs: info.ctimeNs.toString(),
+      ...(kind === "file"
+        ? {
+            sha256: createHash("sha256")
+              .update(await readFile(path))
+              .digest("hex"),
+          }
+        : {}),
+      ...(kind === "symlink" ? { target: await readlink(path) } : {}),
+    };
+    if (kind === "directory")
+      for (const name of (await readdir(path)).sort())
+        await visit(relative ? `${relative}/${name}` : name);
+  };
+  await visit("");
+  return entries;
 }
 
 async function markerLines(path) {
