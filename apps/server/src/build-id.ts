@@ -63,6 +63,31 @@ export function workspaceRootOf(): string | null {
   return own?.kind === "workspace" ? own.root : null;
 }
 
+// Where this build's `cove-tsnet` is: `bin/cove-tsnet` of an installed closure (D1), else the
+// output of `pnpm tsnet:build` in the workspace this module was built in. Null when neither
+// exists: the tsnet entry is then unavailable, the other entries are not affected. The server
+// (network/listeners.ts) and the CLI (remote/tsnet-binary.ts, which starts the dial daemon) use
+// this one lookup, so both run the executable of their own build.
+export function tsnetBinaryPath(): string | null {
+  const closure = installedClosureRoot();
+  if (closure) {
+    const installed = join(closure, "bin", "cove-tsnet");
+    return existsSync(installed) ? installed : null;
+  }
+  const root = workspaceRootOf();
+  if (!root) return null;
+  const arch = process.arch === "x64" ? "amd64" : process.arch;
+  const built = join(
+    root,
+    "native",
+    "tailscale",
+    "dist",
+    `${process.platform}-${arch}`,
+    "cove-tsnet",
+  );
+  return existsSync(built) ? built : null;
+}
+
 // The build ID an install stamp names, or null when the text is not a stamp of a build.
 export function stampedBuild(text: string): string | null {
   try {
