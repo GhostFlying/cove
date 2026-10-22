@@ -117,6 +117,9 @@ cove server start --harness               # 前台运行；打印 harness 页面
   [D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)）。同一数据目录只允许一个 server。
   一次性试用可另给 `--home`，其他命令使用同一个 `--home` 连接它。
 - 其他命令在另一个 shell 中执行，经 `<home>/server/run/rendezvous.json`（或 `--rendezvous`、`$COVE_RENDEZVOUS`）找到 server。
+- 已知限制（#172，规则将修改）：目前 rendezvous 文件所在目录（默认 `<home>/server/run`）的每一级上级目录都必须属于当前用户或 root，
+  且不能被组或其他用户写入（root 所有并带 sticky 位的除外），该目录本身须属于当前用户且为 0700。数据目录位于另一个非 root
+  用户拥有的目录之下时，server 启动失败，只报 `m0-local startup unavailable`；在 #172 修复前把数据目录换到满足条件的位置。
 - 停止 server（Ctrl-C）时先打印将受影响的存活 run；再次启动后记录都在，旧 run 显示为会话中断，
   不自动重开或重跑（[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）。
 - harness 页面列出全部终端 run（tab 的 run 也在其中），点击即可接入；它是 M0 的测试载体，不是 GUI 客户端。
@@ -205,12 +208,23 @@ node apps/cli/dist/main.js server install            # 安装闭包、注册并�
 ~/.cove/bin/cove server entry set sshTarget me@devbox.example   # 邀请中写入的 SSH 目标（经 SSH 配对时需要）
 ~/.cove/bin/cove server tsnet login                  # 可选：让 server 节点加入 Tailnet（auth key 经提示或 stdin）
 ~/.cove/bin/cove auth invite create                  # 输出一次性邀请，只显示这一次
-# laptop：同样安装（或用构建 checkout 中的 CLI），先用普通 ssh 记录 devbox 的 host key
-cove remote tsnet login                              # 只在经 tsnet 配对或连接时需要
-cove remote add devbox --via ssh                     # 在提示中粘贴邀请；或 --via tsnet
-cove --server devbox task list                       # 之后所有业务命令都可远程执行
-cove --server devbox --via tsnet task list           # 换入口：同一 serverId、同一份 task 与 run
+# laptop 经 SSH 配对：先用普通 ssh 记录 devbox 的 host key
+cove remote add devbox --via ssh                     # 在提示中粘贴邀请
+cove --server devbox task list                       # 之后所有业务命令都可远程执行，走 SSH
 ```
+
+或者经 tsnet 配对（另一个客户端，或代替上面的 SSH 配对；devbox 已 `server tsnet login`，邀请含 tsnet 入口）：
+
+```sh
+cove remote tsnet login                              # 客户端自己的节点登录同一 Tailnet
+cove remote add devbox --via tsnet                   # 在提示中粘贴邀请
+cove --server devbox task list                       # 走 tsnet
+```
+
+从另一台主机配对时，配对记录只保存配对所用的那一个入口（`--via ssh` 只有 ssh，`--via tsnet` 只有 tsnet），因此这台客户端
+不能再用 `--via` 换到另一个入口；同一客户端也不能把同一 server 再配对一次（`remote add` 拒绝已配对的 serverId）。
+只有在 server 所在主机上不带 `--via` 配对时，记录才同时含 loopback、邀请中的 ssh 与 tsnet 入口，可用 `--via` 切换
+（见下文“设备配对与 `--server`”中的数据目录 B）。
 
 ### 安装与用户服务
 
@@ -354,7 +368,8 @@ cove --home A server tsnet status    # { state, hostname, nodeId, nodeName, hold
 cove --home A server tsnet logout    # 删除节点状态；控制面未确认时在 stderr 提示到管理控制台删除该节点
 ```
 
-- 只作用于本机（不接受 `--server`），方法为 local-owner：远程登录或登出可能切断请求本身所走的入口。
+- CLI 整组只作用于本机（不接受 `--server`）。RPC 权限上，`server.tsnet.login` 与 `logout` 是 local-owner 方法（设备调用为
+  `FORBIDDEN`）：远程登录或登出可能切断请求本身所走的入口；`server.tsnet.status` 是普通读方法，设备经 RPC 也可调用。
 - 在隐藏提示处直接回车（空行）是交互登录；Ctrl-C、Ctrl-D、终端断开或输入在回车前结束（已输入的部分不算提交）取消命令并以 130 退出，不保存待定记录、不发送请求
   （对已登记的节点开始登录会使它保持 hold，直到登录核实）。
 - 节点有状态（`<home>/tsnet/state` 存在）时随 server 启动，否则直到第一次 login 才启动 `cove-tsnet`，从未登录的 server
@@ -381,7 +396,7 @@ cove --home A server tsnet logout    # 删除节点状态；控制面未确认�
 
 ### 客户端 tsnet
 
-客户端的 Tailnet 节点由每个 OS 用户一个、按需启动的 `cove-tsnet dial` 常驻进程承载，状态在 `<home>/tsnet-client/`
+客户端的 Tailnet 节点由每个 OS 用户与 Cove 数据目录（`--home`）一个、按需启动的 `cove-tsnet dial` 常驻进程承载，状态在 `<home>/tsnet-client/`
 （0700），不需要系统 Tailscale。CLI 找 `cove-tsnet` 的顺序：安装闭包的 `bin/cove-tsnet`，再是开发 checkout 的
 `native/tailscale/dist/<平台>-<架构>/cove-tsnet`（`pnpm tsnet:build`）；都没有时 tsnet 入口报 `ENTRY_UNAVAILABLE`。
 
