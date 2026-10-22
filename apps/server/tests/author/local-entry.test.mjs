@@ -3120,6 +3120,255 @@ describe("D passive production local entry", () => {
     }
   });
 
+  it("classifies case variants by native directory identity without folding distinct user directories", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-managed-case-"));
+    try {
+      for (const name of ["bin", "client", "cli"]) {
+        for (const kind of ["0755", "0777", "symlink"]) {
+          const home = join(root, `${name}-${kind}`);
+          await mkdir(home, { mode: 0o700 });
+          const managed = join(home, name);
+          const upper = join(home, name.toUpperCase());
+          const data = kind === "symlink" ? join(root, `${name}-target`) : managed;
+          await mkdir(data, { mode: 0o700 });
+          await chmod(data, kind === "0755" ? 0o755 : 0o777);
+          if (kind === "symlink") await symlink(data, managed);
+          await writeFile(join(data, "prior"), "unchanged managed data\n");
+          const before = await lstat(managed);
+          let sameTarget = false;
+          try {
+            const selected = await stat(upper);
+            const known = await stat(managed);
+            sameTarget = selected.dev === known.dev && selected.ino === known.ino;
+          } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+          }
+          if (!sameTarget) {
+            // On a case-sensitive filesystem this is an independent user directory.
+            await mkdir(upper, { mode: 0o700 });
+            await chmod(upper, 0o777);
+          }
+          const selectedBefore = await lstat(upper);
+          const file = new LocalRendezvous(join(upper, "rendezvous"), [home]);
+          try {
+            const publication = file.publish({
+              bootstrapVersion: 1,
+              ...identity,
+              endpoint: "http://127.0.0.1:32123",
+            });
+            const outcome = await publication.then(
+              async () => ({
+                serverId: JSON.parse(await readFile(file.path, "utf8")).serverId,
+                mode: (await lstat(file.path)).mode & 0o777,
+              }),
+              (error) => ({ error: error.message }),
+            );
+            const refusal = { error: expect.stringContaining("Cove's own directories must") };
+            expect(outcome).toEqual(
+              sameTarget ? refusal : { serverId: identity.serverId, mode: 0o600 },
+            );
+          } finally {
+            await file.close();
+          }
+          const after = await lstat(managed);
+          const selectedAfter = await lstat(upper);
+          expect([after.dev, after.ino, after.uid, after.mode]).toEqual([
+            before.dev,
+            before.ino,
+            before.uid,
+            before.mode,
+          ]);
+          expect([
+            selectedAfter.dev,
+            selectedAfter.ino,
+            selectedAfter.uid,
+            selectedAfter.mode,
+          ]).toEqual([
+            selectedBefore.dev,
+            selectedBefore.ino,
+            selectedBefore.uid,
+            selectedBefore.mode,
+          ]);
+          expect(await readFile(join(data, "prior"), "utf8")).toBe("unchanged managed data\n");
+          expect(await readdir(data)).toEqual(["prior"]);
+          expect(await readdir(upper)).toEqual(sameTarget ? ["prior"] : []);
+          await recordAuthor(`managed-case-${name}-${kind}`, { sameTarget });
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps symlink checks when native case aliases traverse a managed root before leaving it", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-managed-case-traversal-"));
+    const home = join(root, "home");
+    const managed = join(home, "bin");
+    const upper = join(home, "BIN");
+    const target = join(root, "user-target");
+    await mkdir(home, { mode: 0o700 });
+    await mkdir(managed, { mode: 0o700 });
+    await mkdir(target, { mode: 0o700 });
+    await chmod(target, 0o777);
+    let sameTarget = false;
+    try {
+      const selected = await stat(upper);
+      const known = await stat(managed);
+      sameTarget = selected.dev === known.dev && selected.ino === known.ino;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (!sameTarget) {
+      await mkdir(upper, { mode: 0o700 });
+      await chmod(upper, 0o777);
+    }
+    const alias = join(upper, "redirect");
+    await symlink(target, alias);
+    const file = new LocalRendezvous(join(alias, "rendezvous"), [home]);
+    try {
+      const result = file.publish({
+        bootstrapVersion: 1,
+        ...identity,
+        endpoint: "http://127.0.0.1:32123",
+      });
+      const outcome = await result.then(
+        async () => ({ mode: (await stat(file.path)).mode & 0o777 }),
+        (error) => ({ error: error.message }),
+      );
+      const refusal = { error: expect.stringContaining("is a symbolic link") };
+      expect(outcome).toEqual(sameTarget ? refusal : { mode: 0o600 });
+      await file.close();
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+      expect((await stat(target)).mode & 0o777).toBe(0o777);
+      expect(await readdir(target)).toEqual([]);
+    } finally {
+      await file.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks every supplied home mapping when a nested alias overlaps the canonical home", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-managed-home-alias-"));
+    const alias = join(root, "active");
+    const managed = join(root, "bin");
+    await symlink(root, alias);
+    await mkdir(managed, { mode: 0o700 });
+    await chmod(managed, 0o755);
+    await writeFile(join(managed, "prior"), "user bytes\n");
+    try {
+      for (const homes of [
+        [root, alias],
+        [alias, root],
+      ]) {
+        const file = new LocalRendezvous(join(alias, "bin", "rendezvous"), homes);
+        try {
+          await expect(
+            file.publish({
+              bootstrapVersion: 1,
+              ...identity,
+              endpoint: "http://127.0.0.1:32123",
+            }),
+          ).rejects.toThrow("Cove's own directories must");
+        } finally {
+          await file.close();
+        }
+        expect((await stat(managed)).mode & 0o777).toBe(0o755);
+        expect(await readdir(managed)).toEqual(["prior"]);
+      }
+      await chmod(managed, 0o700);
+      const valid = new LocalRendezvous(join(alias, "bin", "rendezvous"), [root, alias]);
+      try {
+        await valid.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        });
+        expect((await stat(valid.path)).mode & 0o777).toBe(0o600);
+      } finally {
+        await valid.close();
+      }
+      expect(await readFile(join(managed, "prior"), "utf8")).toBe("user bytes\n");
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("checks actual managed targets reached through user aliases while preserving arbitrary external targets", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-managed-target-alias-"));
+    const home = join(root, "home");
+    const managed = join(home, "bin");
+    const child = join(managed, "owned");
+    const external = join(root, "external");
+    const alias = join(root, "shortcut");
+    await mkdir(home, { mode: 0o700 });
+    await mkdir(managed, { mode: 0o700 });
+    await mkdir(child, { mode: 0o700 });
+    await chmod(child, 0o755);
+    await mkdir(external, { mode: 0o700 });
+    await chmod(external, 0o777);
+    await writeFile(join(external, "prior"), "external bytes\n");
+    await symlink(child, alias);
+    const publish = async (path, refused = false) => {
+      const file = new LocalRendezvous(path, [home]);
+      try {
+        const result = file.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        });
+        const outcome = await result.then(
+          async () => ({
+            mode: (await stat(path)).mode & 0o777,
+            serverId: JSON.parse(await readFile(path, "utf8")).serverId,
+            parentMode: (await stat(join(path, ".."))).mode & 0o777,
+          }),
+          (error) => ({ error: error.message }),
+        );
+        const refusal = { error: expect.stringContaining("Cove's own directories must") };
+        expect(outcome).toEqual(
+          refused ? refusal : { mode: 0o600, serverId: identity.serverId, parentMode: 0o700 },
+        );
+      } finally {
+        await file.close();
+      }
+    };
+    try {
+      await publish(join(alias, "rendezvous"), true);
+      expect((await stat(child)).mode & 0o777).toBe(0o755);
+      await chmod(child, 0o700);
+      await publish(join(alias, "rendezvous"));
+      await publish(join(alias, "missing", "rendezvous"));
+      expect(await readdir(child)).toEqual([]);
+      await rm(alias);
+      await rm(managed, { recursive: true });
+      await symlink(external, managed);
+      await symlink(external, alias);
+      // Even an outside alias of a restored symlink root must check the known root with lstat.
+      await publish(join(alias, "rendezvous"), true);
+      expect((await lstat(managed)).isSymbolicLink()).toBe(true);
+      await rm(managed);
+      // Removing the managed mapping makes the same actual target an ordinary user directory.
+      const userFile = new LocalRendezvous(join(alias, "rendezvous"), [home]);
+      try {
+        await userFile.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        });
+        expect((await stat(userFile.path)).mode & 0o777).toBe(0o600);
+      } finally {
+        await userFile.close();
+      }
+      expect((await stat(external)).mode & 0o777).toBe(0o777);
+      expect(await readdir(external)).toEqual(["prior"]);
+      expect(await readFile(join(external, "prior"), "utf8")).toBe("external bytes\n");
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses cleanup through a replaced external directory and preserves both directories", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-parent-identity-"));
     const parent = join(root, "external");
