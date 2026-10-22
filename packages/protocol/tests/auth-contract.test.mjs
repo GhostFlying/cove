@@ -68,6 +68,36 @@ const request = {
   encodings: [],
 };
 
+// #175: the source build a client compares for the D12 warning, optional on both sides.
+test("the pre-auth identity carries the source build when the server knows it", () => {
+  const server = { serverId: "s1", relayInstanceId: "i1", buildVersion: "0.0.0+0123456789abcdef" };
+  const withSource = bootstrapIdentity(request, {
+    ...server,
+    sourceBuild: "0.0.0+fedcba9876543210",
+  });
+  expect(withSource).toEqual({
+    type: "cove-bootstrap-identity",
+    bootstrapVersion: 1,
+    protocolVersion: 2,
+    buildVersion: "0.0.0+0123456789abcdef",
+    sourceBuild: "0.0.0+fedcba9876543210",
+    serverId: "s1",
+    relayInstanceId: "i1",
+  });
+  expect(BootstrapIdentitySchema.strict().safeParse(withSource).success).toBe(true);
+  // Unknown (null) or not given: the field is left out, and such an identity still parses.
+  for (const unknown of [{ ...server, sourceBuild: null }, server]) {
+    const identity = bootstrapIdentity(request, unknown);
+    expect(identity).not.toHaveProperty("sourceBuild");
+    expect(BootstrapIdentitySchema.strict().safeParse(identity).success).toBe(true);
+  }
+  // Bounded like buildVersion.
+  expect(
+    BootstrapIdentitySchema.safeParse({ ...withSource, sourceBuild: "x".repeat(129) }).success,
+  ).toBe(false);
+  expect(BootstrapIdentitySchema.safeParse({ ...withSource, sourceBuild: "" }).success).toBe(false);
+});
+
 test("the two credential kinds are disjoint and parse to their parts", () => {
   expect(parseCredential(localSecret)).toEqual({ kind: "local-secret", secret: localSecret });
   expect(parseCredential(deviceToken)).toEqual({

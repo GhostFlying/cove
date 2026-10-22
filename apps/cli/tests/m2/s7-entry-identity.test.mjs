@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
+import { buildMismatch } from "../../dist/session.js";
 import { portOf } from "./auth-fixtures.mjs";
 import { ECHO_LOOP, attachedTerminal, createSshFixture } from "./ssh-scenario.mjs";
 import { sshClients } from "./sshd-fixture.mjs";
@@ -243,3 +244,23 @@ test("an entry address that reaches another data directory's server is refused b
   }
   expect(await ssh.untouched()).toBe(true);
 }, 120_000);
+
+// D12 with #175: the source builds decide when both sides report one (they do not depend on the
+// platform); otherwise the build IDs, as before. The warning names what was compared.
+test("the build warning compares source builds when both sides know one, else build IDs", () => {
+  const a = "0.0.0+aaaaaaaaaaaaaaaa";
+  const b = "0.0.0+bbbbbbbbbbbbbbbb";
+  const s = "0.0.0+5555555555555555";
+  const t = "0.0.0+7777777777777777";
+  // One commit installed on two platforms: other build IDs, one source build.
+  expect(buildMismatch({ buildVersion: a, sourceBuild: s }, b, s)).toBeNull();
+  expect(buildMismatch({ buildVersion: a, sourceBuild: s }, a, t)).toBe(
+    `source build ${s}, this CLI is source build ${t}`,
+  );
+  // A side without a source build: the build IDs, as before.
+  expect(buildMismatch({ buildVersion: a }, a, s)).toBeNull();
+  expect(buildMismatch({ buildVersion: a }, b, s)).toBe(`build ${a}, this CLI is build ${b}`);
+  expect(buildMismatch({ buildVersion: a, sourceBuild: s }, b, null)).toBe(
+    `build ${a}, this CLI is build ${b}`,
+  );
+});

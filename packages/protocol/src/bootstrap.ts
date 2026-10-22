@@ -244,11 +244,18 @@ export function negotiateBootstrap(
 // The client compares serverId itself, so the answer does not depend on what the request
 // expected. A request that is not a well-formed bootstrap request gets BOOTSTRAP_UNSUPPORTED.
 // T1 serves it; T2 and the client call it before asking the credential provider.
+//
+// `sourceBuild` (#175): the server's source build (apps/server build-id.ts computeSourceBuildId),
+// the identity a client compares for the D12 build warning. Unlike buildVersion, the install
+// identity, it does not depend on the platform, so a CLI and a server of one commit on different
+// machines or OSes match. Optional: a server that does not know its source build leaves it out,
+// and a client then compares buildVersion. It is as public as buildVersion and says no more.
 export const BootstrapIdentitySchema = z.object({
   type: z.literal("cove-bootstrap-identity"),
   bootstrapVersion: z.literal(BOOTSTRAP_VERSION),
   protocolVersion: z.number().int().min(1).max(255),
   buildVersion: build,
+  sourceBuild: build.optional(),
   serverId: OpaqueIdSchema,
   relayInstanceId: OpaqueIdSchema,
 });
@@ -256,7 +263,12 @@ export type BootstrapIdentity = z.infer<typeof BootstrapIdentitySchema>;
 
 export function bootstrapIdentity(
   request: unknown,
-  server: { serverId: string; relayInstanceId: string; buildVersion: string },
+  server: {
+    serverId: string;
+    relayInstanceId: string;
+    buildVersion: string;
+    sourceBuild?: string | null;
+  },
 ): BootstrapIdentity | BootstrapFailure {
   if (!BootstrapRequestSchema.safeParse(request).success) return failure("BOOTSTRAP_UNSUPPORTED");
   // Built field by field, so nothing else the server knows can reach an unauthenticated peer.
@@ -265,6 +277,7 @@ export function bootstrapIdentity(
     bootstrapVersion: BOOTSTRAP_VERSION,
     protocolVersion: PROTOCOL_VERSION,
     buildVersion: server.buildVersion,
+    ...(typeof server.sourceBuild === "string" ? { sourceBuild: server.sourceBuild } : {}),
     serverId: server.serverId,
     relayInstanceId: server.relayInstanceId,
   });

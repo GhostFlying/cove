@@ -27,6 +27,10 @@ import { formatBuildId, isBuildId } from "@cove/protocol/bootstrap";
 // build ID gives UNIDENTIFIED_BUILD, never the scan's answer, because the closure has no workspace
 // to scan. For a layout with neither, UNIDENTIFIED_BUILD is reported rather than failing startup:
 // builds then compare equal, which only loses the D12 warning, never a refusal.
+//
+// The build ID is the install identity: it tells installed closures apart and is what install,
+// restart and prune compare. The D12 warning between a CLI and a server compares the source build
+// instead (computeSourceBuildId), which does not depend on the platform.
 export const UNIDENTIFIED_BUILD = "unidentified";
 const EXCLUDED = /(?:\.d\.ts|\.d\.mts|\.map|\.tsbuildinfo)$/;
 
@@ -106,8 +110,8 @@ function distFiles(directory: string, into: string[]): void {
   }
 }
 
-// The build ID of the workspace checked out at `root`.
-export function computeBuildId(root: string): string {
+// The files the development build ID covers (see the module comment), absolute.
+function workspaceFiles(root: string): string[] {
   const files: string[] = [];
   for (const group of ["apps", "packages"]) {
     const parent = join(root, group);
@@ -122,6 +126,27 @@ export function computeBuildId(root: string): string {
   }
   const lockfile = join(root, "pnpm-lock.yaml");
   if (existsSync(lockfile)) files.push(lockfile);
+  return files;
+}
+
+// The Go sources of cove-tsnet (native/tailscale): every non-test `.go` file, go.mod and go.sum,
+// not its build outputs (dist/) or documentation.
+function goSources(directory: string, into: string[], top = true): void {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (!(top && entry.name === "dist")) goSources(path, into, false);
+    } else if (
+      entry.isFile() &&
+      ((entry.name.endsWith(".go") && !entry.name.endsWith("_test.go")) ||
+        (top && (entry.name === "go.mod" || entry.name === "go.sum")))
+    )
+      into.push(path);
+  }
+}
+
+// The ID over `files`, named relative to `root`.
+function digestId(root: string, files: string[]): string {
   // Paths use "/" whatever the platform, so one build has one ID everywhere.
   const named = files
     .map((path) => ({ path, name: relative(root, path).split(sep).join("/") }))
@@ -137,6 +162,55 @@ export function computeBuildId(root: string): string {
     version?: unknown;
   };
   return formatBuildId(typeof version === "string" ? version : "0.0.0", hash.digest("hex"));
+}
+
+// The build ID of the workspace checked out at `root`.
+export function computeBuildId(root: string): string {
+  return digestId(root, workspaceFiles(root));
+}
+
+// The source build of the workspace at `root` (#175): what the D12 build comparison between a CLI
+// and a server uses. The development build ID's files plus cove-tsnet's Go sources, since the
+// client's dial daemon and the server's node talk across machines. Like the development ID it
+// covers no Node, native addon or other per-machine binary and no absolute path, so one commit
+// built anywhere, on any OS or architecture, has one source build; the install identity
+// (buildId of an installed closure) differs per platform and stays what installs compare.
+export function computeSourceBuildId(root: string): string {
+  const files = workspaceFiles(root);
+  const native = join(root, "native", "tailscale");
+  if (existsSync(native) && lstatSync(native).isDirectory()) goSources(native, files);
+  return digestId(root, files);
+}
+
+// The source build an install stamp records (`source`, written by scripts/runtime-closure.mjs
+// from the checkout the closure was assembled from), or null.
+export function stampedSource(text: string): string | null {
+  try {
+    const stamp = JSON.parse(text) as { type?: unknown; source?: unknown } | null;
+    return stamp?.type === "cove-install" && isBuildId(stamp.source) ? stamp.source : null;
+  } catch {
+    return null;
+  }
+}
+
+let cachedSource: string | null | undefined;
+// This process's source build, computed once on first use; null when it is unknown (a stamp
+// without one, an unreadable tree, neither layout). A null source build is left out of the
+// identity, and the D12 comparison then falls back to the build IDs.
+export function sourceBuildId(): string | null {
+  if (cachedSource === undefined) {
+    const own = ownLayout();
+    let id: string | null = null;
+    try {
+      if (own?.kind === "installed")
+        id = stampedSource(readFileSync(join(own.root, INSTALL_STAMP), "utf8"));
+      else if (own) id = computeSourceBuildId(own.root);
+    } catch {
+      id = null;
+    }
+    cachedSource = id;
+  }
+  return cachedSource;
 }
 
 let cached: string | undefined;

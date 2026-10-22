@@ -34,7 +34,12 @@ export const PAIRING_BOUNDS = Object.freeze({
 });
 
 export type PairingHandlers = {
-  identity(): { serverId: string; relayInstanceId: string; buildVersion: string };
+  identity(): {
+    serverId: string;
+    relayInstanceId: string;
+    buildVersion: string;
+    sourceBuild: string | null;
+  };
   redeem(
     request: PairingRedeemRequest,
     entry: EntryKind,

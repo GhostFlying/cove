@@ -11,7 +11,7 @@ import {
 } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
-import { buildId } from "@cove/server/build-id";
+import { buildId, sourceBuildId } from "@cove/server/build-id";
 import { createNodePorts } from "./node-ports.js";
 import { findServer, type ServerRecord } from "./remote/credentials.js";
 import { openEntry, RemoteError, verifiedIdentity, type Via } from "./remote/entries.js";
@@ -22,6 +22,25 @@ import { withEntryFailure } from "./remote/entry-types.js";
 // never connects never hashes the build.
 export function cliBuildVersion(): string {
   return buildId();
+}
+
+// The D12 warning's comparison (#175), or null when the builds match. The source builds are
+// compared when both sides know theirs: they do not depend on the platform, so a CLI and a server
+// of one commit on different machines or OSes match, while the install builds (buildVersion)
+// differ with Node, native addons and cove-tsnet. Otherwise the build IDs are compared, as before
+// sourceBuild existed. The text names the identity that was compared.
+export function buildMismatch(
+  server: { buildVersion: string; sourceBuild?: string | undefined },
+  cliBuild: string,
+  cliSource: string | null,
+): string | null {
+  if (server.sourceBuild !== undefined && cliSource !== null)
+    return server.sourceBuild === cliSource
+      ? null
+      : `source build ${server.sourceBuild}, this CLI is source build ${cliSource}`;
+  return server.buildVersion === cliBuild
+    ? null
+    : `build ${server.buildVersion}, this CLI is build ${cliBuild}`;
 }
 
 export interface Rendezvous {
@@ -137,11 +156,8 @@ export async function openRemoteSession(
   const entry = await openEntry(server, via, home);
   try {
     const identity = await verifiedIdentity(server, entry, cliBuildVersion());
-    if (identity.buildVersion !== cliBuildVersion())
-      process.stderr.write(
-        `cove: warning: ${alias} runs build ${identity.buildVersion}, this CLI is ` +
-          `${cliBuildVersion()}\n`,
-      );
+    const mismatch = buildMismatch(identity, cliBuildVersion(), sourceBuildId());
+    if (mismatch) process.stderr.write(`cove: warning: ${alias} runs ${mismatch}\n`);
     let token = server.token;
     const credential = (): ClientCredential => ({ kind: "device-token", token });
     const target = {

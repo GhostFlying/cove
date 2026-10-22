@@ -42,6 +42,10 @@ export type InstallStamp = {
   platform: "darwin" | "linux";
   arch: string;
   node: string;
+  // The source build of the checkout the closure was assembled from (#175; @cove/server build-id
+  // computeSourceBuildId), which the installed server reports for the D12 comparison. Not part of
+  // the install identity. Absent in a closure sealed before it was recorded.
+  source?: string;
   // SHA-256 over every file of the sealed closure except this stamp (closureDigest), so that a
   // copy can be checked before it is installed.
   contentsSha256: string;
@@ -64,6 +68,7 @@ export function parseStamp(text: string): InstallStamp | null {
     (value.platform !== "darwin" && value.platform !== "linux") ||
     typeof value.arch !== "string" ||
     typeof value.node !== "string" ||
+    (value.source !== undefined && !isBuildId(value.source)) ||
     typeof value.contentsSha256 !== "string" ||
     !/^[0-9a-f]{64}$/.test(value.contentsSha256)
   )
