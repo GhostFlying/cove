@@ -117,11 +117,11 @@ cove server start --harness               # 前台运行；打印 harness 页面
   [D5](milestones/m1.md#d5-数据库位置schema-与迁移选-a)）。同一数据目录只允许一个 server。
   一次性试用可另给 `--home`，其他命令使用同一个 `--home` 连接它。
 - 其他命令在另一个 shell 中执行，经 `<home>/server/run/rendezvous.json`（或 `--rendezvous`、`$COVE_RENDEZVOUS`）找到 server。
-- 已知限制（#172，规则将修改）：目前 rendezvous 文件所在目录（默认 `<home>/server/run`）的每一级上级目录都必须属于当前用户或 root，
+- 已知限制（#172，将改为不检查 Cove 管理之外原已存在的目录，例如用户给出的数据目录及其上级）：目前 rendezvous 文件所在目录（默认 `<home>/server/run`）的每一级上级目录都必须属于当前用户或 root，
   且不能被组或其他用户写入（root 所有并带 sticky 位的除外），该目录本身须属于当前用户且为 0700。数据目录位于另一个非 root
   用户拥有的目录之下时，server 启动失败，只报 `m0-local startup unavailable`；在 #172 修复前把数据目录换到满足条件的位置。
-- 停止 server（Ctrl-C）时先打印将受影响的存活 run；再次启动后记录都在，旧 run 显示为会话中断，
-  不自动重开或重跑（[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）。
+- 停止 server（Ctrl-C）时先打印将受影响的存活 run；再次启动后记录都在，有序停止的旧 run 记为随 server 停止
+  （stopped-with-server），崩溃或被强杀后为会话中断（interrupted），都不自动重开或重跑（[D9](milestones/m1.md#d9-重启后的-run-显示选-a)）。
 - harness 页面列出全部终端 run（tab 的 run 也在其中），点击即可接入；它是 M0 的测试载体，不是 GUI 客户端。
 
 ### 命令
@@ -221,15 +221,18 @@ cove remote add devbox --via tsnet                   # 在提示中粘贴邀请
 cove --server devbox task list                       # 走 tsnet
 ```
 
-从另一台主机配对时，配对记录只保存配对所用的那一个入口（`--via ssh` 只有 ssh，`--via tsnet` 只有 tsnet），因此这台客户端
-不能再用 `--via` 换到另一个入口；同一客户端也不能把同一 server 再配对一次（`remote add` 拒绝已配对的 serverId）。
-只有在 server 所在主机上不带 `--via` 配对时，记录才同时含 loopback、邀请中的 ssh 与 tsnet 入口，可用 `--via` 切换
-（见下文“设备配对与 `--server`”中的数据目录 B）。
+已知限制（#173，将改为记录邀请中的全部入口）：目前从另一台主机配对时，配对记录只保存配对所用的那一个入口
+（`--via ssh` 只有 ssh，`--via tsnet` 只有 tsnet），因此这台客户端不能再用 `--via` 换到另一个入口；同一客户端也不能把同一 server
+再配对一次（`remote add` 拒绝已配对的 serverId）。现在只有在 server 所在主机上不带 `--via` 配对时，记录才同时含 loopback、
+邀请中的 ssh 与 tsnet 入口，可用 `--via` 切换（见下文“设备配对与 `--server`”中的数据目录 B）。
 
 ### 安装与用户服务
 
 范围与决定见 [M2](milestones/m2.md)（D1–D3、S1、S2）。前提：本 checkout 已 `pnpm build`、`pnpm native:prepare`，
 `pnpm` 与 Go（`COVE_GO` 或 PATH 上的 `go`，版本见 `native/tailscale/go.mod`）可用，并用 `.node-version` 的 Node 运行 CLI。
+server 需要 Git 2.45 及以上（见上文“构建与启动”）。服务管理器不提供登录 shell 的环境，服务单元的 `PATH` 只有执行
+`cove server install` 的 shell 在 `PATH` 中最先找到的 `git` 所在目录加上系统目录：安装前用 `git version` 确认版本满足要求，
+换用别的 Git 后重新执行 `cove server install` 以重写服务单元。
 
 ```sh
 node apps/cli/dist/main.js server install          # 从本 checkout 构建闭包并安装、注册、启动服务
@@ -372,6 +375,8 @@ cove --home A server tsnet logout    # 删除节点状态；控制面未确认�
   `FORBIDDEN`）：远程登录或登出可能切断请求本身所走的入口；`server.tsnet.status` 是普通读方法，设备经 RPC 也可调用。
 - 在隐藏提示处直接回车（空行）是交互登录；Ctrl-C、Ctrl-D、终端断开或输入在回车前结束（已输入的部分不算提交）取消命令并以 130 退出，不保存待定记录、不发送请求
   （对已登记的节点开始登录会使它保持 hold，直到登录核实）。
+- 交互登录时 CLI 最多等待 5 分钟；超时后输出 `{ operation, status }` 并以 1 退出，但节点仍在等待，之后打开 URL 批准，
+  登录仍会完成。超时不等于失败：用 `cove server tsnet status` 查看结果，不要因此重新登录。
 - 节点有状态（`<home>/tsnet/state` 存在）时随 server 启动，否则直到第一次 login 才启动 `cove-tsnet`，从未登录的 server
   不启动任何进程、不连控制面。server 启动不等节点就绪。`cove-tsnet` 意外退出或无法启动（例如可执行文件缺失）后按 1 秒起、
   翻倍到 60 秒的退避重启（实际运行满 60 秒后才回到 1 秒，status 说明无法启动的原因），恢复原状态而不重新登录；PTY、run 与 loopback、SSH 入口不受影响。本机协议不兼容时不重启，
@@ -424,6 +429,8 @@ cove --home B remote tsnet config --idle-timeout 30m   # 空闲退出期限（�
 - 登录结果按 dial 进程的回答报告：`IDENTITY_CHANGED`（登录成了另一个节点，先 logout 再用正确的 key 登录）与
   `LOGIN_UNCERTAIN`（未完成且可能已生效，先看 status）以 1 退出；status 中的 `hold` 表示节点在此期间拒绝流；
   logout 的 `remoteLogoutConfirmed: false` 表示本地状态已删除但控制面未确认，需要在管理控制台删除该节点。
+- 交互登录时 CLI 最多等待 5 分钟，超时后以 1 退出（提示仍可能完成），但节点仍在等待，之后打开 URL 批准，登录仍会完成；
+  用 `cove remote tsnet status` 查看结果，不要因此重新登录。
 - auth key 不进 argv、环境变量、日志与客户端文件；登录 URL 只显示在 stderr，不进 JSON 输出。
 - 开发与测试专用的环境变量（不是回退路径，正常使用时不要设置）：`COVE_TSNET_BINARY` 指定 `cove-tsnet` 的绝对路径
   （设置时是唯一候选），`COVE_TSNET_CONTROL_URL` 让 dial 进程连到测试控制面。它们只在开发 workspace 中生效；
