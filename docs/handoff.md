@@ -1,6 +1,6 @@
 # Cove 当前交接
 
-更新：2026-10-22。只记录当前状态（不超过 150 行）。恢复工作前先核对 GitHub 与各 checkout；
+更新：2026-10-23。只记录当前状态（不超过 150 行）。恢复工作前先核对 GitHub 与各 checkout；
 历史在 Git、Issue 与 PR 中（接管前的长版交接见 `git show 3d7349a:docs/handoff.md`）。
 
 ## 授权阶段
@@ -8,8 +8,8 @@
 - M0 实施于 2026-09-26 获批；M0 退出与 M1 进入于 2026-10-15 获批（[M1](milestones/m1.md)）。
 - 用户于 2026-10-21 批准 M1 退出与 M2 规划，同日决定 D1–D14 并批准 [M2 计划](milestones/m2.md)（PR #142）。
   D9 是范围变更：Cove 不使用系统 Tailscale，两端只用内嵌的 tsnet；D14：客户端 tsnet 用按需启动的常驻进程。
-- **M2 的 T0–T7 与首轮试用修复 #178、#184 已合入；正在完成正常实机补验与阶段 review。**
-  修复合入并验证实际 main 后，补验受影响的实机场景与尚未执行项，再提交 M2 阶段 review；
+- **M2 的 T0–T7 与首轮试用修复 #178、#184 已合入；正常实机补验通过，待阶段 review。**
+  实际 main 双平台 CI 与两节点真实 Tailnet 补验已通过；注销/开机与安装新构建升级仍未执行，不能视为通过；
   M2 退出与 M3 进入都需要用户明确批准，完成任务不等于批准进入下一阶段。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
@@ -19,7 +19,7 @@
 
 ## Main
 
-最近运行时 main 为 `9326def6`（#184；#178 合入于 `905ff5e6`）。实际 main CI 与正常补验的实时结果见 [#185](https://github.com/GhostFlying/cove/issues/185)。M2 主任务历史：
+运行时 main 为 `9326def6`（#184；#178 为 `905ff5e6`），交接 #186 合入于 `db57e826`。两个 main 的双平台 CI 均通过，正常补验与当前 revision 见 [#185](https://github.com/GhostFlying/cove/issues/185)。M2 主任务历史：
 
 | 任务 | PR   | 合入于    | 内容                                                                  |
 | ---- | ---- | --------- | --------------------------------------------------------------------- |
@@ -61,12 +61,12 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - [#184](https://github.com/GhostFlying/cove/pull/184) 已合入 `9326def6`，修正目录边界、启动原因、服务操作预检、源码标识、archive 构建与 logout helper 生命周期。
   候选 `fca9a046` 到 main 的 25 个提交 patch/message 与最终 tree 一致；原 #179 已关闭为替代关系，旧分支保留，映射与 review/CI 在 #184。
 - 一次完整独立 review 与所有必要修正 delta 已完成，无未关闭 P0/P1；候选双平台 author 文件各64/64，实际 CLI/nativeSQLite 六个预期结果已验证。
-  实际 main 的 CI/有限正常启动确认与真实 Tailnet 结果分别记录在 #185，不能用候选结果替代 main 或把未执行项记为通过。
+  实际运行时 main 双平台最小构建、普通启动/公开 RPC/停止与真实 Tailnet 正常补验均通过，详见 #185；未执行项仍单独保留。
 - 用户要求原生 subagent 替代 Claude，此直接决定优先于工程 §6.1 的历史工具安排。后续实现使用原生 agent；
   默认新会话 reviewer 为 codex gpt-6.1-sol xhigh，可选高风险第二 review 经 warmpool 使用 TraeX gpt-5.6-sol xhigh。
 - 用户要求停止扩展大小写/别名/多级链接组合调查；正常流程、必要 review/CI 和交付优先，不追加这些组合检查为阶段门槛。
 - 本机只跑低并发局部检查，不跑 stress/load 或长时并行循环；Linux 走 `ssh devbox`。恢复任务前核对进程身份和资源归属；
-  本轮新建 server state（最后观测 needs-login）与浏览器 handoff 保留供正常补验续接，不能采用旧试用节点或操作既有用户服务。
+  正常补验只使用本轮 fresh server/client 节点与 fixture；已完成两端 logout/stop，不能采用旧试用节点或操作既有用户服务。
 
 ## 实机试用与补验
 
@@ -75,10 +75,11 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建后的升级、共享机器注销/开机行为仍未执行，不能记为通过。
 终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
 
-- #173 的全邀请入口保存已由 #178 修复；同一配对记录的真实 SSH/tsnet 切换仍需在最终 main 上补验。
+- #173 已由 #178 修复并在实际 main 真实补验：恰一条配对记录保存 SSH+tsnet，默认 SSH；两入口返回同一 server/instance/task/run。
 - #172 的边界已确认：只检查 Cove 自己创建/管理的目录；既有 COVE_HOME、HOME、祖先及任意既有用户目录不查 owner/mode、不 chmod；特殊主机布局不作新增门槛。
-- 候选两端最小构建与 helper VCS fca/clean 已验证；新 devbox 节点最后观测为 needs-login，等待用户在保留的 Chrome 标签页完成登录授权。登录请求 succeeded 不代表节点 running；follow 最终 exit1。
-  当前客户端登录、配对、同 run 恢复和 logout 未执行；续接先查本轮 state 的实际状态，不盲目重放 login/邀请/输入。最新进度以 #185 为准。
+- 实际运行时 `9326def6`：macOS arm64 客户端与 Linux x64 devbox 的 fresh 节点均确认 running；SSH→tsnet→SSH 三次接入同一 run，三个标记各发送一次并从恢复输出观察到；默认入口切 tsnet、再恢复 SSH 均通过。
+- server 节点 logout 的 remoteLogoutConfirmed=true，原 helper/state 消失且有界观察未自动重建；server/原 run 继续经 SSH 可用，登出后第四个标记发送一次并观察到。client logout 同样确认，随后 stop，原 daemon/state 消失；fixture run 已退出、配对设备已撤销。
+- 保留登录 follow exit1 的记录、长 socket 路径的 fixture 失败与修正；不将 follow 超时当作节点退出。旧第一次授权可能遗留的控制面节点仍 UNKNOWN，未按名称猜测删除；本轮新资源的清理结果与原始失败见 #185。
 
 - 先在 devbox 上 `cove server entry set sshTarget <user>@<host>`，否则邀请没有 SSH 入口（没有自动推断）。
 - 经 SSH 配对前先用普通 `ssh <目标>` 记录 host key；CLI 不写 known_hosts。
