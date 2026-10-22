@@ -22,7 +22,12 @@ import {
   type RpcId,
   type RpcMethod,
 } from "@cove/protocol/rpc";
-import { localOwner, type LocalCore, type Principal } from "../rpc/context.js";
+import {
+  localOwner,
+  type LocalCore,
+  type Principal,
+  type ResponseDelivery,
+} from "../rpc/context.js";
 import { dispatchRpc } from "../rpc/dispatch.js";
 import { actualHeaders, header, LocalAdmission, type LocalHeaders } from "./local-admission.js";
 import { entryOf } from "./connection-entry.js";
@@ -124,8 +129,9 @@ export async function dispatchLocalRpc(
   method: RpcMethod,
   params: Record<string, unknown>,
   principal?: Principal,
+  delivery?: ResponseDelivery,
 ): Promise<unknown> {
-  return dispatchRpc(core, method, params, principal);
+  return dispatchRpc(core, method, params, principal, delivery);
 }
 
 function isDomainFailure(value: unknown): value is { error: DomainError } {
@@ -154,6 +160,10 @@ export async function rpcBody(
   // The dispatch of each call; tests substitute a handler behind the real secret boundary
   // (rpc/dispatch.ts callHandler) to exercise this serialization.
   route: typeof dispatchLocalRpc = dispatchLocalRpc,
+  // The HTTP response this body goes out in (registerHttpRpc). Each call sees it narrowed to
+  // its own answer: `sent` is true only if that answer, not an error that replaced it, is in a
+  // body that was returned for sending and then handed over.
+  delivery?: ResponseDelivery,
 ): Promise<{ status: number; body?: string }> {
   let value: unknown;
   let parseFailed = false;
@@ -181,6 +191,8 @@ export async function rpcBody(
   let used = 0;
   let count = 0;
   let overflow = false;
+  // Set once the body is returned for sending (below); read when the response is done.
+  const body = { complete: false };
   for (const item of items) {
     if (item.kind === "notification") {
       if (item.params !== null) {
@@ -195,8 +207,14 @@ export async function rpcBody(
     let response;
     if (item.kind === "error") response = item.response;
     else {
+      const answer = { included: false };
+      const itemDelivery: ResponseDelivery | undefined = delivery && {
+        open: () => delivery.open(),
+        sent: delivery.sent.then((sent) => sent && answer.included && body.complete),
+      };
+      let succeeded = false;
       try {
-        const result = await route(core, item.method, item.params, principal);
+        const result = await route(core, item.method, item.params, principal, itemDelivery);
         if (isDomainFailure(result)) {
           // Likewise a refusal is sent as its schema parsed it.
           const error = DomainErrorSchema.safeParse(result.error);
@@ -207,20 +225,23 @@ export async function rpcBody(
           // The parsed result is what is sent: a member the schema strips never reaches the
           // wire, whatever the handler's object held.
           const parsed = parseRpcResultForCall(item.method, item.params, result);
+          succeeded = parsed !== null;
           response =
             parsed !== null
               ? { jsonrpc: "2.0" as const, id: item.id, result: parsed }
               : standard(item.id, STANDARD_RPC_ERRORS.internal);
         }
       } catch {
+        succeeded = false;
         response = standard(item.id, STANDARD_RPC_ERRORS.internal);
       }
       try {
-        response =
-          composeRpcResponse(response, encodeResponse) ??
-          standard(item.id, STANDARD_RPC_ERRORS.internal);
+        const composed = composeRpcResponse(response, encodeResponse);
+        answer.included = succeeded && composed !== null;
+        response = composed ?? standard(item.id, STANDARD_RPC_ERRORS.internal);
       } catch (error) {
         if (error !== oversized) throw error;
+        answer.included = false;
         response = standard(item.id, STANDARD_RPC_ERRORS.internal);
       }
     }
@@ -238,10 +259,12 @@ export async function rpcBody(
   if (!count) return { status: rpcHttpSuccessStatus(items) };
   if (overflow) return { status: ADMISSION_STATUS["too-large"] };
   if (batch) buffers.aggregate[used++] = 93;
-  return boundRpcResponseBody(
+  const bounded = boundRpcResponseBody(
     new TextDecoder("utf-8", { fatal: true }).decode(buffers.aggregate.subarray(0, used)),
     core.runtime.composition.budgets.rpcResponseBytes,
   );
+  body.complete = bounded.body !== undefined;
+  return bounded;
 }
 
 export function registerHttpRpc(
@@ -624,12 +647,33 @@ export function registerHttpRpc(
                 .send(output.subarray(0, length));
             }
             if (!principal) return sendHttpAdmissionFailure(reply, "unauthenticated");
-            const response = await rpcBody(core, bytes, owner.buffers, principal);
+            // How the answers' response is delivered (rpc/context.ts ResponseDelivery): sent only
+            // when the RPC body itself was handed to reply.send and the response then finished,
+            // that is, the whole body was handed to the OS. Any close before that, or a response
+            // that carried something else, is not a delivery.
+            let handedOver = false;
+            const sent = new Promise<boolean>((done) => {
+              reply.raw.once("finish", () => done(handedOver));
+              reply.raw.once("close", () => done(false));
+            });
+            const delivery: ResponseDelivery = {
+              open: () => !owner.logicalClosed && !request.raw.socket.destroyed,
+              sent,
+            };
+            const response = await rpcBody(
+              core,
+              bytes,
+              owner.buffers,
+              principal,
+              dispatchLocalRpc,
+              delivery,
+            );
             if (owner.logicalClosed) return reply;
             const body =
               response.body === undefined
                 ? undefined
                 : owner.buffers!.aggregate.subarray(0, Buffer.byteLength(response.body));
+            handedOver = response.status === 200 && body !== undefined;
             return reply
               .code(response.status)
               .type(body === undefined ? "application/json" : "application/json; charset=utf-8")

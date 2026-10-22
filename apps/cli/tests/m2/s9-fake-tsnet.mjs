@@ -12,7 +12,7 @@
 // they exist: `hang-setports` applies a port set without answering, `slow-logout` closes the
 // ports at once and answers the logout SLOW_MS later. Every request is appended to `<home>/fake-ops.jsonl` as its op, whether it
 // carried a key and its ports, never the key itself. FAKE_TSNET_PROTOCOL overrides the protocol
-// hello answers with.
+// hello answers with; FAKE_TSNET_LOGIN_URL_MS delays the answer of an interactive login.
 import {
   appendFileSync,
   existsSync,
@@ -107,7 +107,10 @@ lines.on("line", (line) => {
         if (node()) return refuse(id, "ALREADY_LOGGED_IN");
         pendingUrl = "https://login.example.test/a/interactive-0123456789";
         pendingSince = Date.now();
-        answer(id, status());
+        const answerUrl = () => answer(id, status());
+        const urlDelay = Number(process.env.FAKE_TSNET_LOGIN_URL_MS ?? 0);
+        if (urlDelay > 0) setTimeout(answerUrl, urlDelay);
+        else answerUrl();
         return;
       }
       if (key.startsWith("tskey-hang")) return;
