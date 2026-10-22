@@ -781,6 +781,7 @@ test.each(["ignore-term", "descendant-pipe"])(
     }
   `;
     let result;
+    let cleanupError;
     try {
       // This independent process has SIGKILL as its watchdog, not the supervisor under test.
       result = spawnSync(process.execPath, ["--input-type=module", "--eval", wrapper], {
@@ -810,10 +811,11 @@ test.each(["ignore-term", "descendant-pipe"])(
         try {
           process.kill(-pid, "SIGKILL");
         } catch (error) {
-          expect(error.code).toBe("ESRCH");
+          cleanupError = error;
         }
       }
     }
+    expect(cleanupError?.code ?? "ESRCH").toBe("ESRCH");
   },
 );
 
