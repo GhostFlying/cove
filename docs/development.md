@@ -237,9 +237,11 @@ cove --server devbox task list                       # 走 tsnet
 
 范围与决定见 [M2](milestones/m2.md)（D1–D3、S1、S2）。前提：本 checkout 已 `pnpm build`、`pnpm native:prepare`，
 `pnpm` 与 Go（`COVE_GO` 或 PATH 上的 `go`，版本见 `native/tailscale/go.mod`）可用，并用 `.node-version` 的 Node 运行 CLI。
-server 需要 Git 2.45 及以上（见上文“构建与启动”）。服务管理器不提供登录 shell 的环境，服务单元的 `PATH` 只有执行
-`cove server install` 的 shell 在 `PATH` 中最先找到的 `git` 所在目录加上系统目录：安装前用 `git version` 确认版本满足要求，
-换用别的 Git 后重新执行 `cove server install` 以重写服务单元。
+server 需要 Git 2.45 及以上（见上文“构建与启动”）。服务管理器不提供登录 shell 的环境，服务单元的 `PATH` 是固定顺序的
+系统目录 `/usr/local/bin`、`/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`；执行 `cove server install` 的 shell 在 `PATH` 中最先找到的
+`git` 所在目录不在其中时，才加在它们之前（#177）。所以那个 `git` 在系统目录之外时，`git version` 检查的就是服务使用的 Git；
+它在某个系统目录中时，服务按上述固定顺序使用最先找到的 `git`（例如有 `/usr/local/bin/git` 时用它而不是 `/usr/bin/git`），
+应检查那一个（如 `/usr/local/bin/git version`）。换用别的 Git 后重新执行 `cove server install` 以重写服务单元。
 
 ```sh
 node apps/cli/dist/main.js server install          # 从本 checkout 构建闭包并安装、注册、启动服务
