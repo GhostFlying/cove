@@ -20,6 +20,31 @@ const closeTimers: LocalTimer = {
   clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+// Only structured OS fields are copied: worker stderr and exception messages may contain
+// terminal contents. Contact loss alone supplies no process-exit evidence.
+export class WorkerStartupError extends Error {
+  constructor(
+    readonly kind: "spawn" | "pipe" | "contact",
+    error?: unknown,
+  ) {
+    const errno = error as NodeJS.ErrnoException | undefined;
+    const code =
+      typeof errno?.code === "string" && /^E[A-Z0-9]+$/.test(errno.code) ? errno.code : undefined;
+    const syscall =
+      typeof errno?.syscall === "string"
+        ? errno.syscall.startsWith("spawn ")
+          ? "spawn"
+          : errno.syscall
+        : "a system call";
+    const path = typeof errno?.path === "string" ? ` ${errno.path}` : "";
+    super(`Worker startup ${kind} failure${code ? `: ${syscall}${path} failed with ${code}` : ""}`);
+    this.name = "WorkerStartupError";
+  }
+  observedExit(code: number | null, signal: NodeJS.Signals | null): void {
+    this.message += `; directly spawned child exited with code ${code ?? "null"}, signal ${signal ?? "none"}`;
+  }
+}
+
 // Only the directly spawned child supplies process-exit proof. Pipe loss is contact loss.
 export class WorkerProcess {
   readonly session: WorkerPipeSession;
@@ -36,6 +61,7 @@ export class WorkerProcess {
   private started = false;
   private shutdownRequested = false;
   private firstError: "spawn" | "pipe" | "contact" | undefined;
+  private startupError: WorkerStartupError | undefined;
   private writerClosed = false;
   private leaderExited = false;
   private closing: Promise<Awaited<WorkerProcess["closed"]>> | undefined;
@@ -81,6 +107,7 @@ export class WorkerProcess {
           return child.stdin.write(bytes, (error) => {
             if (!owned) return;
             owned = false;
+            if (error) this.fail("pipe", error);
             settled(error ?? undefined);
           });
         },
@@ -91,11 +118,12 @@ export class WorkerProcess {
       },
     });
   }
-  private fail(kind: NonNullable<WorkerProcess["firstError"]>): void {
+  private fail(kind: NonNullable<WorkerProcess["firstError"]>, error?: unknown): void {
     this.firstError ??= kind;
     if (!this.readySettled) {
       this.readySettled = true;
-      this.readyReject(new Error("Worker startup unavailable"));
+      this.startupError = new WorkerStartupError(kind, error);
+      this.readyReject(this.startupError);
     }
   }
   start(): void {
@@ -103,20 +131,20 @@ export class WorkerProcess {
     this.started = true;
     try {
       this.child = this.createChild(installedWorkerBin);
-    } catch {
-      this.fail("spawn");
+    } catch (error) {
+      this.fail("spawn", error);
       this.session.loseContact();
       this.closedResolve({ status: "unverifiable" });
       return;
     }
     const child = this.child;
     child.stderr.resume();
-    child.on("error", () => {
-      this.fail("spawn");
+    child.on("error", (error) => {
+      this.fail("spawn", error);
       this.session.loseContact();
     });
-    child.stdin.on("error", () => {
-      this.fail("pipe");
+    child.stdin.on("error", (error) => {
+      this.fail("pipe", error);
       this.session.loseContact();
     });
     child.stdin.once("close", () => {
@@ -124,8 +152,8 @@ export class WorkerProcess {
       this.session.transportReleased();
     });
     child.stdin.on("drain", () => this.session.drain());
-    child.stdout.on("error", () => {
-      this.fail("pipe");
+    child.stdout.on("error", (error) => {
+      this.fail("pipe", error);
       this.session.loseContact();
     });
     child.stdout.on("data", (bytes: Buffer) => {
@@ -140,8 +168,10 @@ export class WorkerProcess {
         this.queueIngress(child, bytes.subarray(consumed));
     });
     child.stdout.once("end", () => this.session.loseContact());
-    child.once("exit", () => {
+    child.once("exit", (code, signal) => {
       this.leaderExited = true;
+      this.fail("contact");
+      this.startupError?.observedExit(code, signal);
       this.session.loseContact();
     });
     child.once("close", (code, signal) => {
