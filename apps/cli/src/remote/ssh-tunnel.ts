@@ -54,8 +54,8 @@ import { RemoteError } from "./entry-types.js";
 // end-of-file (read status 1) within ~0.2 s of the spawn while the command still ran and had not
 // asked for one, and ending ssh then failed a healthy command with status 143. What ends the pipe
 // then is not known (seen only rarely, on macOS, under load). So after an end of the pipe without
-// a line, the reader checks whether its supervisor's parent is still this process
-// (`ps -o ppid=`, or `kill -0` where ps is missing) and, while it is, waits and checks again
+// a line, the reader checks whether its supervisor's parent is still this process, whose PID it
+// is given (`ps -o ppid=`, or `kill -0` where ps is missing) and, while it is, waits and checks again
 // every second instead of ending ssh; it reports that wait on ssh's stderr. A command that dies
 // therefore ends its ssh within about a second of the pipe's end; one that lives keeps its tunnel
 // until close(), whose escalation to signals does not depend on the pipe. When the reader ends
@@ -134,25 +134,31 @@ const NO_WHERE_KNOWN = ["nohostauthenticationforproxycommand", "forkafterauthent
 // The optional keywords this process's ssh rejected, learned once.
 let rejectedKeywords = new Set<string>();
 
-// The supervisor: `sh -c SUPERVISOR cove-ssh ssh ARGS...`. fd 3 keeps the pipe from this process
+// The supervisor: `sh -c SUPERVISOR cove-ssh PID ssh ARGS...`, PID being this process's.
+// fd 3 keeps the pipe from this process
 // and fd 4 the stderr pipe, which only ssh and the reader's `cove-ssh:` lines write to: the shell's
 // own stderr goes to /dev/null, so its job messages (bash reports the reader it kills as
 // "Terminated") never become the error line shown for ssh. ssh runs in the background with stdin
 // from /dev/null; a reader ends ssh after a line on the pipe, or after the pipe's end once this
 // process is gone (see Lifetime above); the supervisor exits with ssh's status. Arguments reach ssh
-// as "$@", never through the shell's parser. `$PPID` is this process: the shell sets it at start
-// and a subshell keeps it, while `ps -o ppid= -p $$` reads the main shell's current parent, which
-// changes when this process dies (to init or a subreaper); a pid reused later is never that
-// parent, so the check cannot mistake another process for this one. Without ps, `kill -0` is the
-// fallback, which a zombie or a reused pid can keep true; the close() escalation still applies.
+// as "$@", never through the shell's parser. `ps -o ppid= -p $$` reads the main shell's current
+// parent, which changes when this process dies (to init or a subreaper); a pid reused later is
+// never that parent, so the check cannot mistake another process for this one. This process's PID
+// is passed in rather than taken from `$PPID`: the shell reads `$PPID` when it starts, and when
+// this process dies before that (killed right after the spawn) `$PPID` is already the new parent,
+// so the check would see "the CLI runs" forever and ssh would outlive the command. Without ps,
+// `kill -0` is the fallback, which a zombie or a reused pid can keep true; the close() escalation
+// still applies.
 export const SUPERVISOR = [
   "exec 3<&0 4>&2 </dev/null 2>/dev/null",
+  "cli_pid=$1",
+  "shift",
   '"$@" 2>&4 &',
   "ssh_pid=$!",
   "cli_runs() {",
   '  if parent=$(ps -o ppid= -p "$$" 2>/dev/null) && [ -n "$parent" ]; then',
-  '    [ $parent -eq "$PPID" ]',
-  '  else kill -0 "$PPID" 2>/dev/null; fi',
+  '    [ $parent -eq "$cli_pid" ]',
+  '  else kill -0 "$cli_pid" 2>/dev/null; fi',
   "}",
   // The reader ignores SIGPIPE: once this process died nobody reads fd 4, and writing the reason
   // must not cost the kill that follows it.
@@ -242,10 +248,14 @@ function lastLine(stderr: string): string {
 type Started = { child: ChildProcess; ended: Promise<number | null>; stderr: () => string };
 
 function startSupervised(args: string[]): Started {
-  const child = spawn("/bin/sh", ["-c", SUPERVISOR, "cove-ssh", "ssh", ...args], {
-    detached: true,
-    stdio: ["pipe", "ignore", "pipe"],
-  });
+  const child = spawn(
+    "/bin/sh",
+    ["-c", SUPERVISOR, "cove-ssh", String(process.pid), "ssh", ...args],
+    {
+      detached: true,
+      stdio: ["pipe", "ignore", "pipe"],
+    },
+  );
   let stderr = "";
   child.stderr!.setEncoding("latin1");
   child.stderr!.on("data", (chunk: string) => {
