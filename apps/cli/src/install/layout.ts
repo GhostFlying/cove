@@ -89,15 +89,16 @@ export function launcherScript(layout: InstallLayout): string {
   ].join("\n");
 }
 
-// Same managed-directory rule as the server store: reject existing violations; never chmod.
-// The caller supplies only a Cove-owned descendant, with an already prepared parent.
-export async function ensureInstallDirectory(path: string): Promise<void> {
+// Existing-only checks let uninstall refuse an invalid restored parent without creating an
+// absent launcher directory. Only ENOENT means absent; permission and I/O failures remain errors.
+export async function checkInstallDirectory(path: string): Promise<boolean> {
+  let info;
   try {
-    await mkdir(path, { mode: 0o700 });
+    info = await lstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
-  const info = await lstat(path);
   const uid = process.getuid?.();
   if (
     uid === undefined ||
@@ -109,6 +110,19 @@ export async function ensureInstallDirectory(path: string): Promise<void> {
     throw new Error(
       `Cove directory ${path} has owner uid ${info.uid} and mode ${(info.mode & 0o777).toString(8).padStart(4, "0")}; Cove's own directories must be owned by the current user, have mode 0700 and not be symbolic links (uid ${uid}, mode 0700)`,
     );
+  return true;
+}
+
+// Same managed-directory rule as the server store: reject existing violations; never chmod.
+// The caller supplies only a Cove-owned descendant, with an already prepared parent.
+export async function ensureInstallDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  if (!(await checkInstallDirectory(path)))
+    throw new Error(`Cove directory ${path} disappeared during preparation`);
 }
 
 // One installation change at a time per data directory: installing, activating, starting or

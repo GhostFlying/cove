@@ -123,6 +123,8 @@ cove server start --harness               # 前台运行；打印 harness 页面
   `<home>/tsnet` 及其 `run`、已存在的 `state`；安装命令使用的 `install`、`bin` 与 `server/log`；数据目录之外的 `--rendezvous` 只有它所在的目录）必须属于当前用户、权限 0700、不是符号链接，
   否则在业务入口与 rendezvous 就绪前启动失败，原因写明目录、属主 uid、权限与规则，Cove 不自动修正。已存在的数据目录本身（自己指定的或早先建立的）
   与它的所有上级目录（包括 `$HOME`）不检查属主与权限，也可以是符号链接；数据目录不存在时 Cove 以 0700 创建。
+  安装激活先检查 `bin` 再替换 `install/current`；卸载在停止/移除服务及删除安装内容前检查已有 `bin`，缺失的 `bin` 不创建。
+  启动或重启 launchd 服务（包括已注册的服务）先检查 `server/log`；install/upgrade 在安装激活前完成这些启动路径检查，目录拒绝不改变当前 build 或停止服务。
 - server 启动失败时以 1 退出，stderr 先写一行 `{"event":"startup-failed","atMs":…,"category":…,"cleanup":…,"detail":…}`
   （`detail` 不含秘密，最多 512 个字符，控制字符已转义；无可安全报告的原因时为 `null`），再写一行 `cove-server: <原因>`。
 - harness 页面列出全部终端 run（tab 的 run 也在其中），点击即可接入；它是 M0 的测试载体，不是 GUI 客户端。

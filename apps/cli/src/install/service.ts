@@ -5,6 +5,15 @@ import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { ensureInstallDirectory, serverCommand, type InstallLayout } from "./layout.js";
 
+// Preflight all paths that a start will adopt before activation or any service stop. The
+// high-level commands call this before earlier mutations; backend entry points repeat it for
+// direct callers and already-registered launchd jobs. Stop-only repair commands need no new log.
+export async function prepareServiceStart(layout: InstallLayout): Promise<void> {
+  await ensureInstallDirectory(join(layout.home, "server"));
+  await ensureInstallDirectory(join(layout.home, "server", "service"));
+  if (process.platform === "darwin") await ensureInstallDirectory(layout.logDirectory);
+}
+
 // The user-level service manager that runs an installed server (m2 D2): a LaunchAgent in the
 // macOS gui domain, a systemd user unit on Linux. Both detach the server from the shell, SSH
 // session and client that started it, restart it after a crash and not after an orderly exit (the
@@ -279,8 +288,7 @@ class LaunchAgent implements ServiceBackend {
   }
 
   async register(start: boolean): Promise<void> {
-    await ensureInstallDirectory(join(this.layout.home, "server"));
-    await ensureInstallDirectory(this.layout.logDirectory);
+    await prepareServiceStart(this.layout);
     await writeAtomically(this.unitPath, launchAgentPlist(this.layout));
     if (start) await this.start();
   }
@@ -288,6 +296,7 @@ class LaunchAgent implements ServiceBackend {
   // Bootstrapping loads the plist as it is now and starts the server (RunAtLoad); a job that is
   // already loaded is only started.
   async start(): Promise<void> {
+    await prepareServiceStart(this.layout);
     if (this.loaded()) check("/bin/launchctl", ["kickstart", this.target]);
     else await this.bootstrap();
   }
@@ -326,6 +335,7 @@ class LaunchAgent implements ServiceBackend {
   // Unload and load again rather than `kickstart -k`, so that the restarted job also picks up a
   // plist that install rewrote (PATH, SHELL) since it was loaded.
   async restart(): Promise<void> {
+    await prepareServiceStart(this.layout);
     await this.stop();
     await this.bootstrap();
   }
