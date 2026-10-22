@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { connect, createServer } from "node:net";
+import type { Readable } from "node:stream";
 import { SshTargetSchema } from "@cove/protocol/auth";
 import { RemoteError } from "./entry-types.js";
 
@@ -44,7 +45,7 @@ import { RemoteError } from "./entry-types.js";
 //
 // Lifetime. The tunnel lives as long as the command. ssh runs under a small POSIX sh supervisor
 // in a session and process group of its own (spawn `detached`), whose stdin is a pipe from this
-// process. The supervisor ends ssh on either of two facts:
+// process. Normally the supervisor ends ssh on either of two facts:
 // - a line on that pipe: close() writes one (a requested end), then ends the pipe and waits, then
 //   signals the group (TERM, then KILL), bounded;
 // - this process is gone: the pipe's write end is held only by this process, so the pipe ends
@@ -55,12 +56,14 @@ import { RemoteError } from "./entry-types.js";
 // asked for one, and ending ssh then failed a healthy command with status 143. What ends the pipe
 // then is not known (seen only rarely, on macOS, under load). So after an end of the pipe without
 // a line, the reader checks whether its supervisor's parent is still this process, whose PID it
-// is given (`ps -o ppid=`, or `kill -0` where ps is missing) and, while it is, waits and checks again
-// every second instead of ending ssh; it reports that wait on ssh's stderr. A command that dies
-// therefore ends its ssh within about a second of the pipe's end; one that lives keeps its tunnel
+// is given (`/bin/ps -o ppid=`) and, while it is, waits and checks again every second instead of
+// ending ssh. A separate supervisor-only pipe reports that wait once on the CLI's stderr.
+// A command that dies therefore ends its ssh within about a second of the pipe's end; one that lives keeps its tunnel
 // until close(), whose escalation to signals does not depend on the pipe. When the reader ends
 // ssh it first writes why to ssh's stderr (`cove-ssh: ...`), and an open that fails that way
-// names it.
+// names it. A failed parent query is not proof of death: it is retried three times, a second
+// apart, then ends ssh with an explicit supervision-unavailable reason. `kill -0` cannot
+// substitute for parent identity: it also succeeds for an unreaped zombie or a reused PID.
 //
 // Readiness. ssh opens the local listener only after authentication and the host-key check; the
 // tunnel is ready when that port accepts a connection while ssh still runs, within readyTimeoutMs.
@@ -135,8 +138,8 @@ const NO_WHERE_KNOWN = ["nohostauthenticationforproxycommand", "forkafterauthent
 let rejectedKeywords = new Set<string>();
 
 // The supervisor: `sh -c SUPERVISOR cove-ssh PID ssh ARGS...`, PID being this process's.
-// fd 3 keeps the pipe from this process
-// and fd 4 the stderr pipe, which only ssh and the reader's `cove-ssh:` lines write to: the shell's
+// fd 5 keeps the supervisor-only diagnostic pipe (spawn fd 3), before fd 3 is reused for stdin;
+// fd 4 keeps the stderr pipe, which only ssh and the reader's `cove-ssh:` lines write to: the shell's
 // own stderr goes to /dev/null, so its job messages (bash reports the reader it kills as
 // "Terminated") never become the error line shown for ssh. ssh runs in the background with stdin
 // from /dev/null; a reader ends ssh after a line on the pipe, or after the pipe's end once this
@@ -146,19 +149,28 @@ let rejectedKeywords = new Set<string>();
 // never that parent, so the check cannot mistake another process for this one. This process's PID
 // is passed in rather than taken from `$PPID`: the shell reads `$PPID` when it starts, and when
 // this process dies before that (killed right after the spawn) `$PPID` is already the new parent,
-// so the check would see "the CLI runs" forever and ssh would outlive the command. Without ps,
-// `kill -0` is the fallback, which a zombie or a reused pid can keep true; the close() escalation
-// still applies.
+// so the check would see "the CLI runs" forever and ssh would outlive the command. Use the
+// supported hosts' absolute ps path, independent of PATH. Repeated query failures are explicitly
+// unknown, not death; after a short retry window we cannot safely keep supervising the tunnel.
 export const SUPERVISOR = [
-  "exec 3<&0 4>&2 </dev/null 2>/dev/null",
+  "exec 5>&3 3<&0 4>&2 </dev/null 2>/dev/null",
   "cli_pid=$1",
   "shift",
-  '"$@" 2>&4 &',
+  '"$@" 2>&4 3<&- 4>&- 5>&- &',
   "ssh_pid=$!",
-  "cli_runs() {",
-  '  if parent=$(ps -o ppid= -p "$$" 2>/dev/null) && [ -n "$parent" ]; then',
-  '    [ $parent -eq "$cli_pid" ]',
-  '  else kill -0 "$cli_pid" 2>/dev/null; fi',
+  "cli_state() {",
+  "  attempts=0",
+  "  while [ $attempts -lt 3 ]; do",
+  '    if parent=$(/bin/ps -o ppid= -p "$$" 2>/dev/null); then',
+  "      set -- $parent",
+  '      case "$*" in ""|*[!0-9]*) ;;',
+  '        *) [ "$1" -eq "$cli_pid" ]; return $? ;;',
+  "      esac",
+  "    fi",
+  "    attempts=$((attempts + 1))",
+  "    [ $attempts -ge 3 ] || sleep 1",
+  "  done",
+  "  return 2",
   "}",
   // The reader ignores SIGPIPE: once this process died nobody reads fd 4, and writing the reason
   // must not cost the kill that follows it.
@@ -166,12 +178,20 @@ export const SUPERVISOR = [
   '  if read -r _ <&3 2>&4; then why="a line on the supervisor pipe"',
   "  else",
   "    status=$?",
-  "    if cli_runs; then",
+  "    cli_state",
+  "    state=$?",
+  "    if [ $state -eq 0 ]; then",
+  '      printf "early-eof\\n" >&5',
   '      printf "cove-ssh: the supervisor pipe ended (read status %s) while the CLI runs; ' +
     'waiting for the CLI to end\\n" "$status" >&4',
-  "      while cli_runs; do sleep 1; done",
+  "      while [ $state -eq 0 ]; do sleep 1; cli_state; state=$?; done",
   "    fi",
-  '    why="the end of the supervisor pipe (read status $status) after the CLI ended"',
+  "    if [ $state -eq 2 ]; then",
+  '      printf "parent-unavailable\\n" >&5',
+  '      why="supervision unavailable: could not verify the CLI parent after 3 attempts"',
+  "    else",
+  '      why="the end of the supervisor pipe (read status $status) after the CLI ended"',
+  "    fi",
   "  fi",
   '  printf "cove-ssh: ending ssh after %s\\n" "$why" >&4',
   '  kill -TERM "$ssh_pid" 2>/dev/null',
@@ -253,9 +273,34 @@ function startSupervised(args: string[]): Started {
     ["-c", SUPERVISOR, "cove-ssh", String(process.pid), "ssh", ...args],
     {
       detached: true,
-      stdio: ["pipe", "ignore", "pipe"],
+      stdio: ["pipe", "ignore", "pipe", "pipe"],
     },
   );
+  // SSH does not inherit the diagnostic fd. Decode only these bounded supervisor markers,
+  // each at most once; arbitrary SSH stderr stays in the private error tail.
+  const warnings: Readonly<Record<string, string>> = {
+    "early-eof": "the supervisor pipe ended while the CLI runs; waiting for the CLI to end",
+    "parent-unavailable":
+      "supervision unavailable: could not verify the CLI parent after 3 attempts; ending ssh",
+  };
+  const warned = new Set<string>();
+  let diagnostic = "";
+  const diagnostics = child.stdio[3] as Readable;
+  diagnostics.setEncoding("ascii");
+  diagnostics.on("data", (chunk: string) => {
+    for (const character of chunk) {
+      if (character === "\n") {
+        const warning = Object.hasOwn(warnings, diagnostic) ? warnings[diagnostic] : undefined;
+        if (warning && !warned.has(diagnostic)) {
+          warned.add(diagnostic);
+          process.stderr.write(`cove-ssh: ${warning}\n`);
+        }
+        diagnostic = "";
+      } else {
+        diagnostic = (diagnostic + character).slice(-64);
+      }
+    }
+  });
   let stderr = "";
   child.stderr!.setEncoding("latin1");
   child.stderr!.on("data", (chunk: string) => {

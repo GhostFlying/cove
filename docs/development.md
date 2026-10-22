@@ -348,7 +348,11 @@ cove --home B remote entry default box ssh           # 改默认入口；失败�
 - 每条命令启动一个系统 `ssh -N -L 127.0.0.1:<本地端口>:127.0.0.1:<server 端口>`，命令结束（包括被 kill）时随之结束；
   ssh 在 `sh` 监督进程下运行：CLI 关闭隧道时在管道上写一行，监督进程随即结束 ssh；CLI 以任何方式结束（包括 SIGKILL）时
   管道随之关闭，监督进程确认自己已不是 CLI 的子进程后结束 ssh（至多约 1 秒），不留下孤儿进程。管道关闭而 CLI 仍在运行时
-  不结束 ssh（#174），而是在 ssh 的 stderr 记一行 `cove-ssh: the supervisor pipe ended ... while the CLI runs` 并等 CLI 结束。
+  不结束 ssh（#174），而是经独立监督诊断管道在 CLI stderr 写一次固定提示
+  `cove-ssh: the supervisor pipe ended while the CLI runs; waiting for the CLI to end` 并等 CLI 结束；
+  成功命令同样可见，不透传 SSH 的原始 stderr。父进程身份由 macOS/Linux 的 `/bin/ps` 查询；连续 3 次查询失败时
+  （间隔 1 秒），以 `cove-ssh: supervision unavailable: could not verify the CLI parent after 3 attempts; ending ssh`
+  提示无法核实监督关系并结束隧道，不把查询失败当作 CLI 已退出，也不退回会误认 zombie 的 `kill -0`。
 - 使用用户自己的 ssh 配置、agent 与 known_hosts。命令行固定 `BatchMode=yes`、`StrictHostKeyChecking=yes`、
   `NoHostAuthenticationForLocalhost=no`、`ExitOnForwardFailure=yes`、`GatewayPorts=no`、`UpdateHostKeys=no`，
   并关闭连接复用（ControlMaster）；ssh 认识时还固定 `NoHostAuthenticationForProxyCommand=no`（Apple 的 ssh）与
