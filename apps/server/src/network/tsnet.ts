@@ -132,7 +132,12 @@ export type TsnetLogoutOutcome =
 
 class HelperLost extends Error {}
 class HelperRefused extends Error {
-  constructor(readonly code: string) {
+  // `detail` is the helper's message: third-party text (a control plane's), kept in memory only
+  // and shown only through sanitizedText.
+  constructor(
+    readonly code: string,
+    readonly detail: string = "",
+  ) {
     super(code);
   }
 }
@@ -213,7 +218,12 @@ class HelperChannel {
   }
 
   private answer(line: string): void {
-    let frame: { id?: unknown; ok?: unknown; result?: unknown; error?: { code?: unknown } };
+    let frame: {
+      id?: unknown;
+      ok?: unknown;
+      result?: unknown;
+      error?: { code?: unknown; message?: unknown };
+    };
     try {
       frame = JSON.parse(line) as typeof frame;
     } catch {
@@ -226,14 +236,17 @@ class HelperChannel {
     if (frame.ok === true) entry.resolve(frame.result ?? {});
     else
       entry.reject(
-        new HelperRefused(typeof frame.error?.code === "string" ? frame.error.code : "INTERNAL"),
+        new HelperRefused(
+          typeof frame.error?.code === "string" ? frame.error.code : "INTERNAL",
+          typeof frame.error?.message === "string" ? frame.error.message : "",
+        ),
       );
   }
 }
 
 // Text from the helper made fit for a status warning or a log line: no control characters, every
 // URL replaced (an interactive login URL must never be shown or logged outside its secret), no
-// `secret` anywhere, bounded.
+// `secret` and nothing shaped like an auth key anywhere, bounded.
 export function sanitizedText(
   value: string,
   limit: number,
@@ -241,6 +254,7 @@ export function sanitizedText(
 ): string {
   let text = value;
   for (const secret of secrets) if (secret) text = text.split(secret).join("[redacted]");
+  text = text.replace(/tskey-\S*/gi, "[redacted]");
   text = [...text.replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, "[url]")]
     .map((char) => (char < " " || char === "\u007f" ? " " : char))
     .join("");
@@ -345,6 +359,9 @@ export class TsnetNode implements TsnetEntry {
   private ready: Promise<boolean> = Promise.resolve(false);
   // Why the last start failed, until a helper answers hello again (downReason).
   private failure: string | undefined;
+  // Why the last login failed, sanitized, until the next login or logout: shown in status, since
+  // the operation's record keeps only a fixed, secret-free error.
+  private loginFailure: string | undefined;
   private backoffMs = BACKOFF_INITIAL_MS;
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
   private incompatible: string | undefined;
@@ -491,7 +508,7 @@ export class TsnetNode implements TsnetEntry {
         STATUS_TIMEOUT_MS,
       )) as HelperStatus;
       this.observed(answer, at);
-      return apiStatus(answer, hostname);
+      return this.withLoginFailure(apiStatus(answer, hostname));
     } catch (error) {
       if (error instanceof HelperRefused)
         return unavailableStatus(hostname, `the tsnet helper refused the status (${error.code})`);
@@ -548,6 +565,7 @@ export class TsnetNode implements TsnetEntry {
     timeoutMs: number,
     deadlineMs: number,
   ): Promise<TsnetLoginOutcome> {
+    this.loginFailure = undefined;
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     let answer: HelperStatus;
@@ -569,6 +587,13 @@ export class TsnetNode implements TsnetEntry {
           listenFailed: true,
         };
       }
+      // The ordinary failures keep their reason for status; a hold reports its own there.
+      if (error.code === "LOGIN_FAILED" || error.code === "LOGIN_TIMEOUT")
+        this.loginFailure = sanitizedText(
+          `the last login failed (${error.code}): ${error.detail}`,
+          TSNET_LIMITS.warningChars,
+          authKey ? [authKey] : [],
+        );
       return { kind: "refused", code: error.code };
     }
     const secrets = authKey ? [authKey] : [];
@@ -578,6 +603,7 @@ export class TsnetNode implements TsnetEntry {
   }
 
   private async logoutRequest(): Promise<TsnetLogoutOutcome> {
+    this.loginFailure = undefined;
     const channel = this.channel;
     if (!channel || !(await this.isReady())) return { kind: "lost" };
     try {
@@ -593,6 +619,15 @@ export class TsnetNode implements TsnetEntry {
   // The helper's process ID, for tests and diagnostics only.
   get pid(): number | undefined {
     return this.child?.pid;
+  }
+
+  // `status` with the last login's failure as its first warning, within the warning bound.
+  private withLoginFailure(status: TsnetStatus): TsnetStatus {
+    if (!this.loginFailure) return status;
+    return {
+      ...status,
+      warnings: [this.loginFailure, ...status.warnings].slice(0, TSNET_LIMITS.warnings),
+    };
   }
 
   // The generations an answer is requested under; see "Advertisement".

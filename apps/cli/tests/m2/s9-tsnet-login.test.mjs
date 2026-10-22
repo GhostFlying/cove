@@ -241,4 +241,9 @@ test("an interactive login shows its URL once, a refused login fails honestly, a
   expect(JSON.parse(refused.stdout).operation.error.kind).toBe("TSNET_LOGIN_FAILED");
   expect(refused.stderr).toMatch(/refused or did not finish; the node is unchanged/);
   expect(refused.stderr).not.toContain("tskey-fail");
+  // The reason is in status, without the key or the URL the control plane's message held.
+  const failure = await fixture.coveJson(["server", "tsnet", "status"], { home });
+  expect(failure.warnings[0]).toBe(
+    "the last login failed (LOGIN_FAILED): invalid key [redacted], see [url]",
+  );
 }, 60_000);
