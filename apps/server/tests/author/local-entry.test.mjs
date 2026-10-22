@@ -3369,6 +3369,64 @@ describe("D passive production local entry", () => {
     }
   });
 
+  it("refuses a managed symlink escape after an external alias enters a managed descendant", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-managed-descendant-escape-"));
+    const home = join(root, "home");
+    const managed = join(home, "bin");
+    const owned = join(managed, "owned");
+    const external = join(root, "user-external");
+    const shortcut = join(root, "shortcut");
+    const redirect = join(owned, "redirect");
+    await mkdir(home, { mode: 0o700 });
+    await mkdir(managed, { mode: 0o700 });
+    await mkdir(owned, { mode: 0o700 });
+    await mkdir(external, { mode: 0o700 });
+    await chmod(external, 0o777);
+    await writeFile(join(external, "prior"), "user bytes\n");
+    await symlink(external, redirect);
+    await symlink(owned, shortcut);
+    const before = await stat(external);
+    const redirectBefore = await lstat(redirect);
+    const selected = join(shortcut, "redirect");
+    const file = new LocalRendezvous(join(selected, "rendezvous"), [home]);
+    try {
+      expect(await realpath(shortcut)).toBe(owned);
+      expect(await realpath(selected)).toBe(external);
+      await expect(
+        file.publish({
+          bootstrapVersion: 1,
+          ...identity,
+          endpoint: "http://127.0.0.1:32123",
+        }),
+      ).rejects.toThrow(`Cove directory ${redirect} is a symbolic link`);
+      await file.close();
+      const after = await stat(external);
+      const redirectAfter = await lstat(redirect);
+      expect([after.dev, after.ino, after.uid, after.mode]).toEqual([
+        before.dev,
+        before.ino,
+        before.uid,
+        before.mode,
+      ]);
+      expect([redirectAfter.dev, redirectAfter.ino, redirectAfter.mode]).toEqual([
+        redirectBefore.dev,
+        redirectBefore.ino,
+        redirectBefore.mode,
+      ]);
+      expect((await lstat(shortcut)).isSymbolicLink()).toBe(true);
+      expect(await readdir(external)).toEqual(["prior"]);
+      expect(await readFile(join(external, "prior"), "utf8")).toBe("user bytes\n");
+      expect(await readdir(owned)).toEqual(["redirect"]);
+      await recordAuthor("managed-descendant-escape", {
+        refused: true,
+        externalMode: after.mode & 0o777,
+      });
+    } finally {
+      await file.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not gate an arbitrary user parent on unrelated absent broken inaccessible or wrong-mode layouts", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-unrelated-managed-"));
     const home = join(root, "home");
