@@ -8,7 +8,7 @@
 - M0 实施于 2026-09-26 获批；M0 退出与 M1 进入于 2026-10-15 获批（[M1](milestones/m1.md)）。
 - 用户于 2026-10-21 批准 M1 退出与 M2 规划，同日决定 D1–D14 并批准 [M2 计划](milestones/m2.md)（PR #142）。
   D9 是范围变更：Cove 不使用系统 Tailscale，两端只用内嵌的 tsnet；D14：客户端 tsnet 用按需启动的常驻进程。
-- **M2 的实现任务 T0–T7 已全部合入。两台真实机器的首轮试用已完成，正在修复试用发现的问题（#178、#179）。**
+- **M2 的 T0–T7 与首轮试用修复 #178、#184 已合入；正在完成正常实机补验与阶段 review。**
   修复合入并验证实际 main 后，补验受影响的实机场景与尚未执行项，再提交 M2 阶段 review；
   M2 退出与 M3 进入都需要用户明确批准，完成任务不等于批准进入下一阶段。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
@@ -19,7 +19,7 @@
 
 ## Main
 
-main 为 `cb94496`（PR #170 合入）。M2 的 PR 与合入提交（rebase 后的最后一个提交）：
+最近运行时 main 为 `9326def6`（#184；#178 合入于 `905ff5e6`）。实际 main CI 与正常补验的实时结果见 [#185](https://github.com/GhostFlying/cove/issues/185)。M2 主任务历史：
 
 | 任务 | PR   | 合入于    | 内容                                                                  |
 | ---- | ---- | --------- | --------------------------------------------------------------------- |
@@ -50,34 +50,35 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
   M2 S1–S13 在 `apps/cli/tests/m2/`（tsnet 部分在 Tailscale 测试控制面上），都在 macOS 与 Ubuntu CI 上运行。
   真实 Tailnet、两台机器与注销/开机行为只能在实机试用中验证。
 - 用法：[开发说明 · M2 远程 server](development.md#m2-远程-server安装配对与入口)；
-  tend 可用的接口：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)（PENDING 为空）。
+  tend 可用的接口与待同步变更：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 
-## 活动修复与协调接管
+## 活动收尾与协调接管
 
-- 用户于 2026-10-22 授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`。
-  原协调会话不再活跃；当前 root 是唯一协调者，只负责派发、review 路由、集成、合入与本交接。
-- F1：[#179](https://github.com/GhostFlying/cove/pull/179)，分支 `p/luchengxuan/m2-172-path-checks`，head `16576b1`；
-  独立工作树 `.claude/worktrees/agent-a97fbe1ecc4fe90aa`，由当前协调者的原生 subagent F1 负责目录、安装与服务、构建标识修正。
-- F2：[#178](https://github.com/GhostFlying/cove/pull/178)，分支 `p/luchengxuan/m2-173-remote-entries`，head `20e486e`；
-  独立工作树 `.claude/worktrees/agent-a102d66c7c4848ceb`，由当前协调者的原生 subagent F2 负责配对入口与 SSH 生命周期修正。
-- 两个 PR 的必需 CI 已通过；两路完整独立 review（Codex 与 TraeX）均已完成，原始完整报告与第一轮修正计划已补入各 PR。
-  #179 有 3 个 TraeX P1 待核实处理；#178 没有 P0/P1。修正后按新 head/base 做增量复审与 CI，再串行合入并验证实际 main。
-- 用户于 2026-10-22 明确要求用当前协调者自己的 subagent 代替 Claude；此项执行者决定优先于工程 §6.1 的历史工具安排。
-  F1、F2 已派发，正在进行第一轮批量修正。此前 Claude 会话均因 503 退出且未执行代码工具，不再等待该通道或额外批准。
-  不修改共享凭据、路由或池配置。原报告、修正计划与会话运行记录保留；接管任务资源前核对进程及工作树状态。
-- 本机不再跑 stress/load 或长时间并行循环；局部检查使用低并发、短时限，广泛检查交给 CI，Linux 验证走 `ssh devbox`。
+- 用户授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`；旧会话只作历史参考。
+  root 是唯一协调者，负责派发、review 路由、集成与交接，不实施运行时代码。
+- [#178](https://github.com/GhostFlying/cove/pull/178) 已合入 `905ff5e6`，修正全部邀请入口保存、默认入口和 SSH supervisor 生命周期。
+  原 tsnet connect timeout 原因 UNKNOWN，同 head 全量重跑通过（#182）；#174 的原始 EOF 根因仍 UNKNOWN，不能把 containment 当作根因证明。
+- [#184](https://github.com/GhostFlying/cove/pull/184) 已合入 `9326def6`，修正目录边界、启动原因、服务操作预检、源码标识、archive 构建与 logout helper 生命周期。
+  候选 `fca9a046` 到 main 的 25 个提交 patch/message 与最终 tree 一致；原 #179 已关闭为替代关系，旧分支保留，映射与 review/CI 在 #184。
+- 一次完整独立 review 与所有必要修正 delta 已完成，无未关闭 P0/P1；候选双平台 author 文件各64/64，实际 CLI/nativeSQLite 六个预期结果已验证。
+  实际 main 的 CI/有限正常启动确认与真实 Tailnet 结果分别记录在 #185，不能用候选结果替代 main 或把未执行项记为通过。
+- 用户要求原生 subagent 替代 Claude，此直接决定优先于工程 §6.1 的历史工具安排。后续实现使用原生 agent；
+  默认新会话 reviewer 为 codex gpt-6.1-sol xhigh，可选高风险第二 review 经 warmpool 使用 TraeX gpt-5.6-sol xhigh。
+- 用户要求停止扩展大小写/别名/多级链接组合调查；正常流程、必要 review/CI 和交付优先，不追加这些组合检查为阶段门槛。
+- 本机只跑低并发局部检查，不跑 stress/load 或长时并行循环；Linux 走 `ssh devbox`。恢复任务前核对进程身份和资源归属；
+  本轮新建 server state（最后观测 needs-login）与浏览器 handoff 保留供正常补验续接，不能采用旧试用节点或操作既有用户服务。
 
 ## 实机试用与补验
 
 首轮试用在笔记本、smallbox 与 sgbox 上完成，结果与缺陷记录于 #172–#175；试用创建的远端服务、客户端节点与临时资源已清理。
-合入修复后按 [M2 验收场景](milestones/m2.md#验收场景) 补验：同一配对记录切换 SSH/tsnet、默认数据目录启动、
+按 [M2 验收场景](milestones/m2.md#验收场景) 与 [#185](https://github.com/GhostFlying/cove/issues/185) 补验同一配对记录切换 SSH/tsnet、
 启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建后的升级、共享机器注销/开机行为仍未执行，不能记为通过。
 终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
 
-- 已知限制 #173：从另一台主机配对时，配对记录目前只保存 `--via` 所用的那一个入口，同一客户端也不能再配对同一 server，
-  因此在笔记本上用 `--via` 在 SSH 与 tsnet 之间切换要等 #173（改为记录邀请中的全部入口）修复后才能试用。
-- 已知限制 #172：数据目录位于另一个非 root 用户拥有的目录之下时 server 启动只报 `m0-local startup unavailable`
-  （现行规则与修复方向见 #172 与[开发说明](development.md#构建与启动)）。
+- #173 的全邀请入口保存已由 #178 修复；同一配对记录的真实 SSH/tsnet 切换仍需在最终 main 上补验。
+- #172 的边界已确认：只检查 Cove 自己创建/管理的目录；既有 COVE_HOME、HOME、祖先及任意既有用户目录不查 owner/mode、不 chmod；特殊主机布局不作新增门槛。
+- 候选两端最小构建与 helper VCS fca/clean 已验证；新 devbox 节点最后观测为 needs-login，等待用户在保留的 Chrome 标签页完成登录授权。登录请求 succeeded 不代表节点 running；follow 最终 exit1。
+  当前客户端登录、配对、同 run 恢复和 logout 未执行；续接先查本轮 state 的实际状态，不盲目重放 login/邀请/输入。最新进度以 #185 为准。
 
 - 先在 devbox 上 `cove server entry set sshTarget <user>@<host>`，否则邀请没有 SSH 入口（没有自动推断）。
 - 经 SSH 配对前先用普通 `ssh <目标>` 记录 host key；CLI 不写 known_hosts。
@@ -107,8 +108,9 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - #164 SSH 入口的 `ssh -G` 预检未受命令生命周期监督，CLI 被 SIGKILL 时可能残留（P2）。
 - #168 server tsnet 登录/登出的终态回执遇到一时的存储拒绝时不重试，记录停在 running 直到重启（P2）。
 - #169 tsnet 监督与原始连接上限的测试从 CLI 测试项目移到 server 测试项目（P3）。
-- #172 rendezvous 路径检查要求数据目录的各级上级目录属于当前用户或 root；将改为不检查 Cove 管理之外原已存在的目录（试用中发现）。
-- #173 远程配对只记录 `--via` 所用的入口，将改为记录邀请中的全部入口（试用中发现）。
+- #181 并发 remote add 可能覆盖同 server 的配对记录（既有 P2，#178 未扩展到全局存储锁）。
+- #182 CI 的一次 tsnet client.connect timeout 原因 UNKNOWN；同 head 全量重跑通过，复发先采分阶段诊断。
+- #183 CI setup 的同步超时并非硬上限，旧 main 曾在浏览器安装阶段超时/取消；缺失阶段证据与隔离复现保留。
 - #107 主线程请求路径约 0.3–0.6 ms 的回显延迟残留，属于 M4 容量验收。
 - #23、#24、#25、#28 已移出 M0（兼容参考、混合版本、有界队列与调度、兼容演进），留待后续阶段。
 
