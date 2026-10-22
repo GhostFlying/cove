@@ -302,9 +302,11 @@ M2 T0 契约（PR #150，合入于 `e8b35bf`；协议 `0e49de5`，build 标识 `
 - `cove status` 与 bootstrap 中的 `buildVersion` 不再是 `0.0.0`，而是 `<版本>+<16 位十六进制>`（随编译产物、package 清单与锁文件变化），
   或在找不到 workspace 根目录时为 `unidentified`。安装版（T3）报告安装时为整个闭包写入的同格式标识（`255b6f5`）。
   只用于诊断，不应据此判断兼容。
-- 新增错误 kind（`error.data.kind`）：`DEVICE_REVOKED`、`INVITATION_UNAVAILABLE`、`INVITATION_NOT_FOUND`、
-  `DEVICE_NOT_FOUND`、`SERVER_ID_MISMATCH`、`PEER_IDENTITY_MISMATCH`、`ENTRY_UNAVAILABLE`、`OPERATION_HISTORY_EXPIRED`
-  （整数码 1042–1049），由下文 T1–T6 的命令产生；T5b 另加 1050–1052。
+- 新增错误 kind（`error.data.kind`，整数码 1042–1049）：`DEVICE_REVOKED`（1042）、`INVITATION_UNAVAILABLE`（1043）、
+  `INVITATION_NOT_FOUND`（1044）、`DEVICE_NOT_FOUND`（1045）、`SERVER_ID_MISMATCH`（1046）、`PEER_IDENTITY_MISMATCH`（1047）、
+  `ENTRY_UNAVAILABLE`（1048）、`OPERATION_HISTORY_EXPIRED`（1049）。除 `PEER_IDENTITY_MISMATCH` 外都由下文 T1–T6 的命令产生；
+  `PEER_IDENTITY_MISMATCH` 只是声明保留，目前没有任何路径产生它：SSH host key 不符与 tsnet 对端核对不符（`PEER_MISMATCH`）
+  都报为 `ENTRY_UNAVAILABLE`。T5b 另加 1050–1052。
 - 携带输入秘密的写（目前只有 `server tsnet login` 的 auth key）的本地待定记录只保存被省略的字段名：
   对它 `cove operation resend` 在本地拒绝、不发送并以 1 退出，提示重新执行原命令（`cove operation get <id>` 可查是否已记录）。
   同一 operationId 以不同的秘密字段重用（先不带、后带 auth key，或相反）时不发送并以 1 退出，需换新的 `--operation-id`。
@@ -314,7 +316,10 @@ M2 T0 契约（PR #150，合入于 `e8b35bf`；协议 `0e49de5`，build 标识 `
 
 M2 T6 操作记录保存期限（PR #152，#97，合入于 `034ffc9`；server `737044c`，CLI `ae332f7`）：请求与成功输出不变；新增两类失败，都以 1 退出且 stdout 为空。
 
-- 已结束（succeeded、failed、cancelled）的操作记录在结束 30 天后由 server 清除，只保留 operationId：
+- 已结束（succeeded、failed、cancelled）的操作记录在结束 30 天后才可被 server 清除，换成永久的 tombstone（记录键、方法、终态、
+  规范化意图的摘要与结束时间，不含参数、结果与秘密）；仍被当前托管 worktree 尝试、尚未确认结束的进程或 run 编号上限引用的
+  记录在此之前保留，30 天是下限而不是保证的清除时间（规则见 [relay-protocol §11.3](../relay-protocol.md#113-去重并发与保存期限)）。
+  已清除的记录：
   - 对它 `cove operation get <id>` 与 `cove operation resend <id>` 以 1 退出，stdout 为空；
   - stderr 含 `OPERATION_HISTORY_EXPIRED`，说明操作已结束超过 30 天、永不再执行；
   - 直接 RPC 重发同一请求返回该 kind（acceptance `not-accepted`）；以不同参数重用这个 ID 返回 `OPERATION_ID_CONFLICT`。
@@ -344,7 +349,8 @@ M2 T1 设备授权与客户端登记（PR #153，合入于 `4d55063`；协议 `2
 - `cove remote add <ALIAS> [--name N] [--via ssh|tsnet]` 只从隐藏提示或 stdin 读邀请，从不从参数读。另有 `remote list/remove`、
   `remote entry default <ALIAS> loopback|ssh|tsnet`；`remote tsnet ...` 见下文 T4。
   输出不含 token；token 保存在 `<home>/client/servers/<serverId>.json` 中（0600）。
-- 带有效设备 token 的请求可用全部现有方法。撤销后的设备在 HTTP 上得到 401 `DEVICE_REVOKED`，在 WS 上被以 policy 关闭；
+- 带有效设备 token 的请求可用除 local-owner 方法（`server.tsnet.login`、`server.tsnet.logout`，设备调用为 `FORBIDDEN`）
+  之外的全部方法。撤销后的设备在 HTTP 上得到 401 `DEVICE_REVOKED`，在 WS 上被以 policy 关闭；
   它已受理的操作照常完成，其他主体可查询。
 
 M2 T2 SSH 入口与入口选择（PR #161，合入于 `eea6b9b`；CLI `c4681d4`、`16c25b5`（host 认证）、`fee30c5`（配对记录锁）、`35b711b`（自我撤销期限），协议 `3239d75`（loopback Host））：本机命令与 loopback 入口的请求和 JSON 输出不变。
@@ -380,7 +386,10 @@ M2 T3 安装、服务管理与重启影响（PR #162，合入于 `b146637`；ser
   `{ build, dir, created, activated, runningBuild, pending, entry, service }`；`pending` 为 true 表示正在运行的 server 仍是旧 build。
   `--activate BUILD` 只切换 `current`，输出 `{ build, activated: true, schema }`。
   目标 build 不支持数据库当前的 schema 时以 1 退出，`current` 与数据库不变（stderr 给出手动恢复步骤）。
-- `cove server restart [--yes]`、`upgrade [--yes] [--closure DIR]`、`service stop [--yes]`、`uninstall [--yes]` 会结束全部存活 run：
+- `cove server restart [--yes]`、`upgrade [--yes] [--closure DIR]`、`service stop [--yes]`、`uninstall [--yes]` 作用于服务管理器
+  运行的 server，会结束它的全部存活 run。前台 `cove server start` 运行的 server 不由它们停止，须在启动它的地方停止：
+  `restart`/`upgrade` 对它以 1 退出；`uninstall` 不确认也不停止它，移除服务单元后，若它运行的是已安装的 build 就保留全部 build
+  并以 1 退出；没有已注册的服务时 `service stop` 输出服务状态并以 0 退出，不停止前台 server。对服务管理器运行的 server：
   没有 `--yes` 且不在终端中时，stdout 输出 `{ action, confirmed: false, state: "running", impact }` 并以 **2** 退出，什么也不做。
   server 持有数据目录却连不上（握手超时、容量拒绝、卡住）时状态未知：同样以 2 退出，输出
   `{ action, confirmed: false, state: "unknown", reason, impact: null }`；带 `--yes` 时照常执行（stderr 注明状态未知），
@@ -405,7 +414,9 @@ M2 T3 安装、服务管理与重启影响（PR #162，合入于 `b146637`；ser
 
 M2 T5b server 的 tsnet 节点与原始连接上限（PR #167，#155、#156，合入于 `60860bd`；协议 `a32db8e`、`86f2044`，server `5045b10`、`4db8f9f`（原始连接上限）、`80d76b0`、`020bca5`、`6adda98`、`065f929`，CLI `4bee12d`、`9e099a2`、`60860bd`）：现有命令的请求与 JSON 输出不变。
 
-- 新增 `cove server tsnet login|status|logout [--operation-id ID]`，只作用于本机（拒绝 `--server`）。
+- 新增 `cove server tsnet login [--operation-id ID]`、`cove server tsnet status`（不接受任何选项，给出选项为用法错误 2）与
+  `cove server tsnet logout [--operation-id ID]`，CLI 整组只作用于本机（拒绝 `--server`）。RPC 上 `server.tsnet.login`/`logout`
+  只接受本机凭据，`server.tsnet.status` 是普通读方法，设备也可调用。
   - `status` 输出 `{ state, hostname, nodeId, nodeName, hold, ports, warnings }`：
     - `state` 为 `logged-out|stopped|starting|needs-login|running|failed`；
     - `hold` 为 `identity-changed|login-uncertain|null`。
@@ -424,13 +435,14 @@ M2 T5b server 的 tsnet 节点与原始连接上限（PR #167，#155、#156，�
 - 节点登录后，`auth invite create` 的邀请可含 `entries.tsnet`；没有 SSH 目标但节点可用时也能创建邀请。
   `auth device list` 中经 tsnet 连接的设备 `lastEntry` 为 `tsnet`。
 - 业务端口在头部解析前有原始连接上限（总数 128，未发完请求头的 64 条，请求头期限 5 秒，#156）。
-  - 只影响不发完请求头的连接；
-  - CLI 与正常客户端不变。
+  - 总数上限计入全部打开的连接（含 loopback 与 tsnet 转交的，正在处理请求或承载 WebSocket 的也算）。达到任一上限时先关闭
+    等待请求头最久的连接；没有等待请求头的连接可关闭时，新连接本身被拒绝。因此正常客户端在连接数达到 128 时同样会被拒绝；
+  - 请求头期限只关闭未发完请求头的连接，正在运行的长请求不受影响。
 - `COVE_TSNET_BINARY`、`COVE_TSNET_CONTROL_URL` 只在开发 workspace 中生效；安装闭包中设置时 server 不启动 tsnet 节点。tend-runner 不应设置它们。
 
 M2 T4 客户端 tsnet（PR #165，合入于 `379905d`；CLI `27cfdb3`、`762f633`、`c2d02f5`、`70f501f`、`37fed77`、`8c0bfd7`、`f87a34e`，`cove-tsnet dial-owned` `f66dd0d`）：本机命令与 loopback、SSH 入口的请求和 JSON 输出不变。
 
-- `--via tsnet` 可用：经客户端自己的 Tailnet 节点（每个 OS 用户一个按需启动的 `cove-tsnet dial` 常驻进程，空闲 10 分钟退出）
+- `--via tsnet` 可用：经客户端自己的 Tailnet 节点（每个 OS 用户与 Cove 数据目录一个按需启动的 `cove-tsnet dial` 常驻进程，空闲 10 分钟退出）
   连到配对记录中按稳定 ID 指定的 server 节点。dial 进程在 10 秒内未就绪、未登录、找不到或核对不符（`PEER_MISMATCH`）时以 1 退出，
   stderr 含 `ENTRY_UNAVAILABLE` 与原因，不发送 token；不换入口。tend-runner 经 tsnet 调用远程 server 前须先完成
   `remote tsnet login`；dial 进程在命令之后继续存在，属预期。
@@ -537,3 +549,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | main `eea6b9b`；#165（M2 T4，未合入）                                           | 更正 PENDING #165：`remote tsnet stop` 只在 dial 进程的锁空闲时报告 `{ running: false }`，锁被占用而 10 秒内无应答时以 1 退出（状态未知）；后续连接被拒时命令错误给出原因；`COVE_TSNET_BINARY`、`COVE_TSNET_CONTROL_URL` 在安装版中被拒绝（以 1 退出）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 2026-10-22 | main `b146637`；#165（M2 T4，未合入）                                           | 更正 PENDING #165（已变基到含 #162 的 main）：`remote add --via tsnet` 的兑换连接被拒时错误给出原因；命令自己处理的失败另在 stderr 写出被拒的原因，stdout 与退出码不变；测试用环境变量在安装闭包中被拒绝时不启动进程、不发送任何内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | 2026-10-22 | main `379905d`（PR #141、#143、#145、#150、#152、#153、#161、#162、#167、#165） | 基准改为 main `379905d`；全部 PENDING 项改为 AVAILABLE（§2），注明各 PR 的合入提交与主要引入提交，PENDING 现为空；§2 表格补列操作记录保存期限、设备授权、远程 server、安装与服务、server 的 tsnet 节点；按 main 上的代码更正此前 PENDING 中已过时的说明：`--via ssh\|tsnet`、`remote tsnet` 与 `server tsnet` 均已可用（不再是 `ENTRY_UNAVAILABLE`/`CAPABILITY_UNAVAILABLE`），`server entry/status/impact` 可带 `--server`，`remote add` 带 `--via`，同一主机配对时另记 tsnet 入口，邀请只有设置 `sshTarget` 后才含 SSH 入口，T0 的错误 kind 由 T1–T6 产生且 T5b 另加 1050–1052、输入秘密目前只有 `server tsnet login`；补充已核对的输出：`install --activate` 的 `{ build, activated, schema }`、`upgrade` 成功输出另带 `build`、前台 server 不能 `restart`/`upgrade`、`server status --server` 只输出 `{ server }`、`remote tsnet stop` 的 `stopped` 形状、安装版的 build 标识                                                                                           |
+| 2026-10-22 | main `379905d`（#170 review 更正）                                              | 更正 §2：`restart`/`upgrade`/`service stop`/`uninstall` 只结束服务管理器运行的 server 的 run，前台 server 须在原处停止；设备 token 不能调用 local-owner 方法（`server.tsnet.login`/`logout`）；原始连接总数上限计入全部连接，正常客户端在满额时也会被拒绝；30 天是清除的下限，被引用的记录保留，tombstone 内容见协议 §11.3；`server tsnet status` 不接受选项；dial 进程按 OS 用户与数据目录唯一；`PEER_IDENTITY_MISMATCH`（1047）只是声明保留，对端核对失败报为 `ENTRY_UNAVAILABLE`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
