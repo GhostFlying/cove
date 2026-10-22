@@ -3369,6 +3369,74 @@ describe("D passive production local entry", () => {
     }
   });
 
+  it("does not gate an arbitrary user parent on unrelated absent broken inaccessible or wrong-mode layouts", async () => {
+    const root = await mkdtemp(join(await realpath(tmpdir()), "cove-unrelated-managed-"));
+    const home = join(root, "home");
+    const parent = join(root, "user");
+    const alias = join(root, "user-alias");
+    const locked = join(root, "locked");
+    await mkdir(home, { mode: 0o700 });
+    await mkdir(parent, { mode: 0o700 });
+    await chmod(parent, 0o777);
+    await symlink(parent, alias);
+    await writeFile(join(parent, "prior"), "user bytes\n");
+    await symlink(join(home, "server"), join(home, "server"));
+    await symlink(join(root, "absent"), join(home, "tsnet"));
+    await mkdir(locked, { mode: 0o700 });
+    await mkdir(join(locked, "private"), { mode: 0o700 });
+    await symlink(join(locked, "private"), join(home, "install"));
+    const unrelated = join(home, "client");
+    await mkdir(unrelated, { mode: 0o700 });
+    await chmod(unrelated, 0o777);
+    await chmod(locked, 0);
+    const before = await stat(parent);
+    try {
+      const resolution = {};
+      for (const name of ["server", "tsnet", "install", "bin"]) {
+        resolution[name] = await realpath(join(home, name)).then(
+          () => "resolved",
+          (error) => error.code,
+        );
+      }
+      expect(resolution).toEqual({
+        server: "ELOOP",
+        tsnet: "ENOENT",
+        bin: "ENOENT",
+        install: process.getuid() === 0 ? "resolved" : "EACCES",
+      });
+      for (const selected of [parent, alias]) {
+        const file = new LocalRendezvous(join(selected, "rendezvous"), [home]);
+        try {
+          await file.publish({
+            bootstrapVersion: 1,
+            ...identity,
+            endpoint: "http://127.0.0.1:32123",
+          });
+          expect(JSON.parse(await readFile(file.path, "utf8")).serverId).toBe(identity.serverId);
+          expect((await stat(file.path)).mode & 0o777).toBe(0o600);
+        } finally {
+          await file.close();
+        }
+      }
+      const after = await stat(parent);
+      expect([after.dev, after.ino, after.uid, after.mode]).toEqual([
+        before.dev,
+        before.ino,
+        before.uid,
+        before.mode,
+      ]);
+      expect((await stat(unrelated)).mode & 0o777).toBe(0o777);
+      expect((await stat(locked)).mode & 0o777).toBe(0);
+      expect((await lstat(alias)).isSymbolicLink()).toBe(true);
+      expect(await readdir(parent)).toEqual(["prior"]);
+      expect(await readFile(join(parent, "prior"), "utf8")).toBe("user bytes\n");
+      await recordAuthor("managed-unrelated-resolution", resolution);
+    } finally {
+      await chmod(locked, 0o700);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("refuses cleanup through a replaced external directory and preserves both directories", async () => {
     const root = await mkdtemp(join(await realpath(tmpdir()), "cove-parent-identity-"));
     const parent = join(root, "external");
