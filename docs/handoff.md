@@ -9,7 +9,7 @@
 - 用户于 2026-10-21 批准 M1 退出与 M2 规划，同日决定 D1–D14 并批准 [M2 计划](milestones/m2.md)（PR #142）。
   D9 是范围变更：Cove 不使用系统 Tailscale，两端只用内嵌的 tsnet；D14：客户端 tsnet 用按需启动的常驻进程。
 - **M2 的 T0–T7 与首轮试用修复 #178、#184 已合入；正常实机补验通过，待阶段 review。**
-  实际 main 双平台 CI 与两节点真实 Tailnet 补验已通过；注销/开机与安装新构建升级仍未执行，不能视为通过；
+  实际 main 双平台 CI、两节点真实 Tailnet 与双平台真实服务安装升级补验已通过；系统账号注销/开机仍未执行，不能视为通过；
   M2 退出与 M3 进入都需要用户明确批准，完成任务不等于批准进入下一阶段。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
@@ -72,10 +72,11 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 
 首轮试用在笔记本、smallbox 与 sgbox 上完成，结果与缺陷记录于 #172–#175；试用创建的远端服务、客户端节点与临时资源已清理。
 按 [M2 验收场景](milestones/m2.md#验收场景) 与 [#185](https://github.com/GhostFlying/cove/issues/185) 补验同一配对记录切换 SSH/tsnet、
-启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建后的升级、共享机器注销/开机行为仍未执行，不能记为通过。
+启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建升级已在 Linux systemd user 与 macOS LaunchAgent 上实测通过；系统账号注销/登录与开机仍未执行，不能记为通过。
 终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
 
 - #173 已由 #178 修复并在实际 main 真实补验：恰一条配对记录保存 SSH+tsnet，默认 SSH；两入口返回同一 server/instance/task/run。
+- 安装升级补验：真实 A `905ff5e6` → B `bf75d451`，两平台安装 B 时保留运行 A；restart/upgrade 无 `--yes` 只列影响并拒绝。确认后运行 B、serverId 保留、instance 改变，旧 run 为 stopped-with-server、启动标记不增加；直接 upgrade 路径也通过。卸载移除本轮唯一服务和进程、保留数据库；两次 Linux 夹具失败与修正保留在 #185。
 - #172 的边界已确认：只检查 Cove 自己创建/管理的目录；既有 COVE_HOME、HOME、祖先及任意既有用户目录不查 owner/mode、不 chmod；特殊主机布局不作新增门槛。
 - 实际运行时 `9326def6`：macOS arm64 客户端与 Linux x64 devbox 的 fresh 节点均确认 running；SSH→tsnet→SSH 三次接入同一 run，三个标记各发送一次并从恢复输出观察到；默认入口切 tsnet、再恢复 SSH 均通过。
 - server 节点 logout 的 remoteLogoutConfirmed=true，原 helper/state 消失且有界观察未自动重建；server/原 run 继续经 SSH 可用，登出后第四个标记发送一次并观察到。client logout 同样确认，随后 stop，原 daemon/state 消失；fixture run 已退出、配对设备已撤销。
