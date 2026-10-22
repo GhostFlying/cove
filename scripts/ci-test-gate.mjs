@@ -676,6 +676,31 @@ export const requiredSuites = [
 
 export const finiteRuntimeExpansions = [
   {
+    project: "tooling",
+    file: "tests/tooling/ci-environment-setup.test.mjs",
+    template: "setup wait is bounded for %s under an independent watchdog",
+    names: [
+      "setup wait is bounded for ignore-term under an independent watchdog",
+      "setup wait is bounded for descendant-pipe under an independent watchdog",
+    ],
+  },
+  {
+    project: "tooling",
+    file: "tests/tooling/ci-environment-setup.test.mjs",
+    template: "unsupported runner layout refuses without changing the supplied originals (%#)",
+    names: [
+      "unsupported runner layout refuses without changing the supplied originals (0)",
+      "unsupported runner layout refuses without changing the supplied originals (1)",
+      "unsupported runner layout refuses without changing the supplied originals (2)",
+      "unsupported runner layout refuses without changing the supplied originals (3)",
+      "unsupported runner layout refuses without changing the supplied originals (4)",
+      "unsupported runner layout refuses without changing the supplied originals (5)",
+      "unsupported runner layout refuses without changing the supplied originals (6)",
+      "unsupported runner layout refuses without changing the supplied originals (7)",
+      "unsupported runner layout refuses without changing the supplied originals (8)",
+    ],
+  },
+  {
     project: "server",
     file: "apps/server/tests/independent/terminal-control-client.test.mjs",
     template:
