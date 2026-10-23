@@ -272,7 +272,7 @@ export const requiredSuites = [
   {
     project: "server",
     file: "apps/server/tests/author/business-events.test.mjs",
-    minimumTests: 13,
+    minimumTests: 14,
   },
   { project: "server", file: "apps/server/tests/author/worker-health.test.mjs", minimumTests: 5 },
   { project: "server", file: "apps/server/tests/author/build-id-stamp.test.mjs", minimumTests: 4 },
