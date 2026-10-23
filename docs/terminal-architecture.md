@@ -36,13 +36,13 @@ Server/CLI 已选 TypeScript/Node.js，终端处理放入有界子进程池；�
 ## 2. Transport 与协议分开
 
 - Server 提供 host 网络和内置 Tailscale 接入；两者进入同一协议和业务服务。
-- 本机还可通过本地 IPC 连接；远程连接经 SSH 隧道或 Tailscale，由通道负责加密和对端验证，Cove 保留设备授权。
+- 本机业务入口已选 loopback；远程连接经 SSH 隧道或内嵌 tsnet，由通道负责加密和对端验证，Cove 保留设备授权（M2 D3/D9）。
 - 桌面和 mobile 使用相同会话身份、方法语义和恢复规则。
 - 不让 relay 的存活依赖 SSH channel 或某个客户端连接的存活。
 - 批量输出按 terminal 独立调度和限流，输入、控制请求及其他 terminal 不能被单个输出洪峰长期饿死。
 - 控制消息可以使用易调试的结构化编码，输出使用保留字节语义的二进制帧；载体已选独立终端 WebSocket，帧编码尚未冻结。
 
-Mobile 通过系统 Tailnet 连接执行主机，不内嵌 Tailscale；移动端 SSH 后续评估。
+Desktop 与 Mobile 均使用各自内嵌的 tsnet，不依赖系统 Tailscale；具体宿主接线见 [M3 规划](milestones/m3.md)，移动端 SSH 后续评估。
 接入与状态同步详见 [Server 架构](server-architecture.md)。
 
 ## 3. 恢复路线：已选 host 持续维护终端状态

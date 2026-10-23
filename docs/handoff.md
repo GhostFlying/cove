@@ -8,9 +8,10 @@
 - M0 实施于 2026-09-26 获批；M0 退出与 M1 进入于 2026-10-15 获批（[M1](milestones/m1.md)）。
 - 用户于 2026-10-21 批准 M1 退出与 M2 规划，同日决定 D1–D14 并批准 [M2 计划](milestones/m2.md)（PR #142）。
   D9 是范围变更：Cove 不使用系统 Tailscale，两端只用内嵌的 tsnet；D14：客户端 tsnet 用按需启动的常驻进程。
-- **M2 的 T0–T7 与首轮试用修复 #178、#184 已合入；正常实机补验通过，待阶段 review。**
-  实际 main 双平台 CI、两节点真实 Tailnet 与双平台真实服务安装升级补验已通过；系统账号注销/开机仍未执行，不能视为通过；
-  M2 退出与 M3 进入都需要用户明确批准，完成任务不等于批准进入下一阶段。
+- **用户于 2026-10-23 接受 M2 交付、批准 M2 退出并授权 M3 规划**（[#185 阶段决定](https://github.com/GhostFlying/cove/issues/185#issuecomment-6358353029)）。
+  M2 双机 Tailnet、双平台安装升级及实际 main CI 已通过；Linux 容器注销/init 周期模拟通过，范围不含 host kernel reboot。
+  macOS 真实 GUI 注销/登录由用户决定暂缓，待测试机或实际使用观察（[#189](https://github.com/GhostFlying/cove/issues/189)），不记通过、不阻塞退出。
+- **M3 仅规划获批，实施待批准。** [草案](milestones/m3.md) 与 [#190](https://github.com/GhostFlying/cove/issues/190) 列出 D1–D7、依赖和验收；不提前 scaffold/原型或开工。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
   默认 reviewer 为 codex `gpt-6.1-sol` xhigh；认证边界、协议契约与节点身份核实的变更另加 TraeX 第二 review。
@@ -19,23 +20,10 @@
 
 ## Main
 
-运行时 main 为 `9326def6`（#184；#178 为 `905ff5e6`），交接 #186 合入于 `db57e826`。两个 main 的双平台 CI 均通过，正常补验与当前 revision 见 [#185](https://github.com/GhostFlying/cove/issues/185)。M2 主任务历史：
-
-| 任务 | PR   | 合入于    | 内容                                                                  |
-| ---- | ---- | --------- | --------------------------------------------------------------------- |
-| T0   | #150 | `e8b35bf` | auth、服务与入口契约，秘密的分界，真实 build 标识                     |
-| T6   | #152 | `034ffc9` | 操作记录 30 天保存期限与 tombstone（#97）                             |
-| T5a  | #148 | `809e098` | `cove-tsnet` serve 与 dial（Go，`native/tailscale`）                  |
-| —    | #158 | `1c306e8` | tend 集成说明的 CI 检查（#101）                                       |
-| T1   | #153 | `4d55063` | 设备授权、配对监听、`auth`、`remote`、`--server`（loopback）          |
-| T2   | #161 | `eea6b9b` | SSH 入口与入口选择，loopback IP 字面量 Host                           |
-| T3   | #162 | `b146637` | 安装闭包、用户服务、重启影响、入口配置                                |
-| —    | #166 | `9878530` | Vitest 门禁按 OS 分 3 片并聚合（#163）                                |
-| T5b  | #167 | `60860bd` | server 的 tsnet 节点、`server tsnet`、业务端口原始连接上限（#156）    |
-| T4   | #165 | `379905d` | 客户端 tsnet（常驻 `cove-tsnet dial`）、`remote tsnet`、`--via tsnet` |
-| T7   | #170 | `cb94496` | M2 设计、使用说明、tend 集成说明与当前交接                            |
-
-M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（测试 flake）。
+当前 main `58460afd`（#188），应用运行时代码与 `9326def6`（#184）一致；#178 为 `905ff5e6`。
+#188 同步安装升级结果并修复 CI setup 监督/证据（#183 已关闭）；候选与 main 的五提交 patch/message/最终 tree 一致。
+实际 main Engineering39839342758 六片、两 Go、两个必需汇总均通过，tend39839342852 通过；原网络原因仍 UNKNOWN。
+M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://github.com/GhostFlying/cove/issues/185)、[M2](milestones/m2.md) 与 Git。
 
 已实现的范围（设计写回见 [Server 架构 §§4、5、9](server-architecture.md#4-host-网络和内置-tailscale)、
 [relay-protocol §§4、11.8](relay-protocol.md#4-握手本身必须跨业务协议可读)）：
@@ -52,8 +40,9 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - 用法：[开发说明 · M2 远程 server](development.md#m2-远程-server安装配对与入口)；
   tend 可用的接口与待同步变更：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 
-## 活动收尾与协调接管
+## M3 规划与协调接管
 
+- 当前 root 为 M3 唯一协调者，持有规划文档写入；read-only helpers 分别调查 Desktop、Mobile 与 shared client/events/tab send。
 - 用户授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`；旧会话只作历史参考。
   root 是唯一协调者，负责派发、review 路由、集成与交接，不实施运行时代码。
 - [#178](https://github.com/GhostFlying/cove/pull/178) 已合入 `905ff5e6`，修正全部邀请入口保存、默认入口和 SSH supervisor 生命周期。
@@ -72,9 +61,11 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 
 首轮试用在笔记本、smallbox 与 sgbox 上完成，结果与缺陷记录于 #172–#175；试用创建的远端服务、客户端节点与临时资源已清理。
 按 [M2 验收场景](milestones/m2.md#验收场景) 与 [#185](https://github.com/GhostFlying/cove/issues/185) 补验同一配对记录切换 SSH/tsnet、
-启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建升级已在 Linux systemd user 与 macOS LaunchAgent 上实测通过；系统账号注销/登录与开机仍未执行，不能记为通过。
+启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建升级已在两平台真实服务实测通过；Linux 容器生命周期模拟通过，macOS GUI 注销/登录已由用户批准暂缓（#189），不冒充通过。
 终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
 
+- Linux Docker 补验：真实 PAM/logind 最后会话退出后同实例/run 继续；init 周期自动拉起、身份保留、旧 run 停止且 marker 不重放。
+  lastStart=unknown 与自动 unified cgroup 隔离 UNKNOWN 保留，全部自有容器/镜像已清理；[报告](https://github.com/GhostFlying/cove/issues/185#issuecomment-6357643941)。
 - #173 已由 #178 修复并在实际 main 真实补验：恰一条配对记录保存 SSH+tsnet，默认 SSH；两入口返回同一 server/instance/task/run。
 - 安装升级补验：真实 A `905ff5e6` → B `bf75d451`，两平台安装 B 时保留运行 A；restart/upgrade 无 `--yes` 只列影响并拒绝。确认后运行 B、serverId 保留、instance 改变，旧 run 为 stopped-with-server、启动标记不增加；直接 upgrade 路径也通过。卸载移除本轮唯一服务和进程、保留数据库；两次 Linux 夹具失败与修正保留在 #185。
 - #172 的边界已确认：只检查 Cove 自己创建/管理的目录；既有 COVE_HOME、HOME、祖先及任意既有用户目录不查 owner/mode、不 chmod；特殊主机布局不作新增门槛。
@@ -112,7 +103,6 @@ M2 之前的最后一批是 #141、#143、#145（M1 后续修复）与 #147（�
 - #169 tsnet 监督与原始连接上限的测试从 CLI 测试项目移到 server 测试项目（P3）。
 - #181 并发 remote add 可能覆盖同 server 的配对记录（既有 P2，#178 未扩展到全局存储锁）。
 - #182 CI 的一次 tsnet client.connect timeout 原因 UNKNOWN；同 head 全量重跑通过，复发先采分阶段诊断。
-- #183 CI setup 的同步超时并非硬上限，旧 main 曾在浏览器安装阶段超时/取消；缺失阶段证据与隔离复现保留。
 - #107 主线程请求路径约 0.3–0.6 ms 的回显延迟残留，属于 M4 容量验收。
 - #23、#24、#25、#28 已移出 M0（兼容参考、混合版本、有界队列与调度、兼容演进），留待后续阶段。
 
