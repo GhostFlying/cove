@@ -605,7 +605,7 @@ export const requiredSuites = [
   {
     project: "terminal-web-unit",
     file: "packages/terminal-web/tests/unit/view-bridge.test.mjs",
-    minimumTests: 16,
+    minimumTests: 22,
   },
   {
     project: "terminal-web",
