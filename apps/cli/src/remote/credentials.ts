@@ -32,16 +32,15 @@ import { OpaqueIdSchema } from "@cove/protocol/identity";
 // checks with WhoIs) and then the serverId (entries.ts verifiedIdentity), both before the token is
 // released.
 
-export const ENTRY_KINDS = ["loopback", "ssh", "tsnet"] as const;
-export type EntryKind = (typeof ENTRY_KINDS)[number];
-export type LoopbackEntry = { readonly port: number };
-export type SshEntry = { readonly target: string; readonly port: number };
-export type TsnetEntry = { readonly nodeId: string; readonly name: string; readonly port: number };
-export type ServerEntries = {
-  readonly loopback?: LoopbackEntry;
-  readonly ssh?: SshEntry;
-  readonly tsnet?: TsnetEntry;
-};
+import { ENTRY_KINDS, type EntryKind, type ServerEntries } from "@cove/node-client";
+export { ENTRY_KINDS } from "@cove/node-client";
+export type {
+  EntryKind,
+  LoopbackEntry,
+  SshEntry,
+  TsnetEntry,
+  ServerEntries,
+} from "@cove/node-client";
 
 // Whether `entry` is a valid entry of `kind`, with exactly its members.
 function validEntry(kind: string, entry: unknown): boolean {
@@ -65,10 +64,10 @@ export type ServerRecord = {
   readonly version: 1;
   readonly alias: string;
   readonly serverId: string;
-  readonly deviceId: string;
-  readonly token: string;
   readonly defaultEntry: EntryKind;
   readonly entries: ServerEntries;
+  readonly deviceId: string;
+  readonly token: string;
   readonly pairedAtMs: number;
 };
 

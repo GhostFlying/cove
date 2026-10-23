@@ -10,6 +10,7 @@
   "references": [
     { "path": "../../packages/protocol" },
     { "path": "../../packages/client" },
-    { "path": "../server" }
+    { "path": "../server" },
+    { "path": "../../packages/node-client" }
   ]
 }

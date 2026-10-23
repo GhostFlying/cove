@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { createClient, credentialSupplier, type CallOutcome, type Client } from "@cove/client";
 import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
+import { nodeSession } from "@cove/node-client";
 import { TsnetAuthKeySchema, type TsnetStatusResultSchema } from "@cove/protocol/auth";
 import type { OperationRecord } from "@cove/protocol/rpc";
 import { createNodePorts } from "../node-ports.js";
@@ -102,7 +103,9 @@ async function withLocalSession<T>(
       throw new Error(
         `Cannot connect to ${record.endpoint}: ${connected.error.category} ${connected.error.reason}`,
       );
-    return await action({ record, client });
+    return await action(
+      nodeSession(record, client, () => ({ kind: "local-secret", secret: record.secret })),
+    );
   } finally {
     client.dispose();
   }

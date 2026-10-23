@@ -12,6 +12,7 @@
     { "path": "./packages/terminal-web/tsconfig.tests.json" },
     { "path": "./apps/server/tsconfig.json" },
     { "path": "./apps/m0-harness/tsconfig.json" },
-    { "path": "./apps/cli/tsconfig.json" }
+    { "path": "./apps/cli/tsconfig.json" },
+    { "path": "./packages/node-client/tsconfig.json" }
   ]
 }

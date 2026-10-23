@@ -25,7 +25,8 @@
     "@cove/client": "workspace:*",
     "@cove/m0-harness": "workspace:*",
     "@cove/protocol": "workspace:*",
-    "@cove/server": "workspace:*"
+    "@cove/server": "workspace:*",
+    "@cove/node-client": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "26.6.2",

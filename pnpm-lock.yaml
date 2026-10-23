@@ -224,6 +224,9 @@ importers:
       '@cove/m0-harness':
         specifier: workspace:*
         version: link:../m0-harness
+      '@cove/node-client':
+        specifier: workspace:*
+        version: link:../../packages/node-client
       '@cove/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -290,6 +293,19 @@ importers:
       '@cove/protocol':
         specifier: workspace:*
         version: link:../protocol
+
+  packages/node-client:
+    dependencies:
+      '@cove/client':
+        specifier: workspace:*
+        version: link:../client
+      '@cove/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.2
+        version: 26.6.2
 
   packages/protocol:
     dependencies:
