@@ -351,7 +351,8 @@ Cove 自己完成任务创建、workspace 管理、session 操作和基本状态
 
 ### 7.1 以 tend 实现 Shepherd，经 CLI 集成（方向已接受，未排期）
 
-状态：用户于 2026-10-16 接受本节方向与程序化输入规则（见下文“已决定”）；实现未排期，不属于 M1，
+状态：用户于 2026-10-16 接受本节方向与程序化输入规则（见下文“已决定”）；业务事件、控制者观测与 `tab send` 已纳入 [M3 T2/T6](milestones/m3.md#任务与单写者)，尚待实现与验证。
+完整 tend 集成及其余能力仍未排期，不属于 M1，
 具体 milestone 另行批准。字段名与命令语法在实现时确定。面向 tend 开发者的现状与变更记录见
 [Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 
