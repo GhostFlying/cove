@@ -13,9 +13,14 @@ type Entry = {
   lease: ByteReservation;
 };
 const copy = (status: RunStatus): RunStatus => structuredClone(status);
+export type RunFactObserver = {
+  changed(run: RunRef, worker: WorkerRef, status: RunStatus | null): void;
+  uncertain(): void;
+};
 
 export class RunRegistry {
   private readonly entries = new Map<string, Entry>();
+  private businessObserver: RunFactObserver | undefined;
   constructor(
     readonly composition: RuntimeComposition,
     readonly maxRuns: number = composition.budgets.maxRuns,
@@ -26,6 +31,24 @@ export class RunRegistry {
 
   private get bytes() {
     return this.composition.bytes;
+  }
+
+  // One business observer reads confirmed facts only. This does not query a worker, focus a
+  // terminal, or change the registry's authority. An observer defect invalidates its stream.
+  observeBusiness(observer: RunFactObserver | undefined): void {
+    if (observer && this.businessObserver) throw new Error("Run business observer already owned");
+    this.businessObserver = observer;
+  }
+  private notify(entry: Entry, removed = false): void {
+    try {
+      this.businessObserver?.changed(
+        { ...entry.run },
+        { ...entry.worker },
+        removed ? null : copy(entry.status),
+      );
+    } catch {
+      this.businessObserver?.uncertain();
+    }
   }
 
   reserve(run: RunRef, worker: WorkerRef, geometry: Geometry): boolean {
@@ -59,6 +82,7 @@ export class RunRegistry {
       dispatched: false,
       lease,
     });
+    this.notify(this.entries.get(run.runId)!);
     return true;
   }
 
@@ -90,6 +114,7 @@ export class RunRegistry {
       if ((status.parsedSeq ?? -1) < (entry.status.parsedSeq ?? -1)) return true;
     }
     entry.status = copy(parsed.data);
+    this.notify(entry);
     return true;
   }
 
@@ -111,6 +136,7 @@ export class RunRegistry {
     });
     if (!parsed.success) return false;
     entry.status = parsed.data;
+    this.notify(entry);
     return true;
   }
 
@@ -118,6 +144,7 @@ export class RunRegistry {
     for (const entry of this.entries.values()) {
       if (sameWorkerRef(entry.worker, worker) && entry.status.status !== "exited") {
         entry.status = { ...entry.status, status: "unverifiable", recovery: "unavailable" };
+        this.notify(entry);
       }
     }
   }
@@ -146,6 +173,7 @@ export class RunRegistry {
     )
       return false;
     this.entries.delete(run.runId);
+    this.notify(entry, true);
     entry.lease.release();
     return true;
   }
@@ -164,6 +192,7 @@ export class RunRegistry {
     )
       return false;
     this.entries.delete(run.runId);
+    this.notify(entry, true);
     entry.lease.release();
     return true;
   }

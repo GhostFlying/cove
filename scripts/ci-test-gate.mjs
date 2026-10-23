@@ -219,6 +219,11 @@ export const requiredSuites = [
   },
   // Three tests run the matrix (53 call points x 15 actions); 43 named regressions; 46 tests.
   { project: "client", file: "packages/client/tests/terminal-reentry.test.mjs", minimumTests: 47 },
+  {
+    project: "protocol",
+    file: "packages/protocol/tests/business-events.test.mjs",
+    minimumTests: 3,
+  },
   { project: "protocol", file: "packages/protocol/tests/metadata.test.mjs", minimumTests: 7 },
   { project: "protocol", file: "packages/protocol/tests/frame.test.mjs", minimumTests: 8 },
   { project: "protocol", file: "packages/protocol/tests/composition.test.mjs", minimumTests: 5 },
@@ -263,6 +268,11 @@ export const requiredSuites = [
     project: "server",
     file: "apps/server/tests/author/worker-pipe-session.test.mjs",
     minimumTests: 48,
+  },
+  {
+    project: "server",
+    file: "apps/server/tests/author/business-events.test.mjs",
+    minimumTests: 13,
   },
   { project: "server", file: "apps/server/tests/author/worker-health.test.mjs", minimumTests: 5 },
   { project: "server", file: "apps/server/tests/author/build-id-stamp.test.mjs", minimumTests: 4 },

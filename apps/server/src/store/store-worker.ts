@@ -3,6 +3,7 @@ import { openConnection } from "./connection.js";
 import { execute, loadAfterCommitHooks, loadOperations } from "./executor.js";
 import { serializeStoreError } from "./store-errors.js";
 import type { StoreRequest, StoreResponse, StoreWorkerData } from "./store-protocol.js";
+import { BusinessJournal } from "./business-journal.js";
 
 // The store worker thread (D6 B): the only place the server's database connection exists. It is
 // started by Store.open (database.ts) after the main thread took the instance lock, and it runs
@@ -39,6 +40,7 @@ async function main(): Promise<void> {
     return;
   }
   const db = opened.db;
+  const journal = new BusinessJournal(db, data.defaultWorkspaceRoot);
   port!.on("message", (request: StoreRequest) => {
     if (request.type === "close") {
       // The client sends close only after every call was answered.
@@ -51,7 +53,7 @@ async function main(): Promise<void> {
       port!.close();
       return;
     }
-    const result = execute(db, operations, request.operation, request.args);
+    const result = execute(db, operations, request.operation, request.args, journal);
     if (result.ok) for (const hook of hooks) result.value = hook(request.operation, result.value);
     try {
       post({ type: "result", id: request.id, ...result });
