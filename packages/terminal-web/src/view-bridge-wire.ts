@@ -12,6 +12,7 @@ export interface ViewBridgeFrame {
   kind: string;
   commandId?: number;
   noticeId?: number;
+  measurementRevision?: number;
   operation?: string;
   value?: unknown;
   bytes?: string;

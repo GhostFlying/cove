@@ -31,9 +31,14 @@ function assertDependencyBoundary(
     throw new Error("Engine exports escaped the adapter and experiment boundary");
   if (
     Object.keys(webManifest.exports).sort().join() !==
-    "./probes/environment,./probes/query-input,./xterm-view"
+    "./probes/environment,./probes/query-input,./view-bridge,./xterm-view"
   )
     throw new Error("Web exports escaped the view and experiment boundary");
+  if (
+    JSON.stringify(webManifest.exports["./view-bridge"]) !==
+    JSON.stringify({ types: "./dist/src/view-bridge.d.ts", import: "./dist/src/view-bridge.js" })
+  )
+    throw new Error("Web bridge export escaped the compiled view boundary");
   if (
     Object.keys(engineManifest.dependencies).sort().join() !==
     "@cove/protocol,@xterm/addon-serialize,@xterm/headless"
@@ -449,10 +454,16 @@ test("isolated browser consumer compiles the public xterm view export", async ()
   await writeFile(
     join(directory, "consumer.mts"),
     `import { createXtermTerminalView } from '@cove/terminal-web/xterm-view';
+import { createTerminalViewBridgeHost, createTerminalViewBridgeEndpoint } from '@cove/terminal-web/view-bridge';
 import type { TerminalView } from '@cove/protocol/view';
 declare const container: HTMLElement;
 const view: TerminalView = createXtermTerminalView(container);
+declare const postMessage: (message: string) => void;
+const host: TerminalView = createTerminalViewBridgeHost({ bridgeGeneration: 1, postMessage });
+const endpoint = createTerminalViewBridgeEndpoint({ bridgeGeneration: 1, view, initialGeometry: { cols: 80, rows: 24 }, postMessage });
 void view;
+void host;
+void endpoint;
 `,
   );
   const result = spawnSync(

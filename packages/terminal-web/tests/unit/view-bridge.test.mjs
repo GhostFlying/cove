@@ -5,6 +5,7 @@ import {
   createTerminalViewBridgeHost,
 } from "../../dist/src/view-bridge.js";
 import { decodeBridgeBytes, encodeBridgeBytes } from "../../dist/src/view-bridge-wire.js";
+import { fakeView, reentryHarness, settle } from "../../../client/tests/reentry-fixture.mjs";
 
 const cleanup = [];
 afterEach(() => {
@@ -60,7 +61,9 @@ function fixture(options = {}, endpointOptions = {}) {
   const host = createTerminalViewBridgeHost({
     bridgeGeneration: 7,
     postMessage(message) {
-      sent.push(JSON.parse(message));
+      const trace = JSON.parse(message);
+      delete trace.bytes;
+      sent.push(trace);
       queueMicrotask(() => endpoint.receiveMessage(message));
     },
     ...options,
@@ -70,7 +73,9 @@ function fixture(options = {}, endpointOptions = {}) {
     view,
     initialGeometry: geometry,
     postMessage(message) {
-      received.push(JSON.parse(message));
+      const trace = JSON.parse(message);
+      delete trace.bytes;
+      received.push(trace);
       if (paused) inbox.push(message);
       else queueMicrotask(() => host.receiveMessage(message));
     },
@@ -137,18 +142,32 @@ test("every legal chunk in the complete 8MiB plus tail baseline can stream with 
   await f.host.ready;
   await f.host.initialize(initialization(1));
   const bytes = Uint8Array.from({ length: 65_536 }, (_, i) => i % 251);
+  const baseChecksum = bytes.reduce((sum, value) => sum + value, 0);
+  const ordinals = [];
+  const checksums = [];
+  const lengths = [];
   let total = 0;
   let largestReservation = 0;
   f.view.writeBaselineChunk.mockImplementation(async (chunk) => {
-    expect(chunk).toEqual(bytes);
+    // Inspect every delivered byte, but avoid a deep matcher traversal over
+    // 8 MiB on loaded CI workers. Exact max-size codec equality is tested below.
+    let checksum = 0;
+    for (const value of chunk) checksum += value;
+    checksums.push(checksum);
+    ordinals.push(chunk[0]);
+    lengths.push(chunk.byteLength);
     total += chunk.byteLength;
   });
   for (let i = 0; i < 129; i++) {
+    bytes[0] = i;
     const pending = f.host.writeBaselineChunk(bytes);
     largestReservation = Math.max(largestReservation, f.host.snapshot().chargedBytes);
     await pending;
   }
   expect(total).toBe(8 * 1024 * 1024 + 64 * 1024);
+  expect(lengths.every((length) => length === 65_536)).toBe(true);
+  expect(ordinals).toEqual(Array.from({ length: 129 }, (_, i) => i));
+  expect(checksums).toEqual(Array.from({ length: 129 }, (_, i) => baseChecksum + i));
   expect(largestReservation).toBeLessThan(1024 * 1024);
   expect(f.host.snapshot().chargedBytes).toBe(0);
 });
@@ -163,7 +182,7 @@ test("outbound bytes are captured at admission and preserve binary boundaries", 
   expect(f.view.applyEvent.mock.calls[0][1]).toEqual(Uint8Array.of(0, 128, 255, 13, 10));
 });
 
-test("controller view generations can advance without recreating the physical bridge", async () => {
+test("logical generations reach the controller unchanged for its recovery and rejection policy", async () => {
   const f = fixture();
   await f.host.ready;
   const input = vi.fn();
@@ -178,11 +197,183 @@ test("controller view generations can advance without recreating the physical br
   f.listeners.onFocusIntent({ viewGeneration: 2, focusSeq: 1, focused: false, geometry });
   await turns();
   expect(input.mock.calls).toEqual([
+    [{ viewGeneration: 1, source: "keyboard", bytes: Uint8Array.of(1) }],
     [{ viewGeneration: 2, source: "paste", bytes: Uint8Array.of(2, 3) }],
   ]);
   expect(focus.mock.calls).toEqual([
+    [{ viewGeneration: 1, focusSeq: 1, focused: true, geometry }],
     [{ viewGeneration: 2, focusSeq: 1, focused: false, geometry }],
   ]);
+});
+
+async function bridgedController() {
+  const h = await reentryHarness({ grant: false });
+  const mounted = fakeView();
+  mounted.state.focusSeq = 0;
+  let endpoint;
+  const host = createTerminalViewBridgeHost({
+    bridgeGeneration: 11,
+    postMessage: (message) => queueMicrotask(() => endpoint.receiveMessage(message)),
+  });
+  endpoint = createTerminalViewBridgeEndpoint({
+    bridgeGeneration: 11,
+    view: mounted.terminalView,
+    initialGeometry: geometry,
+    postMessage: (message) => queueMicrotask(() => host.receiveMessage(message)),
+  });
+  cleanup.push(() => {
+    h.client.dispose();
+    host.dispose();
+    endpoint.dispose();
+  });
+  await host.ready;
+  expect((await h.controller.replaceView(host)).ok).toBe(true);
+  h.controller.setInputTarget(true, true);
+  expect((await h.controller.requestFocus(geometry)).ok).toBe(true);
+  await settle(100);
+  const notices = [];
+  h.controller.onInputOutcome((notice) => notices.push(notice));
+  return { ...h, mounted, host, endpoint, notices };
+}
+
+test("the compiled controller preserves genuine prior-generation input during initialization", async () => {
+  const h = await bridgedController();
+  const gate = deferred();
+  const priorGeneration = h.mounted.state.generation;
+  h.mounted.state.initializeGate = gate.promise;
+  const recovered = h.controller.recover("gap");
+  await settle(200);
+  expect(h.mounted.state.generation).toBe(priorGeneration);
+  h.mounted.focus(true);
+  h.mounted.input("during-init");
+  await settle(200);
+  expect(h.server.written).toEqual([]);
+  gate.resolve();
+  expect((await recovered).ok).toBe(true);
+  await settle(300);
+  expect(h.server.written).toEqual(["during-init"]);
+  expect(h.notices.filter((notice) => notice.kind === "input")[0].outcome.ok).toBe(true);
+  const currentGeneration = h.mounted.state.generation;
+  h.mounted.state.generation = priorGeneration;
+  h.mounted.input("obsolete");
+  h.mounted.state.generation = currentGeneration;
+  await settle(200);
+  expect(h.server.written).toEqual(["during-init"]);
+  expect(h.notices.filter((notice) => notice.kind === "input").at(-1).outcome).toMatchObject({
+    ok: false,
+    error: { reason: "invalid-state" },
+    value: { notSentBytes: 8 },
+  });
+});
+
+test("prior-generation blur during initialization reaches the controller and cancels held input", async () => {
+  const h = await bridgedController();
+  const gate = deferred();
+  h.mounted.state.initializeGate = gate.promise;
+  const recovered = h.controller.recover("gap");
+  await settle(200);
+  h.mounted.focus(true);
+  h.mounted.input("cancel-me");
+  h.mounted.focus(false);
+  await settle(200);
+  gate.resolve();
+  expect((await recovered).ok).toBe(true);
+  await settle(300);
+  expect(h.server.written).toEqual([]);
+  expect(h.controller.snapshot().inputReady).toBe(false);
+  expect(h.notices.filter((notice) => notice.kind === "input").at(-1).outcome).toMatchObject({
+    ok: false,
+    value: { notSentBytes: 9 },
+  });
+});
+
+test("logical focus and blur grids do not overwrite the measured local viewport", async () => {
+  const f = fixture();
+  await f.host.ready;
+  await f.host.initialize(initialization(1));
+  const measured = { cols: 100, rows: 30 };
+  f.view.measureGrid.mockReturnValue(measured);
+  f.endpoint.publishGeometry(measured);
+  await turns();
+  const focus = vi.fn();
+  f.host.onFocusIntent(focus);
+  f.listeners.onFocusIntent({ viewGeneration: 1, focusSeq: 1, focused: true, geometry });
+  await turns();
+  expect(f.host.measureGrid()).toEqual(measured);
+  f.listeners.onFocusIntent({ viewGeneration: 1, focusSeq: 2, focused: false, geometry });
+  await turns();
+  expect(f.host.measureGrid()).toEqual(measured);
+  expect(focus.mock.calls.map(([intent]) => intent.geometry)).toEqual([geometry, geometry]);
+});
+
+test("a delayed layout notice cannot roll back a newer measurement in a command ACK", async () => {
+  const f = fixture();
+  await f.host.ready;
+  await f.host.initialize(initialization(1));
+  const older = { cols: 90, rows: 28 };
+  const newer = { cols: 100, rows: 30 };
+  const afterAck = [];
+  const receive = f.host.receiveMessage;
+  let newerSeen = false;
+  f.host.receiveMessage = (message) => {
+    receive(message);
+    if (JSON.parse(message).kind === "ack") newerSeen = true;
+    if (newerSeen && !f.host.snapshot().closed) afterAck.push(f.host.measureGrid());
+  };
+  f.suspendHost();
+  f.listeners.onInputIntent({ viewGeneration: 1, source: "keyboard", bytes: Uint8Array.of(1) });
+  f.endpoint.publishGeometry(older);
+  f.view.measureGrid.mockReturnValue(newer);
+  const applied = f.host.applyEvent({ type: "output" }, Uint8Array.of(1));
+  await turns();
+  expect(f.endpoint.snapshot().pendingNotices).toBe(2);
+  f.resumeHost();
+  await applied;
+  await turns();
+  expect(afterAck.length).toBeGreaterThan(1);
+  expect(afterAck.every((value) => value.cols === newer.cols && value.rows === newer.rows)).toBe(
+    true,
+  );
+  expect(f.host.measureGrid()).toEqual(newer);
+  expect(f.endpoint.snapshot().pendingNotices).toBe(0);
+});
+
+test("endpoint disposal settles in-flight and queued host work without a disposal echo", async () => {
+  const f = fixture();
+  await f.host.ready;
+  const parse = deferred();
+  f.view.writeBaselineChunk.mockImplementation(() => parse.promise);
+  const failure = vi.fn();
+  f.host.onFailure(failure);
+  const writing = f.host.writeBaselineChunk(Uint8Array.of(1)).catch((error) => error);
+  const finishing = f.host.finishBaseline().catch((error) => error);
+  await turns();
+  f.endpoint.dispose();
+  await turns();
+  expect((await writing).kind).toBe("RESYNC_REQUIRED");
+  expect((await finishing).kind).toBe("RESYNC_REQUIRED");
+  expect(f.host.snapshot()).toEqual({ pendingCommands: 0, chargedBytes: 0, closed: true });
+  expect(failure).toHaveBeenCalledTimes(1);
+  expect(f.sent.filter((frame) => frame.kind === "dispose")).toHaveLength(0);
+  expect(f.view.dispose).toHaveBeenCalledTimes(1);
+  expect(Object.keys(f.listeners)).toEqual([]);
+  parse.resolve();
+});
+
+test("idle endpoint unmount invalidates the host's geometry and notifies recovery immediately", async () => {
+  const f = fixture();
+  await f.host.ready;
+  const failure = vi.fn();
+  f.host.onFailure(failure);
+  f.endpoint.dispose();
+  f.endpoint.dispose();
+  await turns();
+  expect(f.host.snapshot().closed).toBe(true);
+  expect(() => f.host.measureGrid()).toThrow("RESYNC REQUIRED");
+  expect(failure).toHaveBeenCalledTimes(1);
+  expect(f.view.dispose).toHaveBeenCalledTimes(1);
+  expect(f.sent.filter((frame) => frame.kind === "dispose")).toHaveLength(0);
+  expect(Object.keys(f.listeners)).toEqual([]);
 });
 
 test("old physical ACKs cannot settle a new view's in-flight application", async () => {
