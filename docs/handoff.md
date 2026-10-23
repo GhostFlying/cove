@@ -88,7 +88,7 @@ M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://gi
 - loopback 入口接受任何 loopback IP 字面量 Host，只拒绝域名 Host（2026-10-22）；同主机端口抢占冒充 server 是已记录的残留限制（2026-10-21）。
 - 远程配对的默认入口取配对时所用入口（`--via ssh`、`--via tsnet`，同机无 `--via` 时为 loopback），可用 `remote entry default` 修改；#178 同步 D11。
 - tend 集成方向已接受但未排期（[设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)）：
-  经本机 CLI，worker 是 Cove tab，需要 `tab send`；具体 milestone 另行批准。
+  经本机 CLI，worker 是 Cove tab；M3 已批准 T2 业务事件与 T6 控制者观测/`tab send`，完整 tend 集成仍未排期。
 
 ## 未关闭的后续 issue（不阻塞 M2 试用）
 
