@@ -3,7 +3,8 @@
 状态：单仓库、pnpm workspace、构建/测试方向及第 6 节的多 agent 协作规则已确认；具体目录和里程碑拆分仍是待逐阶段审阅的计划。产品与技术决策以 [整体设计](design.md)、[Server 架构](server-architecture.md)、
 [终端架构](terminal-architecture.md) 和 [协议设计](relay-protocol.md) 为准。
 包管理已选 pnpm workspace，首期不叠加 Turborepo/Nx；构建/测试选择见第 9 节，根工具链版本已固定，RN/Expo 与发布流程尚未确定。
-当前已初始化根工程配置；不创建应用空壳、不启动远端服务。安装与验收边界见 [开发说明](development.md)。
+M0–M2 的 server/CLI 与接入已交付；用户于 2026-10-23 批准 M2 退出及 M3 规划，GUI 实施尚未批准。
+不提前创建应用空壳或启动远端服务。安装与验收边界见 [开发说明](development.md)。
 
 ## 1. 已确认单仓库；建议按部署入口和真实依赖边界组织
 
@@ -95,7 +96,9 @@ devbox 性能验证需记录测试进程归属并清理自身资源，不把共�
 以上是依赖顺序；同一 milestone 内按依赖图并行，跨 milestone 不自动推进。
 M1 的范围、场景、任务与第 5 节相关待决策项见 [M1](milestones/m1.md)（D1–D10 已于 2026-10-15 决定）。
 M2 的计划见 [M2](milestones/m2.md)（用户于 2026-10-21 决定 D1–D14 并批准计划；其中 D9 去掉系统 Tailscale；含第 5 节第 5 项的安装与服务管理）。
-M2 的任务 T0–T7 已于 2026-10-22 全部合入；退出前还需用户在两台真实机器上试用，再经用户明确批准的阶段 review，M3 不自动开始。
+M2 的任务 T0–T7、试用修复与正常双机/安装升级补验已完成，用户于 2026-10-23 接受交付并批准退出（[#185](https://github.com/GhostFlying/cove/issues/185)）。
+Linux 容器生命周期模拟已通过；macOS 真实注销/登录由用户决定暂缓（[#189](https://github.com/GhostFlying/cove/issues/189)），不冒充已验证。
+[M3 规划草案](milestones/m3.md) 的范围、待决定方案、任务与验收供用户审阅；规划授权不包含实施。
 M0 即开始采集输入延迟和队列内存；移动端输入等后续风险可提前列入计划，但执行预研需纳入用户已批准的当前阶段范围，
 不能将“提前验证”当作绕过阶段授权的理由。
 无须将完整迁移或 100 个真实 agent 当 M0 前置条件，也不能将 M0 成功宣传为已经支持这些能力。
@@ -114,11 +117,11 @@ M0 即开始采集输入延迟和队列内存；移动端输入等后续风险�
 2. pnpm workspace 与构建/test 方向已选；固定版本与 lint/格式化已落地，继续收敛 RN/Expo 与发布工具。
 3. ~~Workspace 实际目录与引用现有 checkout 的方式~~ 已由 M1 D1、D2 决定（P0 探针，#92）。
 4. ~~数据库执行位置、schema migration 与 CLI bootstrap~~ 已由 M1 D5–D7 决定；执行库为 better-sqlite3。
-5. 平台构建、服务安装发现与升级策略；独立本地 server 的稳定安装目录是必要条件（M1 D7 留给 M2）。
+5. ~~服务安装发现与升级策略~~ 已由 M2 D1/D2 落地；Desktop/Mobile 原生构建与最低系统版本在 M3 收敛，发行打包仍属 M4。
 
 已确定的工具链选择不等于已完成集成：M0/M1 的本机 server 与 CLI、M2 的安装与用户服务、设备配对和 CLI 经 SSH 与 tsnet 的远程接入
-已实现并在 macOS/Ubuntu CI 上运行（tsnet 部分在 Tailscale 测试控制面上）；Desktop、Mobile 客户端及其接入、迁移与数据传输尚未实现，
-真实 Tailnet 与两台机器的远程验证留给 M2 的实机试用。
+已实现并在 macOS/Ubuntu CI 上运行（tsnet 部分在 Tailscale 测试控制面上），M2 的正常真实 Tailnet/双机试用也已完成；
+Desktop、Mobile 客户端及其接入属于 M3 待批准的实施范围，迁移与数据传输仍未实现。
 
 ## 6. 多 agent 并行开发
 
