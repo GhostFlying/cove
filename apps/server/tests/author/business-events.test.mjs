@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { BUSINESS_LIMITS, businessRunId } from "@cove/protocol/business-events";
+import {
+  BUSINESS_LIMITS,
+  BusinessCursorSchema,
+  businessRunId,
+} from "@cove/protocol/business-events";
 import { M0_CAPABILITIES } from "@cove/protocol/bootstrap";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { PROFILE, BASELINE_ENCODING } from "@cove/protocol/profile";
@@ -21,6 +25,7 @@ import { LocalRuntime } from "../../dist/terminal/local-runtime.js";
 import { WorkerPool } from "../../dist/terminal/worker-pool.js";
 import { RuntimeComposition } from "../../dist/terminal/runtime-composition.js";
 import { RuntimeRetainedBytes } from "../../dist/terminal/runtime-retained-bytes.js";
+import { createAuthFixture } from "../../../cli/tests/m2/auth-fixtures.mjs";
 
 const identity = { serverId: "server", relayInstanceId: "instance" };
 const encoder = (text) => new TextEncoder().encode(text);
@@ -142,6 +147,7 @@ describe("compiled worker transaction and runtime barrier", () => {
     const f = await fixture();
     await f.insertRepo();
     const initial = await f.snapshots.capture({});
+    expect(BusinessCursorSchema.safeParse(initial.cursor).success).toBe(true);
     expect(initial.records.find((value) => value.kind === "repo").record.displayName).toBe(
       "before",
     );
@@ -284,7 +290,7 @@ async function socketFixture(f, auth) {
   return { socket, admission, transport };
 }
 async function waitFor(predicate) {
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 2000; i++) {
     if (predicate()) return;
     await new Promise((done) => setTimeout(done, 5));
   }
@@ -402,3 +408,199 @@ it("registers admitted device event sockets for synchronous revocation and tears
   expect(f.snapshots.stream.retained.subscriptions).toBe(0);
   expect(admission.snapshot().authenticated).toBe(0);
 });
+
+// Actual compiled CLI/server/native worker and real HTTP upgrade. Existing isolated auth fixture
+// owns every process/home/credential it creates and scans its retained carriers before cleanup.
+// This is deliberately separate from the injected-socket fault cases above.
+it("converges two live clients, replays disconnects, observes native PTY exit, revokes a paired device and resets after restart", async () => {
+  const f = await createAuthFixture();
+  cleanup.push(() => f.cleanup());
+  const sockets = [];
+  cleanup.push(() => {
+    for (const socket of sockets) socket.socket.close();
+  });
+  const open = async (server, credential, since) => {
+    const socket = new WebSocket(server.record.endpoint.replace(/^http/, "ws") + "/events");
+    const frames = [];
+    let closeCode;
+    const closed = new Promise((done) =>
+      socket.addEventListener("close", (event) => {
+        closeCode = event.code;
+        done();
+      }),
+    );
+    socket.addEventListener("message", (event) => {
+      const frame = JSON.parse(event.data);
+      frames.push(frame);
+      if (frame.type === "cove-bootstrap-result")
+        socket.send(JSON.stringify({ type: "subscribe", filter: {}, ...(since ? { since } : {}) }));
+    });
+    const connection = { socket, frames, closed, closeCode: () => closeCode };
+    sockets.push(connection);
+    await new Promise((done, fail) => {
+      socket.addEventListener("open", done);
+      socket.addEventListener("error", fail);
+    });
+    socket.send(
+      JSON.stringify({
+        type: "cove-bootstrap",
+        bootstrapVersion: 1,
+        protocolVersion: 2,
+        expectedServerId: server.record.serverId,
+        expectedRelayInstanceId: server.record.relayInstanceId,
+        buildVersion: "business-native-fixture",
+        capabilities: [...M0_CAPABILITIES],
+        profiles: [PROFILE],
+        encodings: [BASELINE_ENCODING],
+        secret: credential,
+      }),
+    );
+    await waitFor(
+      () =>
+        frames.some((frame) => frame.type === "ready" || frame.type === "reset") ||
+        closeCode !== undefined,
+    );
+    return connection;
+  };
+  const changes = (connection) => connection.frames.flatMap((frame) => frame.changes ?? []);
+  const home = f.home("server");
+  const server = await f.startAuthServer(home);
+  const first = await open(server, server.record.secret);
+  const second = await open(server, server.record.secret);
+  expect(first.frames.some((frame) => frame.type === "snapshot-end")).toBe(true);
+  expect(second.frames.some((frame) => frame.type === "snapshot-end")).toBe(true);
+  const created = await f.coveJson(
+    ["task", "create", "live-business-task", "--operation-id", "business-task"],
+    { home },
+  );
+  const taskId = created.operation.result.resource.id;
+  await waitFor(() =>
+    [first, second].every((connection) =>
+      changes(connection).some(
+        (change) => change.value?.kind === "task" && change.value.id === taskId,
+      ),
+    ),
+  );
+  const task = changes(first).find(
+    (change) => change.value?.kind === "task" && change.value.id === taskId,
+  ).value;
+  expect(task.filesystem).toBe("unobserved");
+  expect(task.record.workspace.entryState).toBe("unavailable");
+  const clone = await f.gitRepo("business-repo");
+  const registration = await f.coveJson(
+    ["repo", "register", clone.path, "--operation-id", "business-register"],
+    { home },
+  );
+  const repoId = registration.result.resource.id;
+  const mounted = await f.coveJson(
+    [
+      "task",
+      "create",
+      "background-mount",
+      "--operation-id",
+      "business-background",
+      "--worktree",
+      `${repoId},name=mounted,branch=business-mounted,base=main,no-fetch`,
+    ],
+    { home },
+  );
+  const mountedId = mounted.operation.result.resource.id;
+  await waitFor(() =>
+    changes(second).some(
+      (change) =>
+        change.value?.kind === "task" &&
+        change.value.id === mountedId &&
+        change.value.record.workspace.mounts.some((mount) => mount.state === "ready"),
+    ),
+  );
+  expect(
+    changes(second).some(
+      (change) =>
+        change.value?.kind === "task" &&
+        change.value.id === mountedId &&
+        change.value.record.workspace.mounts.some((mount) => mount.state === "pending"),
+    ),
+  ).toBe(true);
+  expect(
+    changes(second).some(
+      (change) =>
+        change.value?.kind === "operation" &&
+        change.value.record.operationId === "business-background" &&
+        change.value.record.state === "succeeded",
+    ),
+  ).toBe(true);
+  const since = first.frames.findLast((frame) => frame.cursor)?.cursor;
+  first.socket.close();
+  await first.closed;
+  await f.coveJson(["task", "archive", taskId, "--operation-id", "business-archive"], { home });
+  const resumed = await open(server, server.record.secret, since);
+  expect(resumed.closeCode()).toBeUndefined();
+  expect(resumed.frames.map((frame) => frame.type)).toContain("ready");
+  expect(resumed.frames.find((frame) => frame.type === "reset")).toBeUndefined();
+  expect(resumed.frames.some((frame) => frame.type === "snapshot-begin")).toBe(false);
+  expect(
+    changes(resumed).some(
+      (change) => change.value?.kind === "task" && change.value.record.archived,
+    ),
+  ).toBe(true);
+
+  const run = await f.coveJson(
+    [
+      "terminal",
+      "create",
+      "--cwd",
+      f.root,
+      "--operation-id",
+      "business-native-exit",
+      "--",
+      process.execPath,
+      "-e",
+      "setTimeout(() => process.exit(7), 100)",
+    ],
+    { home },
+  );
+  await waitFor(() =>
+    changes(second).some(
+      (change) =>
+        change.value?.kind === "run" &&
+        change.value.record.run.runId === run.runId &&
+        change.value.record.lifecycle === "exited",
+    ),
+  );
+  expect(
+    changes(second).some(
+      (change) =>
+        change.value?.kind === "runtime" &&
+        change.value.record.run.runId === run.runId &&
+        change.value.record.status === "exited" &&
+        change.value.record.exitCode === 7,
+    ),
+  ).toBe(true);
+
+  const invitation = await f.invite(home);
+  const clientHome = f.home("device");
+  const paired = await f.pairOk(clientHome, "box", invitation.invitation);
+  const credential = await f.credential(clientHome, server.record.serverId);
+  const device = await open(server, credential.token);
+  expect(device.frames.some((frame) => frame.type === "ready")).toBe(true);
+  await f.coveJson(
+    ["auth", "device", "revoke", paired.deviceId, "--operation-id", "business-revoke"],
+    { home },
+  );
+  await device.closed;
+  expect(device.closeCode()).toBe(1008);
+
+  const beforeRestart = resumed.frames.findLast((frame) => frame.cursor)?.cursor;
+  second.socket.close();
+  resumed.socket.close();
+  await Promise.all([second.closed, resumed.closed]);
+  server.wrapper.kill("SIGTERM");
+  expect(await server.exited).toBe(0);
+  const restarted = await f.startAuthServer(home);
+  expect(restarted.record.relayInstanceId).not.toBe(server.record.relayInstanceId);
+  const stale = await open(restarted, restarted.record.secret, beforeRestart);
+  expect(stale.frames.find((frame) => frame.type === "reset")).toEqual({
+    type: "reset",
+    reason: "identity",
+  });
+}, 30_000);

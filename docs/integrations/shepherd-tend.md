@@ -513,11 +513,38 @@ PLANNED：
 
 M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 
-- 只读事件/等待接口（如 `cove tab watch --json`、`cove events --json --since <cursor>`）：run 启动/退出/中断与控制者变化。
+- 只读业务事件接口已进入 M3 PR #202（PENDING，见 §3.1）；不另外增加 `tab watch` 别名。
 - `tab get` 显示控制者（持有控制权的设备与 controlEpoch，或无）。
 - 程序化输入 `tab send`（规则见 §4）。
 - 启动配方的有界环境变量与每 run 临时值（见 §5）。
 - 有版本的 CLI JSON 契约（见 §6）。
+
+### 3.1 业务事件（PENDING，PR #202）
+
+PR #202 实现中，尚未合入 main；当前 draft 的端口注入 reader/server 流已实现，公共 CLI 接线仍等待 T1 共用 Session 合入。
+最终命令为 `cove events --json [--since CURSOR_JSON] [--kind KIND]...`，接受既有本机/配对 server 选择参数。
+这是与 GUI 相同领域的只读 NDJSON 流，不执行 shell、focus、resize 或任何输入，不自动重连或重放写操作。
+`--since` 接受完整 cursor JSON 对象；v1 仅按 kind 过滤，没有 task/archive 过滤。
+类型为 repo、task、tab、run、operation、config、runtime；默认全部，排序去重后的过滤身份绑定在 cursor 中。
+
+首次连接输出 snapshot-begin、连续 snapshot-page、snapshot-end、补发变化、ready，之后继续 changes。
+只有完整 end 才确认该快照。它包含全部当前资源（含归档 task）、每 tab 最新及 active run、未决 operation；
+不是全部历史，旧 tab run/已完成 operation 仍通过 `tab runs`/`operation get` 查询。
+**tend 必须保留自己保存的未决 operation ID**；重置后的快照没有某个 ID，不表示它未执行，仍需查询，不能自动重发。
+
+Cursor 绑定 serverId、relayInstanceId、streamId、sequence、filter；增量有 after/cursor，sequence 每批加 1。
+过滤后为空的批次仍推进 cursor；不要把空 changes 当作断线，也不要把过滤范围更改后继续用旧 cursor。
+run 的持久历史和 runtime/control 事实是分开的；runtime 控制者没有时 holder 为 null。
+失联是 unverifiable，不推断 process exit 或 agent 业务完成。task 存储投影带 filesystem:unobserved，
+不证明磁盘目录仍 ready，需要即时检查时读取既有 task get/list。
+
+重启、旧 generation/filter、超出窗口、缺口或发布不确定输出 reset 并结束；消费者用无 since 的新连接重新取快照。
+错误/断线也必须把自己的镜像标为非 current，不能将未收到 end 的快照当完整数据。
+退出码约定：0 为显式正常结束；1 为 transport/auth/数据或 snapshot-too-large/busy/unavailable；
+2 为 CLI 用法错误；3 为已输出的 reset；SIGINT 为 130，SIGTERM 为 143。当前流不主动正常结束。
+单帧 256 KiB，窗口 8 MiB/4096 批次，单快照 16 MiB/65536 项且最多 4 个并行交付，
+每连接队列 1 MiB/128 帧，发送进展期限 30 秒；过大/过慢明确失败，不截断成功。
+快照/事件不含 token、邀请秘密或 tsnet 私有状态。此接口没有持久事件历史，也不改变 operation 去重与保留期限。
 
 ## 4. 程序化输入（PLANNED）
 
@@ -609,3 +636,4 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 | 2026-10-22 | PR #184 directory boundary correction（未合入）                                 | 已有自定义 rendezvous 父目录（含 home 内任意用户子目录）不检查属主/权限或修正权限，可用符号链接；仍核对目录类型/身份与文件原子发布。Cove 创建的缺失末级目录和已知管理子树 server/tsnet/install/bin/client/cli/tsnet-client 继续严格检查。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | 2026-10-22 | PR #184 managed target aliases correction（未合入）                             | 管理目录分类同时核对所有 home 映射与文件系统真实目标，大小写别名、嵌套 home 别名和指向管理子树的自定义别名不绕过严格检查；大小写敏感文件系统上不同的用户目录仍不检查属主/权限。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | 2026-10-22 | PR #184 managed descendant alias correction（未合入）                           | 外部别名进入管理子目录后再经管理 symlink 跳出时，仍核对完整管理组件链并拒绝 symlink；任意已有用户目录的权限豁免不变。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 2026-10-23 | PR #202 M3 T2（未合入）                                                         | 新增独立业务 snapshot/cursor/events 的 PENDING 契约与 cove events NDJSON/过滤/reset/退出码；公共 CLI 接线待 T1，未标 main AVAILABLE。当前资源快照明确历史选择，未决 operation ID 不能因 reset 遗忘，持久与 runtime 事实分离，未知结果不重放。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
