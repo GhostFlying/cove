@@ -13,6 +13,8 @@ import {
   type StoreErrorCategory,
 } from "./store-errors.js";
 import type { StoreRequest, StoreResponse, StoreWorkerData } from "./store-protocol.js";
+import type { StoreBusinessPublication } from "./business-journal.js";
+import type { BusinessSnapshotResult } from "./sql/business-events.js";
 
 export { StoreError, type StoreErrorCategory };
 
@@ -54,6 +56,12 @@ type Call = {
   args: unknown;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+  barrier?: (value: unknown) => unknown;
+};
+
+export type StoreBusinessObserver = {
+  publish(publication: StoreBusinessPublication): void;
+  uncertain(): void;
 };
 
 // The worker entry, beside this module in the compiled output (dist/store/store-worker.js). It is
@@ -117,6 +125,7 @@ export class Store {
   private drained: (() => void) | undefined;
   private closeAnswer: ((ok: boolean) => void) | undefined;
   private closing: Promise<void> | undefined;
+  private businessObserver: StoreBusinessObserver | undefined;
 
   private constructor(
     private readonly lock: Database.Database,
@@ -159,6 +168,7 @@ export class Store {
           migrations: (options.migrations ?? MIGRATIONS).map((migration) => ({ ...migration })),
           now: (options.now ?? Date.now)(),
           operationModules: [...(options.operationModules ?? [])],
+          defaultWorkspaceRoot: join(dirname(dirname(options.databasePath)), "workspace"),
         } satisfies StoreWorkerData,
       });
     } catch {
@@ -195,6 +205,34 @@ export class Store {
 
   observe(observer: TransactionObserver | undefined): void {
     this.observer = observer;
+  }
+
+  // One publication owner per store. Called synchronously at the worker result boundary, before
+  // the business caller can continue or a later worker message can be processed.
+  observeBusiness(observer: StoreBusinessObserver | undefined): void {
+    if (observer && this.businessObserver) throw new Error("Business publication already owned");
+    this.businessObserver = observer;
+  }
+
+  captureBusiness<T>(
+    defaultWorkspaceRoot: string,
+    capture: (result: BusinessSnapshotResult) => T,
+  ): Promise<T> {
+    if (this.state !== "open")
+      return Promise.reject(new StoreUnavailableError("closed", "not-sent"));
+    if (this.queue.length >= this.limits.queued && this.inFlight.size >= this.limits.inFlight)
+      return Promise.reject(new StoreUnavailableError("busy", "not-sent"));
+    return new Promise<T>((resolve, reject) => {
+      this.queue.push({
+        id: ++this.nextId,
+        operation: "business.snapshot",
+        args: { defaultWorkspaceRoot },
+        barrier: (result) => capture(result as BusinessSnapshotResult),
+        resolve: (value) => resolve(value as T),
+        reject,
+      });
+      this.pump();
+    });
   }
 
   // Called once when the store fails (immediately if it already has).
@@ -285,8 +323,18 @@ export class Store {
     }
     this.inFlight.delete(message.id);
     this.observer?.(message.timing[0], message.timing[1]);
-    if (message.ok) call.resolve(message.value);
-    else {
+    if (message.ok) {
+      try {
+        if (message.business) this.businessObserver?.publish(message.business);
+      } catch {
+        this.businessObserver?.uncertain();
+      }
+      try {
+        call.resolve(call.barrier ? call.barrier(message.value) : message.value);
+      } catch (error) {
+        call.reject(error instanceof Error ? error : new Error("Business snapshot unavailable"));
+      }
+    } else {
       const error = reviveStoreError(message.error);
       if (error instanceof StoreOperationError && !transientStoreRefusal(error))
         for (const listener of this.operationErrorListeners) {
@@ -304,6 +352,7 @@ export class Store {
   private fail(): void {
     if (this.state === "failed" || this.state === "closed") return;
     this.state = "failed";
+    this.businessObserver?.uncertain();
     for (const call of this.inFlight.values())
       call.reject(new StoreUnavailableError("failed", "unknown"));
     this.inFlight.clear();

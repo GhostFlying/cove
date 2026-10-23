@@ -308,7 +308,12 @@ export function registerHttpRpc(
     if (malformed.has(String(code))) return sendHttpAdmissionFailure(reply, "malformed");
     return reply.code(500).send();
   });
-  for (const path of [LOCAL_PATHS.bootstrap, LOCAL_PATHS.rpc, LOCAL_PATHS.terminal]) {
+  for (const path of [
+    LOCAL_PATHS.bootstrap,
+    LOCAL_PATHS.rpc,
+    LOCAL_PATHS.terminal,
+    LOCAL_PATHS.events,
+  ]) {
     app.options(path, (request, reply) => {
       const result = originFormTarget(request)
         ? admission.http("OPTIONS", path, headers(request), 0)

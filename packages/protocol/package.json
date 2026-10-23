@@ -59,6 +59,10 @@
     "./provisional/pipe": {
       "types": "./dist/provisional/pipe.d.ts",
       "import": "./dist/provisional/pipe.js"
+    },
+    "./business-events": {
+      "types": "./dist/business-events.d.ts",
+      "import": "./dist/business-events.js"
     }
   },
   "scripts": {

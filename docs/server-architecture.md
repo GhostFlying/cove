@@ -59,8 +59,8 @@ Git 枚举仅用于必要校验/诊断。显式引用外部 checkout 不改变�
 需要处理的边界：
 
 - 事件 cursor 与数据快照必须对应，避免取快照和订阅之间漏事件。
-- 持久化与发布之间失败时可以重放已确认变化；具体使用持久事件表或 outbox 待实现决定
-  （M1 不提供业务事件订阅，资源带 revision、CLI 按需读取；事件订阅随 M3 的 GUI 再加）。
+- M3 D4 已选单实例有界内存窗口，不增加持久事件表/outbox。窗口外、实例重启和提交后发布不确定时
+  显式 reset 并重新取快照；durable operation 去重与保留语义不变。
 - 并发修改挂载、归档或迁移时，使用资源 revision 检测冲突，拒绝陈旧写入。
 - 创建 worktree、启动终端等非幂等动作有操作 ID；响应丢失时查询已有操作，不能重复执行。
 - 长操作发布 pending/成功/失败及逐步结果，不伪装成一次原子数据库提交。
@@ -80,6 +80,34 @@ M1 已落实持久的操作身份：记录以 `(serverId, principalId, operation
 按该客户端尺寸调整终端，无需接管或恢复尺寸弹窗。控制权变化作为服务端事实同步，
 不改变其他客户端的当前页面，也不要求其反向触发 focus。
 具体仲裁与旧请求隔离见 [Focus 协议](relay-protocol.md#91-focus控制权与自动-resize)。
+
+### 3.1 M3 业务事件与快照屏障
+
+`/events` 是独立 JSON WebSocket，协商可选能力 `business-events-v1`。它采用和终端通道相同的
+bootstrap、server/instance 绑定、设备凭据、Host/Origin、撤销与连接 admission；不承载 VT 或程序化输入。
+CLI `cove events --json` 读取同一流。具体帧见 [协议 §4.2](relay-protocol.md#42-业务事件-v1)。
+
+快照包含当前全部 repo、task（含归档）、workspace/mount、tab 和 server 配置，run 仅为每个 tab 最新记录及
+仍 active 的记录，operation 仅为未决记录；这不是全部历史。旧 run 和已完成 operation 通过既有 RPC 查询。
+**客户端自己的未决 operation ID 在 reset/快照后仍须保留并显式查询**，不能因快照未包含它而遗忘或重发写操作。
+
+持久资源和 live runtime/control 是分开的事实类型。存储投影不执行文件系统校验，task 的
+`filesystem: "unobserved"` 与 `entryState: "unavailable"` 表明尚未核实；不能把 SQL 占位 pending 当当前目录状态。
+需要经过检查的挂载/入口状态时使用既有 task get/list。后台挂载完成及入口 materialization 会发布新投影，
+即使资源 revision 相同也有更新的业务 cursor。当前控制者与 run 状态来自已确认 worker 事实；失联为 unverifiable，
+不等同退出。较晚抵达的 durable running 行不能覆盖已经确认的 runtime exit。
+
+store worker 在一个 SQLite 事务内执行领域操作，并通过有上限的 TEMP journal 收集受影响资源投影；
+journal 随回滚撤销，覆盖后台 worktree/binding/operation 与 run-exit 写入，不依赖 RPC 返回拦截。
+投影随已提交的 worker result 返回。主线程唯一发布者在 `Store.receive` 同步发布，再 resolve 领域调用。
+快照也在一个 worker 事务内形成不可变数据；其 result 的同步 barrier 捕获当前业务 cursor 与 runtime overlay，
+之后才 resolve。此前的 worker 事务已发布，之后的变更在该 cursor 后重放；多页不会来自不同读视图。
+TEMP journal 溢出、提交后结果无法送回、投影/发布异常都会使 stream generation 失效，不能递增 cursor 隐藏漏发。
+
+默认帧上限 256 KiB，事件窗口 8 MiB/4096 批次，单快照 16 MiB/65536 项、最多 4 个交付中的快照，
+业务订阅最多 32 个并共享全局 admission；每连接增量队列 1 MiB/128 帧，每次发送进展期限 30 秒。
+快照过大明确失败，不截断后声称完整；慢消费者溢出 reset/关闭，客户端视图不再 current。
+取消、断开和撤销释放订阅、快照 lease 与队列。事件窗口仅存本实例内存，不提供审计历史或跨重启 cursor。
 
 ## 4. Host 网络和内置 Tailscale
 

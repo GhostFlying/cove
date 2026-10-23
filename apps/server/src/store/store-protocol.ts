@@ -1,5 +1,6 @@
 import type { Migration } from "./migrations.js";
 import type { SerializedStoreError } from "./store-errors.js";
+import type { StoreBusinessPublication } from "./business-journal.js";
 
 // Messages between the store client on the main thread (database.ts) and the store worker
 // (store-worker.ts). Everything crossing is structured-clone-safe plain data.
@@ -22,6 +23,7 @@ export type StoreWorkerData = {
   migrations: readonly Migration[];
   now: number;
   operationModules: readonly string[];
+  defaultWorkspaceRoot: string;
 };
 
 export type StoreRequest =
@@ -30,7 +32,14 @@ export type StoreRequest =
 export type StoreResponse =
   | { type: "opened"; schemaVersion: number; backupPath: string | null }
   | { type: "open-failed"; error: SerializedStoreError }
-  | { type: "result"; id: number; ok: true; value: unknown; timing: [number, number] }
+  | {
+      type: "result";
+      id: number;
+      ok: true;
+      value: unknown;
+      timing: [number, number];
+      business?: StoreBusinessPublication;
+    }
   | {
       type: "result";
       id: number;

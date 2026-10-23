@@ -113,6 +113,41 @@ HTTP 响应与事件到达顺序不固定，通过操作 ID、资源 revision �
 分离文件通道可以避免文件字节占据终端连接的发送队列，但不能消除共享链路上的带宽竞争。
 HTTP/WebSocket 框架已选择 Fastify + @fastify/websocket，业务 API 已选择统一 HTTP RPC。
 RPC 按领域命名方法，CLI、desktop、mobile 复用同一契约；文件内容仍走独立 HTTP 传输接口。
+
+### 4.2 业务事件 v1
+
+`GET /events` upgrade 后，客户端先发既有带凭据的 bootstrap，明确请求 `business-events-v1`。
+它是可选能力，不提高 protocolVersion 或原客户端必需能力；未协商该能力或没有持久资源服务时明确不可用。
+凭据轮换确认、撤销关闭和通道 server/instance 绑定与终端相同，不能通过另开事件连接绕过鉴权。
+
+随后仅允许一次 `subscribe`：`{type, filter: {kinds?}, since?}`。v1 kinds 为
+`repo/task/tab/run/operation/config/runtime`；默认全选，仅按类型过滤，不按 task 或 archive 过滤。
+排序去重后的 kinds 字符串是过滤身份。归档 task 仍在快照中；workspace/mount 嵌于 task 投影。
+Cursor `{serverId, relayInstanceId, streamId, sequence, filter}` 与 PTY seq、controlEpoch 无关。
+改变过滤范围必须取新快照，不能把旧范围的 cursor 用作新范围的完整性证明。
+
+没有 `since` 时，服务端依次发送 `snapshot-begin(snapshotId)`、从 0 连续编号的
+`snapshot-page(snapshotId,page,records)`、`snapshot-end(snapshotId,pages,cursor,history)`。
+`history` 固定为 `latest-and-active-runs-unresolved-operations`：当前资源完整，但不声称完整保留历史。
+没有合法 end 的快照不能应用为完整视图。快照之后重放增量，再发 `ready(cursor)`，然后继续 live。
+有 `since` 时直接重放到当前 watermark，再发 ready；cursor 过期、异实例/stream/filter、缺口明确 reset，
+绝不静默从现在开始。reset 后重新订阅需要新连接和无 since 的快照。
+
+增量为 `{type:"changes", after, cursor, changes}`，每批 sequence 恰增 1，after 必须等于客户端已应用的 cursor。
+change 为 `upsert(value)` 或 `delete(kind,id)`；upsert 的 value 复用既有公共 record schema。
+run/runtime 的 id 为 `JSON.stringify([relayInstanceId, runId])`，其他资源按公共 ID，config 为 `server` 或 `entry`。entry 投影仅有 revision/settings；需要监听状态与 restartRequired 时读 entry.get。
+过滤掉全部变化时仍发空批次推进 watermark，不能把过滤产生的序号跳跃误作丢失或无声跳过。
+按 cursor 顺序应用相同 revision 的新观察；不以较旧的 HTTP/旧连接结果覆盖新事实。
+runtime/control 与 durable run history 分开维护，contact loss 不会产生退出事实；不因同步事件而 focus/resize。
+
+task 事件是存储投影，携带 `filesystem:"unobserved"`，入口状态 unavailable；它不证明磁盘上仍有 ready 目录。
+客户端需要即时文件系统核实状态时通过 task.get/list 读取，并保留观察代际，不能把相同 revision 当永不变化。
+reset/快照不清除客户端自己保存的未决 operation ID；仍使用 operation.get 查询，任何未知结果均不自动重放。
+
+`reset.reason`：identity、generation、filter、gap、overflow、publication-uncertain、unavailable。
+`error.reason`：snapshot-too-large、busy、unavailable。任何连接断开都令镜像失去 current 标记；
+未送达 reset 不代表可以继续使用旧 cursor。帧/窗口/快照/连接队列及发送进展有明确上限，见 Server §3.1。
+业务流不保证 HTTP 响应先于事件，也不提供跨重启历史；持久 operation 的身份和查询语义保持不变。
 schema 工具已选择 Zod，共享业务契约使用可导出的 JSON 子集；转换与领域规则单独处理。
 业务消息格式已选择标准 JSON-RPC 2.0 over HTTP；具体路径与实现库另定。
 这不把业务事件 WS 或终端二进制帧改成 JSON-RPC，也不将 JSON-RPC 的版本号用作 Cove 协议版本。
