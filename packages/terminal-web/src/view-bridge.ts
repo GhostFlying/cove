@@ -77,6 +77,10 @@ function errorValue(value: unknown): DomainError {
   return DomainErrorSchema.safeParse(value).data ?? domainError("RESYNC_REQUIRED");
 }
 
+function validViewGeneration(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 function serialize(frame: ViewBridgeFrame): string {
   const text = JSON.stringify(frame);
   if (text.length > VIEW_BRIDGE_MAX_FRAME_CHARS) throw domainError("RESYNC_REQUIRED");
@@ -116,7 +120,7 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
   let lastNoticeId = 0;
   let closed = false;
   let geometry: Geometry | undefined;
-  let viewGeneration: number | undefined;
+  let measurementRevision = 0;
   let readySettled = false;
   let resolveReady!: (geometry: Geometry) => void;
   let rejectReady!: (error: DomainError) => void;
@@ -133,7 +137,7 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
   };
-  const close = (error: DomainError, notify: boolean) => {
+  const close = (error: DomainError, notify: boolean, notifyEndpoint = true) => {
     if (closed) return;
     closed = true;
     cancelTimer();
@@ -147,13 +151,15 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
     queue.length = 0;
     chargedBytes = 0;
     for (const command of abandoned) command.reject(error);
-    try {
-      options.postMessage(
-        serialize({ version: 1, bridgeGeneration: options.bridgeGeneration, kind: "dispose" }),
-      );
-    } catch {
-      // A failed/departed renderer cannot acknowledge cleanup. Local promises
-      // are still settled; its owner must release the physical content process.
+    if (notifyEndpoint) {
+      try {
+        options.postMessage(
+          serialize({ version: 1, bridgeGeneration: options.bridgeGeneration, kind: "dispose" }),
+        );
+      } catch {
+        // A failed/departed renderer cannot acknowledge cleanup. Local promises
+        // are still settled; its owner must release the physical content process.
+      }
     }
     if (notify) emit(failures, error);
     inputs.clear();
@@ -211,9 +217,13 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
   const enqueueVoid = (operation: string, value: unknown) => {
     void enqueue(operation, value).catch(() => {});
   };
-  const adoptGeometry = (value: unknown): boolean => {
+  const adoptGeometry = (value: unknown, revision: unknown): boolean => {
     const checked = GeometrySchema.safeParse(value);
-    if (!checked.success) return false;
+    if (!checked.success || !positiveCounter(revision)) return false;
+    // ACKs bypass the receipt-controlled notice lane. Their measurements and
+    // queued layout notices therefore share one endpoint-issued order.
+    if (revision <= measurementRevision) return true;
+    measurementRevision = revision;
     geometry = checked.data;
     if (!readySettled) {
       readySettled = true;
@@ -240,10 +250,7 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
 
   return {
     ready,
-    initialize(input: ViewInitialization) {
-      viewGeneration = input.viewGeneration;
-      return enqueue("initialize", input);
-    },
+    initialize: (input: ViewInitialization) => enqueue("initialize", input),
     beginBaseline: (descriptor: BaselineDescriptor) => enqueue("beginBaseline", descriptor),
     writeBaselineChunk: (bytes: Uint8Array) => enqueue("writeBaselineChunk", undefined, bytes),
     finishBaseline: () => enqueue("finishBaseline"),
@@ -265,16 +272,17 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
       const frame = readBridgeFrame(message);
       if (!frame) return fail();
       if (frame.bridgeGeneration !== options.bridgeGeneration) return;
+      if (frame.kind === "closed") return close(domainError("RESYNC_REQUIRED"), true, false);
       if (frame.kind === "failure") return fail(errorValue(frame.value));
       if (frame.kind === "ready") {
-        if (!adoptGeometry(frame.value)) return fail();
+        if (!adoptGeometry(frame.value, frame.measurementRevision)) return fail();
         if (!current) cancelTimer();
         pump();
         return;
       }
       if (frame.kind === "ack") {
         if (!current || frame.commandId !== current.id) return;
-        if (!adoptGeometry(frame.value)) return fail();
+        if (!adoptGeometry(frame.value, frame.measurementRevision)) return fail();
         const applied = current;
         current = undefined;
         chargedBytes -= applied.charge;
@@ -288,7 +296,7 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
       if (frame.noticeId !== lastNoticeId + 1) return fail();
       lastNoticeId = frame.noticeId;
       if (frame.kind === "geometry") {
-        if (!adoptGeometry(frame.value)) return fail();
+        if (!adoptGeometry(frame.value, frame.measurementRevision)) return fail();
         acknowledgeNotice(frame.noticeId);
         return;
       }
@@ -302,10 +310,12 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
       if (frame.kind === "input") {
         const bytes = decodeBridgeBytes(frame.bytes);
         const value = frame.value as Partial<InputIntent> | undefined;
-        if (!value || !positiveCounter(value.viewGeneration)) return fail();
-        if (value.viewGeneration !== viewGeneration) return acknowledgeNotice(frame.noticeId);
+        if (!value || !validViewGeneration(value.viewGeneration)) return fail();
         if (!bytes || !["keyboard", "paste", "mouse"].includes(value.source ?? "")) return fail();
-        emit(inputs, { viewGeneration: viewGeneration!, source: value.source!, bytes });
+        // The controller accepts the preceding logical generation while recovery
+        // initializes its replacement, and visibly rejects truly obsolete input.
+        // Admission to this bridge's initialize queue is not that transition.
+        emit(inputs, { viewGeneration: value.viewGeneration, source: value.source!, bytes });
         // Receipt proves synchronous delivery to the controller's listener only.
         // Its own input receipt still decides PTY acceptance/written/unknown.
         acknowledgeNotice(frame.noticeId);
@@ -314,11 +324,10 @@ export function createTerminalViewBridgeHost(options: ViewBridgeOptions): Termin
       if (frame.kind === "focus") {
         const value = frame.value as Partial<FocusIntent> | undefined;
         const grid = GeometrySchema.safeParse(value?.geometry);
-        if (!value || !positiveCounter(value.viewGeneration)) return fail();
-        if (value.viewGeneration !== viewGeneration) return acknowledgeNotice(frame.noticeId);
+        if (!value || !validViewGeneration(value.viewGeneration)) return fail();
         if (!positiveCounter(value.focusSeq) || typeof value.focused !== "boolean" || !grid.success)
           return fail();
-        geometry = grid.data;
+        // Focus carries the server's logical grid, not a local viewport measurement.
         emit(focuses, value as FocusIntent);
         acknowledgeNotice(frame.noticeId);
         return;
@@ -355,6 +364,7 @@ export function createTerminalViewBridgeEndpoint(
   )
     throw new RangeError("Invalid bridge notification bounds");
   let closed = false;
+  let closing = false;
   let active = false;
   let lastId = 0;
   const subscriptions: Array<{ dispose(): void }> = [];
@@ -362,6 +372,7 @@ export function createTerminalViewBridgeEndpoint(
   let currentNotice: { id: number; text: string; charge: number } | undefined;
   let noticeBytes = 0;
   let nextNoticeId = 1;
+  let measurementRevision = 1;
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const post = (kind: string, rest: Partial<ViewBridgeFrame> = {}) => {
     if (!closed)
@@ -369,7 +380,7 @@ export function createTerminalViewBridgeEndpoint(
         serialize({ version: 1, bridgeGeneration: options.bridgeGeneration, kind, ...rest }),
       );
   };
-  const dispose = () => {
+  const disposeLocal = () => {
     if (closed) return;
     closed = true;
     if (noticeTimer !== undefined) clearTimeout(noticeTimer);
@@ -393,6 +404,17 @@ export function createTerminalViewBridgeEndpoint(
     }
     if (cleanupError !== undefined) throw cleanupError;
   };
+  const dispose = () => {
+    if (closed || closing) return;
+    closing = true;
+    try {
+      // Endpoint unmount invalidates even an idle host immediately. The host
+      // does not echo this closure back, and received host disposal stays local.
+      post("closed");
+    } finally {
+      disposeLocal();
+    }
+  };
   const fail = (error: unknown) => {
     try {
       post("failure", { value: errorValue(error) });
@@ -400,7 +422,7 @@ export function createTerminalViewBridgeEndpoint(
       // Transport failure is already fatal; still attempt every local cleanup.
     } finally {
       try {
-        dispose();
+        disposeLocal();
       } catch {
         // The failure notification never promises successful resource cleanup.
         // Public dispose preserves a cleanup exception for the physical owner.
@@ -417,7 +439,7 @@ export function createTerminalViewBridgeEndpoint(
       fail(error);
     }
   };
-  const forward = (kind: string, value: unknown, bytes?: Uint8Array) => {
+  const forward = (kind: string, value: unknown, bytes?: Uint8Array, measuredRevision?: number) => {
     if (closed) return;
     try {
       const id = nextNoticeId++;
@@ -428,6 +450,7 @@ export function createTerminalViewBridgeEndpoint(
         kind,
         noticeId: id,
         value,
+        ...(measuredRevision === undefined ? {} : { measurementRevision: measuredRevision }),
         ...(bytes === undefined ? {} : { bytes: encodeBridgeBytes(bytes) }),
       });
       const charge = frameCharge(text, bytes?.byteLength ?? 0);
@@ -480,10 +503,10 @@ export function createTerminalViewBridgeEndpoint(
         else fail(error);
       }),
     );
-    post("ready", { value: options.initialGeometry });
+    post("ready", { value: options.initialGeometry, measurementRevision });
   } catch (error) {
     try {
-      dispose();
+      disposeLocal();
     } catch {
       // Preserve the initialization failure after attempting every cleanup.
     }
@@ -495,7 +518,7 @@ export function createTerminalViewBridgeEndpoint(
       const frame = readBridgeFrame(message);
       if (!frame) return fail(domainError("RESYNC_REQUIRED"));
       if (frame.bridgeGeneration !== options.bridgeGeneration) return;
-      if (frame.kind === "dispose") return dispose();
+      if (frame.kind === "dispose") return disposeLocal();
       if (frame.kind === "notice-ack") {
         if (!currentNotice || frame.noticeId !== currentNotice.id) return;
         if (noticeTimer !== undefined) clearTimeout(noticeTimer);
@@ -520,7 +543,13 @@ export function createTerminalViewBridgeEndpoint(
         try {
           // For baseline/event writes, apply resolves only after xterm's parse
           // callback. Posting to this document was never an acknowledgement.
-          post("ack", { commandId: frame.commandId!, value: view.measureGrid() });
+          const measured = view.measureGrid();
+          if (!positiveCounter(++measurementRevision)) throw domainError("COUNTER_EXHAUSTED");
+          post("ack", {
+            commandId: frame.commandId!,
+            value: measured,
+            measurementRevision,
+          });
         } catch (error) {
           fail(error);
         }
@@ -528,7 +557,8 @@ export function createTerminalViewBridgeEndpoint(
     },
     publishGeometry(geometry: Geometry) {
       if (!GeometrySchema.safeParse(geometry).success) return fail(domainError("RESYNC_REQUIRED"));
-      forward("geometry", geometry);
+      if (!positiveCounter(++measurementRevision)) return fail(domainError("COUNTER_EXHAUSTED"));
+      forward("geometry", geometry, undefined, measurementRevision);
     },
     snapshot: () => ({
       pendingNotices: notices.length + Number(!!currentNotice),
