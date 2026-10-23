@@ -9,6 +9,7 @@ export const LOCAL_PATHS = Object.freeze({
   bootstrap: "/bootstrap",
   rpc: "/rpc",
   terminal: "/terminal",
+  events: "/events",
 });
 export const BUSINESS_HEADERS = Object.freeze([
   "Authorization",
@@ -22,6 +23,7 @@ export const M0_CAPABILITIES = Object.freeze([
   "worker-pipe-v2",
   "terminal-preview-v1",
   "operation-receipts-v1",
+  "business-events-v1",
 ] as const);
 export const REQUIRED_CAPABILITIES = Object.freeze([
   "terminal-framing-v2",
@@ -411,7 +413,7 @@ export function evaluateWsUpgrade(input: {
   capacityAvailable: boolean;
 }): AdmissionKind {
   if (
-    input.path !== LOCAL_PATHS.terminal ||
+    (input.path !== LOCAL_PATHS.terminal && input.path !== LOCAL_PATHS.events) ||
     !/^(?:127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$/.test(input.boundAuthority) ||
     !isLoopbackLiteralHost(input.host) ||
     (input.origin !== undefined &&

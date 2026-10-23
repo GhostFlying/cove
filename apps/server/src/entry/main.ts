@@ -26,6 +26,8 @@ import { LocalRuntimeClock, type LocalTimer } from "../terminal/local-runtime-cl
 import { LocalAdmission } from "../transport/local-admission.js";
 import { RawConnectionGate } from "../transport/raw-connections.js";
 import { TerminalWebSocket, registerTerminalWebSocket } from "../transport/terminal-websocket.js";
+import { BusinessSnapshots } from "../business/snapshot.js";
+import { BusinessWebSocket, registerBusinessWebSocket } from "../transport/business-websocket.js";
 import { encodeUtf8, registerHttpRpc, type LocalCore } from "../transport/http-rpc.js";
 import { ConfigService, initializeWorkspaceRoot, sqliteConfigState } from "../store/config.js";
 import { HomeError, homeLayout, resolveHome } from "../store/home.js";
@@ -103,6 +105,7 @@ export function createLocalApplication(
   if (!budgets || !/^[A-Za-z0-9_-]{43,256}$/.test(identity.secret))
     throw new Error("Invalid local launch binding");
   let terminal: TerminalWebSocket | undefined;
+  let business: BusinessWebSocket | undefined;
   let worker: WorkerProcess | undefined;
   const clock = new LocalRuntimeClock(
     () => {
@@ -113,6 +116,7 @@ export function createLocalApplication(
     () => {
       for (const session of core.runtime.pool.sessions()) session.loseContact();
       terminal?.close();
+      business?.close();
     },
     injected?.timer,
     injected?.monotonic,
@@ -270,6 +274,11 @@ export function createLocalApplication(
     auth,
   );
   terminal = new TerminalWebSocket(admission, core, arbiter, clock.now, injected?.timer);
+  const snapshots =
+    core.store && core.config
+      ? new BusinessSnapshots(core.store, runtime, core.config.defaultWorkspaceRoot(), randomUUID)
+      : undefined;
+  business = new BusinessWebSocket(admission, core, snapshots, clock.now);
   const app = Fastify({
     logger: false,
     bodyLimit: budgets.rpcRequestBytes,
@@ -286,11 +295,17 @@ export function createLocalApplication(
   new RawConnectionGate().attach(app.server);
   // Register the plugin before routes; business handlers attach synchronously on upgrade.
   const terminalRoutes = terminal;
+  const businessRoutes = business;
   app.register(async (routes) => {
     await routes.register(websocket, { options: { maxPayload: 69648, perMessageDeflate: false } });
     routes.setNotFoundHandler((_request, reply) => reply.code(404).send());
     registerHttpRpc(routes, admission, core);
     registerTerminalWebSocket(routes, terminalRoutes);
+    registerBusinessWebSocket(routes, businessRoutes);
+  });
+  app.addHook("onClose", async () => {
+    businessRoutes.close();
+    snapshots?.close();
   });
   return {
     app,
@@ -298,6 +313,7 @@ export function createLocalApplication(
     core,
     clock,
     terminal,
+    business,
     arbiter,
     identity,
     options,
@@ -325,6 +341,8 @@ export function createLocalApplication(
       storeErrorLog?.();
       clock.stop();
       terminal?.close();
+      business?.close();
+      snapshots?.close();
       arbiter.dispose();
       core.operations.dispose();
       receipts?.dispose();
@@ -602,6 +620,7 @@ export async function startLocalEntry(
         failed = true;
       }
       local.terminal.close();
+      local.business.close();
       if (!(await listeners.close())) failed = true;
       let receipt: Awaited<WorkerProcess["closed"]> | undefined;
       try {

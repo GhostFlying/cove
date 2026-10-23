@@ -1,5 +1,6 @@
 import { authOperations } from "./auth.js";
 import { bindingOperations } from "./bindings.js";
+import { businessOperations } from "./business-events.js";
 import { configOperations } from "./config.js";
 import { entryOperations } from "./entry.js";
 import { identityOperations } from "./identity.js";
@@ -16,6 +17,7 @@ import { worktreeOperations } from "./worktrees.js";
 // connection. A domain task adds its read and write operations here (one writer per change, like
 // the RPC dispatch table); writes that need an operation receipt go to writes.ts instead.
 export const STORE_OPERATIONS = Object.freeze({
+  ...businessOperations,
   ...identityOperations,
   ...configOperations,
   ...receiptOperations,

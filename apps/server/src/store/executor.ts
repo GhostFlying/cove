@@ -1,6 +1,7 @@
 import { Rollback, type Connection, type SqlOperation } from "./sql/statements.js";
 import { STORE_OPERATIONS } from "./sql/registry.js";
 import { serializeStoreError, type SerializedStoreError } from "./store-errors.js";
+import type { BusinessJournal, StoreBusinessPublication } from "./business-journal.js";
 
 export type OperationTable = ReadonlyMap<string, SqlOperation<unknown, unknown>>;
 
@@ -42,7 +43,7 @@ export async function loadAfterCommitHooks(
 }
 
 export type Execution =
-  | { ok: true; value: unknown; timing: [number, number] }
+  | { ok: true; value: unknown; timing: [number, number]; business?: StoreBusinessPublication }
   | { ok: false; error: SerializedStoreError; timing: [number, number] };
 
 const now = (): number => performance.timeOrigin + performance.now();
@@ -57,6 +58,7 @@ export function execute(
   operations: OperationTable,
   name: string,
   args: unknown,
+  journal?: BusinessJournal,
 ): Execution {
   const start = now();
   const operation = operations.get(name);
@@ -67,8 +69,16 @@ export function execute(
       timing: [start, now()],
     };
   try {
-    const value = db.transaction(() => operation(db, args)).immediate();
-    return { ok: true, value, timing: [start, now()] };
+    journal?.clear();
+    let business: StoreBusinessPublication | undefined;
+    const value = db
+      .transaction(() => {
+        const answer = operation(db, args);
+        business = journal?.collect();
+        return answer;
+      })
+      .immediate();
+    return { ok: true, value, timing: [start, now()], ...(business ? { business } : {}) };
   } catch (error) {
     if (error instanceof Rollback) return { ok: true, value: error.value, timing: [start, now()] };
     return { ok: false, error: serializeStoreError(error), timing: [start, now()] };
