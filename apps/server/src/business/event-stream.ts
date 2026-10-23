@@ -46,7 +46,10 @@ export class BusinessEventStream {
   }
   cursor(filter: BusinessFilter): BusinessCursor {
     return {
-      ...this.identity,
+      // Callers may pass RuntimeComposition structurally; its budgets/byte owner are not wire
+      // identity. Project named fields instead of leaking those properties into strict cursors.
+      serverId: this.identity.serverId,
+      relayInstanceId: this.identity.relayInstanceId,
       streamId: this.streamId,
       sequence: this.sequence,
       filter: businessFilterIdentity(filter),

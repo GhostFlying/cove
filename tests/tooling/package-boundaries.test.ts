@@ -59,7 +59,7 @@ function assertDependencyBoundary(
     throw new Error("Protocol runtime dependency escaped pure boundary");
   if (
     Object.keys(protocolManifest.exports).sort().join() !==
-    "./auth,./bootstrap,./budgets,./errors,./identity,./pipe,./profile,./provisional/pipe,./provisional/terminal,./rpc,./runtime,./terminal,./view,./workspace"
+    "./auth,./bootstrap,./budgets,./business-events,./errors,./identity,./pipe,./profile,./provisional/pipe,./provisional/terminal,./rpc,./runtime,./terminal,./view,./workspace"
   )
     throw new Error("Protocol exports escaped the supported contract boundary");
 }
@@ -333,6 +333,7 @@ import type { WebProbeResult } from '@cove/terminal-web/probes/environment';
 import type { TerminalMetadata } from '@cove/protocol/provisional/terminal';
 import type { PipeMetadata } from '@cove/protocol/provisional/pipe';
 import type { BootstrapSuccess } from '@cove/protocol/bootstrap';
+import type { BusinessCursor, BusinessFrame } from '@cove/protocol/business-events';
 import type { EffectiveBudgets } from '@cove/protocol/budgets';
 import type { DomainError } from '@cove/protocol/errors';
 import type { SubscriptionRef } from '@cove/protocol/identity';
@@ -357,7 +358,7 @@ declare const terminal: TerminalMetadata;
 declare const pipe: PipeMetadata;
 void terminal;
 void pipe;
-declare const supported: [BootstrapSuccess, EffectiveBudgets, DomainError, SubscriptionRef, SupportedPipeMetadata, Appearance, OperationRecord, RuntimeTerminalPort, SupportedTerminalMetadata, TerminalView];
+declare const supported: [BusinessCursor, BusinessFrame, BootstrapSuccess, EffectiveBudgets, DomainError, SubscriptionRef, SupportedPipeMetadata, Appearance, OperationRecord, RuntimeTerminalPort, SupportedTerminalMetadata, TerminalView];
 void supported;
 declare const result: Awaited<ReturnType<RuntimeTerminalPort['spawn']>>;
 const runtime: RuntimeTerminalPort = {
@@ -408,11 +409,13 @@ import { runEnvironmentProbe as web } from '@cove/terminal-web/probes/environmen
 import { TerminalMetadataSchema } from '@cove/protocol/provisional/terminal';
 import { PipeMetadataSchema } from '@cove/protocol/provisional/pipe';
 import { BootstrapRequestSchema } from '@cove/protocol/bootstrap';
+import { BusinessSubscribeSchema } from '@cove/protocol/business-events';
 import { PipeCommandSchema } from '@cove/protocol/pipe';
 import { RpcRequestSchema } from '@cove/protocol/rpc';
 import { createClient } from '@cove/client';
 if (typeof engine !== 'function' || typeof web !== 'function' || typeof createTerminalModel !== 'function' || typeof createClient !== 'function') throw new Error('Compiled exports missing');
 if (!TerminalMetadataSchema || !PipeMetadataSchema || !BootstrapRequestSchema || !PipeCommandSchema || !RpcRequestSchema) throw new Error('Protocol exports missing');
+if (!BusinessSubscribeSchema.safeParse({type:'subscribe',filter:{kinds:['task']}}).success) throw new Error('Business contract missing');
 for (const name of ['@cove/terminal-engine/probes/pty-child', '@cove/terminal-web/dist/probes/node/environment', '@cove/protocol', '@cove/protocol/src/provisional/identity', '@cove/client/src/client']) {
   try { await import(name); throw new Error('Private import succeeded: ' + name); }
   catch (error) { if (error.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error; }
