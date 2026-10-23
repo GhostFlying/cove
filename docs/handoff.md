@@ -11,7 +11,8 @@
 - **用户于 2026-10-23 接受 M2 交付、批准 M2 退出并授权 M3 规划**（[#185 阶段决定](https://github.com/GhostFlying/cove/issues/185#issuecomment-6358353029)）。
   M2 双机 Tailnet、双平台安装升级及实际 main CI 已通过；Linux 容器注销/init 周期模拟通过，范围不含 host kernel reboot。
   macOS 真实 GUI 注销/登录由用户决定暂缓，待测试机或实际使用观察（[#189](https://github.com/GhostFlying/cove/issues/189)），不记通过、不阻塞退出。
-- **M3 仅规划获批，实施待批准。** [草案](milestones/m3.md) 与 [#190](https://github.com/GhostFlying/cove/issues/190) 列出 D1–D7、依赖和验收；不提前 scaffold/原型或开工。
+- **M3 D1–D7 推荐方案、任务与验收已获用户批准，授权实施**（[#190 批准记录](https://github.com/GhostFlying/cove/issues/190#issuecomment-6359407784)）。
+  [计划](milestones/m3.md)：先 T0/T1/T2，再按依赖推进 T3–T7；D6 初始系统目标待实证，D7 延期 shell integration，不启动 T8。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
   默认 reviewer 为 codex `gpt-6.1-sol` xhigh；认证边界、协议契约与节点身份核实的变更另加 TraeX 第二 review。
@@ -40,9 +41,10 @@ M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://gi
 - 用法：[开发说明 · M2 远程 server](development.md#m2-远程-server安装配对与入口)；
   tend 可用的接口与待同步变更：[Shepherd/tend 集成说明](integrations/shepherd-tend.md)。
 
-## M3 规划与协调接管
+## M3 实施与协调接管
 
-- 当前 root 为 M3 唯一协调者，持有规划文档写入；read-only helpers 分别调查 Desktop、Mobile 与 shared client/events/tab send。
+- 当前 root 为 M3 唯一协调者，维护阶段文档、派发与集成；Desktop/Mobile/shared 规划调查和 PR191 完整独立 review 已完成。
+  PR191 记录计划及授权，合入后完成实际 main 检查再释放依赖；首批 T0 原生/桥、T1 Node 适配、T2 业务事件各用独立写者。
 - 用户授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`；旧会话只作历史参考。
   root 是唯一协调者，负责派发、review 路由、集成与交接，不实施运行时代码。
 - [#178](https://github.com/GhostFlying/cove/pull/178) 已合入 `905ff5e6`，修正全部邀请入口保存、默认入口和 SSH supervisor 生命周期。
