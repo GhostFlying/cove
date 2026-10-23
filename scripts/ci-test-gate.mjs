@@ -603,6 +603,11 @@ export const requiredSuites = [
     minimumTests: 11,
   },
   {
+    project: "terminal-web-unit",
+    file: "packages/terminal-web/tests/unit/view-bridge.test.mjs",
+    minimumTests: 16,
+  },
+  {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-input.test.mjs",
     minimumTests: 8,
