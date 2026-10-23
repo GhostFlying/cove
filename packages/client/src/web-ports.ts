@@ -127,17 +127,11 @@ export function createWebPorts(options: WebPortOptions): WebPorts {
   // The endpoint is an origin only; paths come from the protocol's fixed local routes.
   const match = /^(https?):\/\/([^/?#\s]+)$/.exec(options.endpoint);
   if (!match) throw new Error("Endpoint must be an http(s) origin");
-  const secure = match[1] === "https";
   const origin = options.endpoint;
   const doFetch = options.fetch ?? globalValue<FetchLike>("fetch");
   const createAbort =
     options.createAbortController ??
     (() => new (globalValue<new () => AbortControllerLike>("AbortController"))());
-  const createSocket =
-    options.createWebSocket ??
-    ((url: string) => new (globalValue<new (url: string) => WebSocketLike>("WebSocket"))(url));
-  const maxBuffered = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
-  const textEncoder = new (globalValue<new () => TextEncoderLike>("TextEncoder"))();
 
   const http: HttpPort = {
     post(request: HttpRequest, callbacks: HttpCallbacks): CancellationHandle {
@@ -198,7 +192,40 @@ export function createWebPorts(options: WebPortOptions): WebPorts {
     },
   };
 
-  const terminalUrl = `${secure ? "wss" : "ws"}://${match[2]}${TERMINAL_PATH}`;
+  const terminal = createWebSocketPort({
+    endpoint: options.endpoint,
+    path: TERMINAL_PATH,
+    ...(options.createWebSocket ? { createWebSocket: options.createWebSocket } : {}),
+    ...(options.maxBufferedBytes !== undefined
+      ? { maxBufferedBytes: options.maxBufferedBytes }
+      : {}),
+  });
+
+  return { http, terminal };
+}
+
+export interface WebSocketPortOptions {
+  readonly endpoint: string;
+  // A fixed protocol route. The byte transport does not add authentication or business frames.
+  readonly path: string;
+  readonly createWebSocket?: WebSocketFactory;
+  readonly maxBufferedBytes?: number;
+}
+
+// Terminal and business sockets share lifecycle, bounded send admission and cancellation; their
+// callers independently own bootstrap, credentials, message schemas and recovery semantics.
+export function createWebSocketPort(options: WebSocketPortOptions): TerminalPort {
+  const match = /^(https?):\/\/([^/?#\s]+)$/.exec(options.endpoint);
+  if (!match) throw new Error("Endpoint must be an http(s) origin");
+  if (!/^\/[A-Za-z0-9/_-]+$/.test(options.path))
+    throw new Error("Socket path must be a protocol route");
+  const secure = match[1] === "https";
+  const createSocket =
+    options.createWebSocket ??
+    ((url: string) => new (globalValue<new (url: string) => WebSocketLike>("WebSocket"))(url));
+  const maxBuffered = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+  const textEncoder = new (globalValue<new () => TextEncoderLike>("TextEncoder"))();
+  const terminalUrl = `${secure ? "wss" : "ws"}://${match[2]}${options.path}`;
 
   const terminal: TerminalPort = {
     open(callbacks: TerminalOpenCallbacks): CancellationHandle {
@@ -249,7 +276,7 @@ export function createWebPorts(options: WebPortOptions): WebPorts {
     },
   };
 
-  return { http, terminal };
+  return terminal;
 }
 
 export function createDefaultScheduler(): Scheduler {

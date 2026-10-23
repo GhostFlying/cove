@@ -1384,7 +1384,7 @@ test("rejects removal of a gate test below the required floor", () => {
   );
 });
 
-test("M1 and M2 CLI suites are registered per file and join the required inventory", async () => {
+test("M1 through M3 CLI suites are registered per file and join the required inventory", async () => {
   // Pinned independently of the directory listing: these suites cannot leave the inventory by
   // deleting a test together with its registration.
   expect(fileRegisteredDirectories).toEqual([
@@ -1408,6 +1408,7 @@ test("M1 and M2 CLI suites are registered per file and join the required invento
       ],
     },
     { project: "cli", directory: "apps/cli/tests/m2", required: ["pending-secrets"] },
+    { project: "cli", directory: "apps/cli/tests/m3", required: ["node-client"] },
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
   const registered = await readFileRegisteredSuites();
@@ -1415,7 +1416,9 @@ test("M1 and M2 CLI suites are registered per file and join the required invento
   expect(
     registered.every(
       (suite) =>
-        suite.file.startsWith("apps/cli/tests/m1/") || suite.file.startsWith("apps/cli/tests/m2/"),
+        suite.file.startsWith("apps/cli/tests/m1/") ||
+        suite.file.startsWith("apps/cli/tests/m2/") ||
+        suite.file.startsWith("apps/cli/tests/m3/"),
     ),
   ).toBe(true);
   for (const { directory, required } of fileRegisteredDirectories)

@@ -81,6 +81,28 @@ Vitest projects 和 inventory，
 pnpm 使用 isolated linker、严格 engines/peer 校验；依赖构建脚本默认未授权，原生包引入时显式配置所需 allowBuilds。
 已有 `docs/benchmarks/` 是独立实验，保留其 lockfile 和原始文件，不进入 workspace 或自动格式化/lint。
 
+## Node 客户端接线（M3 T1）
+
+`@cove/node-client` 是 CLI 与后续 Electron main 的实际 Node 接入边界，只依赖 `@cove/client`、
+`@cove/protocol` 和 Node。它提供 HTTP/WebSocket transport、显式入口选择、SSH、配对与常驻 tsnet dial，
+不导入 server 原生依赖、CLI 命令或文件 token store。消费者通过 workspace exports 与编译产物使用它。
+
+宿主传入 `createNodeConnectionAdapters` 的 tsnet binary locator、可选测试 control URL 和 warning 回调；
+CLI 保留 installed-closure/development lookup、开发 override 限制与 build warning，Desktop 后续提供稳定安装位置的 helper，
+不能指向临时 app 构建产物。两者在同一 OS 用户/Cove home 复用网络节点，但设备注册与凭据各自独立。
+Desktop 必须实现 Keychain 存储，不读取 CLI token 文件，也不允许明文 fallback。
+
+`openRemoteConnection` 先核实所选通道的 peer 与 serverId，再调用宿主 `CredentialProvider`。
+返回连接的 `credentials` 是按 serverId 绑定、每次调用读取当前凭据的 supplier；`socketPort(path)` 只提供原始字节传输，
+新通道自行实现协议握手、身份绑定和有界恢复，不能复用终端帧冒充业务事件。关闭连接仅释放自己的通道，
+不停止共享 dial node、server 或 PTY；不因连接失败切入口或重复不确定写入。
+
+客户端 tsnet 创建缺失 home 时可请求 0700，但不检查或修改已有任意 home/祖先的属主或权限；
+仅处理已知管理子目录 `client`、`tsnet-client` 及 `tsnet-client/run`。这沿用已接受的目录归属边界。
+
+局部检查：`pnpm --filter @cove/node-client test`，包含编译 package/CLI 的实际消费者与受影响连接行为。
+M3 CLI 测试在 `apps/cli/tests/m3` 按 `.suite.json` 注册，由同一 inventory gate 检查。
+
 ## M1 本机试用与 CLI 用法
 
 范围、场景与决定见 [M1](milestones/m1.md)。完整用法以 `cove help`（或 `cove --help`）打印的 usage 为准，

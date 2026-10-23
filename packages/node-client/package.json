@@ -1,0 +1,24 @@
+{
+  "name": "@cove/node-client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm --dir ../.. --filter @cove/cli... build && pnpm --dir ../.. exec vitest run --project cli apps/cli/tests/m3/node-client.test.mjs",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@cove/client": "workspace:*",
+    "@cove/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2"
+  }
+}

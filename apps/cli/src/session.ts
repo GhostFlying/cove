@@ -1,21 +1,19 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { Client, ClientCredential, CredentialProvider } from "@cove/client";
 import {
-  createClient,
-  credentialSupplier,
-  type Client,
-  type ClientCredential,
-  type CredentialProvider,
-} from "@cove/client";
-import { createDefaultScheduler, createUtf8Codec } from "@cove/client/web-ports";
+  createNodeClient,
+  nodeSession,
+  type NodeSession,
+  type SessionTarget,
+} from "@cove/node-client";
+export type { SessionTarget } from "@cove/node-client";
 import { RendezvousSchema } from "@cove/protocol/bootstrap";
 import { buildId, sourceBuildId } from "@cove/server/build-id";
-import { createNodePorts } from "./node-ports.js";
 import { findServer, type ServerRecord } from "./remote/credentials.js";
-import { openEntry, RemoteError, verifiedIdentity, type Via } from "./remote/entries.js";
-import { withEntryFailure } from "./remote/entry-types.js";
+import { RemoteError, type Via } from "./remote/entries.js";
+import { nodeAdapters } from "./remote/adapters.js";
 
 // This CLI's build (m2 D12): the server's computation over the same build, so the two agree when
 // they come from one build. Computed on first use and cached for the process, so a command that
@@ -51,13 +49,6 @@ export interface Rendezvous {
   readonly secret: string;
 }
 
-// The server instance a session is bound to and where it is reached.
-export interface SessionTarget {
-  readonly serverId: string;
-  readonly relayInstanceId: string;
-  readonly endpoint: string;
-}
-
 export function defaultRendezvousPath(): string {
   return join(homedir(), ".cove", "m0", "run", "rendezvous.json");
 }
@@ -89,16 +80,7 @@ export async function readRendezvous(path: string): Promise<Rendezvous> {
 
 // A client bound to one server instance, with the credential `provider` gives for it.
 export function createTargetClient(target: SessionTarget, provider: CredentialProvider): Client {
-  return createClient({
-    expectedServerId: target.serverId,
-    expectedRelayInstanceId: target.relayInstanceId,
-    buildVersion: cliBuildVersion(),
-    credentials: credentialSupplier(provider, target.serverId),
-    codec: createUtf8Codec(),
-    createOpaqueId: () => randomUUID(),
-    scheduler: createDefaultScheduler(),
-    ...createNodePorts(target.endpoint),
-  });
+  return createNodeClient(target, provider, cliBuildVersion());
 }
 
 export function createSessionClient(record: Rendezvous): Client {
@@ -106,9 +88,7 @@ export function createSessionClient(record: Rendezvous): Client {
   return createTargetClient(record, () => ({ kind: "local-secret", secret: record.secret }));
 }
 
-export interface Session {
-  readonly record: SessionTarget;
-  readonly client: Client;
+export interface Session extends NodeSession {
   // A remote session: the paired server's record and the token in use, which `auth device
   // rotate` replaces (the client asks for the credential before every request).
   readonly remote?: { server: ServerRecord; token(): string; useToken(token: string): void };
@@ -136,7 +116,7 @@ export async function openSession(rendezvousPath?: string): Promise<Session> {
   const record = await readRendezvous(resolveRendezvousPath(rendezvousPath));
   const client = createSessionClient(record);
   await connected(client, record.endpoint);
-  return { record, client };
+  return nodeSession(record, client, () => ({ kind: "local-secret", secret: record.secret }));
 }
 
 // A session with a paired server (m2 D5, D11): its record under `home`, the selected entry, and
@@ -153,29 +133,19 @@ export async function openRemoteSession(
       "ENTRY_UNAVAILABLE",
       `no paired server is named ${alias} (\`cove remote list\`); nothing was sent`,
     );
-  const entry = await openEntry(server, via, home);
-  try {
-    const identity = await verifiedIdentity(server, entry, cliBuildVersion());
-    const mismatch = buildMismatch(identity, cliBuildVersion(), sourceBuildId());
-    if (mismatch) process.stderr.write(`cove: warning: ${alias} runs ${mismatch}\n`);
-    let token = server.token;
-    const credential = (): ClientCredential => ({ kind: "device-token", token });
-    const target = {
-      serverId: server.serverId,
-      relayInstanceId: identity.relayInstanceId,
-      endpoint: entry.endpoint,
-    };
-    const client = createTargetClient(target, credential);
-    await connected(client, `${alias} over ${entry.kind}`);
-    return {
-      record: target,
-      client,
-      remote: { server, token: () => token, useToken: (next) => void (token = next) },
-      close: () => entry.close(),
-      entryFailure: () => entry.failure?.(),
-    };
-  } catch (error) {
-    await entry.close();
-    throw withEntryFailure(error, entry);
-  }
+  let token = server.token;
+  const provider = (): ClientCredential => ({ kind: "device-token", token });
+  const session = await nodeAdapters.openRemoteConnection(server, provider, {
+    via,
+    home,
+    buildVersion: cliBuildVersion(),
+    onIdentity(identity) {
+      const mismatch = buildMismatch(identity, cliBuildVersion(), sourceBuildId());
+      if (mismatch) process.stderr.write(`cove: warning: ${alias} runs ${mismatch}\n`);
+    },
+  });
+  return {
+    ...session,
+    remote: { server, token: () => token, useToken: (next) => void (token = next) },
+  };
 }

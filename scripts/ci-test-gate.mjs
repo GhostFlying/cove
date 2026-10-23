@@ -1098,6 +1098,11 @@ export const fileRegisteredDirectories = [
     directory: "apps/cli/tests/m2",
     required: ["pending-secrets"],
   },
+  {
+    project: "cli",
+    directory: "apps/cli/tests/m3",
+    required: ["node-client"],
+  },
 ];
 
 const SUITE_SUFFIX = ".suite.json";

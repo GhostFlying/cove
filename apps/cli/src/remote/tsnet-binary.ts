@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { TsnetBinaryError } from "@cove/node-client";
 import {
   installedClosureRoot,
   tsnetBinaryPath as buildTsnetBinaryPath,
@@ -23,13 +23,11 @@ import {
 // of a real installation; it always uses its own `bin/cove-tsnet`. COVE_TSNET_BINARY is never a
 // fallback: when it is set it is the only candidate, and it must be an absolute path.
 
-const VERSION_TIMEOUT_MS = 5_000;
 const OVERRIDES = ["COVE_TSNET_BINARY", "COVE_TSNET_CONTROL_URL"] as const;
 
-// The local dial-socket protocol this CLI speaks (native/tailscale/PROTOCOL.md "Versioning").
-export const DIAL_PROTOCOL = 1;
-
-export class TsnetBinaryError extends Error {}
+// Shared dial protocol/version parser; executable lookup and override policy stay with the CLI.
+export { binaryIdentity, DIAL_PROTOCOL, TsnetBinaryError } from "@cove/node-client";
+export type { BinaryIdentity } from "@cove/node-client";
 
 // Throws TsnetBinaryError when a development or test override is set and this CLI does not run
 // from a development workspace. The `remote tsnet` commands call it before they read input; every
@@ -66,33 +64,4 @@ export function tsnetBinaryPath(): string | null {
 export function tsnetControlUrl(): string | undefined {
   checkTsnetOverrides();
   return process.env.COVE_TSNET_CONTROL_URL || undefined;
-}
-
-export type BinaryIdentity = { readonly build: string; readonly protocol: number };
-
-const VERSION_LINE = /^cove-tsnet build=([A-Za-z0-9.+_-]{1,128}) protocol=([0-9]{1,6})\n?$/;
-
-// `cove-tsnet version`: the build a daemon started from `path` reports in its hello, which is
-// what "the current build" means for the version rules (D14), and its local protocol.
-export function binaryIdentity(path: string): Promise<BinaryIdentity> {
-  return new Promise((resolve, reject) => {
-    execFile(
-      path,
-      ["version"],
-      { timeout: VERSION_TIMEOUT_MS, maxBuffer: 4096, encoding: "utf8" },
-      (error, stdout) => {
-        const match = VERSION_LINE.exec(stdout);
-        if (error || !match) {
-          reject(
-            new TsnetBinaryError(
-              `${path} did not report a cove-tsnet version` +
-                (error ? ` (${error.message.split("\n")[0]})` : ""),
-            ),
-          );
-          return;
-        }
-        resolve({ build: match[1]!, protocol: Number(match[2]) });
-      },
-    );
-  });
 }
