@@ -4,6 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
+    "./view-bridge": {
+      "types": "./dist/src/view-bridge.d.ts",
+      "import": "./dist/src/view-bridge.js"
+    },
     "./xterm-view": {
       "types": "./dist/src/xterm-view.d.ts",
       "import": "./dist/src/xterm-view.js"
