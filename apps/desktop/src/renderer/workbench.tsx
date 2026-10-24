@@ -323,7 +323,8 @@ export function App() {
             mutate("tab.create", {
               taskId,
               name: text(data, "name"),
-              recipe: text(data, "mount")
+              recipe: { kind: "shell" },
+              cwd: text(data, "mount")
                 ? { kind: "mount", mountId: text(data, "mount") }
                 : { kind: "entry" },
             })
