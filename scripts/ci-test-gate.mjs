@@ -214,7 +214,7 @@ export const requiredSuites = [
     file: "apps/mobile/tests/native-ports.test.mjs",
     minimumTests: 15,
   },
-  { project: "mobile-native-ports", file: "apps/mobile/tests/product.test.mjs", minimumTests: 18 },
+  { project: "mobile-native-ports", file: "apps/mobile/tests/product.test.mjs", minimumTests: 19 },
   {
     project: "client",
     file: "packages/client/tests/terminal-budgets-preview.test.mjs",

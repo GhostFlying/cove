@@ -556,3 +556,56 @@ it("background-cancelled native open does not poison a future explicit start", a
   expect(host.snapshot().nodeState).toBe("Running");
   await host.stop();
 });
+
+it("repeated background notifications retain reconnect intent until explicit disconnect or stop", async () => {
+  const { store } = await storage();
+  const first = profile();
+  const second = profile();
+  await store.putProfile(first);
+  await store.putProfile(second);
+  const reads = new Map();
+  let entries = 0;
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: (key) => ({
+      read: async () => {
+        reads.set(key, (reads.get(key) ?? 0) + 1);
+        return null;
+      },
+    }),
+    openNode: async () => ({
+      status: '{"state":"Running"}',
+      driver: {
+        nextEvent: () => new Promise(() => {}),
+        stop: () => {},
+        openEntry: () => {
+          entries++;
+        },
+      },
+      close: async () => {},
+    }),
+  });
+  await host.initialize();
+  await host.foreground();
+  // A selected entry with unavailable credentials remains an unverified session. Resuming
+  // must only try that original slot again, never allocate another credential or mutation.
+  for (const p of [first, second])
+    await expect(host.connect(p.id)).rejects.toMatchObject({
+      failure: { category: "missing-slot" },
+    });
+  host.background();
+  host.background();
+  host.disconnect(second.id);
+  await host.foreground();
+  expect(reads.get(`cove.mobile.${first.id}`)).toBe(2);
+  expect(reads.get(`cove.mobile.${second.id}`)).toBe(1);
+  expect(Object.keys(host.snapshot().sessions)).toEqual([first.id]);
+  expect(entries).toBe(0);
+  await host.stop();
+  await host.foreground();
+  expect(reads.get(`cove.mobile.${first.id}`)).toBe(2);
+  expect(Object.keys(host.snapshot().sessions)).toEqual([]);
+  await host.stop();
+});
