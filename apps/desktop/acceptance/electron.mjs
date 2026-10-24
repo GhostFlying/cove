@@ -170,6 +170,21 @@ async function chooseServer() {
     .getByRole("button", { name: /electron-box/ })
     .click();
 }
+async function confirmAction(button, title) {
+  await page.getByRole("button", { name: button, exact: true }).click();
+  await dialog(title, async (modal) => {
+    await modal
+      .getByRole("button", { name: `Confirm ${title.toLowerCase()}`, exact: true })
+      .click();
+  });
+}
+async function selectTrialTab() {
+  await page.getByRole("button", { name: /Electron trial/ }).click();
+  await page
+    .getByRole("navigation", { name: "Terminal tabs", exact: true })
+    .getByRole("button", { name: "Trial shell", exact: true })
+    .click();
+}
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
 try {
@@ -297,6 +312,132 @@ try {
       assert.equal(reply.value.ok, true);
       const tasks = await fixture.coveJson(["task", "list"], { home: server.home });
       assert.equal(tasks.tasks.filter((task) => task.title === "Electron trial").length, 1);
+    },
+  );
+  await step(
+    "explicit tab stop/history/reopen preserve old run identity without replay",
+    async () => {
+      await selectTrialTab();
+      await page.getByText("Run live", { exact: false }).waitFor();
+      await confirmAction("Stop run", "Stop run");
+      await page.getByText("Run exited", { exact: false }).waitFor();
+      await page.getByRole("button", { name: "Run history", exact: true }).click();
+      await page.getByRole("heading", { name: "Retained run history", exact: true }).waitFor();
+      await page.locator(".history").getByText(run.runId, { exact: true }).waitFor();
+      await confirmAction("Reopen", "Reopen tab");
+      await page.waitForFunction(
+        async ({ serverId, runId }) => {
+          const state = await window.cove.snapshot();
+          return state.sessions[serverId].mirror.records.some(
+            (row) =>
+              row.kind === "tab" &&
+              row.record.name === "Trial shell" &&
+              row.record.latestRun?.runId !== runId,
+          );
+        },
+        { serverId, runId: run.runId },
+      );
+      await selectTrialTab();
+      await page.getByText("Run live", { exact: false }).waitFor();
+      assert.equal(await readFile(join(fixture.root, "typed-once"), "utf8"), "typed-once\n");
+      await confirmAction("Stop run", "Stop run");
+      await page.getByText("Run exited", { exact: false }).waitFor();
+      await confirmAction("Delete tab", "Delete tab");
+      await page
+        .getByRole("navigation", { name: "Terminal tabs", exact: true })
+        .getByRole("button", { name: "Trial shell", exact: true })
+        .waitFor({ state: "detached" });
+    },
+  );
+  await step("zero/multiple repository tasks and explicit mount management", async () => {
+    const second = await fixture.gitRepo("second-clone");
+    await page.getByRole("button", { name: "Repositories", exact: true }).click();
+    await page.getByRole("button", { name: "Register repository", exact: true }).click();
+    await dialog("Register repository", async (modal) => {
+      await modal.getByLabel("Absolute repository path on this server").fill(second.path);
+      await modal.getByLabel("Display name").fill("Second repository");
+      await modal.getByRole("button", { name: "Register", exact: true }).click();
+    });
+    await page.getByRole("heading", { name: "Second repository", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Tasks", exact: true }).click();
+    await page.getByRole("button", { name: "＋ New", exact: true }).click();
+    await dialog("Create task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Empty task");
+      await modal.getByRole("button", { name: "Create task", exact: true }).click();
+    });
+    await page.getByRole("button", { name: /Empty task/ }).click();
+    let tasks = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks;
+    assert.equal(tasks.find((task) => task.title === "Empty task").workspace.mounts.length, 0);
+    await page.getByRole("button", { name: "Rename", exact: true }).click();
+    await dialog("Rename task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Renamed empty task");
+      await modal.getByRole("button", { name: "Save title", exact: true }).click();
+    });
+    await page.getByRole("heading", { name: "Renamed empty task", exact: true }).waitFor();
+    await confirmAction("Archive", "Archive task");
+    await page.getByRole("button", { name: "Restore", exact: true }).waitFor();
+    await confirmAction("Restore", "Restore task");
+    await page.getByRole("button", { name: "Archive", exact: true }).waitFor();
+    await page.getByRole("button", { name: "＋ New", exact: true }).click();
+    const repos = (await snapshot()).sessions[serverId].mirror.records.filter(
+      (row) => row.kind === "repo",
+    );
+    const secondId = repos.find((row) => row.record.displayName === "Second repository").record
+      .repoId;
+    await dialog("Create task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Two repositories");
+      await modal.getByRole("button", { name: "Add repository mount", exact: true }).click();
+      await modal.getByRole("button", { name: "Add repository mount", exact: true }).click();
+      await modal.locator('select[name="repo-1"]').selectOption(secondId);
+      await modal.getByRole("button", { name: "Create task", exact: true }).click();
+    });
+    await page.getByRole("button", { name: /Two repositories/ }).click();
+    tasks = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks;
+    const task = tasks.find((task) => task.title === "Two repositories");
+    assert.equal(task.workspace.mounts.length, 2);
+    assert.equal(new Set(task.workspace.mounts.map((mount) => mount.repoId)).size, 2);
+    await page.getByRole("button", { name: "Make worktree", exact: true }).first().click();
+    await dialog("Convert to worktree", async (modal) => {
+      await modal.getByLabel("Skip fetch for this worktree explicitly").check();
+      await modal.getByRole("button", { name: "Create managed worktree", exact: true }).click();
+    });
+    await page.getByRole("button", { name: "Delete worktree", exact: true }).waitFor();
+    await confirmAction("Delete worktree", "Delete worktree");
+    await page
+      .getByRole("button", { name: "Delete worktree", exact: true })
+      .waitFor({ state: "detached" });
+    await confirmAction("Remove", "Remove mount");
+    const updated = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks.find(
+      (row) => row.taskId === task.taskId,
+    );
+    assert.equal(updated.workspace.mounts.length, 0);
+  });
+  await step(
+    "explicit self-device revocation disconnects without stopping the server, then forget",
+    async () => {
+      await page.getByRole("button", { name: "Devices", exact: true }).click();
+      await page.getByRole("heading", { name: "Electron acceptance", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Revoke device", exact: true }).click();
+      await page
+        .getByRole("dialog", { name: "Revoke device", exact: true })
+        .getByRole("button", { name: "Confirm revoke device", exact: true })
+        .click();
+      await page.waitForFunction(
+        async (id) => (await window.cove.snapshot()).sessions[id]?.status !== "current",
+        serverId,
+      );
+      const devices = await fixture.coveJson(["auth", "device", "list", "--include-revoked"], {
+        home: server.home,
+      });
+      assert.equal(
+        devices.devices.some(
+          (device) => device.name === "Electron acceptance" && device.revokedAtMs,
+        ),
+        true,
+      );
+      assert.equal(await fixture.serverRuns(server), true);
+      await confirmAction("Forget", "Forget server");
+      assert.equal((await snapshot()).servers.length, 0);
     },
   );
   assert.deepEqual(errors, []);
