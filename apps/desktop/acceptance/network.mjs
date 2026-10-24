@@ -65,6 +65,27 @@ async function freePort() {
   return port;
 }
 
+async function installFixtureHelper(binary, bin, controlUrl) {
+  const real = join(bin, "cove-tsnet-fixture-real");
+  await copyFile(binary, real);
+  const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  // Desktop deliberately does not read the CLI's development control-plane override. Route
+  // its cold-started helper to this fixture too, while version/ownership probes stay intact.
+  // exec keeps the actual Go process and exit status; the production-control panic guard stays on.
+  await writeFile(
+    join(bin, "cove-tsnet"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = dial ]; then',
+      `  exec ${quote(real)} "$@" --control-url ${quote(controlUrl)}`,
+      "fi",
+      `exec ${quote(real)} "$@"`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
 try {
   const builds = await tsnetBuilds();
   tailnet = await startTailnet(builds);
@@ -88,7 +109,7 @@ try {
   // The app itself does not install, replace or stop this helper.
   const bin = join(home, "install/current/bin");
   await mkdir(bin, { recursive: true });
-  await copyFile(builds.current, join(bin, "cove-tsnet"));
+  await installFixtureHelper(builds.current, bin, tailnet.controlURL);
   const login = () =>
     fixture.coveInput(["remote", "tsnet", "login"], `${tailnet.authKey}\n`, { home });
   assert.equal((await login()).code, 0);
