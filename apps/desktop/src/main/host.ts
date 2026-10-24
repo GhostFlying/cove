@@ -241,6 +241,12 @@ export class DesktopHost {
         identity.relayInstanceId !== local.relayInstanceId
       )
         throw new Error("Local server identity changed; no owner secret was sent");
+      if (
+        this.storage
+          .serverRecords()
+          .some((server) => server.serverId === local.serverId || server.alias === input.alias)
+      )
+        throw new Error("Server or alias already paired; no new invitation was created");
       const owner = createNodeClient(
         { ...local },
         () => ({ kind: "local-secret", secret: local.secret }),
