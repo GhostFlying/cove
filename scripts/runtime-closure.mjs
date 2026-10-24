@@ -171,7 +171,13 @@ function assembleInto(target, sourceBuild) {
   const nodeModules = join(app, "node_modules");
   const pty = storeEntry(nodeModules, "node-pty@");
   const ptySource = join(root, "node_modules/.pnpm", pty, "node_modules/node-pty/build/Release");
-  const ptyTarget = join(nodeModules, ".pnpm", pty, "node_modules/node-pty/build/Release");
+  const ptyBuild = join(nodeModules, ".pnpm", pty, "node_modules/node-pty/build");
+  const ptyTarget = join(ptyBuild, "Release");
+  // The loader uses the prepared Release addon and its macOS spawn-helper. A source
+  // build also leaves node-gyp Makefiles and intermediates containing checkout paths;
+  // those are not runtime dependencies and must not enter the deployed closure.
+  rmSync(ptyBuild, { recursive: true, force: true });
+  mkdirSync(ptyTarget, { recursive: true });
   // node-pty builds spawn-helper on macOS only; Linux forks the PTY process from pty.node itself.
   const ptyFiles = ["pty.node", ...(process.platform === "darwin" ? ["spawn-helper"] : [])];
   for (const file of ptyFiles) {
