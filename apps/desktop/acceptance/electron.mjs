@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, release } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
@@ -11,7 +13,9 @@ import { waitFor } from "../../cli/tests/recording-view.mjs";
 // Run after pnpm build, on macOS with a GUI/Keychain session. This is actual Electron,
 // not a browser substitute. All server/Git/PTY/file resources are fresh task-owned fixtures.
 assert.equal(process.platform, "darwin");
+const execute = promisify(execFile);
 const desktop = resolve(import.meta.dirname, "..");
+const source = (await execute("git", ["rev-parse", "HEAD"], { cwd: desktop })).stdout.trim();
 const require = createRequire(new URL("../package.json", import.meta.url));
 const executablePath = require("electron");
 const output =
@@ -39,6 +43,69 @@ const errors = [];
 const steps = [];
 let run;
 const logs = [];
+let runtime;
+let failed = false;
+async function closeApp() {
+  if (!electron) return;
+  const currentApp = electron;
+  electron = undefined;
+  const child = currentApp.process();
+  let timer;
+  try {
+    await Promise.race([
+      currentApp.close(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Own Electron did not close in 10 seconds")),
+          10_000,
+        );
+      }),
+    ]);
+  } catch (error) {
+    // The handle identifies only this launch. A failed Keychain request must not hang
+    // fixture cleanup or turn an unrelated process name/PID into a cleanup target.
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("Own Electron exit remains unverified")),
+          5_000,
+        );
+        child.once("exit", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+        child.kill("SIGKILL");
+      });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function cleanKeychain() {
+  const service = `Cove-${profile} Safe Storage`;
+  const account = `Cove-${profile} Key`;
+  const keychain = join(process.env.HOME, "Library/Keychains/login.keychain-db");
+  const args = ["-s", service, "-a", account, keychain];
+  const observed = await execute("security", ["find-generic-password", ...args]).catch((error) => {
+    if (error.code === 44) return null;
+    throw error;
+  });
+  if (!observed) return "absent";
+  if (
+    !observed.stdout.includes(`"svce"<blob>="${service}"`) ||
+    !observed.stdout.includes(`"acct"<blob>="${account}"`)
+  )
+    throw new Error("Own Keychain item attributes could not be verified; it was preserved");
+  await execute("security", ["delete-generic-password", ...args]);
+  try {
+    await execute("security", ["find-generic-password", ...args]);
+  } catch (error) {
+    if (error.code === 44) return "removed-and-verified-absent";
+    throw error;
+  }
+  throw new Error("Own Keychain item is still present after cleanup");
+}
 async function step(name, action) {
   process.stdout.write(`Starting: ${name}\n`);
   await action();
@@ -53,6 +120,11 @@ async function launch() {
     timeout: 30_000,
   });
   electron.process().stderr.on("data", (chunk) => logs.push(String(chunk)));
+  runtime = await electron.evaluate(() => ({
+    versions: process.versions,
+    platform: process.platform,
+    arch: process.arch,
+  }));
   page = await electron.firstWindow();
   // CDP clicks alone do not establish macOS foreground. Activate only this test window.
   await electron.evaluate(({ app, BrowserWindow }) => {
@@ -185,8 +257,7 @@ try {
     await page.screenshot({ path: join(output, "03-recovered.png") });
   });
   await step("app quit preserves independent server and same PTY run", async () => {
-    await electron.close();
-    electron = undefined;
+    await closeApp();
     assert.equal(await fixture.serverRuns(server), true);
     const observed = await fixture.coveJson(["terminal", "get", run.runId], { home: server.home });
     assert.equal(JSON.stringify(observed).includes(run.runId), true);
@@ -221,9 +292,9 @@ try {
       {
         status: "PASS",
         environment: {
-          platform: process.platform,
-          arch: process.arch,
-          electron: "45.0.0",
+          source,
+          osRelease: release(),
+          runtime,
           playwright: "1.63.0",
           profile,
         },
@@ -241,6 +312,7 @@ try {
   );
   process.stdout.write(`Electron acceptance PASS; evidence ${output}\n`);
 } catch (error) {
+  failed = true;
   await page?.screenshot({ path: join(output, "failure.png") }).catch(() => {});
   await writeFile(
     join(output, "result.json"),
@@ -252,12 +324,43 @@ try {
   );
   throw error;
 } finally {
-  if (electron) await electron.close();
-  await fixture.cleanup();
+  const cleanup = {};
+  const errors = [];
+  try {
+    await closeApp();
+    cleanup.app = "closed";
+  } catch (error) {
+    cleanup.app = String(error);
+    errors.push(error);
+  }
+  try {
+    await fixture.cleanup();
+    cleanup.fixture = "cleaned";
+  } catch (error) {
+    cleanup.fixture = String(error);
+    errors.push(error);
+  }
+  try {
+    cleanup.keychain = await cleanKeychain();
+  } catch (error) {
+    cleanup.keychain = String(error);
+    errors.push(error);
+  }
   await writeFile(join(output, "electron-stderr.log"), logs.join(""));
-  // The unique profile's exact Keychain item must be identified before any deletion; this
-  // script never guesses a service name and never deletes another application's key.
-  process.stdout.write(
-    `Task Keychain profile: Cove-${profile}; cleanup requires exact matching item verification.\n`,
+  await writeFile(
+    join(output, "cleanup.json"),
+    JSON.stringify({ source, profile, cleanup }, null, 2),
   );
+  process.stdout.write(`Own fixture cleanup: ${JSON.stringify(cleanup)}\n`);
+  if (errors.length && !failed) {
+    await writeFile(
+      join(output, "result.json"),
+      JSON.stringify(
+        { status: "FAIL", source, steps, error: "Own acceptance cleanup failed", cleanup },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 1;
+  }
 }
