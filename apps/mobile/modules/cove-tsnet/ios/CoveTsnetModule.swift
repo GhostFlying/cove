@@ -109,7 +109,7 @@ public class CoveTsnetModule: Module {
         values.isExcludedFromBackup = true
         try directory.setResourceValues(values)
         var error: NSError?
-        guard let created = CoveMobileNew(directory.path, hostname, controlURL, &error) else { throw self.nativeError() }
+        guard let created = CoveMobileNew(directory.path, hostname, controlURL, &error) else { throw error ?? self.nativeError() }
         let accepted = self.locked { () -> Bool in
           guard self.foreground && self.epoch == observed else { return false }
           self.client = created
