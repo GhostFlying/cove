@@ -19,6 +19,12 @@ declare global {
 }
 type Task = Extract<ReadonlyBusinessRecord, { kind: "task" }>["record"];
 type Repo = Extract<ReadonlyBusinessRecord, { kind: "repo" }>["record"];
+type Device = {
+  deviceId: string;
+  name: string;
+  neverConnected: boolean;
+  revokedAtMs: number | null;
+};
 type Dialog = { title: string; body: ReactNode };
 const BusyContext = createContext(false);
 
@@ -101,10 +107,16 @@ export function App() {
   const working = useRef(false);
   const [notice, setNotice] = useState<string>();
   const [result, setResult] = useState<unknown>();
-  const [devices, setDevices] = useState<
-    Array<{ deviceId: string; name: string; neverConnected: boolean; revokedAtMs: number | null }>
-  >([]);
-  const [history, setHistory] = useState<RunHistoryRecord[]>();
+  const [deviceResult, setDevices] = useState<{ serverId: string; rows: Device[] }>();
+  const [deviceRefresh, setDeviceRefresh] = useState(0);
+  const deviceRequest = useRef(0);
+  const historyRequest = useRef(0);
+  const [historyResult, setHistory] = useState<{
+    serverId: string;
+    taskId: string;
+    tabId: string;
+    runs: RunHistoryRecord[];
+  }>();
   const [checkedTask, setCheckedTask] = useState<Task>();
   useEffect(() => {
     const stop = window.cove.onState(setSnapshot);
@@ -135,6 +147,39 @@ export function App() {
   const tab = tabs.find((value) => value.tabId === tabId);
   const current = session?.status === "current";
   const run = tab?.latestRun;
+  const devices = deviceResult?.serverId === serverId ? deviceResult.rows : [];
+  const history =
+    historyResult?.serverId === serverId &&
+    historyResult.taskId === taskId &&
+    historyResult.tabId === tabId
+      ? historyResult.runs
+      : undefined;
+  function clearHistory() {
+    // Invalidate at the navigation event, including A -> B -> A before a reply arrives.
+    historyRequest.current++;
+    setHistory(undefined);
+  }
+  useEffect(() => {
+    const request = ++deviceRequest.current;
+    setDevices(undefined);
+    if (page !== "devices" || !current) return;
+    let active = true;
+    // Reads have their own lifetime: a pending read for A must not prevent loading B.
+    void window.cove
+      .call(serverId, "auth.device.list", { includeRevoked: true })
+      .then((reply) => {
+        if (!active || request !== deviceRequest.current) return;
+        const value = unwrap(reply) as { devices: Device[] };
+        setDevices({ serverId, rows: value.devices });
+      })
+      .catch((failure: unknown) => {
+        if (active && request === deviceRequest.current)
+          setNotice(failure instanceof Error ? failure.message : "Device list unavailable");
+      });
+    return () => {
+      active = false;
+    };
+  }, [serverId, page, current, session?.generation, deviceRefresh]);
 
   async function perform(action: () => Promise<HostReply>, close = false): Promise<void> {
     if (working.current) return;
@@ -160,10 +205,12 @@ export function App() {
   const mutate = async (method: string, params: unknown) =>
     perform(() => rpc(method, params), true);
   function selectServer(value: SavedServer) {
+    deviceRequest.current++;
+    setDialog(undefined);
     setServerId(value.serverId);
     setTaskId("");
     setTabId("");
-    setHistory(undefined);
+    clearHistory();
     setCheckedTask(undefined);
     setResult(undefined);
   }
@@ -350,11 +397,22 @@ export function App() {
       ),
     });
   }
-  async function refreshDevices() {
+  function refreshDevices() {
+    deviceRequest.current++;
+    setDevices(undefined);
+    setDeviceRefresh((value) => value + 1);
+  }
+  async function readHistory() {
+    const request = ++historyRequest.current;
+    const selection = { serverId, taskId, tabId };
     await perform(async () => {
-      const reply = await rpc("auth.device.list", { includeRevoked: true });
-      const value = unwrap(reply) as { devices: typeof devices };
-      setDevices(value.devices);
+      const reply = await window.cove.call(selection.serverId, "tab.runs", {
+        tabId: selection.tabId,
+        limit: 100,
+      });
+      if (request !== historyRequest.current) return { ok: true };
+      const value = unwrap(reply) as { runs: RunHistoryRecord[] };
+      setHistory({ ...selection, runs: value.runs });
       return { ok: true };
     });
   }
@@ -505,7 +563,6 @@ export function App() {
                   className={page === item ? "active" : ""}
                   onClick={() => {
                     setPage(item);
-                    if (item === "devices" && current) void refreshDevices();
                   }}
                 >
                   {item === "repos" ? "Repositories" : item[0]!.toUpperCase() + item.slice(1)}
@@ -583,7 +640,7 @@ export function App() {
                       onClick={() => {
                         setTaskId(value.taskId);
                         setTabId("");
-                        setHistory(undefined);
+                        clearHistory();
                         setCheckedTask(undefined);
                       }}
                     >
@@ -768,7 +825,7 @@ export function App() {
                             key={value.tabId}
                             onClick={() => {
                               setTabId(value.tabId);
-                              setHistory(undefined);
+                              clearHistory();
                             }}
                           >
                             {value.name}
@@ -780,17 +837,17 @@ export function App() {
                           <div className="terminal-toolbar">
                             <span>{run ? `Run ${run.runId}` : "No run"}</span>
                             <div className="actions">
-                              <button onClick={() => setTabId("")}>Close view</button>
+                              <button
+                                onClick={() => {
+                                  clearHistory();
+                                  setTabId("");
+                                }}
+                              >
+                                Close view
+                              </button>
                               <button
                                 disabled={!current || busy}
-                                onClick={() =>
-                                  void perform(async () => {
-                                    const reply = await rpc("tab.runs", { tabId, limit: 100 });
-                                    const value = unwrap(reply) as { runs: RunHistoryRecord[] };
-                                    setHistory(value.runs);
-                                    return { ok: true };
-                                  })
-                                }
+                                onClick={() => void readHistory()}
                               >
                                 Run history
                               </button>

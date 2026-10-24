@@ -119,9 +119,11 @@ missing server result proves anything.
 
 ## Verification boundaries
 
-`pnpm --filter @cove/desktop test` runs the Node/core project after the repository
-build: storage/error/crash boundaries and actual compiled standalone-server
-integration. Injected test ciphers do not establish Keychain behavior. The actual
+`pnpm --filter @cove/desktop test` runs after the repository build and
+`pnpm --filter @cove/terminal-web browser:install`: storage/error/crash boundaries,
+actual compiled standalone-server integration, and headless rendered IPC response
+isolation across server/tab navigation. Injected ciphers and deferred IPC tests do
+not establish Keychain or native Electron behavior. The actual
 Playwright Electron launch, real Keychain store/restore, rendered workbench,
 native PTY input/control and app-quit continuity are separate macOS acceptance in
 PR #219. Browser-only screenshots do not substitute for that native integration.
