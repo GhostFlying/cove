@@ -5,14 +5,15 @@
   "type": "module",
   "main": "index.ts",
   "scripts": {
-    "start": "expo start --dev-client",
+    "start": "pnpm prepare:js && expo start --dev-client",
     "prebuild": "expo prebuild --no-install",
-    "android": "expo run:android",
-    "ios": "expo run:ios",
+    "android": "pnpm prepare:js && expo run:android",
+    "ios": "pnpm prepare:js && expo run:ios",
     "typecheck": "pnpm --dir ../.. exec tsc --noEmit -p apps/mobile/tsconfig.json",
     "build:ports": "pnpm --dir ../.. exec tsc -b apps/mobile/tsconfig.ports.json",
-    "build:terminal": "vite build --config terminal/vite.config.mjs && node scripts/bundle-terminal.mjs",
-    "test": "pnpm build:ports && vitest run --config vitest.config.ts"
+    "build:terminal": "pnpm --dir ../.. exec tsc -b packages/terminal-web/tsconfig.production.json && vite build --config terminal/vite.config.mjs && node scripts/bundle-terminal.mjs",
+    "test": "pnpm build:ports && vitest run --config vitest.config.ts",
+    "prepare:js": "pnpm build:ports && pnpm build:terminal"
   },
   "dependencies": {
     "@cove/client": "workspace:*",
