@@ -11,7 +11,9 @@ Pod::Spec.new do |s|
   s.swift_version = '5.9'
   s.static_framework = true
   s.dependency 'ExpoModulesCore'
-  s.source_files = '*.swift'
-  s.vendored_frameworks = '../generated/ios/CoveTsnet.xcframework'
+  s.source_files = 'ios/*.swift'
+  # CocoaPods only discovers vendored files inside this pod's source root.
+  # Keep the spec at the module root so generated native slices are included.
+  s.vendored_frameworks = 'generated/ios/CoveTsnet.xcframework'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES' }
 end

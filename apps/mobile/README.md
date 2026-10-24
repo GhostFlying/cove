@@ -54,6 +54,13 @@ Java classes and packages its arm64 JNI library. iOS links the generated arm64
 XCFramework. A simulator requires its own `ios-simulator` library build; a
 device-only framework is not simulator evidence.
 
+For an installed arm64 iOS Simulator runtime, build `ios-simulator` with the
+native build script and pass `ios-simulator` to `prepare-native.mjs`. This selects
+that actual framework for the same local pod. Rerun `pod install` after switching
+between device and simulator artifacts. Return to `prepare-native.mjs ios` before
+building for a device. A simulator run is intermediate functionality evidence;
+it does not validate physical-device input, background policy or performance.
+
 For an ordinary development build, start Metro with `pnpm --filter @cove/mobile
 start` and use `pnpm --filter @cove/mobile android` or `ios`. The generated Android
 project also supports a serial arm64 build without launching or adopting a
