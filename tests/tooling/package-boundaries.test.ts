@@ -11,12 +11,37 @@ const protocol = join(root, "packages/protocol");
 const client = join(root, "packages/client");
 const worker = join(root, "packages/terminal-worker");
 const server = join(root, "apps/server");
+const desktop = join(root, "apps/desktop");
 const directories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
+});
+
+test("Desktop delivery contains only client transports and bundled renderer assets", async () => {
+  const manifest = JSON.parse(await readFile(join(desktop, "package.json"), "utf8")) as {
+    dependencies: Record<string, string>;
+    devDependencies: Record<string, string>;
+  };
+  for (const forbidden of [
+    "@cove/server",
+    "@cove/terminal-engine",
+    "@cove/terminal-worker",
+    "node-pty",
+    "better-sqlite3",
+  ])
+    expect(manifest.dependencies).not.toHaveProperty(forbidden);
+  expect(manifest.devDependencies.electron).toBe("45.0.0");
+  const main = await readFile(join(desktop, "dist/main/index.js"), "utf8");
+  expect(main).not.toMatch(/(?:node-pty|better-sqlite3|@cove\/server)/);
+  const preload = await readFile(join(desktop, "dist/preload/index.cjs"), "utf8");
+  expect(preload).toContain("exposeInMainWorld");
+  const renderer = await readFile(join(desktop, "dist/renderer/index.html"), "utf8");
+  expect(renderer).not.toMatch(/https?:\/\//);
+  expect(renderer).toMatch(/\.\/assets\/[^" ]+\.js/);
+  expect(renderer).toContain("Content-Security-Policy");
 });
 
 function assertDependencyBoundary(

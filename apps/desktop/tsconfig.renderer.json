@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "rootDir": "src",
+    "outDir": "dist/types/renderer",
+    "tsBuildInfoFile": "dist/types/renderer.tsbuildinfo",
+    "types": ["react", "react-dom", "node", "vite/client"]
+  },
+  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts"],
+  "references": [
+    { "path": "../../packages/client" },
+    { "path": "../../packages/node-client" },
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/terminal-web/tsconfig.production.json" }
+  ]
+}
