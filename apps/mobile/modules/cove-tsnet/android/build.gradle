@@ -1,0 +1,23 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.ghostflying.cove'
+version = '0.0.0'
+
+android {
+  namespace 'com.ghostflying.cove'
+  defaultConfig {
+    minSdkVersion 31
+    versionCode 1
+    versionName "0.0.0"
+  }
+  sourceSets {
+    main { jniLibs.srcDirs = ['../generated/android/jni'] }
+  }
+}
+
+dependencies {
+  implementation files('../generated/android/classes.jar')
+}

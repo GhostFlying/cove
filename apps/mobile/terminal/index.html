@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:"
+    />
+    <style>
+      html,
+      body,
+      #terminal {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: #111318;
+      }
+    </style>
+    <script>
+      window.__coveBridgeGeneration = __COVE_NATIVE_GENERATION__;
+    </script>
+  </head>
+  <body>
+    <div id="terminal"></div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

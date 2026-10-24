@@ -21,6 +21,15 @@ export default defineConfig({
       },
       {
         test: {
+          name: "mobile-native-ports",
+          environment: "node",
+          include: ["apps/mobile/tests/**/*.test.mjs"],
+          testTimeout: 15_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "server",
           environment: "node",
           include: ["apps/server/tests/**/*.test.mjs"],
