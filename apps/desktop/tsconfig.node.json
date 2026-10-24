@@ -1,0 +1,26 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist/types/node",
+    "tsBuildInfoFile": "dist/types/node.tsbuildinfo",
+    "types": ["node"],
+    "lib": ["ES2024", "DOM"],
+    "skipLibCheck": true
+  },
+  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.ts"],
+  "references": [
+    {
+      "path": "../../packages/client"
+    },
+    {
+      "path": "../../packages/node-client"
+    },
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/terminal-web/tsconfig.production.json"
+    }
+  ]
+}

@@ -16,7 +16,7 @@
 
 ## 实际 main 与已合入能力
 
-当前 main：`d269e7630e6133d30c6490a9770ac78d05fb59b2`（Mobile #229）；其 actual-main CI 的 S8 失败由 #231 收尾，未放行 Desktop 集成。
+当前 main：`776788a6b838831b8f1cf6b1b5c1da209cb9b9bd`（S8 fixture #232）；actual-main Engineering40112636995 全6 shards/2Go/2 required aggregates、tend40112636867 成功。
 
 - T1 Node adapter #200、T0a bridge #203、T2 business snapshot/events #206、T3 ServerSession/mirror #209 已合入。
 - T6 #217 → `6b12c5df`，actual-main Engineering40072307667 attempt2 + tend40072307661 成功。
@@ -37,7 +37,8 @@
 ## 正在推进
 
 - T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `29f1e825`；full/delta 结果见 PR，P3 #220 后续。
-  真实 Desktop GUI 验证因 Mac 锁屏未执行，不能记 PASS；依赖集成/真实 app gate 由 root 路由。
+  fresh integration checkout `cove-worktrees/m3-196-desktop-main776` 从健康 main776 合并19个已评审提交；排除已合入的2个 packaging 提交。
+  当前正在组合 root manifests/lock/inventory；真实 Desktop GUI 因 Mac 锁屏未执行，仍阻最终合入，不记 PASS。
 - Runtime packaging [#227](https://github.com/GhostFlying/cove/pull/227) 已合入上述 88e4，仅 runtime closure/CLI S1/S9 三文件。
   actual-main Engineering40093259061 全6 shards/2 Go/2 required aggregates 与 tend40093259092 成功，artifact 均88e4。T5 不修改这些文件。
 - T5 [#197 / PR #229](https://github.com/GhostFlying/cove/pull/229) 已 rebase 合入 d269；完整独立 review/同 context 窄 delta 完成，无 open P0/P1；P2 #230 后续。
@@ -61,17 +62,17 @@
   旧 FAIL/UNKNOWN 与112records/dropped0 的单次诊断 payload 保留，诊断不作验收；精确 source/hash/mapping/原始结果归属在 PR229。
   物理 iPhone/Android、真实 Tailnet 且 Desktop off、IME/selection/外接键盘仍属 T7 未执行；不冒充全平台/硬件或 M3 退出。
 - [#231](https://github.com/GhostFlying/cove/issues/231) 独立复现确认测试时钟错配：receipt backend 用实例序号1/2作毫秒，retention 用 Date.now；显式 purge 后同 ID 返回 OPERATION_HISTORY_EXPIRED。
-  修复仅测试 fixture wall clock，并在原 S8 重复请求前显式完成 retention；原历史缺失 response 仍保留 UNKNOWN。PR/CI/review 与 actual-main 由 root 路由。
+  修复仅测试 fixture wall clock，并在原 S8 重复请求前显式完成 retention；原历史缺失 response 仍保留 UNKNOWN。#232 已合入776788a6，fresh review 无发现、candidate 与上述 actual-main 全成功。
   main40109550733 已终态 failure：仅 Ubuntu shard3 S8 失败，其余5 shards/2Go 成功；两个 required aggregate 传播 matrix 失败。
 - T7 集成、实际使用试用与 M3 退出尚未完成，M4 未启动。
 
 ## 单写者、资源与恢复
 
-- T5 原作者已交还写权/资源；root 将 #231 server fixture/tests 与必要 handoff 的唯一写权交 fresh 实现者，Desktop 集成等待本 gate 收尾。
+- T5 与 #231 作者均已交还写权/资源，0 活动资源；root 已放行 fresh Desktop integration owner 为 apps/desktop、必要 rootconfig/单 lock/inventory/docs/handoff/tend 唯一写者。
   public client/protocol/native contracts/native/tailscale 变更先交 root 协调；不借其他 checkout 未提交 generated outputs。
 - 各 worktree 独有 node_modules/dist/tsbuildinfo/native bindings/测试数据库/端口；共享 pnpm package store 和只读 toolbins 可以。
   Node26.10.0/pnpm12.6.0/Go1.27.3；私有 TS5 仅 Expo loader，实际 tsc 仍 root TS7。
-- 本机只低并发局部检查、最多2CPU串行重构建；重资源 token 当前 #231；仅 server 局部编译/测试，不重跑 native/GUI。Linux 使用 ssh devbox 自有 checkout/resources。
+- 本机只低并发局部检查、最多2CPU串行重构建；重资源 token 当前 Desktop integration；仅组合构建/局部检查，不重跑 Mobile native/GUI。Linux 使用 ssh devbox 自有 checkout/resources。
   不操作现有用户服务/终端/设备；Dora 仅 fresh idle+online lease，每次操作前核实 session ID，finally 仅释放匹配自有 lease。
 - 前后台/进程重建不重放输入、mutation、focus；失联不证明 run 退出。客户端退出不停止 server/PTYS。
   测试 controlURL 为开发隔离配置，不成为产品连接字段；native digest binding 不静默迁移。

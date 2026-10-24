@@ -1,0 +1,33 @@
+{
+  "name": "@cove/desktop",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "./dist/main/index.js",
+  "scripts": {
+    "build": "tsc -b && electron-vite build",
+    "build:app": "electron-vite build",
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "clean": "tsc -b --clean && node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "test": "pnpm --dir ../.. exec vitest run --project desktop"
+  },
+  "dependencies": {
+    "@cove/client": "workspace:*",
+    "@cove/node-client": "workspace:*",
+    "@cove/protocol": "workspace:*",
+    "@cove/terminal-web": "workspace:*",
+    "@xterm/xterm": "catalog:",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@types/react": "19.2.0",
+    "@types/react-dom": "19.2.0",
+    "electron": "45.0.0",
+    "electron-vite": "6.0.0",
+    "playwright": "catalog:",
+    "vite": "8.3.1"
+  }
+}
