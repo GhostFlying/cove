@@ -11,6 +11,18 @@ import { utf8 } from "./codec.js";
 
 export const MOBILE_BUILD_VERSION = "0.0.0+mobile-native";
 
+export function bootstrapRequest() {
+  return {
+    type: "cove-bootstrap",
+    bootstrapVersion: BOOTSTRAP_VERSION,
+    protocolVersion: PROTOCOL_VERSION,
+    buildVersion: MOBILE_BUILD_VERSION,
+    capabilities: [...REQUIRED_CAPABILITIES],
+    profiles: [PROFILE],
+    encodings: [BASELINE_ENCODING],
+  };
+}
+
 export class NativeRequestFailure extends Error {
   constructor(readonly disposition: TransferDisposition) {
     super("Native request failed; an uncertain operation must not be replayed");
@@ -74,20 +86,7 @@ export async function verifyServer(
   http: HttpPort,
   expectedServerId: string,
 ): Promise<BootstrapIdentity> {
-  const response = await postJSON(
-    http,
-    "/bootstrap",
-    {
-      type: "cove-bootstrap",
-      bootstrapVersion: BOOTSTRAP_VERSION,
-      protocolVersion: PROTOCOL_VERSION,
-      buildVersion: MOBILE_BUILD_VERSION,
-      capabilities: [...REQUIRED_CAPABILITIES],
-      profiles: [PROFILE],
-      encodings: [BASELINE_ENCODING],
-    },
-    8192,
-  );
+  const response = await postJSON(http, "/bootstrap", bootstrapRequest(), 8192);
   const identity = BootstrapIdentitySchema.safeParse(response);
   if (
     !identity.success ||
