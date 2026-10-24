@@ -89,6 +89,8 @@ export const DOMAIN_ERROR_KINDS = [
   // A login of the enrolled node did not finish and may still have completed. The node serves
   // nothing until `server.tsnet.status` confirms its identity.
   "TSNET_LOGIN_UNCERTAIN",
+  // Programmatic input never acquires or overrides a human controller.
+  "CONTROL_HELD",
 ] as const;
 export type DomainErrorKind = (typeof DOMAIN_ERROR_KINDS)[number];
 
@@ -199,6 +201,7 @@ const actions: Record<DomainErrorKind, z.infer<typeof NextActionSchema>> = {
   TSNET_IDENTITY_CHANGED: "none",
   // server.tsnet.status settles the hold; nothing is repeated on its own.
   TSNET_LOGIN_UNCERTAIN: "none",
+  CONTROL_HELD: "refresh-control",
 };
 
 export const DomainErrorSchema = DomainErrorFieldsSchema.refine(

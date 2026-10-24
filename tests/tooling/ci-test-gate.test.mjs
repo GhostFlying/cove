@@ -1144,7 +1144,7 @@ test("native adapter and worker execution suites cannot disappear or shrink", as
     ["native-adapter-factory", 22],
     ["native-adapter-input", 14],
     ["native-adapter-real", 6],
-    ["run-session", 36],
+    ["run-session", 42],
     ["worker-execution", 36],
     ["run-session-real", 1],
     ["pipe-endpoint", 34],
@@ -1411,7 +1411,7 @@ test("M1 through M3 CLI suites are registered per file and join the required inv
     {
       project: "cli",
       directory: "apps/cli/tests/m3",
-      required: ["node-client", "business-events"],
+      required: ["node-client", "business-events", "tab-send"],
     },
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";

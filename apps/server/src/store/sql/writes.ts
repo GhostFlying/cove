@@ -1,3 +1,4 @@
+import { tabInputWrites } from "./tab-input.js";
 import { authWrites } from "./auth.js";
 import { bindingWrites } from "./bindings.js";
 import { configWrites } from "./config.js";
@@ -19,6 +20,7 @@ export const DATABASE_WRITES = Object.freeze({
   ...repoWrites,
   ...workspaceWrites,
   ...tabWrites,
+  ...tabInputWrites,
   ...worktreeWrites,
   ...bindingWrites,
   ...authWrites,

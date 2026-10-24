@@ -663,7 +663,9 @@ export class WorkerPipeSession {
     if ((command.type === "subscribe" || command.type === "recover") && !handoff)
       return Promise.resolve(this.error(command, "BUSY"));
     if (
-      (command.type === "input" && payload.byteLength > this.composition.budgets.inputQueueBytes) ||
+      ((command.type === "input" || command.type === "programmatic-input") &&
+        payload.byteLength + (command.type === "programmatic-input" && command.submit ? 1 : 0) >
+          this.composition.budgets.inputQueueBytes) ||
       (command.type === "spawn" &&
         (command.geometry.cols > this.composition.budgets.maxCols ||
           command.geometry.rows > this.composition.budgets.maxRows)) ||

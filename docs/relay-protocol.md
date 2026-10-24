@@ -417,6 +417,17 @@ ready 时若基线裁定 E 仍属本订阅（恢复的或仍在等待自身控�
 不因普通尺寸切换引入额外确认、自动轮流抢占或复杂租约策略。输入、focus 和 resize 的权限边界
 由 server 执行，客户端持有的 UI 焦点不能作为仍拥有控制权的证明。
 
+### 程序化 tab 输入（M3 T6）
+
+`tab.send` 与人类 focus/blur/input 共用执行 server 的每 run 控制队列，worker 在同一权威 pump 中再次核对
+确切 run、无人持有控制权与观测 epoch。它不产生 focus、resize 或新的控制身份；`tab.get.control` 是无订阅的只读观测。
+RPC 参数、CLI flags 与回执见 [Shepherd/tend §4](integrations/shepherd-tend.md#4-程序化输入pending-176未合入)。
+
+每次输入的文本与可选最后 CR 分别回执已写前缀、明确未写和未知字节。只有文本完整确认后才发送 CR。
+一次失败或不确定使同 run 上尚未写入的后继程序化 send 零写入结算，直到该队列前缀清空。
+持久 receipt 先于 PTY 写入；相同 operationId 先查原记录，不依赖当前 run 是否存活。崩溃遗留 send 只查询或显式放弃跟踪，
+不继续、不自动重放。放弃不证明没有副作用，迟到执行结果也不能改写 cancelled 记录。
+
 ### 9.2 终端查询回复（已确认）
 
 终端查询由执行主机的权威终端模型唯一回复，回复权与客户端 focus、连接和可见性无关。

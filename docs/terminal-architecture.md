@@ -821,6 +821,8 @@ Focus 是 Cove 控制协议语义，不等同于某个终端模拟器或 TUI 自
 
 非人类 CLI 主体的程序化输入（不取得控制权、有人控制时拒绝、绑定确切 run 并按 epoch 隔离）已纳入 [M3 T6](milestones/m3.md#任务与单写者)，尚待实现与验证；
 规则见 [设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)。完整 tend 集成不因此进入 M3。
+程序化输入仍通过既有 run pump 与 native bounded-write owner，保留确认前缀和 unknownBytes；
+文本与最后 CR 分别结算，文本不完整时禁止发送 CR。它不创建另一终端模型或 focus 身份。
 
 ## 8. 优先验证的交互
 

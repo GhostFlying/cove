@@ -191,6 +191,8 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
+  { project: "protocol", file: "packages/protocol/tests/tab-send.test.mjs", minimumTests: 4 },
+  { project: "server", file: "apps/server/tests/author/tab-input.test.mjs", minimumTests: 8 },
   { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 11 },
   { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 9 },
   { project: "cli", file: "apps/cli/tests/request-identity-cap.test.mjs", minimumTests: 1 },
@@ -505,7 +507,7 @@ export const requiredSuites = [
   {
     project: "terminal-worker",
     file: "packages/terminal-worker/tests/run-session.test.mjs",
-    minimumTests: 36,
+    minimumTests: 42,
   },
   {
     project: "terminal-worker",
@@ -1116,7 +1118,7 @@ export const fileRegisteredDirectories = [
   {
     project: "cli",
     directory: "apps/cli/tests/m3",
-    required: ["node-client", "business-events"],
+    required: ["node-client", "business-events", "tab-send"],
   },
 ];
 

@@ -309,12 +309,21 @@ export async function acceptWrite<M extends WriteRpcMethod>(
     savedAtMs: Date.now(),
   };
   const saved = await publishPending(homeDirectory(args), pending);
+  if (!samePendingRequest(saved, pending) && method === "tab.send")
+    throw new Error(
+      `operation ${params.operationId} already has a different saved immutable request; nothing was sent. Inspect the original operation before making any independent input decision`,
+    );
   if (!samePendingRequest(saved, pending))
     throw new Error(
       `operation ${params.operationId} already has a saved request with another server, method ` +
         `or parameters; nothing was sent. Use a fresh --operation-id for this request ` +
         `(\`cove operation resend ${params.operationId}\` sends the saved one)`,
     );
+  if (method === "tab.send" && saved !== pending) {
+    // A published send may have reached the PTY even if this process never saw acceptance.
+    // Query only: an absent receipt is insufficient proof to transmit the saved bytes again.
+    return unwrap("operation.get", await session.client.getOperation(params.operationId)).operation;
+  }
   // An earlier command's record past its retention is never sent again (see PendingOperation).
   if (saved !== pending && pendingExpired(saved))
     throw new Error(

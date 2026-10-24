@@ -1,3 +1,4 @@
+import { createWorkerRunSession } from "../dist/src/run-session.js";
 import { expect, test, vi } from "vitest";
 import * as execution from "@cove/terminal-worker/execution";
 
@@ -40,7 +41,8 @@ function start(name = "run", callbacks = {}) {
   const pty = {
     pid: 1,
     writerCompletion,
-    submit() {
+    submit(bytes, onSettled) {
+      if (callbacks.submit) return callbacks.submit(bytes, onSettled);
       throw new Error("Unexpected input admission in the first worker slice");
     },
     automaticOutputSink(output) {
@@ -114,7 +116,7 @@ function start(name = "run", callbacks = {}) {
   };
   const run = { serverId: "server", relayInstanceId: "relay", runId: name };
   const faults = [];
-  const result = createRunSession({
+  const result = (callbacks.execution ? createWorkerRunSession : createRunSession)({
     run,
     geometry: { cols: 12, rows: 4 },
     spawn: { file: "unused", args: [], cwd: "/", env: {} },
@@ -127,7 +129,16 @@ function start(name = "run", callbacks = {}) {
     ...(callbacks.reserveIngressBytes && { reserveIngressBytes: callbacks.reserveIngressBytes }),
   });
   expect(result.kind).toBe("created");
-  return { session: result.session, observer, pty, events, writes, state, faults };
+  return {
+    session: result.session,
+    capability: result.capability,
+    observer,
+    pty,
+    events,
+    writes,
+    state,
+    faults,
+  };
 }
 
 function ingressLedger() {
@@ -1005,4 +1016,164 @@ test("fact consumer disposal at low water never resumes a retired PTY", async ()
   expect(remainingAtDispose).toBe(3 * 65_536);
   expect(owned.state).toMatchObject({ resumed: 0, stopped: 1 });
   expect(session.snapshot()).toMatchObject({ disposed: true, queuedBytes: 0 });
+});
+
+// Programmatic input shares the authoritative worker pump with human control, without
+// pretending to be a focus subscription. These fixtures inject native completion facts.
+function programmaticFixture(settle) {
+  const sent = [];
+  let ticket = 0;
+  const fixture = start("programmatic", {
+    execution: true,
+    submit(bytes, callback) {
+      sent.push(Buffer.from(bytes));
+      const id = ++ticket;
+      settle(bytes, callback, id);
+      return { kind: "accepted", ticket: id, byteLength: bytes.byteLength, origin: "user" };
+    },
+  });
+  return {
+    ...fixture,
+    sent,
+    send: (text, submit = true, epoch = 0) =>
+      fixture.capability.execute({
+        type: "programmatic-input",
+        bytes: encoder.encode(text),
+        submit,
+        epoch,
+      }),
+  };
+}
+const written = (bytes, callback, ticket) =>
+  callback({
+    kind: "written",
+    ticket,
+    status: "written",
+    originalBytes: bytes.byteLength,
+    writtenBytes: bytes.byteLength,
+    remainingBytes: 0,
+  });
+
+test("programmatic text and submit are separately confirmed in order without focus or resize", async () => {
+  const f = programmaticFixture(written);
+  try {
+    const result = await f.send("hello😀");
+    expect(result.kind).toBe("programmatic");
+    expect(result.input.text).toMatchObject({
+      status: "written",
+      requestedBytes: 9,
+      writtenBytes: 9,
+      unknownBytes: 0,
+    });
+    expect(result.input.submit).toMatchObject({ status: "written", writtenBytes: 1 });
+    expect(f.sent.map((bytes) => bytes.toString())).toEqual(["hello😀", "\r"]);
+    expect(f.session.snapshot().controlEpoch).toBe(0);
+    expect(
+      f.events.some((fact) => fact.event.type === "control" || fact.event.type === "resize"),
+    ).toBe(false);
+  } finally {
+    await f.session.dispose();
+  }
+});
+
+test("a known native partial prefix never sends its dependent submit", async () => {
+  const f = programmaticFixture((bytes, callback, ticket) =>
+    callback({
+      kind: "unknown",
+      ticket,
+      status: "error",
+      originalBytes: bytes.byteLength,
+      writtenBytes: 2,
+      remainingBytes: bytes.byteLength - 2,
+    }),
+  );
+  try {
+    const result = await f.send("hello");
+    expect(result.input.text).toMatchObject({
+      status: "partial",
+      writtenBytes: 2,
+      unknownBytes: 0,
+    });
+    expect(result.input.submit).toMatchObject({ status: "notSent", writtenBytes: 0 });
+    expect(f.sent).toHaveLength(1);
+    const later = await f.send("later");
+    expect(later.kind).toBe("rejected");
+    expect(f.sent).toHaveLength(1);
+  } finally {
+    await f.session.dispose();
+  }
+});
+
+test("native uncertainty preserves all unconfirmed bytes and suppresses submit", async () => {
+  const f = programmaticFixture((bytes, callback, ticket) =>
+    callback({
+      kind: "unknown",
+      ticket,
+      status: "invalid",
+      originalBytes: bytes.byteLength,
+      writtenBytes: 0,
+      remainingBytes: bytes.byteLength,
+    }),
+  );
+  try {
+    const result = await f.send("hello");
+    expect(result.input.text).toMatchObject({
+      status: "unknown",
+      writtenBytes: 0,
+      unknownBytes: 5,
+    });
+    expect(result.input.submit.status).toBe("notSent");
+    expect(f.sent).toHaveLength(1);
+  } finally {
+    await f.session.dispose();
+  }
+});
+
+test("stale programmatic epoch is rejected by the execution pump with zero native bytes", async () => {
+  const f = programmaticFixture(written);
+  try {
+    const result = await f.send("hello", true, 1);
+    expect(result.input.text).toMatchObject({ status: "notSent", reason: "stale-control" });
+    expect(result.input.submit.status).toBe("notSent");
+    expect(f.sent).toEqual([]);
+  } finally {
+    await f.session.dispose();
+  }
+});
+
+test("submit-only is one separately receipted CR and does not write empty text", async () => {
+  const f = programmaticFixture(written);
+  try {
+    const result = await f.send("");
+    expect(result.input.text).toMatchObject({ status: "written", requestedBytes: 0 });
+    expect(result.input.submit.status).toBe("written");
+    expect(f.sent.map((bytes) => [...bytes])).toEqual([[13]]);
+  } finally {
+    await f.session.dispose();
+  }
+});
+
+test("uncertain native settlement retains its already-confirmed prefix", async () => {
+  const f = programmaticFixture((bytes, callback, ticket) =>
+    callback({
+      kind: "unknown",
+      ticket,
+      status: "written",
+      originalBytes: bytes.byteLength,
+      writtenBytes: 2,
+      remainingBytes: bytes.byteLength - 2,
+    }),
+  );
+  try {
+    const result = await f.send("hello");
+    expect(result.input.text).toMatchObject({
+      status: "unknown",
+      writtenBytes: 2,
+      unknownBytes: 3,
+    });
+    expect(result.input.submit.status).toBe("notSent");
+    expect(f.sent).toHaveLength(1);
+  } finally {
+    await f.session.dispose();
+  }
 });

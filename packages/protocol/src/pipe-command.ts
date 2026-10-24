@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TAB_SEND_TEXT_BYTES, TabInputReceiptSchema } from "./workspace.js";
 import { M0_LIMITS, EffectiveBudgetsSchema } from "./budgets.js";
 import { DomainErrorSchema } from "./errors.js";
 import {
@@ -159,6 +160,14 @@ export const PipeCommandSchema = z.discriminatedUnion("type", [
     inputSeq: SequenceSchema.min(1),
   }),
   z.object({
+    type: z.literal("programmatic-input"),
+    ...command,
+    operationId: OpaqueIdSchema,
+    epoch: SequenceSchema,
+    textBytes: z.number().int().min(0).max(TAB_SEND_TEXT_BYTES),
+    submit: z.boolean(),
+  }),
+  z.object({
     type: z.literal("resize"),
     ...command,
     subscription: SubscriptionRefSchema,
@@ -235,6 +244,7 @@ export const PipeResultSchema = z.object({
     "stop",
     "set-control",
     "input",
+    "programmatic-input",
     "resize",
     "appearance",
     "subscribe",
@@ -250,6 +260,7 @@ export const PipeResultSchema = z.object({
   operationId: OpaqueIdSchema.optional(),
   atSeq: SequenceSchema.optional(),
   inputSeq: SequenceSchema.optional(),
+  input: TabInputReceiptSchema.optional(),
   writtenBytes: z.number().int().min(1).max(65_536).optional(),
   runStatus: RunStatusSchema.optional(),
   previewVersion: SequenceSchema.optional(),

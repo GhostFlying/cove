@@ -40,6 +40,7 @@ export const WRITE_RPC_METHODS = [
   "tab.reopen",
   "tab.stop",
   "tab.close",
+  "tab.send",
   "binding.convert",
   "binding.delete",
   "auth.invite.create",
@@ -127,6 +128,14 @@ export const OperationRecordSchema = OperationRecordFieldsSchema.refine((value) 
     keys.every((key) => terminalKeys.includes(key) === terminal) &&
     storedDetailsAllowed(value) &&
     m2ProjectionHolds(value) &&
+    (value.method === "tab.send"
+      ? !!value.run &&
+        !!value.result?.input &&
+        keys.every((key) => key === "resource" || key === "input") &&
+        (value.state !== "succeeded" ||
+          (value.result.input.text.status === "written" &&
+            (value.result.input.submit === null || value.result.input.submit.status === "written")))
+      : value.result?.input === undefined) &&
     (!value.run || !value.result?.run || sameRunRef(value.run, value.result.run))
   );
 });
@@ -381,6 +390,7 @@ export const RPC_METHODS = Object.freeze({
   "tab.reopen": write("tab", W.TabReopenParamsSchema, "tab reopen"),
   "tab.stop": write("tab", W.TabStopParamsSchema, "tab stop"),
   "tab.close": write("tab", W.TabCloseParamsSchema, "tab close"),
+  "tab.send": write("tab", W.TabSendParamsSchema, "tab send"),
   "binding.convert": write("binding", W.BindingConvertParamsSchema, "mount convert"),
   "binding.delete": write("binding", W.BindingDeleteParamsSchema, "mount delete-worktree"),
   "binding.list": read(

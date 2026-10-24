@@ -363,7 +363,7 @@ void supported;
 declare const result: Awaited<ReturnType<RuntimeTerminalPort['spawn']>>;
 const runtime: RuntimeTerminalPort = {
   spawn: async () => result, stop: async () => result, setControl: async () => result,
-  writeInput: async () => result, resize: async () => result,
+  writeInput: async () => result, writeProgrammatic: async () => result, resize: async () => result,
   setAppearance: async () => result, openSubscription: async () => result,
   closeSubscription: async () => result, ackApplied: async () => result,
   ackBaselineProgress: async () => result, getStatus: async () => result,
