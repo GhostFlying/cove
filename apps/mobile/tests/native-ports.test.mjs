@@ -189,6 +189,7 @@ it("displays bounded partial/uncertain input counts without reflecting input or 
     },
   });
   expect(message).toContain("写入 3 B；未知 4 B；未发送 5 B");
+  expect(message).toMatch(/^输入未完成/);
   expect(message).toContain("不会自动重试");
   for (const notice of [
     { kind: "input-rejections", count: Number.MAX_SAFE_INTEGER, groups: [{ error: privateText }] },
