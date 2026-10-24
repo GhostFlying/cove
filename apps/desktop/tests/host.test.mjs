@@ -164,3 +164,50 @@ test("failed durable write admission sends no domain write to the actual server"
     (await readFile(join(fixture.root, "desktop", "credentials.sealed"))).byteLength,
   ).toBeGreaterThan(0);
 });
+
+test("acknowledging completed writes frees both durable and session capacity beyond 256 operations", async () => {
+  const server = await fixture.startServer(fixture.home("server"));
+  const { host, storage } = await makeHost("desktop");
+  const id = server.record.serverId;
+  value(await host.pairLocal({ alias: "box", home: server.home, name: "Desktop" }));
+  value(await host.connect(id, "loopback"));
+  for (const reference of storage.pendingOperations())
+    value(await host.acknowledgeOperation(id, reference.operationId));
+  const created = await rpc(host, id, "task.create", { title: "capacity", mounts: [] });
+  const taskId = created.operation.result.resource.id;
+  value(await host.acknowledgeOperation(id, created.operation.operationId));
+  for (let index = 0; index < 257; index++) {
+    const updated = await rpc(host, id, "task.update", { taskId, title: `update-${index}` });
+    value(await host.acknowledgeOperation(id, updated.operation.operationId));
+    expect(storage.pendingOperations()).toHaveLength(0);
+    expect(host.snapshot().sessions[id].operations).toHaveLength(0);
+  }
+  expect((await rpc(host, id, "task.get", { taskId })).task.title).toBe("update-256");
+}, 90_000);
+
+test("retirement during durable admission records a proven pre-dispatch failure as not sent", async () => {
+  const server = await fixture.startServer(fixture.home("server"));
+  const { host, storage } = await makeHost("desktop");
+  const id = server.record.serverId;
+  value(await host.pairLocal({ alias: "box", home: server.home, name: "Desktop" }));
+  value(await host.connect(id, "loopback"));
+  const save = storage.recordOperation.bind(storage);
+  storage.recordOperation = async (operation) => {
+    await save(operation);
+    if (operation.status === "pending") value(await host.disconnect(id));
+  };
+  const outcome = value(
+    await host.call(id, "task.create", {
+      title: "must-not-dispatch",
+      mounts: [],
+    }),
+  );
+  expect(outcome).toMatchObject({ ok: false, kind: "local-error" });
+  const reference = storage.pendingOperations().find((row) => row.method === "task.create");
+  expect(reference.status).toBe("not-sent");
+  expect((await fixture.coveJson(["task", "list"], { home: server.home })).tasks).toEqual([]);
+  value(await host.acknowledgeOperation(id, reference.operationId));
+  expect(storage.pendingOperations().some((row) => row.operationId === reference.operationId)).toBe(
+    false,
+  );
+});

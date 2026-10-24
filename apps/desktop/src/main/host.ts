@@ -419,7 +419,8 @@ export class DesktopHost {
           status: record?.success
             ? "observed"
             : !outcome.ok &&
-                (outcome.kind === "operation-not-sent" ||
+                (outcome.kind === "local-error" ||
+                  outcome.kind === "operation-not-sent" ||
                   (outcome.kind === "rpc-error" &&
                     "acceptance" in outcome.error &&
                     outcome.error.acceptance === "not-accepted"))
@@ -451,7 +452,23 @@ export class DesktopHost {
       return outcome;
     });
   acknowledgeOperation: DesktopApi["acknowledgeOperation"] = (serverId, operationId) =>
-    this.attempt(() => this.storage.acknowledgeOperation(serverId, operationId));
+    this.attempt(() =>
+      this.storage.acknowledgeOperation(serverId, operationId, async () => {
+        const session = this.sessions.get(serverId);
+        if (
+          !session?.snapshot().operations.some((row) => row.reference.operationId === operationId)
+        )
+          return; // Cold-start references need not have an in-memory tracker.
+        if (session.forgetOperation(operationId)) return;
+        // A direct original-ID query may have observed completion after the tracked call
+        // returned in-progress. Refresh the shared tracker read-only before freeing it.
+        await session.reconcileOperations();
+        if (!session.forgetOperation(operationId))
+          throw new Error("The session operation remains unresolved; reconnect or query it first");
+        // If the following disk replacement fails, the durable reference remains visible.
+        // Releasing a terminal tracker cannot cause a replay or hide that recovery record.
+      }),
+    );
   networkStatus: DesktopApi["networkStatus"] = () =>
     this.attempt(async () => {
       const daemon = await this.adapters.probeDaemon(this.home);

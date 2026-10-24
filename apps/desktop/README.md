@@ -112,7 +112,10 @@ possible conservative unknown result; Desktop does not work around it by replay.
 connections. **Forget** only removes this Desktop's stored credential; it does
 not revoke remote authorization or delete unresolved operation references.
 Completed observations can be acknowledged; unresolved and in-progress operations
-remain available for read-only verification.
+remain available for read-only verification. Acknowledgement releases both the
+durable reference and the connected session's bounded tracker. A local rejection
+before dispatch is marked not sent and can be acknowledged without assuming a
+missing server result proves anything.
 
 ## Verification boundaries
 
