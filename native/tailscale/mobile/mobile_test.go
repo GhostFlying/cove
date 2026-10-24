@@ -19,6 +19,7 @@ import (
 	"github.com/GhostFlying/cove/native/tailscale/internal/node"
 	"github.com/GhostFlying/cove/native/tailscale/internal/proto"
 	"github.com/coder/websocket"
+	"tailscale.com/logpolicy"
 )
 
 func fixture(t *testing.T, dial func() (net.Conn, error), who string) (*Client, *Entry, *fakenode.Node) {
@@ -479,4 +480,35 @@ func TestControlBindingPreservesEnrollmentAcrossNormalRestartAndSelection(t *tes
 		t.Fatalf("logout retained a control selection or failed-open lock: %v", err)
 	}
 	c.Close()
+}
+
+func TestMobileLogsStayInsideTheManagedRoot(t *testing.T) {
+	t.Run("dependency resolves the prepared private directory", func(t *testing.T) {
+		t.Setenv("TS_LOGS_DIR", "")
+		root := t.TempDir()
+		if err := configureMobileLogs(root); err != nil {
+			t.Fatal(err)
+		}
+		logs := filepath.Join(root, "logs")
+		if got := logpolicy.LogsDir(func(string, ...any) {}); got != logs {
+			t.Fatalf("dependency selected %q instead of the managed log directory", got)
+		}
+		info, err := os.Stat(logs)
+		if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+			t.Fatalf("private log directory not ready: %v, %v", info, err)
+		}
+	})
+	t.Run("unusable directory fails before publishing configuration", func(t *testing.T) {
+		t.Setenv("TS_LOGS_DIR", "unchanged-fixture")
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "logs"), []byte("owned fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := configureMobileLogs(root); err == nil {
+			t.Fatal("unusable log directory accepted")
+		}
+		if os.Getenv("TS_LOGS_DIR") != "unchanged-fixture" {
+			t.Fatal("failed preparation changed the dependency configuration")
+		}
+	})
 }
