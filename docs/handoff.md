@@ -47,13 +47,15 @@
   fresh Dora 设备段正在执行，lease、安装、载入与网络结果待 native owner 核对；不能声明零占用或设备验证通过。
   iOS 实际 unsigned app 已进入 Swift 编译/link 验证，最终结果待核对；已有 profile 不覆盖所查闲置物理设备，不自动注册设备或改签名。
   旧 head CI 的 held-PID 夹具失败保留在 #210；新 head 的 review/CI/原生与设备证据需分别核对。
-- T4 [#196 / draft #218](https://github.com/GhostFlying/cove/pull/218)：own checkout `cove-worktrees/m3-196-desktop`，基线 `65f07e72`。
-  窄修 loopback-only 邀请已提交 `e81d089a`，protocol auth13项与真实 compiled CLI 本机配对1项通过；缺远程入口仍不发秘密。
-  Electron45/electron-vite6/React19.2 的 main/preload/renderer 工作台源码及 bundle 已形成，T3 session/view bridge、Keychain cipher store、
-  冷启 operation reference ledger、多 server/repo/task/mount/tab/device UI 正在同 PR 推进，未冻结最终候选。
-  strict app TS、storage7项、真实 compiled host/server3项通过；后者首轮端口夹具失败及固定入口修正保留在 PR。
-  **真实 Electron 启动、Keychain保护/恢复、终端 GUI 输入/恢复与共享节点 logout/stop 影响尚未执行**；不记原生客户端验收通过。
-  支持声明仍为 macOS14 arm64 候选；本机 macOS26.3 的构建/运行不能代替14实机验证。T4 不做安装器、签名、公证、更新或M4。
+- T4 [#196 / draft #219](https://github.com/GhostFlying/cove/pull/219)：own checkout `cove-worktrees/m3-196-desktop`，
+  当前分支 `p/luchengxuan/m3-196-desktop-integrated`，base `6b12c5df`；原 #218/分支保留，映射见 #219。
+  loopback-only 邀请、真实 Electron45/electron-vite6/React19.2 工作台、独立 Keychain 凭据、operation query ledger 与多 server UI 已发布。
+  combined root build/受影响96项通过；源码修正至 `bfb177b7` 后 strict Desktop TS/bundle、scoped lint/format 通过，最终 CI/review/验收未冻结。
+  实际 Electron 窗口、首屏、Keychain 配对加密保存、GUI repo/task/mount/path、run 创建和 VT 显示已执行；
+  启动 ESM ready、fixture HOME、tab recipe/cwd、foreground/visibility 集成缺口已据实际失败修正，完整原始记录见 #219。
+  尚无成功终端键入；reload、app quit 后同 run 存活、Keychain 冷恢复、共享节点 logout/stop、远程 GUI 仍待实际验收。
+  五轮没有发送终端输入；自有进程/fixture 和核实匹配的唯一 Keychain 项已清理；新 GUI 段须由 root 与 Native 串行安排。
+  支持声明仍为 macOS14 arm64 候选；本机 macOS26.3 运行不能代替14实机验证。不做安装器、签名、公证、更新或M4。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 
 ## 单写者与本地资源

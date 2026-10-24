@@ -26,7 +26,7 @@ flow is provided in M3.
 
 Electron45 declares macOS13+ and arm64 binaries, compatible with Cove's proposed
 macOS14 arm64 floor. Running on a newer macOS version does not prove execution on
-macOS14. The actual runtime matrix and unexecuted checks belong to PR #218.
+macOS14. The actual runtime matrix and unexecuted checks belong to PR #219.
 
 Electron's combined vendor declarations reference DOM types from the Node host
 declaration file. With TS7 they still report unresolved DOM names in that file
@@ -117,7 +117,7 @@ build: storage/error/crash boundaries and actual compiled standalone-server
 integration. Injected test ciphers do not establish Keychain behavior. The actual
 Playwright Electron launch, real Keychain store/restore, rendered workbench,
 native PTY input/control and app-quit continuity are separate macOS acceptance in
-PR #218. Browser-only screenshots do not substitute for that native integration.
+PR #219. Browser-only screenshots do not substitute for that native integration.
 
 Explicit task-only environment settings `COVE_DESKTOP_PROFILE` and
 `COVE_DESKTOP_DATA_DIR` isolate development/test app identity and files. `COVE_HOME`
