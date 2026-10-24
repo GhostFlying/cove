@@ -14,7 +14,20 @@
     "src/pairing.ts",
     "src/credentials.ts",
     "src/lifecycle.ts",
-    "src/observation.ts"
+    "src/observation.ts",
+    "src/local-store.ts",
+    "src/operation-store.ts",
+    "src/mobile-host.ts",
+    "src/navigation.ts",
+    "src/presentation.ts",
+    "src/action-error.ts"
   ],
-  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/client" }]
+  "references": [
+    {
+      "path": "../../packages/protocol"
+    },
+    {
+      "path": "../../packages/client"
+    }
+  ]
 }
