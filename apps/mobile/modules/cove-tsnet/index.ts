@@ -1,5 +1,5 @@
 import { requireNativeModule } from "expo-modules-core";
-import type { NativeDriver } from "../../src/native-ports";
+import type { NativeDriver } from "../../dist/native-ports.js";
 
 interface CoveTsnetModule {
   open(hostname: string, controlURL: string): Promise<{ generation: number; status: string }>;

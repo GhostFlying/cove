@@ -26,6 +26,13 @@ absent from the repository's TypeScript 7 API. The app pins TypeScript 5.9.3
 privately for that loader only. Both app typecheck and compiled port tests invoke
 the root TypeScript 7.0.2 executable explicitly; strict peer checks stay enabled.
 
+The RN host imports this app's compiled private ports from `dist/`, the same
+artifacts exercised by its compiled tests. Their NodeNext `.js` imports resolve
+to real emitted files in Metro as well as Node, without a source alias or custom
+resolver. `prepare:js` builds those ports and the offline terminal document;
+`start`, `android` and `ios` run it before invoking Expo. The terminal build also
+builds its referenced public view artifacts when starting from a clean checkout.
+
 Build the embedded library using the scoped SDK/toolchain environment described
 in [the native README](../../native/tailscale/README.md). The commands below use
 repository-relative outputs; SDK locations may be supplied through environment
