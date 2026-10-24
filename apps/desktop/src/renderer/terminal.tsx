@@ -17,14 +17,19 @@ export function Terminal({ serverId, run }: { serverId: string; run: RunRef }) {
     let descriptor: ViewDescriptor | undefined;
     let endpoint: ReturnType<typeof createTerminalViewBridgeEndpoint> | undefined;
     let resize: ResizeObserver | undefined;
+    let canMeasure = false;
     const view = createXtermTerminalView(element);
     const stopMessages = window.cove.onViewMessage((target, message) => {
       if (descriptor?.viewId === target.viewId && descriptor.generation === target.generation)
         endpoint?.receiveMessage(message);
     });
     const stopState = window.cove.onTerminalState((target, next) => {
-      if (descriptor?.viewId === target.viewId && descriptor.generation === target.generation)
+      if (descriptor?.viewId === target.viewId && descriptor.generation === target.generation) {
         setState(next);
+        const newlyReady = !canMeasure && next.phase === "ready";
+        canMeasure = next.phase === "ready";
+        if (newlyReady) endpoint?.publishGeometry(view.measureGrid());
+      }
     });
     const stopInput = window.cove.onTerminalInput((target, notice) => {
       if (descriptor?.viewId !== target.viewId || descriptor.generation !== target.generation)
@@ -62,7 +67,9 @@ export function Terminal({ serverId, run }: { serverId: string; run: RunRef }) {
         },
       });
       resize = new ResizeObserver(() => {
-        if (!disposed) endpoint?.publishGeometry(view.measureGrid());
+        // Before initialize, the view returns its logical fallback grid. Only the actual
+        // measured estimator above may establish readiness; resize notices need a live backend.
+        if (!disposed && canMeasure) endpoint?.publishGeometry(view.measureGrid());
       });
       resize.observe(element);
     })().catch((failure: unknown) => {
