@@ -4,3 +4,7 @@ dist/
 coverage/
 pnpm-lock.yaml
 docs/benchmarks/
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/modules/cove-tsnet/generated/
+apps/mobile/src/terminal-document.generated.ts

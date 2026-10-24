@@ -1,0 +1,38 @@
+{
+  "name": "@cove/mobile",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "prebuild": "expo prebuild --no-install",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "pnpm --dir ../.. exec tsc --noEmit -p apps/mobile/tsconfig.json",
+    "build:ports": "pnpm --dir ../.. exec tsc -b apps/mobile/tsconfig.ports.json",
+    "build:terminal": "vite build --config terminal/vite.config.mjs && node scripts/bundle-terminal.mjs",
+    "test": "pnpm build:ports && vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@cove/client": "workspace:*",
+    "@cove/protocol": "workspace:*",
+    "@cove/terminal-web": "workspace:*",
+    "expo": "55.0.31",
+    "expo-build-properties": "55.0.18",
+    "expo-crypto": "55.0.19",
+    "expo-dev-client": "55.0.40",
+    "expo-modules-core": "55.0.26",
+    "expo-secure-store": "55.0.18",
+    "react": "19.2.0",
+    "react-native": "0.83.10",
+    "react-native-webview": "13.16.0",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.0",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

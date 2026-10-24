@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "lib": ["ES2024", "DOM"],
+    "skipLibCheck": true,
+    "outDir": "dist",
+    "tsBuildInfoFile": ".cache/ports.tsbuildinfo"
+  },
+  "include": [
+    "src/codec.ts",
+    "src/native-ports.ts",
+    "src/entry.ts",
+    "src/pairing.ts",
+    "src/credentials.ts",
+    "src/lifecycle.ts"
+  ],
+  "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/client" }]
+}
