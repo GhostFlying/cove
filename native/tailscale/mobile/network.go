@@ -170,5 +170,11 @@ func (c *Client) startNetworkNode(cfg node.Config, key string) (node.Node, error
 	}
 	c.networkNode = wrapped
 	c.mu.Unlock()
+	// An SDK update during Start may have published after netmon's initial
+	// read but before this notifier existed. Re-read once after installation
+	// rather than waiting for Android's ten-minute fallback polling interval.
+	if wrapped.changed != nil {
+		wrapped.changed()
+	}
 	return wrapped, nil
 }
