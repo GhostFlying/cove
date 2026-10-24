@@ -60,5 +60,9 @@ export function runFacts(state: ServerSessionSnapshot | undefined, run: RunRef |
   if (runtime?.kind !== "runtime")
     return `${durable} · controller unobserved · shell activity unknown`;
   const fact = runtime.record;
-  return `${durable} · runtime ${fact.status} · controller ${fact.controlHolder ? fact.controlHolder.connection.connectionId : "none"} · epoch ${fact.controlEpoch} · shell activity unknown`;
+  const lifecycle =
+    fact.status === "exited"
+      ? "lifecycle exited / server confirmed"
+      : `history last observed ${durable}`;
+  return `${lifecycle} · runtime ${fact.status} · controller ${fact.controlHolder ? fact.controlHolder.connection.connectionId : "none"} · epoch ${fact.controlEpoch} · shell activity unknown`;
 }
