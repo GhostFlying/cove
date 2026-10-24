@@ -640,3 +640,15 @@ identity、未固定 identity 的 ClientOptions、专属 events TerminalPort 和
 局部检查可先构建 `pnpm exec tsc -b packages/client apps/cli`，再执行 client project 和
 `apps/cli/tests/m3/business-events.test.mjs`。新增 reader/mirror/session 回归直接消费编译后的公共入口，
 公共类型 consumer 不依赖 DOM/Node 类型。真实服务场景使用独立测试资源，不能指向默认用户服务。
+
+## M3 原生传输开发夹具
+
+[Native fixture 的构建与边界](../apps/mobile/README.md)包含 Expo/CNG、embedded tsnet、离线 terminal 文档和
+平台私有凭据的实际接线。初始目标为 iOS16 arm64 与 Android12/API31 arm64；Expo Go 无法加载 Go 模块。
+应用采用 Metro，端口与 terminal 文档消费已编译的 workspace exports。Expo 配置加载器私有固定 TS5.9.3，
+正式 typecheck 与 compiled ports 测试仍明确使用根 TS7.0.2，Node/pnpm pins 与 strict peer 校验保持一致。
+
+每个 checkout 自行生成 AAR/XCFramework、CNG 项目和应用产物；工具 SDK 可通过 scoped 环境配置，不依赖另一 checkout
+的未提交产物，也不修改全局 Xcode、Java 或已有服务。设备与 Simulator 的 Go framework target 不可互换。
+库构建、实际 app 编译/link、启动、真实 HTTP/WS payload、SecureStore 与物理机生命周期分别验收；Android14
+模拟器与 iOS Simulator 的功能结果不能代作 API31、物理机性能/后台行为或最终 T7 验收。
