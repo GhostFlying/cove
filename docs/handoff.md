@@ -1,6 +1,6 @@
 # Cove 当前交接
 
-更新：2026-10-23。只记录当前状态（不超过 150 行）。恢复工作前先核对 GitHub 与各 checkout；
+更新：2026-10-24。只记录当前状态（不超过 150 行）。恢复工作前先核对 GitHub 与各 checkout；
 历史在 Git、Issue 与 PR 中（接管前的长版交接见 `git show 3d7349a:docs/handoff.md`）。
 
 ## 授权阶段
@@ -15,16 +15,22 @@
   [计划](milestones/m3.md)：先 T0/T1/T2，再按依赖推进 T3–T7；D6 初始系统目标待实证，D7 延期 shell integration，不启动 T8。
 - 合入规则（用户于 2026-10-17 决定，见 AGENTS.md 与[工程 §6.1](engineering-plan.md#61-角色授权与执行入口2026-10-09-用户调整)）：
   所需 CI 全绿且一次完整独立 review 没有未关闭的 P0/P1 时，协调者可 rebase & merge；P2/P3 转为后续 issue。
-  默认 reviewer 为 codex `gpt-6.1-sol` xhigh；认证边界、协议契约与节点身份核实的变更另加 TraeX 第二 review。
+  默认 reviewer 为全新 codex `gpt-6.1-sol` xhigh；每 PR 一次完整独立 review，高风险可选第二 review，遵循工程 §6.9，不新增强制门槛。
 - 威胁模型：单用户，经认证的用户是受信任的所有者；不防范其自我攻击，判据是不丢数据
   （AGENTS.md「Trust the authenticated owner」）。每个 review 提示都写明这一点。
 
 ## Main
 
-当前 main `58460afd`（#188），应用运行时代码与 `9326def6`（#184）一致；#178 为 `905ff5e6`。
-#188 同步安装升级结果并修复 CI setup 监督/证据（#183 已关闭）；候选与 main 的五提交 patch/message/最终 tree 一致。
-实际 main Engineering39839342758 六片、两 Go、两个必需汇总均通过，tend39839342852 通过；原网络原因仍 UNKNOWN。
-M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://github.com/GhostFlying/cove/issues/185)、[M2](milestones/m2.md) 与 Git。
+当前 main `932f5261a8715b823fcb014e184d669f290aa472`（PR #203）。
+
+- M3 计划/授权 #191 已合入 `70d68245` 并通过实际 main 必需 CI；首批 T0/T1/T2 已释放实施。
+- T1 Node adapter #200 已合入 `2c45bf44`；实际 main Engineering39992275645 attempt2 与 tend39992275355 成功，
+  shared Session credentials/socketPort 已可供 T2 消费。原失败与一次完整独立 review 在 #200。
+- T0a 终端 view bridge #203 已合入；候选两提交到 main 的映射与最终 tree 已核对。
+  实际 main Engineering40064147591 尚待确认；不把候选 CI 通过当作依赖组合后的 main 证明。
+- T2 业务事件原 draft [#202](https://github.com/GhostFlying/cove/pull/202) 保留全部失败/修正/CI，
+  当前在 fresh integration branch 上完成公共 CLI 收尾；替代 PR、最终 review/CI 与实际 main 是后续依赖门槛。
+  M2 已接受退出；T0–T7、试用与原始失败/局限的历史在 [#185](https://github.com/GhostFlying/cove/issues/185)、[M2](milestones/m2.md) 与 Git。
 
 已实现的范围（设计写回见 [Server 架构 §§4、5、9](server-architecture.md#4-host-网络和内置-tailscale)、
 [relay-protocol §§4、11.8](relay-protocol.md#4-握手本身必须跨业务协议可读)）：
@@ -44,15 +50,11 @@ M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://gi
 ## M3 实施与协调接管
 
 - 当前 root 为 M3 唯一协调者，维护阶段文档、派发与集成；Desktop/Mobile/shared 规划调查和 PR191 完整独立 review 已完成。
-  PR191 记录计划及授权，合入后完成实际 main 检查再释放依赖；首批 T0 原生/桥、T1 Node 适配、T2 业务事件各用独立写者。
+  PR191 计划及授权已合入；T1 已过实际 main，T0a bridge 已合入待 main，T2 正在收尾公共事件 CLI。
+  T3 等 T2 最终契约/实际 main 与桥依赖检查后派发；T0 mobile/Go 原生验证仍属 #192，不因桥合入而记双平台已通过。
 - 用户授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`；旧会话只作历史参考。
   root 是唯一协调者，负责派发、review 路由、集成与交接，不实施运行时代码。
-- [#178](https://github.com/GhostFlying/cove/pull/178) 已合入 `905ff5e6`，修正全部邀请入口保存、默认入口和 SSH supervisor 生命周期。
-  原 tsnet connect timeout 原因 UNKNOWN，同 head 全量重跑通过（#182）；#174 的原始 EOF 根因仍 UNKNOWN，不能把 containment 当作根因证明。
-- [#184](https://github.com/GhostFlying/cove/pull/184) 已合入 `9326def6`，修正目录边界、启动原因、服务操作预检、源码标识、archive 构建与 logout helper 生命周期。
-  候选 `fca9a046` 到 main 的 25 个提交 patch/message 与最终 tree 一致；原 #179 已关闭为替代关系，旧分支保留，映射与 review/CI 在 #184。
-- 一次完整独立 review 与所有必要修正 delta 已完成，无未关闭 P0/P1；候选双平台 author 文件各64/64，实际 CLI/nativeSQLite 六个预期结果已验证。
-  实际运行时 main 双平台最小构建、普通启动/公开 RPC/停止与真实 Tailnet 正常补验均通过，详见 #185；未执行项仍单独保留。
+- M2 历史修复 #178/#184、双平台安装升级、真实 Tailnet 与未核实项已归档在 #185；既有失败不改写为通过。
 - 用户要求原生 subagent 替代 Claude，此直接决定优先于工程 §6.1 的历史工具安排。后续实现使用原生 agent；
   默认新会话 reviewer 为 codex gpt-6.1-sol xhigh，可选高风险第二 review 经 warmpool 使用 TraeX gpt-5.6-sol xhigh。
 - 用户要求停止扩展大小写/别名/多级链接组合调查；正常流程、必要 review/CI 和交付优先，不追加这些组合检查为阶段门槛。
@@ -64,7 +66,7 @@ M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://gi
 首轮试用在笔记本、smallbox 与 sgbox 上完成，结果与缺陷记录于 #172–#175；试用创建的远端服务、客户端节点与临时资源已清理。
 按 [M2 验收场景](milestones/m2.md#验收场景) 与 [#185](https://github.com/GhostFlying/cove/issues/185) 补验同一配对记录切换 SSH/tsnet、
 启动失败原因、跨平台源码标识与登出后的 helper 生命周期。安装新构建升级已在两平台真实服务实测通过；Linux 容器生命周期模拟通过，macOS GUI 注销/登录已由用户批准暂缓（#189），不冒充通过。
-终端输入由临时 harness 验证；`tab send` 已由用户排到下一 milestone（#176），不作为本阶段前置条件。要点：
+终端输入由临时 harness 验证；`tab send` 已纳入 M3 T6（#176），不作为已退出 M2 的前置条件。要点：
 
 - Linux Docker 补验：真实 PAM/logind 最后会话退出后同实例/run 继续；init 周期自动拉起、身份保留、旧 run 停止且 marker 不重放。
   lastStart=unknown 与自动 unified cgroup 隔离 UNKNOWN 保留，全部自有容器/镜像已清理；[报告](https://github.com/GhostFlying/cove/issues/185#issuecomment-6357643941)。
@@ -90,8 +92,9 @@ M2 T0–T7、修复/试用、原始失败和局限的历史在 [#185](https://gi
 - tend 集成方向已接受但未排期（[设计 §7.1](design.md#71-以-tend-实现-shepherd经-cli-集成方向已接受未排期)）：
   经本机 CLI，worker 是 Cove tab；M3 已批准 T2 业务事件与 T6 控制者观测/`tab send`，完整 tend 集成仍未排期。
 
-## 未关闭的后续 issue（不阻塞 M2 试用）
+## 未关闭的后续 issue
 
+- [#204](https://github.com/GhostFlying/cove/issues/204) bridge package test 未准备 compiled client fixture（P2）；生产桥未发现 P0/P1，不阻塞 #203。
 - #100 M1 T1 测试夹具失败路径上的清理缺口（只涉及测试）。
 - #125 M1 T4 后续：`tab stop --run` 的实例分类、reopen 的 revision 溢出、跨重启停止的覆盖。
 - #126 M1 T3b 后续（P2）：陈旧跟踪 ref 选中已删除的远端主分支、受理时的记录大小上限等。
