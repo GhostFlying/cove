@@ -54,7 +54,7 @@ function compile(directory) {
 
 test("isolated ES-only consumer imports typed RPC, preview, and terminal state from public entries", async () => {
   const directory = await isolatedConsumer(`
-import { createClient, type Client, type ClientOptions, type ParamsFor, type PreviewOutcome, type ResultFor, type TerminalSnapshot, type TerminalExecutionEvidence, type TerminalAppliedGeometry, type TerminalAppliedAuthority } from '@cove/client';
+import { createServerSession, createBusinessMirror, openBusinessEvents, type ServerSessionOptions, type BusinessReaderOptions, createClient, type Client, type ClientOptions, type ParamsFor, type PreviewOutcome, type ResultFor, type TerminalSnapshot, type TerminalExecutionEvidence, type TerminalAppliedGeometry, type TerminalAppliedAuthority } from '@cove/client';
 import type { RunRef } from '@cove/protocol/identity';
 declare const options: ClientOptions;
 declare const run: RunRef;
@@ -102,6 +102,22 @@ if (state.appliedAuthority?.holder) {
   // @ts-expect-error Applied authority cannot change its nested connection.
   state.appliedAuthority.holder.connection.generation = 2;
 }
+declare const sessionOptions: ServerSessionOptions;
+declare const readerOptions: BusinessReaderOptions;
+const session = createServerSession(sessionOptions);
+const business = createBusinessMirror({ scheduler: options.scheduler, codec: options.codec });
+const reader = openBusinessEvents(readerOptions);
+const businessOutcome: Promise<{ kind: string }> = reader.done;
+const current = business.snapshot();
+for (const resource of current.records) {
+  if (resource.kind === 'repo') {
+    // @ts-expect-error Confirmed nested records are immutable.
+    resource.record.path = '/changed';
+  }
+}
+void session.reconcileOperations();
+void session.call('config.get', {});
+void businessOutcome;
 void typed; void result; void readPreview; void fullRun; void evidence; void readExecution; void readApplied;
 `);
   const result = compile(directory);
