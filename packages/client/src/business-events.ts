@@ -234,7 +234,9 @@ export function openBusinessEvents(options: BusinessReaderOptions): BusinessRead
   };
 
   const start = async (): Promise<void> => {
-    if (!request || (cursor && !boundCursor(cursor))) {
+    // A caller may intentionally present a stale/differently filtered cursor. Let the
+    // authenticated server return its explicit reset reason (and preserve CLI exit 3).
+    if (!request) {
       fail("Business event cursor binding mismatch");
       return;
     }

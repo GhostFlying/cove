@@ -146,10 +146,16 @@ test("bounded queue overflow settles even when output is stalled and late callba
 
 test("reset and refusal frames are delivered before their explicit terminal outcomes", async () => {
   for (const frame of [
-    { type: "reset", reason: "gap" },
+    { type: "reset", reason: "filter" },
     { type: "error", reason: "busy" },
   ]) {
-    const f = reader();
+    const f = reader({
+      request: {
+        type: "subscribe",
+        filter: { kinds: ["repo"] },
+        since: cursor(0, identity, { kinds: ["task"] }),
+      },
+    });
     await settle();
     f.events.latest().emit(frame);
     expect(await f.value.done).toEqual({
