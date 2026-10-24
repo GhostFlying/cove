@@ -24,6 +24,10 @@ to 6.0.0 and React/ReactDOM to 19.2.0; Vite 8.3.1 and Playwright 1.63.0 use the
 existing workspace versions. No installer, auto-update, signing or notarization
 flow is provided in M3.
 
+Each app data profile has one Electron process owner. A second normal launch using
+that profile exits before loading credentials or operation references. Closing the
+owner releases the lock; separate explicit test profiles remain independent.
+
 Electron45 declares macOS13+ and arm64 binaries, compatible with Cove's proposed
 macOS14 arm64 floor. Running on a newer macOS version does not prove execution on
 macOS14. The actual runtime matrix and unexecuted checks belong to PR #219.
@@ -125,7 +129,11 @@ selects the shared network/bootstrap home, independently of Desktop credentials.
 Tests create fresh homes/processes/profiles and never operate on an active/default
 user server, node, terminal or existing credential entry.
 
-The manual native acceptance entrypoints run only on macOS with a GUI/Keychain
+`node apps/desktop/acceptance/profile-owner.mjs` checks actual Electron profile
+ownership using two normal processes and a quit/reopen cycle. It needs macOS but
+neither OS foreground nor Keychain/terminal input, and cleans only its fresh profile.
+
+The other manual native acceptance entrypoints run only on macOS with a GUI/Keychain
 session, after the compiled workspace build:
 
 ```sh
