@@ -13,7 +13,8 @@
     "src/entry.ts",
     "src/pairing.ts",
     "src/credentials.ts",
-    "src/lifecycle.ts"
+    "src/lifecycle.ts",
+    "src/observation.ts"
   ],
   "references": [{ "path": "../../packages/protocol" }, { "path": "../../packages/client" }]
 }

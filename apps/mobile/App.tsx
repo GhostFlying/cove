@@ -17,6 +17,7 @@ import {
 import { verifyServer, MOBILE_BUILD_VERSION, bootstrapRequest } from "./dist/entry.js";
 import { pairServer } from "./dist/pairing.js";
 import { ForegroundOwnership } from "./dist/lifecycle.js";
+import { observeConnectedClient } from "./dist/observation.js";
 import { TerminalHost } from "./src/terminal-host";
 
 // Only the private native/pairing boundaries' fixed, bounded vocabulary is
@@ -53,6 +54,7 @@ type Host = {
   ports: NativePorts;
   controlURL: string;
   client?: Client;
+  stopWatching?: () => void;
 };
 
 export default function App() {
@@ -71,10 +73,12 @@ export default function App() {
   const [tabID, setTabID] = useState("");
   const [connected, setConnected] = useState<Client | null>(null);
   const [run, setRun] = useState<RunRef | null>(null);
+  const [inputNotice, setInputNotice] = useState("");
 
   function stopHost(updateUI = true) {
     const owned = host.current;
     host.current = null;
+    owned?.stopWatching?.();
     owned?.client?.dispose();
     owned?.ports.dispose();
     if (owned) void owned.node.close().catch(() => {});
@@ -110,6 +114,17 @@ export default function App() {
       return;
     }
     if (!outcome.ok) throw new Error("Server connection could not be verified");
+    owned.stopWatching = observeConnectedClient(
+      client,
+      () => host.current === owned && owned.client === client,
+      () => {
+        // Fence pending UI actions as well as the exact connection observer.
+        ownership.begin();
+        stopHost();
+        setStatus("服务连接未核实；未决输入效果未知，不会重放；可显式重新连接");
+      },
+    );
+    if (host.current !== owned || owned.client !== client) return;
     setConnected(client);
     setStatus("已验证 server 身份，HTTP / WebSocket 已连接");
     const selection = selected.current;
@@ -205,6 +220,7 @@ export default function App() {
     <SafeAreaView style={{ flex: 1, padding: 12 }}>
       <Text style={{ fontSize: 22, fontWeight: "600" }}>Cove Native</Text>
       <Text testID="connection-status">{status}</Text>
+      {inputNotice ? <Text testID="terminal-input-notice">{inputNotice}</Text> : null}
       <Button
         title="验证安全存储"
         disabled={busy || loading}
@@ -399,7 +415,12 @@ export default function App() {
         }
       />
       {connected && run && (
-        <TerminalHost key={`${run.runId}:${run.relayInstanceId}`} client={connected} run={run} />
+        <TerminalHost
+          key={`${run.runId}:${run.relayInstanceId}`}
+          client={connected}
+          run={run}
+          onInputNotice={setInputNotice}
+        />
       )}
     </SafeAreaView>
   );
