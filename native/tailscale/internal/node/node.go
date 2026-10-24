@@ -384,3 +384,14 @@ func nodeInfo(n *tailcfg.Node) proto.NodeInfo {
 	}
 	return info
 }
+
+// NetworkChanged is an optional mobile capability, deliberately outside Node's
+// domain contract. Android SDK callbacks wake the same tsnet monitor; they do not
+// create another network model or change the process's selected OS network.
+func (n *tsnetNode) NetworkChanged() {
+	if sys := n.srv.Sys(); sys != nil {
+		if monitor, ok := sys.NetMon.GetOK(); ok && monitor != nil {
+			monitor.InjectEvent()
+		}
+	}
+}

@@ -87,6 +87,21 @@ and node logout does not revoke an existing Cove pairing. SecureStore must
 successfully persist a pairing before the UI reports it saved; there is no
 plaintext fallback. Invitation secrets and auth keys are not logged.
 
+The embedded process explicitly keeps Tailscale diagnostic state in this node
+root's private `logs/` directory, outside the enrollment subtree that logout
+removes. It does not change the host environment or use a system Tailscale path.
+On Android, `ACCESS_NETWORK_STATE` permits observing real `ConnectivityManager`
+and `LinkProperties` snapshots. A single registered Go interface getter reads
+bounded immutable snapshots, and native OS callbacks wake the existing tsnet
+monitor. The app creates no VPN service and does not bind the process to another
+network. Stop and native generation checks reject obsolete callbacks.
+
+Native control failures expose only a fixed vocabulary of bounded categories and
+safe reasons. Original Go errors, control-plane bodies, credentials and URLs are
+never reflected into these diagnostics or default logs. A failure remains an
+unverified outcome; its reason does not authorize automatically repeating login,
+logout, RPC or terminal input.
+
 The fixture's optional control URL is an explicit local bootstrap setting. Edit
 it and reconnect before login; the field is not persisted. The native node root
 keeps a digest binding before enrollment can start, and checks it before any

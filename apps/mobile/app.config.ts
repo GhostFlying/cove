@@ -11,6 +11,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: "com.ghostflying.cove.nativeapp",
+    permissions: ["android.permission.ACCESS_NETWORK_STATE"],
   },
   plugins: [
     [
