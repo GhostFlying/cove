@@ -1,9 +1,9 @@
-# Cove Native development fixture
+# Cove Mobile development app
 
-This is the M3 native transport fixture, using Expo 55 / React Native 0.83 and
-the existing Cove client and terminal WebView bridge. It provides explicit
-Tailnet login, one secure Cove pairing, RPC verification, and attachment to an
-existing isolated test tab. It is not the product navigation or session list.
+This is the M3 iOS/Android client, using Expo 55 / React Native 0.83, the public
+ServerSession/business mirror and the bundled terminal WebView bridge. The RN
+host connects directly to independent Cove servers; Desktop is not required.
+Product source and automated tests do not establish physical-device acceptance.
 
 The initial targets are iOS 16 arm64 and Android 12 / API 31 arm64. Expo Go
 cannot load the embedded Go library. Build an actual native application.
@@ -123,15 +123,12 @@ using the same API and accessibility options as pairing. Success requires
 write/read/delete; failures expose only fixed platform categories and whether
 synthetic-key deletion was confirmed. The saved pairing record is untouched.
 
-The fixture's optional control URL is an explicit local bootstrap setting. Edit
-it and reconnect before login; the field is not persisted. The native node root
-keeps a digest binding before enrollment can start, and checks it before any
-restore. An enrolled node requires the same selection after process restart;
-an empty/default or different value fails without starting it. Logout removes
-enrollment and permits a new explicit selection. There is no automatic control
-plane migration or adoption of another node's state. Isolated testcontrol plus
-a fresh cloud-device lease can validate real embedded-tsnet app payloads without
-creating a real Tailnet node; that result is recorded separately from real
+The optional EXPO_PUBLIC_COVE_TEST_CONTROL_URL is a compile-time development
+fixture bootstrap, never a production connection form field. The native node
+root keeps its digest binding before enrollment and checks it before restore.
+An enrolled test node requires the same setting after restart; empty/default or
+different selection fails without starting it. Logout removes enrollment before
+a new explicit selection. Isolated testcontrol results are distinct from real
 Tailnet and physical-device coverage.
 
 Each native call is bound to a node generation, so a delayed event pull, close,
@@ -167,3 +164,63 @@ The terminal document embeds the actual compiled xterm view and bridge code and
 CSS, without loading a network page. The server remains the sole terminal model
 and query responder. Acquiring control requires the explicit control button;
 the fixture does not send PTY query replies or create product UI workflows.
+
+## Core workflows and local persistence
+
+1. Start this phone's embedded network node, log in to Tailnet and open the login
+   link. Refresh status after enrollment. Cove never uses system Tailscale.
+2. Add a server label and one-use invitation from that independent server. Its
+   stable peer and Cove identity are checked before credentials are sent. Each
+   pairing owns a fresh SecureStore slot (WHEN_UNLOCKED_THIS_DEVICE_ONLY). A
+   pending pairing can check its saved slot without redeeming again; if no token
+   was saved or redemption is unknown, request a new invitation.
+3. Open the server to register remote repositories, create multi-repository tasks
+   from existing checkouts or new worktrees, edit mounts and archive tasks. Paths
+   always belong to the execution server. Catalog events do not check filesystem
+   readiness: task detail reads current server paths and marks stale observations.
+   The main-branch input applies to repository updates after registration.
+4. Create shell/command tabs, select a verified existing run, view paginated run
+   history, explicitly stop or reopen. Reopen starts a new run from its recipe;
+   selecting/reconnecting never starts one. Only the selected terminal subscribes.
+   Use Control or an actual terminal focus gesture to acquire control. Observers
+   keep the authoritative server grid. No reliable shell activity signal exists
+   yet, so activity is unknown.
+5. Operations shows original IDs, delivery uncertainty, progress, per-mount results
+   and server-advertised recovery actions. Query only reads operation.get. Missing
+   records do not prove that the effect never happened. Continue/abandon is an
+   explicit new operation, never a replay of the original request.
+6. Devices lists current registrations and allows explicit revoke. Forget only
+   removes this phone's credential slot. Stop node, Tailnet logout, device revoke
+   and forget have separate actions and effects.
+
+One app-private SQLite database stores nonsecret profile metadata and operation
+references, summaries and immutable canonical digests. It never stores tokens,
+invitation secrets, raw RPC arguments or terminal input/output. A transaction
+commits each original reference before dispatch; persistence failure prevents the
+write. Outcome persistence failure retains the reference as pending/unknown.
+Cold-start reconciliation queries only the original ID with the original
+credential slot; a new pairing cannot silently adopt old-principal operations.
+The summary is not an exact request copy and cannot be dispatched. Completed or
+proven not-sent observations can be acknowledged; unresolved rows are never evicted.
+Bounds: 64 profiles, eight connected server sessions (other profiles remain
+explicitly disconnected), 256 operation rows / 1 MiB encoded journal, UI pages
+of 50 rows. Disconnect a server to free a live connection slot. Full capacity
+blocks admission before any write; acknowledge terminal observations to make space.
+
+Backgrounding withdraws input/focus and retires owned transports/views. Foreground
+recreates sessions for previously connected profiles and verifies identity anew;
+restoring a selected old run never acquires control or replays input. Process death
+returns to server navigation. WebView content-process loss creates a fresh bridge
+generation. Unknown remote execution remains unknown until observed by the server.
+No background VPN/service or plaintext credential fallback is provided.
+
+## Verification boundary
+
+Run prepare:js, typecheck and test against emitted private modules. Product tests
+use isolated SQLite databases and verify admission-before-dispatch, crash/reopen,
+unknown/not-found preservation, credential-slot isolation, bounds and late lifecycle
+completion. Native ports tests remain separate. Actual Android/iOS app builds,
+Metro/Hermes payloads, native SQLite/SecureStore and lifecycle checks must be recorded
+with their exact SHA in the PR. Physical input, real Tailnet with Desktop off,
+IME/selection and external-keyboard acceptance are still required M3/T7 evidence;
+T0 fixture or simulator results do not establish product acceptance.
