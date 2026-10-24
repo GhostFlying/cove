@@ -312,6 +312,7 @@ it("exact run facts expose runtime controller and qualify stale catalog", async 
     },
   };
   expect(runFacts(state, run)).toContain("runtime exited");
+  expect(runFacts(state, run)).not.toContain("running / live");
   expect(runFacts(state, run)).toContain("phone-other · epoch 7");
   expect(runFacts({ ...state, status: "stale" }, run)).toContain("unverified");
   expect(runFacts(state, { ...run, relayInstanceId: "old-instance" })).toContain("unverified");
@@ -492,4 +493,66 @@ it("safe connection classification retains pairing identity request delivery", a
     disposition: "not-sent",
     redemptionDisposition: "not-sent",
   });
+});
+it("a rejected native open settles ownership and allows a later explicit local start", async () => {
+  const { store } = await storage();
+  let opens = 0;
+  const node = {
+    status: '{"state":"Running"}',
+    driver: { nextEvent: () => new Promise(() => {}), stop: () => {} },
+    close: async () => {},
+  };
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: () => ({ read: async () => null }),
+    openNode: async () => {
+      opens++;
+      if (opens === 1) throw new Error("native open failed");
+      return node;
+    },
+  });
+  await host.initialize();
+  await expect(host.foreground()).rejects.toThrow("connection");
+  expect(host.snapshot().nodeState).toBe("open-unverified");
+  await host.foreground();
+  expect(opens).toBe(2);
+  expect(host.snapshot().nodeState).toBe("Running");
+  await host.stop();
+});
+it("background-cancelled native open does not poison a future explicit start", async () => {
+  const { store } = await storage();
+  let rejectOpen;
+  let opens = 0;
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: () => ({ read: async () => null }),
+    openNode: () => {
+      opens++;
+      return opens === 1
+        ? new Promise((_resolve, reject) => {
+            rejectOpen = reject;
+          })
+        : Promise.resolve({
+            status: '{"state":"Running"}',
+            driver: { nextEvent: () => new Promise(() => {}), stop: () => {} },
+            close: async () => {},
+          });
+    },
+  });
+  await host.initialize();
+  const opening = host.foreground();
+  await new Promise((r) => setTimeout(r, 0));
+  host.background();
+  rejectOpen(new Error("native epoch cancelled"));
+  await expect(opening).rejects.toThrow("connection");
+  await new Promise((r) => setTimeout(r, 0));
+  expect(host.snapshot().nodeState).toBe("shutdown-unverified");
+  await host.foreground();
+  expect(opens).toBe(2);
+  expect(host.snapshot().nodeState).toBe("Running");
+  await host.stop();
 });

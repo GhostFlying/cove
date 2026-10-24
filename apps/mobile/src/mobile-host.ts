@@ -41,6 +41,8 @@ export interface HostOptions {
   digest(text: string): Promise<string>;
 }
 
+class OpenAttemptFailure extends ActionError {}
+
 /** RN owns transport, credentials and domain clients; navigation and terminal focus stay local. */
 export class MobileHost {
   readonly operations: Operations;
@@ -101,7 +103,15 @@ export class MobileHost {
     this.publish({ foreground: true, nodeState: "starting" });
     const attempt = { promise: this.options.openNode(), claimed: false };
     this.opening = attempt;
-    const node = await attempt.promise;
+    let node: MobileNode;
+    try {
+      node = await attempt.promise;
+    } catch {
+      if (this.opening === attempt) this.opening = undefined;
+      if (generation === this.generation)
+        this.publish({ foreground: false, nodeState: "open-unverified" });
+      throw new ConnectionError({ stage: "connection", category: "unavailable" });
+    }
     if (this.opening === attempt) this.opening = undefined;
     if (generation !== this.generation) {
       if (!attempt.claimed) await node.close();
@@ -159,11 +169,28 @@ export class MobileHost {
     this.publish();
     // Preserve a rejected close, including across repeated background notifications. It is
     // never converted to success just because the JS resource reference was retired.
-    if (node || opening)
-      this.closing = this.closing.then(async () => {
+    if (node || opening) {
+      const result = this.closing.then(async () => {
         if (node) await node.close();
-        if (opening) await (await opening.promise).close();
+        if (opening) {
+          let handle: MobileNode;
+          try {
+            handle = await opening.promise;
+          } catch {
+            throw new OpenAttemptFailure("Native open returned no verified handle");
+          }
+          await handle.close();
+        }
       });
+      // A rejected open is not a rejected close. The caller still sees uncertainty for this
+      // attempt, but the settled native-open ownership boundary permits a later explicit
+      // local start. Actual close failure remains a blocker; neither path retries logout.
+      this.closing = result.catch((error: unknown) => {
+        if (!(error instanceof OpenAttemptFailure)) throw error;
+      });
+      void this.closing.catch(() => {});
+      return result;
+    }
     return this.closing;
   }
   private nodeStatus(raw: string): void {
