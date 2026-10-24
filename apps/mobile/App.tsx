@@ -14,8 +14,8 @@ import { pairServer } from "./dist/pairing.js";
 import { ForegroundOwnership } from "./dist/lifecycle.js";
 import { TerminalHost } from "./src/terminal-host";
 
-// Only the native control boundary's fixed, bounded vocabulary is displayed.
-// Other failures keep their existing generic wording; none are logged/retried.
+// Only the private native/pairing boundaries' fixed, bounded vocabulary is
+// displayed. Other failures stay generic; none are logged or retried.
 function nativeFailureReason(error: unknown): string {
   if (
     typeof error !== "object" ||
