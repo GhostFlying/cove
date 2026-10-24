@@ -107,6 +107,10 @@ Pairing failures additionally retain a fixed stage and the request/redemption
 delivery dispositions. An identity check may have reached the server while
 redemption is still `not-sent`; a persistence failure can follow a handed-off
 redemption. These diagnostics never authorize repeating a redemption.
+The fixture can independently check secure storage with a fresh synthetic key,
+using the same API and accessibility options as pairing. Success requires
+write/read/delete; failures expose only fixed platform categories and whether
+synthetic-key deletion was confirmed. The saved pairing record is untouched.
 
 The fixture's optional control URL is an explicit local bootstrap setting. Edit
 it and reconnect before login; the field is not persisted. The native node root
