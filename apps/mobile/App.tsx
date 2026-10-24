@@ -120,6 +120,8 @@ export default function App() {
       () => {
         // Fence pending UI actions as well as the exact connection observer.
         ownership.begin();
+        // Loss owns startup teardown: the retired generation skips its finally.
+        setLoading(false);
         stopHost();
         setStatus("服务连接未核实；未决输入效果未知，不会重放；可显式重新连接");
       },
