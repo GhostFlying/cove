@@ -197,6 +197,16 @@ it("keeps binary and text traffic ordered on each fixed WebSocket route", async 
   await vi.waitFor(() => expect(driver.released).toContain(1));
   expect(connection.send("late")).toBe("not-sent");
   expect(closed).toHaveBeenCalledOnce();
+  const pending = entry.terminal.open({
+    onOpen: vi.fn(),
+    onBinary: vi.fn(),
+    onText: vi.fn(),
+    onClose: closed,
+  });
+  driver.emit({ id: 2, type: "socket-close", disposition: "unknown" });
+  await vi.waitFor(() => expect(driver.released).toContain(2));
+  expect(pending.cancel()).toBe("unknown");
+  expect(closed).toHaveBeenCalledTimes(2);
 });
 
 it("settles pending HTTP and sockets when the native stream fails", async () => {
@@ -204,11 +214,21 @@ it("settles pending HTTP and sockets when the native stream fails", async () => 
   const failed = vi.fn();
   const closed = vi.fn();
   entry.http.post(request, { onDisposition: vi.fn(), onResponse: vi.fn(), onFailure: failed });
-  entry.terminal.open({ onOpen: vi.fn(), onText: vi.fn(), onBinary: vi.fn(), onClose: closed });
+  const pending = entry.terminal.open({
+    onOpen: vi.fn(),
+    onText: vi.fn(),
+    onBinary: vi.fn(),
+    onClose: closed,
+  });
+  driver.stop = () => {
+    driver.stopped = true;
+    throw new Error("Expo bridge destroyed");
+  };
   driver.emit({ id: 1, type: "invalid-native-event" });
   await vi.waitFor(() => expect(failed).toHaveBeenCalledOnce());
   expect(failed).toHaveBeenCalledWith({ disposition: "unknown", reason: "transport" });
   expect(closed).toHaveBeenCalledOnce();
+  expect(pending.cancel()).toBe("unknown");
   expect(driver.stopped).toBe(true);
 });
 

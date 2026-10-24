@@ -3,3 +3,5 @@
 /.expo/
 /src/terminal-document.generated.ts
 /modules/cove-tsnet/generated/
+/modules/cove-tsnet/android/build/
+/modules/cove-tsnet/android/.gradle/

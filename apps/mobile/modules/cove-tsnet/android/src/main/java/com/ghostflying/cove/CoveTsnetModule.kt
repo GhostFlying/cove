@@ -53,12 +53,20 @@ class CoveTsnetModule : Module() {
 
     AsyncFunction("open") { hostname: String, controlURL: String, promise: Promise ->
       async(promise) {
-        val observed = synchronized(ownership) {
+        val opening = synchronized(ownership) {
           check(foreground) { "Application is backgrounded" }
           epoch += 1
-          epoch
+          // Revoke the old generation before draining/constructing. A delayed
+          // JS Stop for that old node must not invalidate this pending open.
+          clientGeneration = epoch
+          stopped = true
+          val previous = client
+          client = null
+          entries.clear()
+          Pair(epoch, previous)
         }
-        val previous = synchronized(ownership) { client.also { client = null; entries.clear() } }
+        val observed = opening.first
+        val previous = opening.second
         previous?.stop()
         previous?.close()
         val context = appContext.reactContext ?: error("Application context unavailable")
