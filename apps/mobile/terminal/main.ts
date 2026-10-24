@@ -20,6 +20,15 @@ function start() {
     return;
   }
   const view = createXtermTerminalView(container, options);
+  // xterm's mouse activation focuses its textarea, but a mobile WebView touch
+  // can leave only the outer WebView focused. Focus the existing input during
+  // the user's touch gesture so the OS keyboard targets it. This emits no
+  // terminal bytes or protocol focus; genuine input still uses the view bridge.
+  const focusTouchInput = (event: PointerEvent) => {
+    if (event.pointerType !== "touch" || !event.isPrimary || !event.isTrusted) return;
+    container.querySelector("textarea")?.focus({ preventScroll: true });
+  };
+  container.addEventListener("pointerdown", focusTouchInput, { capture: true, passive: true });
   const endpoint = createTerminalViewBridgeEndpoint({
     bridgeGeneration: window.__coveBridgeGeneration,
     view,
@@ -35,6 +44,7 @@ function start() {
   window.addEventListener(
     "pagehide",
     () => {
+      container.removeEventListener("pointerdown", focusTouchInput, true);
       resize.disconnect();
       endpoint.dispose();
       view.dispose();
