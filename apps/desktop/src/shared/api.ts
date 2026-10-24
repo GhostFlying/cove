@@ -1,6 +1,7 @@
 import type { ServerSessionSnapshot, TerminalSnapshot, TerminalInputNotice } from "@cove/client";
 import type { ConnectionRecord, EntryKind } from "@cove/node-client";
 import type { RunRef } from "@cove/protocol/identity";
+import type { Geometry } from "@cove/protocol/profile";
 
 export interface SavedServer extends ConnectionRecord {
   readonly deviceId: string;
@@ -49,6 +50,8 @@ export interface DesktopApi {
   openLink(url: string): Promise<HostReply>;
   openView(serverId: string, run: RunRef): Promise<ViewDescriptor>;
   closeView(descriptor: ViewDescriptor): Promise<void>;
+  focusView(descriptor: ViewDescriptor, geometry: Geometry): Promise<HostReply>;
+  blurView(descriptor: ViewDescriptor): Promise<HostReply>;
   viewMessage(descriptor: ViewDescriptor, message: string): void;
   onViewMessage(callback: (descriptor: ViewDescriptor, message: string) => void): () => void;
   onTerminalState(
