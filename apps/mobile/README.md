@@ -15,8 +15,7 @@ for each checkout. No generated artifact from another checkout is needed.
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm exec tsc -b packages/terminal-web/tsconfig.production.json
-pnpm --filter @cove/mobile build:terminal
+pnpm --filter @cove/mobile prepare:js
 pnpm --filter @cove/mobile typecheck
 pnpm --filter @cove/mobile test
 ```
