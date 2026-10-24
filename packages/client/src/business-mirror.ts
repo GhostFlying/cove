@@ -307,7 +307,8 @@ export class BusinessMirror implements Disposable {
         (!value.record.tabId || latest.get(value.record.tabId) !== value.id)
       ) {
         records.delete(id);
-        records.delete(key("runtime", value.id));
+        // Runtime facts have independent server-owned retention. Pruning a durable history
+        // row must not hide the worker's confirmed exit before its explicit runtime delete.
       }
     }
   }

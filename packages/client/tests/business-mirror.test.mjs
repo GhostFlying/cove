@@ -154,6 +154,20 @@ test("durable running rows cannot overwrite runtime exit and old run history is 
     "exited",
   );
   expect(value.snapshot().records.some((item) => item.kind === "operation")).toBe(false);
+  const standalone = history("standalone", "exited", 200);
+  standalone.record.tabId = null;
+  const final = batch(at, [
+    { type: "upsert", value: runtime("standalone") },
+    { type: "upsert", value: standalone },
+  ]);
+  apply(value, [final]);
+  expect(
+    value.snapshot().records.some((item) => item.kind === "run" && item.id === standalone.id),
+  ).toBe(false);
+  expect(
+    value.snapshot().records.find((item) => item.kind === "runtime" && item.id === standalone.id)
+      .record.status,
+  ).toBe("exited");
   expect(value.snapshot().bytes).toBeLessThan(BUSINESS_LIMITS.snapshotBytes);
   value.dispose();
 });
