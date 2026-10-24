@@ -24,6 +24,8 @@ const data = join(fixture.root, "desktop-data");
 await mkdir(data);
 const environment = {
   ...fixture.env,
+  // Keep the logged-in macOS Keychain context; server/files remain isolated below.
+  HOME: process.env.HOME,
   COVE_DESKTOP_PROFILE: profile,
   COVE_DESKTOP_DATA_DIR: data,
   COVE_HOME: fixture.home("network-home"),
@@ -38,8 +40,10 @@ const steps = [];
 let run;
 const logs = [];
 async function step(name, action) {
+  process.stdout.write(`Starting: ${name}\n`);
   await action();
   steps.push({ name, status: "PASS" });
+  process.stdout.write(`PASS: ${name}\n`);
 }
 async function launch() {
   electron = await _electron.launch({
@@ -50,6 +54,12 @@ async function launch() {
   });
   electron.process().stderr.on("data", (chunk) => logs.push(String(chunk)));
   page = await electron.firstWindow();
+  // CDP clicks alone do not establish macOS foreground. Activate only this test window.
+  await electron.evaluate(({ app, BrowserWindow }) => {
+    app.focus({ steal: true });
+    BrowserWindow.getAllWindows()[0].focus();
+  });
+  page.setDefaultTimeout(30_000);
   page.on("pageerror", (error) => errors.push(error.message));
   await page.waitForFunction(async () => (await window.cove.snapshot()).ready);
   assert.equal(await page.title(), "Cove");
