@@ -204,6 +204,7 @@ export default function App() {
           setControlURL(value);
         }}
         placeholder="隔离 control URL（留空默认；修改后重新连接）"
+        keyboardType="url"
         editable={!busy && !loading}
         autoCapitalize="none"
         autoCorrect={false}
