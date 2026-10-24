@@ -1,6 +1,7 @@
 package com.ghostflying.cove
 
 import android.util.Base64
+import android.net.ConnectivityManager
 import com.ghostflying.cove.mobile.Client
 import com.ghostflying.cove.mobile.Entry
 import com.ghostflying.cove.mobile.Mobile
@@ -10,12 +11,14 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import go.Seq
 import java.io.File
 import java.util.concurrent.Executors
+import org.json.JSONObject
 
 class CoveTsnetModule : Module() {
   private val ownership = Any()
   private val controlQueue = Executors.newSingleThreadExecutor()
   private val eventQueue = Executors.newSingleThreadExecutor()
   private var client: Client? = null
+  private var networkMonitor: AndroidNetwork? = null
   private var epoch = 0L
   private var clientGeneration = 0L
   private var stopped = true
@@ -44,7 +47,12 @@ class CoveTsnetModule : Module() {
   private fun async(promise: Promise, body: () -> Any?) {
     controlQueue.execute {
       try { promise.resolve(body()) }
-      catch (_: Exception) { promise.reject("COVE_NATIVE", "Native node operation failed", null) }
+      catch (error: Exception) {
+        // The Go classifier returns constants only, never the original message,
+        // auth key, URL or remote body. A rejection still leaves effects unknown.
+        val failure = JSONObject(Mobile.controlFailureJSON((error.message ?: "").take(4096)))
+        promise.reject(failure.getString("code"), failure.getString("reason"), null)
+      }
     }
   }
 
@@ -63,39 +71,65 @@ class CoveTsnetModule : Module() {
           val previous = client
           client = null
           entries.clear()
-          Pair(epoch, previous)
+          Triple(epoch, previous, networkMonitor.also { networkMonitor = null })
         }
         val observed = opening.first
         val previous = opening.second
         previous?.stop()
-        previous?.close()
+        try { opening.third?.close() } finally { previous?.close() }
         val context = appContext.reactContext ?: error("Application context unavailable")
         Seq.setContext(context.applicationContext)
         val state = File(context.noBackupFilesDir, "cove-tsnet")
+        val manager = context.getSystemService(ConnectivityManager::class.java)
+          ?: error("native netmon SDK service unavailable")
+        Mobile.setAndroidNetworkInterfaces(AndroidNetwork.snapshot(manager))
         val created = Mobile.new_(state.absolutePath, hostname, controlURL)
-        val accepted = synchronized(ownership) {
-          if (!foreground || epoch != observed) false
-          else {
-          client = created
-          clientGeneration = observed
-          stopped = false
-          entrySequence = 0
-          true
+        val network = AndroidNetwork(manager) {
+          synchronized(ownership) {
+            if (foreground && !stopped && clientGeneration == observed && client === created) created else null
           }
         }
-        if (!accepted) { created.stop(); created.close(); error("Native node open was cancelled") }
-        mapOf("generation" to observed, "status" to created.statusJSON())
+        try {
+          network.start()
+          // Refresh after registration closes the initial snapshot/subscription
+          // gap. Later callbacks are bound to this exact client and generation.
+          created.networkChanged(AndroidNetwork.snapshot(manager))
+          val accepted = synchronized(ownership) {
+            if (!foreground || epoch != observed) false
+            else {
+              client = created
+              networkMonitor = network
+              clientGeneration = observed
+              stopped = false
+              entrySequence = 0
+              true
+            }
+          }
+          check(accepted) { "Native node open was cancelled" }
+          mapOf("generation" to observed, "status" to created.statusJSON())
+        } catch (error: Exception) {
+          stopNative(observed)
+          synchronized(ownership) {
+            if (client === created) client = null
+            if (networkMonitor === network) networkMonitor = null
+          }
+          try { network.close() } finally { created.close() }
+          throw error
+        }
       }
     }
     AsyncFunction("status") { generation: Long, promise: Promise -> async(promise) { current(generation).statusJSON() } }
     AsyncFunction("login") { generation: Long, authKey: String, promise: Promise -> async(promise) { current(generation).login(authKey) } }
     AsyncFunction("logout") { generation: Long, promise: Promise -> async(promise) { current(generation).logout() } }
     AsyncFunction("close") { generation: Long, promise: Promise ->
-      val owned = synchronized(ownership) { if (generation == clientGeneration) client else null }
+      val owned = synchronized(ownership) { if (generation == clientGeneration) Pair(client, networkMonitor.also { networkMonitor = null }) else Pair(null, null) }
       stopNative(generation)
       async(promise) {
-        owned?.close()
-        synchronized(ownership) { if (client === owned) client = null }
+        try {
+          try { owned.second?.close() } finally { owned.first?.close() }
+        } finally {
+          synchronized(ownership) { if (client === owned.first) client = null }
+        }
         null
       }
     }
@@ -147,8 +181,8 @@ class CoveTsnetModule : Module() {
     OnDestroy {
       synchronized(ownership) { foreground = false }
       stopNative()
-      val owned = synchronized(ownership) { client.also { client = null } }
-      controlQueue.execute { owned?.close() }
+      val owned = synchronized(ownership) { Pair(client.also { client = null }, networkMonitor.also { networkMonitor = null }) }
+      controlQueue.execute { try { owned.second?.close() } finally { owned.first?.close() } }
       controlQueue.shutdown()
       eventQueue.shutdown()
     }

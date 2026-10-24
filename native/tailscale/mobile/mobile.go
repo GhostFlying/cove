@@ -49,23 +49,24 @@ const (
 // Manager mutations are serialized independently of operation admission, so
 // cancellation never waits for a control-plane request or a blocked event pull.
 type Client struct {
-	mu         sync.Mutex
-	control    sync.Mutex
-	mgr        *node.Manager
-	life       context.Context
-	stop       context.CancelFunc
-	closed     bool
-	mutating   bool
-	generation int64
-	closeDone  chan struct{}
-	ops        map[int64]*operation
-	lastID     int64
-	events     []string
-	eventBytes int
-	changed    chan struct{}
-	pulling    bool
-	wg         sync.WaitGroup
-	ownedLock  *os.File
+	mu          sync.Mutex
+	control     sync.Mutex
+	mgr         *node.Manager
+	life        context.Context
+	stop        context.CancelFunc
+	closed      bool
+	mutating    bool
+	generation  int64
+	closeDone   chan struct{}
+	ops         map[int64]*operation
+	lastID      int64
+	events      []string
+	eventBytes  int
+	changed     chan struct{}
+	pulling     bool
+	wg          sync.WaitGroup
+	ownedLock   *os.File
+	networkNode *mobileNetworkNode
 }
 
 type operation struct {
@@ -120,8 +121,11 @@ func New(stateDirectory, hostname, controlURL string) (*Client, error) {
 			return nil, err
 		}
 	}
-	mgr := node.NewManager(node.Config{StateDir: filepath.Join(stateDirectory, "state"), Hostname: hostname, ControlURL: controlURL}, node.StartTSNet)
-	c := newClient(mgr)
+	var c *Client
+	mgr := node.NewManager(node.Config{StateDir: filepath.Join(stateDirectory, "state"), Hostname: hostname, ControlURL: controlURL}, func(cfg node.Config, key string) (node.Node, error) {
+		return c.startNetworkNode(cfg, key)
+	})
+	c = newClient(mgr)
 	c.ownedLock = lock
 	mgr.Boot()
 	return c, nil
@@ -510,6 +514,7 @@ func (c *Client) Stop() {
 		return
 	}
 	c.closed = true
+	c.networkNode = nil
 	c.events = nil
 	c.eventBytes = 0
 	c.signalLocked()
