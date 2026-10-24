@@ -50,11 +50,15 @@
 - T4 [#196 / draft #219](https://github.com/GhostFlying/cove/pull/219)：own checkout `cove-worktrees/m3-196-desktop`，
   当前分支 `p/luchengxuan/m3-196-desktop-integrated`，base `6b12c5df`；原 #218/分支保留，映射见 #219。
   loopback-only 邀请、真实 Electron45/electron-vite6/React19.2 工作台、独立 Keychain 凭据、operation query ledger 与多 server UI 已发布。
-  combined root build/受影响96项通过；源码修正至 `dcaeac26` 后 strict Desktop TS/bundle、scoped lint/format 通过，最终 CI/review/验收未冻结。
-  实际 Electron 窗口、首屏、Keychain 配对加密保存、GUI repo/task/mount/path、run 创建和 VT 显示已执行；
-  启动 ESM ready、fixture HOME、tab recipe/cwd、foreground/visibility 集成缺口已据实际失败修正，完整原始记录见 #219。
-  尚无成功终端键入；reload、app quit 后同 run 存活、Keychain 冷恢复、共享节点 logout/stop、远程 GUI 仍待实际验收。
-  七轮没有发送终端输入；自有进程/fixture 和核实匹配的唯一 Keychain 项已清理；新 GUI 段须由 root 与 Native 串行安排。
+  完整独立 review 在 `3b19d8a5` 提出 1P1/4P2，修正已按三项原子提交推送到 `833c06b8`，待同 reviewer 一次统一 delta。
+  修正涵盖 native profile 单写者、ack 同时释放 session tracker、local-error not-sent、device/history 异步响应隔离；未扩 shared 合同。
+  strict TS/bundle、Desktop14项、inventory工具60项通过；最终 `833c06b8` 实际 Electron45 同 profile 双进程退出/重开写入通过，own cleanup 完成。
+  `3b19d8a5` 候选 Engineering40075855214/tend40075855210 成功；新 head CI/完整 pnpm check 与 delta review 仍须核对。
+  devbox 自有 checkout 初轮全 check exit1：Git2.39低于要求2.45、managed-browser 专用 cache 未安装；原始失败保留，环境修复后重验。
+  实际 Electron 首屏、Keychain 配对加密保存、GUI repo/task/mount/path、run 创建与 VT 显示已执行；历次失败及修正完整保留在 #219。
+  前七轮未发送终端输入；第八轮启动前台验证被锁屏挡住。只读 OS 证据确认 console locked，用户明确选择暂时保持锁屏、继续其他工作。
+  GUI 输入/reload/app quit 同 run 存活/Keychain 冷恢复、实际 native 共享节点与 clipboard 链保持未执行；不再尝试激活或催促解锁。
+  自有 GUI/Keychain fixtures 均已清理；无前台 compiled-host 共享节点验证继续准备，fixture cipher 不代作 Keychain 证据。
   支持声明仍为 macOS14 arm64 候选；本机 macOS26.3 运行不能代替14实机验证。不做安装器、签名、公证、更新或M4。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 
