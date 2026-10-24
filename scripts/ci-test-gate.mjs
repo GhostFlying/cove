@@ -195,6 +195,7 @@ export const requiredSuites = [
   { project: "server", file: "apps/server/tests/author/tab-input.test.mjs", minimumTests: 8 },
   { project: "desktop", file: "apps/desktop/tests/storage.test.mjs", minimumTests: 7 },
   { project: "desktop", file: "apps/desktop/tests/host.test.mjs", minimumTests: 5 },
+  { project: "desktop", file: "apps/desktop/tests/ui-isolation.test.mjs", minimumTests: 2 },
   { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 11 },
   { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 9 },
   { project: "cli", file: "apps/cli/tests/request-identity-cap.test.mjs", minimumTests: 1 },
