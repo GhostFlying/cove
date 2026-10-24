@@ -433,7 +433,7 @@ test("M2 schemas bound third-party and operator input", () => {
     entries: { ssh: { target: "devbox" } },
   };
   expect(InvitationPayloadSchema.safeParse(payload).success).toBe(true);
-  expect(InvitationPayloadSchema.safeParse({ ...payload, entries: {} }).success).toBe(false);
+  expect(InvitationPayloadSchema.safeParse({ ...payload, entries: {} }).success).toBe(true);
   expect(InvitationPayloadSchema.safeParse({ ...payload, pairingPort: 80 }).success).toBe(false);
   expect(InvitationStringSchema.safeParse("cove-invite:v1:abc").success).toBe(true);
   expect(InvitationStringSchema.safeParse("cove-invite:v2:abc").success).toBe(false);
@@ -513,7 +513,8 @@ test("an invitation string round-trips its payload and nothing else decodes", as
     42,
   ])
     expect(decodeInvitation(invalid)).toBeNull();
-  expect(() => encodeInvitation({ ...payload, entries: {} })).toThrow("Invalid input");
+  const local = { ...payload, entries: {} };
+  expect(decodeInvitation(encodeInvitation(local))).toEqual(local);
 });
 
 test("pairing requests and answers are strict and the token names the device", async () => {

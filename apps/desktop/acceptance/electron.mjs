@@ -1,0 +1,467 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir, release } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
+import { _electron } from "playwright";
+import { createM1Fixture } from "../../cli/tests/m1/fixtures.mjs";
+import { waitFor } from "../../cli/tests/recording-view.mjs";
+import { closeNativeApp, cleanKeychain } from "./native-app.mjs";
+
+// Run after pnpm build, on macOS with a GUI/Keychain session. This is actual Electron,
+// not a browser substitute. All server/Git/PTY/file resources are fresh task-owned fixtures.
+assert.equal(process.platform, "darwin");
+const execute = promisify(execFile);
+const desktop = resolve(import.meta.dirname, "..");
+const source = (await execute("git", ["rev-parse", "HEAD"], { cwd: desktop })).stdout.trim();
+const require = createRequire(new URL("../package.json", import.meta.url));
+const executablePath = require("electron");
+const output =
+  process.env.COVE_DESKTOP_ACCEPTANCE_DIR ||
+  (await mkdtemp(join(tmpdir(), "cove-desktop-electron-")));
+await mkdir(output, { recursive: true });
+const fixture = await createM1Fixture();
+const profile = `m3-${randomUUID()}`;
+const data = join(fixture.root, "desktop-data");
+await mkdir(data);
+const environment = {
+  ...fixture.env,
+  // Keep the logged-in macOS Keychain context; server/files remain isolated below.
+  HOME: process.env.HOME,
+  COVE_DESKTOP_PROFILE: profile,
+  COVE_DESKTOP_DATA_DIR: data,
+  COVE_HOME: fixture.home("network-home"),
+};
+delete environment.ELECTRON_RUN_AS_NODE;
+let electron;
+let page;
+let server;
+let serverId;
+const errors = [];
+const steps = [];
+let run;
+const logs = [];
+let runtime;
+let failed = false;
+async function closeApp() {
+  if (!electron) return;
+  const currentApp = electron;
+  electron = undefined;
+  await closeNativeApp(currentApp);
+}
+async function step(name, action) {
+  process.stdout.write(`Starting: ${name}\n`);
+  await action();
+  steps.push({ name, status: "PASS" });
+  process.stdout.write(`PASS: ${name}\n`);
+}
+async function launch() {
+  electron = await _electron.launch({
+    executablePath,
+    args: [join(desktop, "dist/main/index.js")],
+    env: environment,
+    timeout: 30_000,
+  });
+  electron.process().stderr.on("data", (chunk) => logs.push(String(chunk)));
+  runtime = await electron.evaluate(() => ({
+    versions: process.versions,
+    platform: process.platform,
+    arch: process.arch,
+  }));
+  page = await electron.firstWindow();
+  await activateWindow();
+  page.setDefaultTimeout(30_000);
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.waitForFunction(async () => (await window.cove.snapshot()).ready);
+  assert.equal(await page.title(), "Cove");
+  assert.match(page.url(), /^file:/);
+}
+async function activateWindow() {
+  // Keychain may have changed OS focus since launch; CDP clicks do not activate a Mac app.
+  await electron.evaluate(({ app, BrowserWindow }) => {
+    app.focus({ steal: true });
+    BrowserWindow.getAllWindows()[0].focus();
+  });
+  await waitFor(
+    "own Electron OS foreground",
+    () =>
+      electron.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        return window.isFocused() && window.isVisible();
+      }),
+    5_000,
+  );
+}
+async function dialog(name, action) {
+  const modal = page.getByRole("dialog", { name, exact: true });
+  await modal.waitFor();
+  await action(modal);
+  await modal.waitFor({ state: "detached" });
+}
+async function snapshot() {
+  return page.evaluate(() => window.cove.snapshot());
+}
+async function current() {
+  await page.waitForFunction(
+    async (id) => (await window.cove.snapshot()).sessions[id]?.status === "current",
+    serverId,
+  );
+}
+async function chooseServer() {
+  await page
+    .getByRole("navigation", { name: "Servers", exact: true })
+    .getByRole("button", { name: /electron-box/ })
+    .click();
+}
+async function confirmAction(button, title) {
+  await page.getByRole("button", { name: button, exact: true }).click();
+  await dialog(title, async (modal) => {
+    await modal
+      .getByRole("button", { name: `Confirm ${title.toLowerCase()}`, exact: true })
+      .click();
+  });
+}
+async function selectTrialTab() {
+  await page.getByRole("button", { name: /Electron trial/ }).click();
+  await page
+    .getByRole("navigation", { name: "Terminal tabs", exact: true })
+    .getByRole("button", { name: "Trial shell", exact: true })
+    .click();
+}
+const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+
+try {
+  server = await fixture.startServer(fixture.home("server"));
+  serverId = server.record.serverId;
+  const repo = await fixture.gitRepo("clone");
+  await launch();
+  await step("real Electron window and first meaningful screen", async () => {
+    await page.getByRole("heading", { name: "A place for work in progress." }).waitFor();
+    await page.screenshot({ path: join(output, "01-first-use.png") });
+  });
+  await step(
+    "explicit same-host independent device pairing with actual Keychain storage",
+    async () => {
+      await page.getByRole("button", { name: "Pair this Mac", exact: true }).click();
+      await dialog("Pair this Mac's server", async (modal) => {
+        await modal.getByLabel("Server alias").fill("electron-box");
+        await modal.getByLabel("Device name").fill("Electron acceptance");
+        await modal.getByLabel("Local Cove home (absolute path)").fill(server.home);
+        await modal.getByRole("button", { name: "Pair device", exact: true }).click();
+      });
+      const state = await snapshot();
+      assert.equal(state.servers.length, 1);
+      assert.equal(state.servers[0].serverId, serverId);
+      assert.equal(Object.hasOwn(state.servers[0], "token"), false);
+      const sealed = await readFile(join(data, "credentials.sealed"));
+      assert.equal(sealed[0] === 0x5b || sealed[0] === 0x7b, false);
+      const devices = await fixture.coveJson(["auth", "device", "list"], { home: server.home });
+      assert.equal(devices.devices[0].name, "Electron acceptance");
+    },
+  );
+  await chooseServer();
+  await page.getByRole("button", { name: "Connect", exact: true }).click();
+  await current();
+  await step(
+    "visible repository/task/workspace operations against actual compiled server",
+    async () => {
+      await page.getByRole("button", { name: "Repositories", exact: true }).click();
+      await page.getByRole("button", { name: "Register repository", exact: true }).click();
+      await dialog("Register repository", async (modal) => {
+        await modal.getByLabel("Absolute repository path on this server").fill(repo.path);
+        await modal.getByLabel("Display name").fill("Acceptance repository");
+        await modal.getByRole("button", { name: "Register", exact: true }).click();
+      });
+      await page.getByRole("heading", { name: "Acceptance repository", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Tasks", exact: true }).click();
+      await page.getByRole("button", { name: "＋ New", exact: true }).click();
+      await dialog("Create task", async (modal) => {
+        await modal.getByLabel("Task title").fill("Electron trial");
+        await modal.getByRole("button", { name: "Add repository mount", exact: true }).click();
+        await modal.getByRole("button", { name: "Create task", exact: true }).click();
+      });
+      await page.getByRole("button", { name: /Electron trial/ }).click();
+      await page.getByRole("button", { name: "Check paths", exact: true }).click();
+      await page.getByText("Last path check: entry ready", { exact: false }).waitFor();
+    },
+  );
+  await step("real terminal attachment and deliberate keyboard input once", async () => {
+    await page.getByRole("button", { name: "New terminal", exact: true }).click();
+    await dialog("Create terminal tab", async (modal) => {
+      await modal.getByLabel("Tab name").fill("Trial shell");
+      await modal.getByRole("button", { name: "Create tab and run", exact: true }).click();
+    });
+    await page
+      .getByRole("navigation", { name: "Terminal tabs", exact: true })
+      .getByRole("button", { name: "Trial shell", exact: true })
+      .click();
+    await page.locator(".terminal-surface .xterm-screen").waitFor();
+    await page.getByText("ready", { exact: true }).waitFor();
+    await activateWindow();
+    await page.locator(".terminal-surface").click({ position: { x: 45, y: 35 } });
+    await page.getByText("Input ready", { exact: false }).waitFor();
+    const marker = join(fixture.root, "typed-once");
+    await page.keyboard.type(`printf 'typed-once\\n' >> ${quote(marker)}`, { delay: 1 });
+    await page.keyboard.press("Enter");
+    await waitFor(
+      "typed marker",
+      async () => (await readFile(marker, "utf8").catch(() => "")) === "typed-once\n",
+      10_000,
+    );
+    const state = await snapshot();
+    run = state.sessions[serverId].mirror.records.find(
+      (row) => row.kind === "tab" && row.record.name === "Trial shell",
+    ).record.latestRun;
+    assert.ok(run);
+    await page.screenshot({ path: join(output, "02-terminal.png") });
+  });
+  await step("renderer reload obtains new real baseline without replaying input", async () => {
+    await page.reload();
+    await page.waitForFunction(async () => (await window.cove.snapshot()).ready);
+    await chooseServer();
+    await page.getByRole("button", { name: /Electron trial/ }).click();
+    await page
+      .getByRole("navigation", { name: "Terminal tabs", exact: true })
+      .getByRole("button", { name: "Trial shell", exact: true })
+      .click();
+    await page.getByText("Run live", { exact: false }).waitFor();
+    assert.equal(await readFile(join(fixture.root, "typed-once"), "utf8"), "typed-once\n");
+    await page.screenshot({ path: join(output, "03-recovered.png") });
+  });
+  await step("app quit preserves independent server and same PTY run", async () => {
+    await closeApp();
+    assert.equal(await fixture.serverRuns(server), true);
+    const observed = await fixture.coveJson(["terminal", "get", run.runId], { home: server.home });
+    assert.equal(JSON.stringify(observed).includes(run.runId), true);
+    assert.equal(JSON.stringify(observed).includes("running"), true);
+  });
+  await step(
+    "actual Keychain credential cold restore and read-only original operation queries",
+    async () => {
+      await launch();
+      const restored = await snapshot();
+      assert.equal(restored.servers[0].serverId, serverId);
+      await chooseServer();
+      await page.getByRole("button", { name: "Connect", exact: true }).click();
+      await current();
+      const operations = (await snapshot()).operations;
+      const created = operations.find((operation) => operation.method === "task.create");
+      assert.ok(created);
+      const reply = await page.evaluate(
+        async ({ id, operationId }) => window.cove.queryOperation(id, operationId),
+        { id: serverId, operationId: created.operationId },
+      );
+      assert.equal(reply.ok, true);
+      assert.equal(reply.value.ok, true);
+      const tasks = await fixture.coveJson(["task", "list"], { home: server.home });
+      assert.equal(tasks.tasks.filter((task) => task.title === "Electron trial").length, 1);
+    },
+  );
+  await step(
+    "explicit tab stop/history/reopen preserve old run identity without replay",
+    async () => {
+      await selectTrialTab();
+      await page.getByText("Run live", { exact: false }).waitFor();
+      await confirmAction("Stop run", "Stop run");
+      await page.getByText("Run exited", { exact: false }).waitFor();
+      await page.getByRole("button", { name: "Run history", exact: true }).click();
+      await page.getByRole("heading", { name: "Retained run history", exact: true }).waitFor();
+      await page.locator(".history").getByText(run.runId, { exact: true }).waitFor();
+      await confirmAction("Reopen", "Reopen tab");
+      await page.waitForFunction(
+        async ({ serverId, runId }) => {
+          const state = await window.cove.snapshot();
+          return state.sessions[serverId].mirror.records.some(
+            (row) =>
+              row.kind === "tab" &&
+              row.record.name === "Trial shell" &&
+              row.record.latestRun?.runId !== runId,
+          );
+        },
+        { serverId, runId: run.runId },
+      );
+      await selectTrialTab();
+      await page.getByText("Run live", { exact: false }).waitFor();
+      assert.equal(await readFile(join(fixture.root, "typed-once"), "utf8"), "typed-once\n");
+      await confirmAction("Stop run", "Stop run");
+      await page.getByText("Run exited", { exact: false }).waitFor();
+      await confirmAction("Delete tab", "Delete tab");
+      await page
+        .getByRole("navigation", { name: "Terminal tabs", exact: true })
+        .getByRole("button", { name: "Trial shell", exact: true })
+        .waitFor({ state: "detached" });
+    },
+  );
+  await step("zero/multiple repository tasks and explicit mount management", async () => {
+    const second = await fixture.gitRepo("second-clone");
+    await page.getByRole("button", { name: "Repositories", exact: true }).click();
+    await page.getByRole("button", { name: "Register repository", exact: true }).click();
+    await dialog("Register repository", async (modal) => {
+      await modal.getByLabel("Absolute repository path on this server").fill(second.path);
+      await modal.getByLabel("Display name").fill("Second repository");
+      await modal.getByRole("button", { name: "Register", exact: true }).click();
+    });
+    await page.getByRole("heading", { name: "Second repository", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Tasks", exact: true }).click();
+    await page.getByRole("button", { name: "＋ New", exact: true }).click();
+    await dialog("Create task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Empty task");
+      await modal.getByRole("button", { name: "Create task", exact: true }).click();
+    });
+    await page.getByRole("button", { name: /Empty task/ }).click();
+    let tasks = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks;
+    assert.equal(tasks.find((task) => task.title === "Empty task").workspace.mounts.length, 0);
+    await page.getByRole("button", { name: "Rename", exact: true }).click();
+    await dialog("Rename task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Renamed empty task");
+      await modal.getByRole("button", { name: "Save title", exact: true }).click();
+    });
+    await page.getByRole("heading", { name: "Renamed empty task", exact: true }).waitFor();
+    await confirmAction("Archive", "Archive task");
+    await page.getByRole("button", { name: "Restore", exact: true }).waitFor();
+    await confirmAction("Restore", "Restore task");
+    await page.getByRole("button", { name: "Archive", exact: true }).waitFor();
+    await page.getByRole("button", { name: "＋ New", exact: true }).click();
+    const repos = (await snapshot()).sessions[serverId].mirror.records.filter(
+      (row) => row.kind === "repo",
+    );
+    const secondId = repos.find((row) => row.record.displayName === "Second repository").record
+      .repoId;
+    await dialog("Create task", async (modal) => {
+      await modal.getByLabel("Task title").fill("Two repositories");
+      await modal.getByRole("button", { name: "Add repository mount", exact: true }).click();
+      await modal.getByRole("button", { name: "Add repository mount", exact: true }).click();
+      await modal.locator('select[name="repo-1"]').selectOption(secondId);
+      await modal.getByRole("button", { name: "Create task", exact: true }).click();
+    });
+    await page.getByRole("button", { name: /Two repositories/ }).click();
+    tasks = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks;
+    const task = tasks.find((task) => task.title === "Two repositories");
+    assert.equal(task.workspace.mounts.length, 2);
+    assert.equal(new Set(task.workspace.mounts.map((mount) => mount.repoId)).size, 2);
+    await page.getByRole("button", { name: "Make worktree", exact: true }).first().click();
+    await dialog("Convert to worktree", async (modal) => {
+      await modal.getByLabel("Skip fetch for this worktree explicitly").check();
+      await modal.getByRole("button", { name: "Create managed worktree", exact: true }).click();
+    });
+    await page.getByRole("button", { name: "Delete worktree", exact: true }).waitFor();
+    await confirmAction("Delete worktree", "Delete worktree");
+    await page
+      .getByRole("button", { name: "Delete worktree", exact: true })
+      .waitFor({ state: "detached" });
+    await confirmAction("Remove", "Remove mount");
+    const updated = (await fixture.coveJson(["task", "list"], { home: server.home })).tasks.find(
+      (row) => row.taskId === task.taskId,
+    );
+    assert.equal(updated.workspace.mounts.length, 0);
+  });
+  await step(
+    "explicit self-device revocation disconnects without stopping the server, then forget",
+    async () => {
+      await page.getByRole("button", { name: "Devices", exact: true }).click();
+      await page.getByRole("heading", { name: "Electron acceptance", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Revoke device", exact: true }).click();
+      await page
+        .getByRole("dialog", { name: "Revoke device", exact: true })
+        .getByRole("button", { name: "Confirm revoke device", exact: true })
+        .click();
+      await page.waitForFunction(
+        async (id) => (await window.cove.snapshot()).sessions[id]?.status !== "current",
+        serverId,
+      );
+      const devices = await fixture.coveJson(["auth", "device", "list", "--include-revoked"], {
+        home: server.home,
+      });
+      assert.equal(
+        devices.devices.some(
+          (device) => device.name === "Electron acceptance" && device.revokedAtMs,
+        ),
+        true,
+      );
+      assert.equal(await fixture.serverRuns(server), true);
+      await confirmAction("Forget", "Forget server");
+      assert.equal((await snapshot()).servers.length, 0);
+    },
+  );
+  assert.deepEqual(errors, []);
+  await writeFile(
+    join(output, "result.json"),
+    JSON.stringify(
+      {
+        status: "PASS",
+        environment: {
+          source,
+          osRelease: release(),
+          runtime,
+          playwright: "1.63.0",
+          profile,
+        },
+        steps,
+        unexecuted: [
+          "macOS14 physical target",
+          "physical IME/native clipboard",
+          "shared tsnet real logout/stop",
+          "production Tailnet/SSH GUI entry",
+        ],
+      },
+      null,
+      2,
+    ),
+  );
+  process.stdout.write(`Electron acceptance PASS; evidence ${output}\n`);
+} catch (error) {
+  failed = true;
+  await page?.screenshot({ path: join(output, "failure.png") }).catch(() => {});
+  await writeFile(
+    join(output, "result.json"),
+    JSON.stringify(
+      { status: "FAIL", steps, error: error instanceof Error ? error.message : String(error) },
+      null,
+      2,
+    ),
+  );
+  throw error;
+} finally {
+  const cleanup = {};
+  const errors = [];
+  try {
+    await closeApp();
+    cleanup.app = "closed";
+  } catch (error) {
+    cleanup.app = String(error);
+    errors.push(error);
+  }
+  try {
+    await fixture.cleanup();
+    cleanup.fixture = "cleaned";
+  } catch (error) {
+    cleanup.fixture = String(error);
+    errors.push(error);
+  }
+  try {
+    cleanup.keychain = await cleanKeychain(profile);
+  } catch (error) {
+    cleanup.keychain = String(error);
+    errors.push(error);
+  }
+  await writeFile(join(output, "electron-stderr.log"), logs.join(""));
+  await writeFile(
+    join(output, "cleanup.json"),
+    JSON.stringify({ source, profile, cleanup }, null, 2),
+  );
+  process.stdout.write(`Own fixture cleanup: ${JSON.stringify(cleanup)}\n`);
+  if (errors.length && !failed) {
+    await writeFile(
+      join(output, "result.json"),
+      JSON.stringify(
+        { status: "FAIL", source, steps, error: "Own acceptance cleanup failed", cleanup },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 1;
+  }
+}

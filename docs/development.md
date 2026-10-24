@@ -242,6 +242,11 @@ cove --server devbox task list                       # 之后所有业务命令�
 cove --server devbox --via tsnet task list           # 邀请含 tsnet 入口时：同一记录的另一个入口，同一 server
 ```
 
+本机设备配对不需要配置 SSH 或加入 Tailnet。没有远程入口时，`auth invite create` 仍创建一次性邀请，
+并在 stderr 提示它仅限本机；在同一主机运行 `cove remote add local`、不带 `--via` 即经 loopback 兑换。
+邀请的 `entries: {}` 不代表任意远端地址；显式请求不存在的 SSH/tsnet 入口会在发送邀请秘密前失败，且不会自动改入口。
+Desktop 的显式本机 bootstrap 使用同一邀请/兑换领域路径，为自己取得独立的设备 token。
+
 或者经 tsnet 配对（另一个客户端，或代替上面的 SSH 配对；devbox 已 `server tsnet login`，邀请含 tsnet 入口）：
 
 ```sh

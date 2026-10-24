@@ -342,6 +342,8 @@ M2 T1 设备授权与客户端登记（PR #153，合入于 `4d55063`；协议 `2
   `REPO_ID,path=PATH`。`mount delete-worktree PATH` 在 `--server` 模式下以 2 退出且不发送，须给 `<taskId> <mountId>`。本机模式保持原行为。
 - `cove auth invite create [--ttl-minutes N]` 输出 `{ operation, invitation }`；邀请只在首次响应中出现，以同一 `--operation-id`
   重发时只输出记录并以 1 退出。另有 `auth invite list/cancel`、`auth device list [--include-revoked]/rename/revoke`。
+  没有配置远程入口时仍可创建邀请，payload 的 `entries: {}` 明确仅限同主机 loopback 兑换；CLI 在 stderr 提示本机限定，
+  stdout JSON 和退出码不变。显式 `remote add --via ssh|tsnet` 请求缺失入口时以 1 退出，不发送秘密、不自动改入口。
   `auth device revoke` 等被撤销设备的连接关闭后才返回；有连接未在期限内关闭时仍输出记录（`result.unclosedConnections`
   为未关闭的连接数），但以 1 退出。设备以 `--server` 撤销自己时语义相同：其他连接（包括持有控制权的终端连接）在应答前关闭，
   应答报告实际未关闭数，不会因 CLI 自己的终端连接被关闭而变成 `RESULT_UNKNOWN`。
@@ -671,3 +673,4 @@ cove tab send <tabId> --operation-id <id> --run <runId> \
 
 | 2026-10-24 | M3 T6 #176（未合入） | 新增 PENDING tab.send、tab.get.control、4 KiB/8 KiB 双重输入边界、确切 run/实例/epoch 绑定、前缀封闭与分离 submit 回执；CLI 保存 send 后仅查询，显式 abandon 不撤销未知副作用，不允许 continue。 |
 | 2026-10-24 | #224（未合入） | Linux uninstall 对已注册服务先 stop 再 disable，避免 linked unit 的定义被移除后 stop 报 not loaded；停止与禁用的错误继续保留，失败时不继续删除安装内容。 |
+| 2026-10-24 | M3 T4 #196（未合入） | 本机首次设备配对支持 loopback-only 邀请（entries 为空）；auth invite create 无须先配置 SSH/tsnet，stderr 明示本机限定，stdout JSON/退出码不变；缺失的显式远程入口仍在发送秘密前失败，不自动切换。 |

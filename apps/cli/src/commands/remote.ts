@@ -37,7 +37,8 @@ invitation's SSH target, which ssh must already know (known_hosts); with --via t
 through the invitation's tsnet node from this client's own node (\`cove remote tsnet login\`
 first). Either way the record holds every entry the invitation names (its SSH target and tsnet
 node), plus loopback when paired on the server's host; the entry the pairing went through is the
-default. A command uses --via ssh|tsnet or the default, and never switches entries on its own;
+default. An invitation with no SSH or tsnet entry is local-only; pair on the server's host
+without --via. A command uses --via ssh|tsnet or the default, and never switches entries on its own;
 \`remote entry default\` changes the default.`;
 
 // These commands manage this client's own records; they never address a server with --server.
