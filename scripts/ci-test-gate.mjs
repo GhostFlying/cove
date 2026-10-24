@@ -206,7 +206,7 @@ export const requiredSuites = [
   { project: "client", file: "packages/client/tests/credentials.test.mjs", minimumTests: 3 },
   { project: "client", file: "packages/client/tests/business-mirror.test.mjs", minimumTests: 7 },
   { project: "client", file: "packages/client/tests/business-reader.test.mjs", minimumTests: 7 },
-  { project: "client", file: "packages/client/tests/server-session.test.mjs", minimumTests: 9 },
+  { project: "client", file: "packages/client/tests/server-session.test.mjs", minimumTests: 10 },
   {
     project: "client",
     file: "packages/client/tests/terminal-budgets-preview.test.mjs",
