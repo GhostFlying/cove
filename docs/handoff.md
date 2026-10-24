@@ -40,23 +40,31 @@
   真实 Desktop GUI 验证因 Mac 锁屏未执行，不能记 PASS；依赖集成/真实 app gate 由 root 路由。
 - Runtime packaging [#227](https://github.com/GhostFlying/cove/pull/227) 已合入上述 88e4，仅 runtime closure/CLI S1/S9 三文件。
   actual-main Engineering40093259061 全6 shards/2 Go/2 required aggregates 与 tend40093259092 成功，artifact 均88e4。T5 不修改这些文件。
-- T5 [#197](https://github.com/GhostFlying/cove/issues/197) 已正式 source release。
-  own checkout `cove-worktrees/m3-197-mobile`，branch `p/luchengxuan/m3-197-mobile`，基于 exact 8b。
-  实现 RN 直连多 server、repo/task/workspace/mount/tab、公共 ServerSession/mirror、独立 SecureStore slots、SQLite journal、bundled terminal。
-  SQLite55.0.20 是唯一新增存储依赖；原 ID/canonical digest 在 dispatch 前事务落盘；cold start 只 operation.get，不重派原写。
-  64 profiles、8 live server sessions、256 journal rows/1 MiB、UI50 rows；未决记录不淘汰。
-  [draft PR #228](https://github.com/GhostFlying/cove/pull/228) 原子产品提交 `8c7dd698`；完整独立 review 无 P0/P1，F1–F5 五项P2在同批纠正。
-  当前 Mobile prepare:js/typecheck/lint、compiled31、tooling69、原 client302 已过；root check 的 format/lint/build 通过，
-  完整 test gate 因本地缺 worker-qualification CI identity 退出；保留失败，不记 full PASS。PR CI 与产品 native 验证推进中。
-  `8c7` own AndroidAPI31 AAR/offlineAPK（d55bd132…7ef055）已构建，实际新AVD证实原生SQLite启动与keyless测试控制登录。
-  首UI harness在输入后错误Back退出app，尚未配对；FAIL与cleanup[]保留，不能记完整产品通过。
-  own iOS Simulator binding已编译；F1–F5纠正后将冻结head并重建新JS/app，旧APK不代新源码证据。
-  物理 iPhone/Android、真实 Tailnet 且 Desktop off、IME/外接键盘与完整生命周期属于明确保留的 T7/硬件验收。
+- T5 [#197 / draft PR #229](https://github.com/GhostFlying/cove/pull/229) 产品实现与一次完整独立 review/同 context 窄 delta 已完成，无 open P0–P3。
+  own author checkout `cove-worktrees/m3-197-mobile` 基于8b；integration checkout `m3-197-mobile-main88` 基于上述88e4。
+  当前 code/inventory head `cde35b29`，原作者 `ee930805`；实际 native 产品冻结 `19e121f0` → `23239369`，两侧 Mobile/terminal-web trees 完全相等。
+  RN 自有 ServerSession/mirror/TerminalController、embedded tsnet/native ports 与独立 SecureStore slots；WebView 仅 bundled xterm 桥。
+  多 server、repo/task/workspace/mount/tab/history/device 工作流；SQLite55.0.20 是唯一新增存储依赖。
+  dispatch 前持久化原 ID/credential slot/instance/method/canonical digest 与非 secret summary；cold recovery 只查询原 ID，不重派写或重兑未知 invitation。
+  64 profiles、8 live server sessions、256 journal rows/1 MiB、UI50；未决记录不淘汰。导航 focus 本地拥有，恢复不重放输入/focus/resize。
+  Mobile opt-in 固定 xterm6 committed-insertText/legacy diff 去重适配；Desktop 默认不启用，origin/query filtering 与 composition/普通键盘路径保留。
+  Mobile prepare/typecheck/compiled34、terminal-web build/77 unit+真实 xterm browser tests、CI inventory tooling61、full discovery2117/189files 已过。
+  code head cde 的 [Engineering40105842730](https://github.com/GhostFlying/cove/actions/runs/40105842730) 全6 shards/2Go/2 required aggregates SUCCESS，
+  [tend40105842610](https://github.com/GhostFlying/cove/actions/runs/40105842610) SUCCESS；final handoff docs append 后仍需该 exact head CI 与 actual-main。
+  local author ee930/base8b 的 pnpm check：prep/format/lint/build PASS，188files PASS/1FAIL，2192tests PASS/1FAIL/2local-service SKIP。
+  唯一 S8 FAIL：首次 continue 与产物/ledger 断言已过，同原 ID 第二次 continue 返回无 operation；完整 error 未留，cause UNKNOWN。
+  S8 test/domain/SQL 与 main88/cde same blobs；保留 local FAIL/UNKNOWN，公开摘要/后续见 PR229，不记 full local PASS、不改 server 或重跑。
+  ba62 iOS18.1 Simulator core PASS：原生 SQLite/profile/journal、task.create、cold 原 ID 只读核实、same-run observer 前后台恢复/history，无输入且 grid/control 不变。
+  ba62 Android14/API34 arm64 core 已观察 pairing/current/task.create/原 ID 成功卡/SQLite1ready+1operation/cold restore；reader 最后跨页面查错状态，最终 query 未执行，保留 FAIL。
+  正常19e121 iOS ad-hoc app 单次 UI marker 恰14B/1marker PASS；Android 正常 APK 单次 marker+Enter 恰16B/1marker PASS，独立 raw TUI bytes 核实。
+  iOS bundle `3f81ac65…64b27b`；Android APK `b096f438…df3d94` / bundle `2e2291b8…f42c67`；所有自有 Simulator/AVD/fixture 已终态清理。
+  旧 FAIL/UNKNOWN 与112records/dropped0 的单次诊断 payload 保留，诊断不作验收；精确 source/hash/mapping/原始结果归属在 PR229。
+  物理 iPhone/Android、真实 Tailnet 且 Desktop off、IME/selection/外接键盘仍属 T7 未执行；不冒充全平台/硬件或 M3 退出。
 - T7 集成、实际使用试用与 M3 退出尚未完成，M4 未启动。
 
 ## 单写者、资源与恢复
 
-- T5 是 apps/mobile、必要 SQLite manifest/lock、inventory/tooling 与本 handoff 的唯一实现写者。
+- T5 是 apps/mobile、必要 SQLite manifest/lock、已授权 terminal-web 小适配/tests、inventory/tooling 与本 handoff 的唯一实现写者。
   public client/protocol/native contracts/native/tailscale 变更先交 root 协调；不借 T0/T4 未提交 generated outputs。
 - 各 worktree 独有 node_modules/dist/tsbuildinfo/native bindings/测试数据库/端口；共享 pnpm package store 和只读 toolbins 可以。
   Node26.10.0/pnpm12.6.0/Go1.27.3；私有 TS5 仅 Expo loader，实际 tsc 仍 root TS7。
@@ -74,5 +82,5 @@
 ## 后续与残留
 
 - #207 business observer 容量；#210 held-Git PID fixture race；#212 session retirement 的已拒 write；#213 binding getters；#214 clock rollback。
-- #215 native 零写入拒绝 fence；#216 tab.send canonical bound；#220 Desktop P3，以及 M0–M2 历史后续见 #185。
+- #215 native 零写入拒绝 fence；#216 tab.send canonical bound；#220 Desktop P3；#230 queued background/disconnect 非阻断；M0–M2 历史见 #185。
   这些后续不自动成为里程碑的新前置。凭据/真实终端 raw 不公开；历史未证结论不追记成功。
