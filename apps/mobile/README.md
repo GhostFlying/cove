@@ -70,7 +70,9 @@ build, use Xcode's ordinary ad-hoc identity (`CODE_SIGN_IDENTITY=-`,
 `CODE_SIGNING_ALLOWED=YES`) and inspect the resulting signature/entitlements
 before recording the probe result. This requires no Apple account, device
 registration or physical-device provisioning change. Keep SecureStore's
-`WHEN_UNLOCKED_THIS_DEVICE_ONLY` accessibility unchanged.
+`WHEN_UNLOCKED_THIS_DEVICE_ONLY` accessibility unchanged. Xcode's simulator
+application identifier is linked through its simulated entitlement section;
+record it separately from the `codesign` entitlement dictionary.
 
 For an ordinary development build, start Metro with `pnpm --filter @cove/mobile
 start` and use `pnpm --filter @cove/mobile android` or `ios`. The generated Android
@@ -151,6 +153,15 @@ Cancellation reports `not-sent` only while the native first-write guard proves
 that no request bytes could have been written. A bridge exception or possible
 write remains `unknown`; the UI never retries uncertain pairing, RPC or input.
 Backgrounding closes client transports but does not stop server-owned PTYs.
+
+The fixture observes the exact Client and terminal controller it displays.
+Connection loss retires that UI and fences late callbacks; execution evidence
+is shown separately from a ready subscription, and unknown never means exited.
+One bounded latest input notice shows written/unknown/not-sent byte counts or
+aggregate rejection counts, without raw input or error content. Explicit node
+logout first retires only the Client and its loss observer, then awaits its
+single native logout receipt before reporting success. Failed or uncertain
+logout is never automatically repeated.
 
 The terminal document embeds the actual compiled xterm view and bridge code and
 CSS, without loading a network page. The server remains the sole terminal model

@@ -34,40 +34,39 @@
 
 ## 正在推进
 
-- T0b [#205](https://github.com/GhostFlying/cove/issues/205)：旧 draft [#208](https://github.com/GhostFlying/cove/pull/208) 保留到 `d14c47b7`，替代 [draft #221](https://github.com/GhostFlying/cove/pull/221) 当前 `97234b90`。
-  新 integration branch `p/luchengxuan/m3-205-native-integration` 基于 main `6b12c5df`，16 个原子 cherry-pick 的映射记入替代 PR；旧分支未改写。
-  组合 frozen install、全 workspace build、tooling 73 项及 compiled client/mobile 36 项作者检查通过；最终 CI/review 待新 head。
-  Android arm64 AAR、含离线 JS/Hermes/JNI 的实际 APK 构建通过；初始 minSdk31/target36 不变，development signing 非发布签名。
-  fresh 自有本地 Android14/API34 arm64 AVD 已实际 Login→Running、WhoIs/serverId、单次兑换与 SecureStore 保存通过。
-  旧 Boot `NoState` 重连失败已修；组合 APK 实际 Reconnect、RPC、cancel `not-sent`、terminal WebSocket attach/控制通过。
-  单次测试输入未确认恰好一次，保留 UNKNOWN 不重发；内部文本框未聚焦及首读时序只作观测，生命周期尚待复验。
-  Dora 与本地 nc 辅助探针均未证明回程，不能据此归因云路由或 native 网络失败；旧失败/UNKNOWN 全保留。
-  iOS arm64/min16 unsigned 实际 app compile/link 通过；自有 iOS18.1 arm64 Simulator 的真实模块加载、Login/HTTP/WhoIs/兑换通过。
-  旧 unsigned Simulator SecureStore persist 失败（redemption 已 handed-off，未重放）；独立 synthetic probe 确证 missing-entitlement。
-  正常本地 ad-hoc Simulator 构建后，同 API/options 的 synthetic write/read/delete 已实际通过，未降低访问级别。
-  组合 iOS RPC/WS/lifecycle 仍待执行；物理设备签名前提缺失，未申请注册或修改用户签名。
-  Android14 与 iOS Simulator 是中间功能证据，不代表 API31、物理机、真实 Tailnet 或 T7 完整通过。
-  原 CI held-PID 夹具失败见 #210；新候选须有自己的 CI、完整独立 review 与组合实际链证据。
-- T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `d1267afe`（product `833c06b8`），base `6b12c5df`。
-  完整 review/delta 的原 P1/P2 已关闭，P3 #220 后续；Engineering40079052218 与 tend40079052207/40079174469 成功。
-  实际 Electron45 profile 双进程、quit/reopen ledger 与 14 项 scoped tests、inventory60 通过。
-  用户明确保持本机锁屏，GUI input/reload/quit/cold/paste 未执行、不豁免；不绕过 foreground guard。
-  devbox fullcheck 仍在执行，已发现 S1/S9 测试环境假设失败，待 T4 批次修正；shared-node 非 GUI 编译链证明尚待执行。
+- T0b [#205 / draft #221](https://github.com/GhostFlying/cove/pull/221) 最终产品 source `9df608b5`，base `6b12c5df`。
+  原 [#208](https://github.com/GhostFlying/cove/pull/208) 分支 `d14c47b7` 未改写；16 个 original→integration 映射在 #221。
+  一次完整独立 review 与同 context delta/F5/主动 logout 收束无 open findings；[最终窄 review](https://github.com/GhostFlying/cove/pull/221#issuecomment-6383089595)。
+  最终所需 CI 仍须按 exact head 核对；文档收尾不改变已验产品源码，不能把旧 head CI 当新 head 通过。
+  frozen install、组合 build、局部 compiled mobile15/CI tooling60、完整 app TS7/lint/format、自有 clean-artifact prepare→typecheck→test 通过。
+  Android14/API34 arm64 自有 AVD：`8a269ff2` 全部 Login/WhoIs/serverId/pair/SecureStore/RPC/cancel/binaryWS/BGFG/cold restore/logout 通过；
+  最后仅 App 主动 logout 顺序 +9 行的 `9df608b5` 新 APK 再验 Login/pair/save/verified-client/单次 logout 通过，未冒称重跑全部链。
+  iOS18.1 arm64 自有 Simulator：`9df608b5` 签名实 app 全部上述核心链、错误 control 选择固定分类、准确 same-run 与 logout 通过，无 PTY 输入。
+  当前 Go Android API31 AAR 与 arm64 Simulator binding 源码/目标已核实；早期 iPhoneOS arm64/min16 unsigned compile/link 仅作对应旧产物证据。
+  unsigned Simulator SecureStore 的 missing-entitlement 已确证；正常本地 ad-hoc 包同 options synthetic write/read/delete 通过，未降低访问级别。
+  物理设备签名前提仍缺；不注册设备、不改用户证书。Simulator/Android14 不代作 API31 实机、真实 Tailnet、性能或 T7 通过。
+  早期输入一次 UNKNOWN、后续未发均保留；完整键盘/IME/触摸属 T5/T7，不追加为 T0 合入 gate。
+  原 NoState/缺模块/输入 URL/日志目录、F1 execution/loading/主动退出竞态及所有 tool FAIL/UNKNOWN 在 PR/私有 raw 保留；#210 仍后续。
+- T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `6d04294a`，base `6b12c5df`。
+  独立 full/原 delta/新 delivery delta 无 open P0/P1/P2，P3 #220 后续；Engineering40082695647+tend40082695603 全成功。
+  早期 profile 双进程/quit-reopen ledger 与局部检查保留；GUI/input/reload/quit/cold/paste 因用户保持 Mac 锁屏未执行，不豁免或称 Keychain/input 通过。
+  devbox corrected-env 第1 shard 62 files：795 PASS/1 service-uninstall FAIL/0 skip，后2 shard 未执行；shared-node 非 GUI proof 由 owner 推进，未先记成功。
+  独立 delivery [#223](https://github.com/GhostFlying/cove/pull/223) `e6192533` CI/full review 成功，但 pure-base external 4 PASS/1 S1 uninstall FAIL 保留，未合入。
+  同 #224 的 stop→disable linked-unit 顺序错误由 [#225](https://github.com/GhostFlying/cove/pull/225) 修正：fresh review 无 P0–P3，
+  自有 systemd backend6/router2/safety16 检查与8 units 清理通过；CI40085072249 在途，尚未合入或代称全部外部 S1 通过。
 - T6 精确 run/实例/epoch 的 `tab send`、控制者观测、text/CR 分离回执及 receipt-only abandon 已交付当前 main。
   不抢 focus、不 resize、不重放未知输入；真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 
 ## 单写者与本地资源
 
-- Native owner 管理 `native/tailscale`、`apps/mobile`，当前持 root manifest/lock/TS/Vitest 与 mobile 所需 CI/tooling fixture 单写权，
-  以及本轮 handoff/development integration 文档；T4 只持其协调的单文件修正，不写这些共享文件。
-  保留当前 main 的 T2/T3/T6 行为、inventory 计数和依赖限制；不采用别的 checkout 未提交文件。
-- 本轮 iOS synthetic probe 已清理 own UDID；Native 正在 fresh 本地 AVD 组合链复验，资源归属/在途命令以 owner 当前回报为准。
-  无 Dora lease，不采用旧 AVD/Simulator；每轮 finally 清理自己的 package/PID/root、reverse 和 server/PTY/control 夹具。
-  历史一次 Dora reverse mapping 删除 UNKNOWN 独立保留；lease 已释放，禁止再操作旧 SID 或猜名清理。
-- 本机 heavy token 当前 Native，串行 2 CPU；其他作者重检查由 root 在安全终态安排交接，不打断在途命令。
-  各 worktree 的 node_modules、dist、tsbuildinfo、端口、测试夹具独立；Linux 使用 `ssh devbox`。
-  不操作既有用户服务、终端、AVD/Simulator 或共享 pool；中断不证明旧进程退出，恢复先确认资源归属。
+- Native owner 管理 `native/tailscale`、`apps/mobile`，本轮保留 root manifest/lock/TS/Vitest 与 mobile CI/tooling 单写权，
+  最后只集中更新 README/handoff；root 按实际需要移交。T4 的 `runtime-closure.mjs` 与 #225 的 service/tend 文档由各自 owner 独占，Native 不碰。
+  保留 main 的 T2/T3/T6 行为/计数；各 checkout 的安装、dist、tsbuildinfo 与运行资源独立，不采用他人未提交文件。
+- Native 所有实际检查已终态，own AVD/Simulator/Dora lease/server/PTY/control/日志捕获均已清理，本地 heavy token 已归还 root。
+  历史一次 Dora reverse 删除 UNKNOWN 与已核实 lease release 分开保留；不操作旧 SID 或猜名清理。
+- 本机重资源串行 2 CPU，由 root 安排安全终态交接，不打断在途命令；Linux 使用 `ssh devbox`。
+  不操作既有用户服务、终端、AVD/Simulator 或共享 pool；中断不证明旧进程退出，恢复先核资源归属。
 - fresh native implementation owner 与独立 reviewer；原子 Conventional Commits，不得 agent/bot 身份或 co-author。
   main 只允许 GitHub rebase & merge，禁止 force push、删除、直接推送和 squash；保留原→集成→main commit 映射。
 
