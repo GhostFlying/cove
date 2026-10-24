@@ -129,7 +129,7 @@ func New(stateDirectory, hostname, controlURL string) (*Client, error) {
 
 // configureMobileLogs supplies Tailscale's logpolicy fallback explicitly. A
 // mobile sandbox has no usable system state directory, HOME/cache or /tmp; even
-// with backend logging disabled, tsnet constructs a socket-statistics logger and
+// with verbose backend output discarded, tsnet constructs a socket-statistics logger and
 // LogsDir otherwise panics. This private library lives in the app process and its
 // native wrappers drain one fixed-root node before opening its successor. The
 // dependency exposes this directory only through its process environment; never
