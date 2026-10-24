@@ -526,13 +526,12 @@ export class DesktopHost {
   focusView: DesktopApi["focusView"] = (descriptor, rawGeometry) =>
     this.attempt(async () => {
       const view = this.views.get(descriptor.viewId);
-      if (
-        view?.descriptor.generation !== descriptor.generation ||
-        !view.controller ||
-        !this.foreground ||
-        !this.windowVisible
-      )
-        throw new Error("This terminal view is not foreground and ready for control");
+      if (view?.descriptor.generation !== descriptor.generation)
+        throw new Error("This terminal view has been replaced; select its current view");
+      if (!view.controller) throw new Error("This terminal view is still initializing");
+      if (!this.windowVisible) throw new Error("Show this Cove window before taking control");
+      if (!this.foreground)
+        throw new Error("Activate this Cove window, then click the terminal to take control");
       const geometry = GeometrySchema.parse(rawGeometry);
       view.controller.setInputTarget(true, true);
       const outcome = await view.controller.requestFocus(geometry);
