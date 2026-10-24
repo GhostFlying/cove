@@ -27,6 +27,10 @@ export interface RuntimeTerminalPort {
     input: Extract<PipeCommand, { type: "input" }>,
     bytes: Uint8Array,
   ): Promise<RuntimeResult>;
+  writeProgrammatic(
+    input: Extract<PipeCommand, { type: "programmatic-input" }>,
+    bytes: Uint8Array,
+  ): Promise<RuntimeResult>;
   resize(input: Extract<PipeCommand, { type: "resize" }>): Promise<RuntimeResult>;
   setAppearance(input: Extract<PipeCommand, { type: "appearance" }>): Promise<RuntimeResult>;
   openSubscription(

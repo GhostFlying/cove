@@ -1,3 +1,4 @@
+import { TabInputService } from "../operations/tab-input.js";
 import { M0_LIMITS } from "@cove/protocol/budgets";
 import { TabService } from "../domain/tabs.js";
 import { capabilityUnavailable, type LocalCore, type RpcHandler } from "./context.js";
@@ -7,6 +8,20 @@ import { capabilityUnavailable, type LocalCore, type RpcHandler } from "./contex
 // once per core, like the repo and task modules; a composition without a store (unit tests)
 // reports CAPABILITY_UNAVAILABLE for every method.
 const services = new WeakMap<LocalCore, TabService>();
+const inputServices = new WeakMap<LocalCore, TabInputService>();
+export function inputService(core: LocalCore): TabInputService | null {
+  if (!core.store || !core.receipts) return null;
+  let service = inputServices.get(core);
+  if (!service) {
+    service = new TabInputService({
+      store: core.store,
+      receipts: core.receipts,
+      runtime: core.runtime,
+    });
+    inputServices.set(core, service);
+  }
+  return service;
+}
 const encoder = new TextEncoder();
 const encodeUtf8 = (text: string): Uint8Array => encoder.encode(text);
 
@@ -41,7 +56,7 @@ type Params<M extends keyof TabService> = TabService[M] extends (
     : B
   : never;
 
-export const handle: RpcHandler<"tab"> = (core, { method, params, principalId }) => {
+export const handle: RpcHandler<"tab"> = async (core, { method, params, principalId }) => {
   const tabs = service(core);
   if (!tabs) return capabilityUnavailable();
   switch (method) {
@@ -49,8 +64,13 @@ export const handle: RpcHandler<"tab"> = (core, { method, params, principalId })
       return tabs.create(principalId, params as Params<"create">);
     case "tab.list":
       return tabs.list(params as Parameters<TabService["list"]>[0]);
-    case "tab.get":
-      return tabs.get(params.tabId as string);
+    case "tab.get": {
+      const read = await tabs.get(params.tabId as string);
+      if ("error" in read) return read;
+      return { ...read, control: await inputService(core)!.observe(read.latestRun?.run ?? null) };
+    }
+    case "tab.send":
+      return inputService(core)!.send(principalId, params);
     case "tab.runs":
       return tabs.runs(params as Parameters<TabService["runs"]>[0]);
     case "tab.reopen":

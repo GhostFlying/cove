@@ -390,7 +390,7 @@ tend 先对齐当前状态，再恢复托管执行；人仍持有 Cove 控制权
 **程序化输入的控制模型（已接受 A）**
 
 2026-10-16 用户接受方向 A：tend 发送输入时不抢控制权；以下绑定、强制 epoch、回执与前缀封闭规则同时接受。
-示例：`cove tab send <tab> --operation-id <id> --run <runId> --relay-instance <relayInstanceId> --control-epoch <E> -- <文本>`。
+示例：`cove tab send <tab> --operation-id <id> --run <runId> --relay-instance <relayInstanceId> --if-control-epoch <E> -- <文本>`。
 
 - 绑定观测到的确切 run：runId、relayInstanceId（[relay-protocol §2](relay-protocol.md#2-服务构建协议和运行实例的身份分开)
   的执行身份）与 controlEpoch E 都是必填项。controlEpoch 按 run 计数且从 0 开始，仅凭 tab 与 E 无法区分重开后的新 run：
@@ -405,7 +405,7 @@ tend 先对齐当前状态，再恢复托管执行；人仍持有 Cove 控制权
   的过期输入规则在执行侧丢弃并报告。
 - 观测到的 epoch 对每次程序化输入都是强制的。若只检查“当前没有控制者”，人接管后又释放时，迟到的请求仍会通过。
   tend 在接管结束并对齐状态后，读取新的 epoch 再发送。
-- 一次 send 有大小上限，但不是原子的 PTY 写入，可能只写入一部分。结果沿用
+- 一次 send 的文本上限为 4 KiB UTF-8，包含身份与 JSON 转义的完整 canonical intent 还须满足既有 8 KiB 上限；不隐式分片。它不是原子的 PTY 写入，可能只写入一部分。结果沿用
   [终端 §4.4](terminal-architecture.md#44-回调通知与重入client-controller-与-view) 第 4.4.7 条的回执：
   成功、明确拒绝（未写入）、部分写入或不确定，并保留已写前缀与 `unknownBytes` 证据。
   部分写入与不确定都不自动重发；同一 operationId 重发只返回原记录。重启后遗留的未决 send 只能核实或放弃，不提供“继续”。

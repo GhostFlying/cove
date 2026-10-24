@@ -546,16 +546,45 @@ run 的持久历史和 runtime/control 事实是分开的；runtime 控制者没
 每连接队列 1 MiB/128 帧，发送进展期限 30 秒；过大/过慢明确失败，不截断成功。
 快照/事件不含 token、邀请秘密或 tsnet 私有状态。此接口没有持久事件历史，也不改变 operation 去重与保留期限。
 
-## 4. 程序化输入（PLANNED）
+## 4. 程序化输入（PENDING #176，未合入）
 
-- 必须携带观测到的 runId、relayInstanceId 与 controlEpoch，并带 `--operation-id`；三者都是执行前提，写入操作指纹，
-  只写向该确切 run。已有相同操作记录时直接返回原记录。
-- 只在没有控制者且 epoch 未变时接受；不取得控制权，也不 resize。之后若有人取得控制权，已排队的输入被丢弃并报告。
-- 一次 send 有大小上限，但不是原子写入。结果为成功、拒绝（未写入）、部分写入或不确定，并带已写前缀与未知字节数。
-  部分写入与不确定不会自动重发；tend 也不应盲目重发。重启后遗留的未决 send 只能核实或放弃。
-- 前缀封闭：同一 run 上任一 send 未完整写入时，其后已排队的 send 全部失败、不写入。
-  tend 只在确认前一个 send 完整写入后才发送依赖它的输入。
-- 可选结尾提交键：只在文本完整写入后发送。各 TUI（Claude Code、Codex）的实际行为在实现时验证。
+本片实现接受的模型 A；通过 PR review、CI 与实际 main 后才标记 AVAILABLE。完整 tend 集成仍未排期。
+
+```sh
+cove tab get <tabId>
+cove tab send <tabId> --operation-id <id> --run <runId> \
+  --relay-instance <relayInstanceId> --if-control-epoch <epoch> [--submit] -- '<exact text>'
+```
+
+- 只有 `--if-control-epoch`，不提供旧设计示例的别名。`operationId`、run、实例与 epoch 都必须显式给出。
+  serverId 来自所选、已核实身份的 server，和 tabId、确切 UTF-8 文本、submit 一起写进不可变指纹。
+  `--` 后恰好一个参数，不拼接多个参数，不改写换行；空文本仅在 `--submit` 时有效。
+- 文本最多 4096 UTF-8 字节；包含身份、JSON 转义与其他参数的完整 canonical intent 同时不得超过既有 8192 字节。
+  因而大量控制字符的转义可能先触及总上限。超限在接受前拒绝，零写入，不隐式拆分。
+- `tab.get` 增加 `control`：`{state:"current",run,epoch,holder}` 表示对该确切 run 的当前观测，holder 为 null 或现有
+  人类控制者的 connection/view/subscription 身份；`{state:"unknown",run,reason}` 表示当前不可核实；
+  `{state:"not-live",run}` 表示没有当前存活 run。它不创建 focus 订阅，不取得控制权。
+  后续 focus 仍可能让观测过期，send 在同一控制队列和 worker 执行侧重复核对。
+- 新 send 只向当前实例中确切存活的 run 写入；有人持有控制权为 `CONTROL_HELD`，epoch 不符为 `STALE_CONTROL`，
+  其他实例为 `INSTANCE_MISMATCH`，tab 已换 run 为 `RUN_NOT_FOUND`。不抢控制、不 resize、不改投新 run。
+  旧操作先查 `(serverId,principalId,operationId)`：相同指纹返回原记录，冲突为 `OPERATION_ID_CONFLICT`；
+  这个查询早于存活、实例和控制检查，因此原结果在 run 退出或 server 重启后仍可读取。
+- 每个 run 至多 32 个待处理程序化 send，并受既有 pending worker 命令、输入字节与 retained bytes 总预算约束。
+  任一 send 未完整写入时，排在它后面的程序化输入全部零写入结算，直到这个待处理前缀已清空。
+  tend 也必须在收到前一个 send 完整写入的确认后，才发出依赖它的下一个输入。
+- JSON 为 `{operation}`；结果在 `operation.result.input`：`{text,submit}`。submit 未请求时为 null；
+  每一部分含 `status`（written/notSent/partial/unknown）、`requestedBytes`、`writtenBytes`、`unknownBytes` 与可选 reason。
+  writtenBytes 是不可变请求的已确认前缀长度；剩余未列为 unknown 的字节明确未发送。结果不回显文本。
+  `--submit` 是独立的一字节 CR，仅在文本完整确认后发送，文本部分失败或不确定时不发送。
+  这些事实只证明 PTY 字节写入，不能证明 TUI 接受任务、执行完成或 agent 状态。
+- send 只有全部请求字节确认 written 才 `succeeded` 并以 0 退出；明确拒绝、部分写入、不确定及观测失败以 1 退出，
+  参数用法错误以 2 退出。`--json` 显式可用；send 默认也输出同一 JSON 对象。
+- CLI 在首次传输前保存不可变 pending 记录。重复运行同一 ID 和 `operation resend` 对 send 都只调用只读的
+  operation.get；即使查不到记录，也不再次发输入。禁止将不确定结果自动换 ID 重发。
+  `operation get` 用于核实，requires_attention 可显式 `operation abandon`，不能 continue。
+  abandon 原子结束跟踪并保存未知字节证据，既不撤销先前 PTY 副作用，也不宣称副作用不存在；迟到回执不能复活已放弃记录。
+- 本片回归包含自有 raw-mode Node TUI 对 CR 的提交观测。Claude Code、Codex 等真实 provider 的提交键行为未验证，
+  不据此声明受支持。Cove 不加入 provider hook 或业务完成推断。
 
 ## 5. 重启与环境变量
 
@@ -637,3 +666,5 @@ run 的持久历史和 runtime/control 事实是分开的；runtime 控制者没
 | 2026-10-22 | PR #184 managed target aliases correction（未合入）                             | 管理目录分类同时核对所有 home 映射与文件系统真实目标，大小写别名、嵌套 home 别名和指向管理子树的自定义别名不绕过严格检查；大小写敏感文件系统上不同的用户目录仍不检查属主/权限。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | 2026-10-22 | PR #184 managed descendant alias correction（未合入）                           | 外部别名进入管理子目录后再经管理 symlink 跳出时，仍核对完整管理组件链并拒绝 symlink；任意已有用户目录的权限豁免不变。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | 2026-10-23 | PR #202 M3 T2（未合入）                                                         | 新增独立业务 snapshot/cursor/events 的 PENDING 契约与 cove events NDJSON/过滤/reset/退出码；公共 CLI 经已合入 T1 共用 Session 接入，未标 main AVAILABLE。当前资源快照明确历史选择，未决 operation ID 不能因 reset 遗忘，持久与 runtime 事实分离，未知结果不重放。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+| 2026-10-24 | M3 T6 #176（未合入） | 新增 PENDING tab.send、tab.get.control、4 KiB/8 KiB 双重输入边界、确切 run/实例/epoch 绑定、前缀封闭与分离 submit 回执；CLI 保存 send 后仅查询，显式 abandon 不撤销未知副作用，不允许 continue。 |

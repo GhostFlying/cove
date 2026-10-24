@@ -25,6 +25,9 @@ operation is never executed again. Records of operations that have not ended are
 request a write saved locally expires 30 days after it was saved: resend refuses it without
 sending, and so does a command reusing its --operation-id.
 
+For tab.send, resend is a read-only lookup: missing or uncertain receipts never resend bytes.
+A send cannot be continued; abandon closes tracking and preserves its byte uncertainty.
+
 continue and abandon act on an operation in requires_attention. Each is a write with its own
 --operation-id. The server refuses both while a Git process the operation started may still run
 (OPERATION_EFFECTS_ACTIVE; nothing is accepted, so send it again later). continue goes on from
@@ -173,6 +176,11 @@ export async function run(args: Arguments): Promise<number> {
           `operation ${operationId} was saved for server ${pending.serverId}, but the connected ` +
             `server is ${record.serverId}; nothing was sent`,
         );
+      if (pending.method === "tab.send") {
+        const found = unwrap("operation.get", await client.getOperation(operationId)).operation;
+        print(found);
+        return found.state === "succeeded" ? 0 : 1;
+      }
       const outcome = await client.call(pending.method, pending.params as never);
       // Refused, not executed: the request was not accepted again (acceptance not-accepted).
       if (historyExpired(outcome))

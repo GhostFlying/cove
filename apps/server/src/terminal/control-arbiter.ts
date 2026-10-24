@@ -1,3 +1,8 @@
+import {
+  inputPartReceipt,
+  TAB_SEND_PENDING_PER_RUN,
+  type TabInputReceipt,
+} from "@cove/protocol/workspace";
 import { domainError, type DomainError, type DomainErrorKind } from "@cove/protocol/errors";
 import {
   sameConnectionRef,
@@ -55,12 +60,14 @@ type Run = {
   worker: WorkerRef;
   boundary?: Boundary;
   uncertain: boolean;
-  queue: ControlJob[];
+  queue: ArbiterJob[];
+  programFailure?: string | undefined;
   counters: Map<string, Counter>;
   running: boolean;
   lease: ByteReservation;
 };
 export type ControlJob = {
+  kind: "control";
   command: ControlCommand;
   context: ControlRouteContext;
   run: Run;
@@ -72,6 +79,27 @@ export type ControlJob = {
   resolve: (reply: Reply) => void;
   promise: Promise<Reply>;
 };
+type ProgramCommand = Extract<PipeCommand, { type: "programmatic-input" }>;
+export type ProgrammaticJob = {
+  kind: "programmatic";
+  command: ProgramCommand;
+  run: Run;
+  payload: Uint8Array;
+  leases: ByteReservation[];
+  ready: boolean;
+  dispatched: boolean;
+  cancelled?: string;
+  accept?: () => Promise<boolean>;
+  resolve: (receipt: TabInputReceipt) => void;
+  promise: Promise<TabInputReceipt>;
+};
+type ArbiterJob = ControlJob | ProgrammaticJob;
+const notSent = (job: ProgrammaticJob, reason: string, unknown = false): TabInputReceipt => ({
+  text: inputPartReceipt(job.command.textBytes, 0, unknown ? job.command.textBytes : 0, reason),
+  // No receipt of text completion means submit could only have been sent when the whole
+  // programmatic command itself is uncertain. Preserve that possibility for nonempty text too.
+  submit: job.command.submit ? inputPartReceipt(1, 0, unknown ? 1 : 0, reason) : null,
+});
 const arbiters = new WeakMap<LocalRuntime, ControlArbiter>();
 const key = (ref: SubscriptionRef) => JSON.stringify(ref);
 const holder = (ref: SubscriptionRef): Holder => ({
@@ -254,6 +282,7 @@ export class ControlArbiter {
       resolve = done;
     });
     const job: ControlJob = {
+      kind: "control",
       command,
       context,
       run,
@@ -274,12 +303,151 @@ export class ControlArbiter {
     void this.drain(job.run);
     return job.promise;
   }
+  admitProgrammatic(command: ProgramCommand, bytes: Uint8Array): ProgrammaticJob | DomainError {
+    const budgets = this.composition.budgets;
+    const placement = this.runtime.pool.get(command.run);
+    if (this.disposed || !placement || !sameWorkerRef(placement.worker, command.worker))
+      return domainError("WORKER_UNAVAILABLE");
+    let run = this.runs.get(command.run.runId);
+    if (run && (!sameRunRef(run.ref, command.run) || !sameWorkerRef(run.worker, command.worker)))
+      return domainError("WORKER_UNAVAILABLE");
+    if (
+      this.pending >= budgets.pendingWorkerCommands ||
+      (run?.queue.filter((j) => j.kind === "programmatic").length ?? 0) >=
+        TAB_SEND_PENDING_PER_RUN ||
+      bytes.byteLength +
+        Number(command.submit) +
+        (run?.queue.reduce(
+          (n, j) =>
+            n + j.payload.byteLength + Number(j.kind === "programmatic" && j.command.submit),
+          0,
+        ) ?? 0) >
+        budgets.inputQueueBytes
+    )
+      return domainError("BUSY");
+    if (run?.programFailure) return domainError("INPUT_REJECTED");
+    let newRun = false;
+    if (!run) {
+      if (this.runs.size >= budgets.maxRuns) return domainError("BUSY");
+      const lease = this.composition.bytes.reserve(8192);
+      if (!lease) return domainError("BUSY");
+      run = {
+        ref: structuredClone(command.run),
+        worker: structuredClone(command.worker),
+        uncertain: false,
+        queue: [],
+        counters: new Map(),
+        running: false,
+        lease,
+      };
+      newRun = true;
+    }
+    const lease = this.composition.bytes.reserve(2048 + 2 * bytes.byteLength);
+    if (!lease) {
+      if (newRun) run.lease.release();
+      return domainError("BUSY");
+    }
+    let resolve!: (receipt: TabInputReceipt) => void;
+    const promise = new Promise<TabInputReceipt>((done) => {
+      resolve = done;
+    });
+    const job: ProgrammaticJob = {
+      kind: "programmatic",
+      command: structuredClone(command),
+      run,
+      payload: new Uint8Array(bytes),
+      leases: [lease],
+      ready: false,
+      dispatched: false,
+      resolve,
+      promise,
+    };
+    if (newRun) this.runs.set(command.run.runId, run);
+    run.queue.push(job);
+    this.pending++;
+    return job;
+  }
+  executeProgrammatic(
+    job: ProgrammaticJob,
+    accept: () => Promise<boolean>,
+  ): Promise<TabInputReceipt> {
+    job.accept = accept;
+    job.ready = true;
+    void this.drain(job.run);
+    return job.promise;
+  }
+  cancelProgrammatic(job: ProgrammaticJob, reason: string): void {
+    job.cancelled = reason;
+    job.ready = true;
+    void this.drain(job.run);
+  }
+  private async performProgrammatic(job: ProgrammaticJob): Promise<TabInputReceipt> {
+    const { run, command } = job;
+    if (job.cancelled || run.programFailure)
+      return notSent(job, job.cancelled ?? run.programFailure!);
+    const current = () => {
+      const placement = this.runtime.pool.get(command.run);
+      const entry = this.runtime.registry.get(command.run);
+      return (
+        !this.disposed &&
+        !!placement &&
+        sameWorkerRef(placement.worker, command.worker) &&
+        !!entry &&
+        entry.status.status !== "exited"
+      );
+    };
+    if (!current()) return notSent(job, "run-not-live");
+    const read = await this.runtime.getStatus(
+      {
+        type: "status",
+        worker: command.worker,
+        run: command.run,
+        requestId: command.requestId + ".s",
+      },
+      current,
+    );
+    if (
+      !current() ||
+      read.type === "error" ||
+      read.outcome !== "accepted" ||
+      !read.runStatus ||
+      read.runStatus.status !== "live" ||
+      read.runStatus.parsedSeq === null
+    )
+      return notSent(job, "control-unverifiable");
+    const status = read.runStatus;
+    if (run.boundary && run.boundary.atSeq > status.parsedSeq!)
+      return notSent(job, "control-unverifiable");
+    run.boundary = {
+      epoch: status.controlEpoch,
+      holder: structuredClone(status.controlHolder),
+      geometry: { ...status.geometry },
+      atSeq: status.parsedSeq!,
+    };
+    run.uncertain = false;
+    if (status.controlHolder !== null) return notSent(job, "controller-present");
+    if (status.controlEpoch !== command.epoch) return notSent(job, "stale-control");
+    // Commit the durable intent after this ordered precondition decision and before
+    // native input. Human controls stay in this same queue during the store await.
+    if (!job.accept || !(await job.accept())) return notSent(job, "receipt-not-confirmed");
+    // No await between this fence and dispatch; the worker repeats it in its ordered pump.
+    if (!current()) return notSent(job, "run-not-live");
+    job.dispatched = true;
+    const result = await this.runtime.writeProgrammatic(command, job.payload);
+    if (result.type === "result" && result.input) return result.input;
+    return notSent(
+      job,
+      result.type === "error" ? result.error.kind : "runtime-result-unknown",
+      result.type === "error" ? result.error.acceptance === "unknown" : true,
+    );
+  }
   retire(ref: SubscriptionRef): void {
     const run = this.runs.get(ref.run.runId);
     const counter = run?.counters.get(key(ref));
     if (!run || !counter || !sameSubscriptionRef(counter.ref, ref)) return;
     counter.retired = true;
-    for (const job of run.queue) if (job.counter === counter) job.ready = true;
+    for (const job of run.queue)
+      if (job.kind === "control" && job.counter === counter) job.ready = true;
     if (matches(run.boundary?.holder ?? null, ref)) {
       counter.cleanup = "pending";
       counter.cleanupEpoch = run.boundary!.epoch;
@@ -292,6 +460,31 @@ export class ControlArbiter {
     try {
       while (run.queue[0]?.ready) {
         const job = run.queue[0]!;
+        if (job.kind === "programmatic") {
+          let input: TabInputReceipt;
+          try {
+            input = await this.performProgrammatic(job);
+          } catch {
+            input = notSent(job, "runtime-result-unknown", job.dispatched);
+          }
+          if (
+            input.text.status !== "written" ||
+            (input.submit && input.submit.status !== "written")
+          )
+            run.programFailure ??=
+              input.text.reason ?? input.submit?.reason ?? "earlier-input-not-complete";
+          run.queue.shift();
+          this.pending--;
+          for (const lease of job.leases) lease.release();
+          job.leases.length = 0;
+          job.payload = new Uint8Array();
+          job.resolve(input);
+          // Every dependent programmatic request admitted before failure settlement must
+          // receive zero-write failure before this run may start a fresh independent batch.
+          if (!run.queue.some((item) => item.kind === "programmatic"))
+            run.programFailure = undefined;
+          continue;
+        }
         let reply: Reply;
         try {
           reply = await this.perform(job);
@@ -345,7 +538,7 @@ export class ControlArbiter {
       if (
         counter.retired &&
         counter.cleanup !== "pending" &&
-        !run.queue.some((job) => job.counter === counter)
+        !run.queue.some((job) => job.kind === "control" && job.counter === counter)
       ) {
         run.counters.delete(id);
         counter.lease.release();
@@ -641,3 +834,7 @@ export class ControlArbiter {
     };
   }
 }
+
+// Consumers share the entry-owned arbiter; a business RPC never creates a second queue.
+export const controlArbiter = (runtime: LocalRuntime): ControlArbiter | undefined =>
+  arbiters.get(runtime);

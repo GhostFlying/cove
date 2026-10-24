@@ -44,6 +44,7 @@ export const SWITCHES: ReadonlySet<string> = new Set([
   "--help",
   "--include-revoked",
   "--json",
+  "--submit",
 ]);
 
 export function parseArguments(argv: readonly string[]): Arguments {
