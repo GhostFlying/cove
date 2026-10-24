@@ -1,7 +1,10 @@
+import { ConnectionError } from "./action-error.js";
 import type { HttpPort, TransferDisposition } from "@cove/client";
 import {
   BOOTSTRAP_VERSION,
   BootstrapIdentitySchema,
+  BootstrapFailureSchema,
+  type BootstrapFailure,
   PROTOCOL_VERSION,
   REQUIRED_CAPABILITIES,
   type BootstrapIdentity,
@@ -24,7 +27,10 @@ export function bootstrapRequest() {
 }
 
 export class NativeRequestFailure extends Error {
-  constructor(readonly disposition: TransferDisposition) {
+  constructor(
+    readonly disposition: TransferDisposition,
+    readonly bootstrapKind?: BootstrapFailure["kind"],
+  ) {
     super("Native request failed; an uncertain operation must not be replayed");
   }
 }
@@ -66,8 +72,18 @@ export function postJSON(
           settled = true;
           clearTimeout(timer);
           try {
-            if (response.status !== 200) throw new Error("Native server refused request");
-            resolve(JSON.parse(utf8.decodeFatal(response.body)));
+            const value: unknown = JSON.parse(utf8.decodeFatal(response.body));
+            if (response.status !== 200) {
+              const failure = BootstrapFailureSchema.safeParse(value);
+              reject(
+                new NativeRequestFailure(
+                  "handed-off",
+                  failure.success ? failure.data.kind : undefined,
+                ),
+              );
+              return;
+            }
+            resolve(value);
           } catch {
             reject(new NativeRequestFailure("handed-off"));
           }
@@ -86,13 +102,32 @@ export async function verifyServer(
   http: HttpPort,
   expectedServerId: string,
 ): Promise<BootstrapIdentity> {
-  const response = await postJSON(http, "/bootstrap", bootstrapRequest(), 8192);
+  let response: unknown;
+  try {
+    response = await postJSON(http, "/bootstrap", bootstrapRequest(), 8192);
+  } catch (error) {
+    const kind = error instanceof NativeRequestFailure ? error.bootstrapKind : undefined;
+    if (
+      kind === "PROTOCOL_MISMATCH" ||
+      kind === "BOOTSTRAP_UNSUPPORTED" ||
+      kind === "PROFILE_UNSUPPORTED" ||
+      kind === "CAPABILITY_UNAVAILABLE"
+    )
+      throw new ConnectionError(
+        { stage: "protocol", category: "protocol-mismatch" },
+        error instanceof NativeRequestFailure ? error.disposition : "unknown",
+      );
+    throw new ConnectionError(
+      { stage: "entry", category: "peer-transport-unverified" },
+      error instanceof NativeRequestFailure ? error.disposition : "unknown",
+    );
+  }
   const identity = BootstrapIdentitySchema.safeParse(response);
-  if (
-    !identity.success ||
-    identity.data.serverId !== expectedServerId ||
-    identity.data.protocolVersion !== PROTOCOL_VERSION
-  )
-    throw new Error("Cove server identity or protocol did not match; no credential was sent");
+  if (!identity.success)
+    throw new ConnectionError({ stage: "identity", category: "invalid-response" });
+  if (identity.data.serverId !== expectedServerId)
+    throw new ConnectionError({ stage: "identity", category: "server-mismatch" });
+  if (identity.data.protocolVersion !== PROTOCOL_VERSION)
+    throw new ConnectionError({ stage: "protocol", category: "protocol-mismatch" });
   return identity.data;
 }

@@ -1,3 +1,4 @@
+import { ConnectionError } from "./action-error.js";
 import { decodeInvitation, DeviceNameSchema, PairingRedeemResultSchema } from "@cove/protocol/auth";
 import type { TransferDisposition } from "@cove/client";
 import { NativeRequestFailure, postJSON, verifyServer } from "./entry.js";
@@ -74,7 +75,7 @@ export async function pairServer(
     await saveServer(store, server);
     return server;
   } catch (error) {
-    if (error instanceof NativeRequestFailure) {
+    if (error instanceof NativeRequestFailure || error instanceof ConnectionError) {
       disposition = error.disposition;
       if (stage === "redeem") redemptionDisposition = disposition;
     }

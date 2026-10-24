@@ -1,4 +1,9 @@
-import { ActionError } from "./action-error.js";
+import {
+  ActionError,
+  ConnectionError,
+  connectionReason,
+  type ConnectionFailure,
+} from "./action-error.js";
 import { createServerSession, type ServerSession, type ServerSessionSnapshot } from "@cove/client";
 import { createDefaultScheduler } from "@cove/client/web-ports";
 import { decodeInvitation } from "@cove/protocol/auth";
@@ -22,6 +27,7 @@ export interface MobileState {
   profiles: Profile[];
   operations: Journal[];
   sessions: Readonly<Record<string, ServerSessionSnapshot>>;
+  failures: Readonly<Record<string, ConnectionFailure>>;
   nodeState: string;
   authURL: string;
   foreground: boolean;
@@ -41,6 +47,7 @@ export class MobileHost {
   private generation = 0;
   private node: MobileNode | undefined;
   private ports: NativePorts | undefined;
+  private opening: { promise: Promise<MobileNode>; claimed: boolean } | undefined;
   private resumeProfiles: string[] = [];
   private sessions = new Map<string, ServerSession>();
   private subscriptions = new Map<string, { dispose(): void }>();
@@ -50,6 +57,7 @@ export class MobileHost {
     profiles: [],
     operations: [],
     sessions: {},
+    failures: {},
     nodeState: "stopped",
     authURL: "",
     foreground: false,
@@ -91,9 +99,12 @@ export class MobileHost {
     await this.closeOwned();
     if (generation !== this.generation) return;
     this.publish({ foreground: true, nodeState: "starting" });
-    const node = await this.options.openNode();
+    const attempt = { promise: this.options.openNode(), claimed: false };
+    this.opening = attempt;
+    const node = await attempt.promise;
+    if (this.opening === attempt) this.opening = undefined;
     if (generation !== this.generation) {
-      await node.close();
+      if (!attempt.claimed) await node.close();
       return;
     }
     this.node = node;
@@ -107,10 +118,31 @@ export class MobileHost {
     }
   }
   background(): void {
-    ++this.generation;
+    const generation = ++this.generation;
     this.resumeProfiles = [...this.sessions.keys()];
-    this.publish({ foreground: false, authURL: "", nodeState: "stopped" });
-    void this.closeOwned();
+    this.publish({ foreground: false, authURL: "", nodeState: "stopping" });
+    // OS suspension fences immediately. Completion is still an observed receipt, not an
+    // inference from loss of contact; delayed results cannot update a newer incarnation.
+    void this.closeOwned().then(
+      () => {
+        if (generation === this.generation) this.publish({ nodeState: "stopped" });
+      },
+      () => {
+        if (generation === this.generation) this.publish({ nodeState: "shutdown-unverified" });
+      },
+    );
+  }
+  async stop(): Promise<void> {
+    const generation = ++this.generation;
+    this.resumeProfiles = [];
+    this.publish({ foreground: false, authURL: "", nodeState: "stopping" });
+    try {
+      await this.closeOwned();
+      if (generation === this.generation) this.publish({ nodeState: "stopped" });
+    } catch {
+      if (generation === this.generation) this.publish({ nodeState: "shutdown-unverified" });
+      throw new ConnectionError({ stage: "shutdown", category: "shutdown-unverified" });
+    }
   }
   private closeOwned(): Promise<void> {
     for (const subscription of this.subscriptions.values()) subscription.dispose();
@@ -120,14 +152,18 @@ export class MobileHost {
     this.ports?.dispose();
     this.ports = undefined;
     const node = this.node;
+    const opening = this.opening;
+    if (opening) opening.claimed = true;
+    this.opening = undefined;
     this.node = undefined;
     this.publish();
-    this.closing = this.closing
-      .then(() => node?.close())
-      .then(
-        () => {},
-        () => {},
-      );
+    // Preserve a rejected close, including across repeated background notifications. It is
+    // never converted to success just because the JS resource reference was retired.
+    if (node || opening)
+      this.closing = this.closing.then(async () => {
+        if (node) await node.close();
+        if (opening) await (await opening.promise).close();
+      });
     return this.closing;
   }
   private nodeStatus(raw: string): void {
@@ -167,8 +203,12 @@ export class MobileHost {
     if (!profile) throw new ActionError("Saved server is unavailable");
     return profile;
   }
+  currentSession(id: string): ServerSession | undefined {
+    const value = this.sessions.get(id);
+    return value?.snapshot().status === "current" ? value : undefined;
+  }
   session(id: string): ServerSession {
-    const session = this.sessions.get(id);
+    const session = this.currentSession(id);
     if (!session || session.snapshot().status !== "current")
       throw new ActionError("Reconnect and verify server first");
     return session;
@@ -236,6 +276,10 @@ export class MobileHost {
     this.subscriptions.get(id)?.dispose();
     this.sessions.get(id)?.dispose();
     const scheduler = createDefaultScheduler();
+    let bindingFailure: ConnectionFailure | undefined;
+    const failures = { ...this.state.failures };
+    delete failures[id];
+    this.publish({ failures });
     const session = createServerSession({
       serverId: profile.serverId,
       scheduler,
@@ -244,11 +288,25 @@ export class MobileHost {
         let cancelled = false;
         let close: (() => void) | undefined;
         const result = (async () => {
-          const saved = await loadServer(this.options.secure(credentialKey(profile)));
-          if (!saved || saved.serverId !== profile.serverId)
-            throw new ActionError("Credential slot unavailable");
+          let saved;
+          try {
+            saved = await loadServer(this.options.secure(credentialKey(profile)));
+          } catch {
+            bindingFailure = { stage: "credentials", category: "store-unavailable" };
+            throw new ConnectionError(bindingFailure);
+          }
+          if (!saved || saved.serverId !== profile.serverId) {
+            bindingFailure = { stage: "credentials", category: "missing-slot" };
+            throw new ConnectionError(bindingFailure);
+          }
           if (cancelled || ports !== this.ports) throw new ActionError("Connection superseded");
-          const entry = ports.entry(profile.peerID, profile.port);
+          let entry;
+          try {
+            entry = ports.entry(profile.peerID, profile.port);
+          } catch {
+            bindingFailure = { stage: "entry", category: "peer-transport-unverified" };
+            throw new ConnectionError(bindingFailure);
+          }
           close = () => entry.close();
           try {
             const identity = await verifyServer(entry.http, profile.serverId);
@@ -271,8 +329,12 @@ export class MobileHost {
               dispose: close,
             };
           } catch (error) {
+            bindingFailure =
+              error instanceof ConnectionError
+                ? error.failure
+                : { stage: "entry", category: "peer-transport-unverified" };
             entry.close();
-            throw error;
+            throw new ConnectionError(bindingFailure);
           }
         })();
         return {
@@ -287,11 +349,23 @@ export class MobileHost {
     this.sessions.set(id, session);
     this.subscriptions.set(
       id,
-      session.onState(() => this.publish()),
+      session.onState((value) => {
+        const failure =
+          value.status === "stale" && value.lastError
+            ? (bindingFailure ?? connectionReason(value.lastError))
+            : undefined;
+        this.publish(failure ? { failures: { ...this.state.failures, [id]: failure } } : {});
+      }),
     );
     this.publish();
     const outcome = await session.connect();
-    if (!outcome.ok) throw new ActionError("Selected server entry could not be verified");
+    if (!outcome.ok) {
+      const reason = session.snapshot().lastError ?? outcome.reason;
+      const failure = bindingFailure ?? connectionReason(reason);
+      if (this.sessions.get(id) === session)
+        this.publish({ failures: { ...this.state.failures, [id]: failure } });
+      throw new ConnectionError(failure);
+    }
   }
   disconnect(id: string): void {
     this.subscriptions.get(id)?.dispose();

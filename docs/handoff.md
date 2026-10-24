@@ -39,14 +39,18 @@
 - T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `29f1e825`；full/delta 结果见 PR，P3 #220 后续。
   真实 Desktop GUI 验证因 Mac 锁屏未执行，不能记 PASS；依赖集成/真实 app gate 由 root 路由。
 - Runtime packaging [#227](https://github.com/GhostFlying/cove/pull/227) 已合入上述 88e4，仅 runtime closure/CLI S1/S9 三文件。
-  actual-main Engineering40093259061 仍在途；不把候选成功当 actual-main。T5 不修改这些文件。
+  actual-main Engineering40093259061 全6 shards/2 Go/2 required aggregates 与 tend40093259092 成功，artifact 均88e4。T5 不修改这些文件。
 - T5 [#197](https://github.com/GhostFlying/cove/issues/197) 已正式 source release。
   own checkout `cove-worktrees/m3-197-mobile`，branch `p/luchengxuan/m3-197-mobile`，基于 exact 8b。
   实现 RN 直连多 server、repo/task/workspace/mount/tab、公共 ServerSession/mirror、独立 SecureStore slots、SQLite journal、bundled terminal。
   SQLite55.0.20 是唯一新增存储依赖；原 ID/canonical digest 在 dispatch 前事务落盘；cold start 只 operation.get，不重派原写。
   64 profiles、8 live server sessions、256 journal rows/1 MiB、UI50 rows；未决记录不淘汰。
-  当前 Mobile prepare:js/typecheck/lint、compiled24、tooling69/client302 已过；root check 的 format/lint/build 通过，
-  完整 test gate 因本地缺 worker-qualification CI identity 退出；保留失败，不记 full PASS。draft PR/CI、产品 native 验证推进中。
+  [draft PR #228](https://github.com/GhostFlying/cove/pull/228) 原子产品提交 `8c7dd698`；完整独立 review 无 P0/P1，F1–F5 五项P2在同批纠正。
+  当前 Mobile prepare:js/typecheck/lint、compiled31、tooling69、原 client302 已过；root check 的 format/lint/build 通过，
+  完整 test gate 因本地缺 worker-qualification CI identity 退出；保留失败，不记 full PASS。PR CI 与产品 native 验证推进中。
+  `8c7` own AndroidAPI31 AAR/offlineAPK（d55bd132…7ef055）已构建，实际新AVD证实原生SQLite启动与keyless测试控制登录。
+  首UI harness在输入后错误Back退出app，尚未配对；FAIL与cleanup[]保留，不能记完整产品通过。
+  own iOS Simulator binding已编译；F1–F5纠正后将冻结head并重建新JS/app，旧APK不代新源码证据。
   物理 iPhone/Android、真实 Tailnet 且 Desktop off、IME/外接键盘与完整生命周期属于明确保留的 T7/硬件验收。
 - T7 集成、实际使用试用与 M3 退出尚未完成，M4 未启动。
 
