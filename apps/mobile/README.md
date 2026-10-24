@@ -1,0 +1,99 @@
+# Cove Native development fixture
+
+This is the M3 native transport fixture, using Expo 55 / React Native 0.83 and
+the existing Cove client and terminal WebView bridge. It provides explicit
+Tailnet login, one secure Cove pairing, RPC verification, and attachment to an
+existing isolated test tab. It is not the product navigation or session list.
+
+The initial targets are iOS 16 arm64 and Android 12 / API 31 arm64. Expo Go
+cannot load the embedded Go library. Build an actual native application.
+
+## Reproduce from a clean checkout
+
+Use the repository's Node and pnpm pins and a separate install/output directory
+for each checkout. No generated artifact from another checkout is needed.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm exec tsc -b packages/terminal-web/tsconfig.production.json
+pnpm --filter @cove/mobile build:terminal
+pnpm --filter @cove/mobile typecheck
+pnpm --filter @cove/mobile test
+```
+
+Expo's configuration loader requires TypeScript 5's `transpileModule`, which is
+absent from the repository's TypeScript 7 API. The app pins TypeScript 5.9.3
+privately for that loader only. Both app typecheck and compiled port tests invoke
+the root TypeScript 7.0.2 executable explicitly; strict peer checks stay enabled.
+
+Build the embedded library using the scoped SDK/toolchain environment described
+in [the native README](../../native/tailscale/README.md). The commands below use
+repository-relative outputs; SDK locations may be supplied through environment
+variables without changing global Xcode, Java or service state.
+
+```sh
+# Run from the repository root, one platform at a time.
+node scripts/tsnet-mobile-build.mjs android
+node apps/mobile/scripts/prepare-native.mjs android
+node scripts/tsnet-mobile-build.mjs ios
+node apps/mobile/scripts/prepare-native.mjs ios
+pnpm --filter @cove/mobile prebuild
+```
+
+CNG generates the ignored `apps/mobile/android` and `apps/mobile/ios` projects.
+Local Expo modules under `modules/cove-tsnet` are source; only their `generated`
+binding artifacts are ignored. Android compiles against the extracted AAR's
+Java classes and packages its arm64 JNI library. iOS links the generated arm64
+XCFramework. A simulator requires its own `ios-simulator` library build; a
+device-only framework is not simulator evidence.
+
+For an ordinary development build, start Metro with `pnpm --filter @cove/mobile
+start` and use `pnpm --filter @cove/mobile android` or `ios`. The generated Android
+project also supports a serial arm64 build without launching or adopting a
+device:
+
+```sh
+cd apps/mobile/android
+./gradlew :app:assembleDebug --no-daemon --max-workers=2 \
+  -Dorg.gradle.parallel=false -PreactNativeArchitectures=arm64-v8a
+```
+
+An APK build, an XCFramework build, and successful TypeScript tests do not prove
+native app launch, login, network payload exchange, signing or physical-device
+behavior. Record these separately in the task PR. A debug Android build normally
+needs reachable Metro; a bundled build is needed for an offline cloud-device
+installation. Generated development signing is not release distribution.
+
+## Ownership and verification behavior
+
+The app owns one embedded tsnet node in platform-private, backup-excluded app
+storage. Fresh installation does not log in automatically. Tailnet enrollment
+and Cove's device token are separate: forgetting Cove does not log out Tailnet,
+and node logout does not revoke an existing Cove pairing. SecureStore must
+successfully persist a pairing before the UI reports it saved; there is no
+plaintext fallback. Invitation secrets and auth keys are not logged.
+
+Each native call is bound to a node generation, so a delayed event pull, close,
+cancel or release cannot affect a newer foreground node. Native background hooks
+stop admission immediately. JS releases its connection and view; foreground
+creates a fresh host, rechecks peer identity and `serverId`, then reconnects. It
+reattaches only a previously selected, still-live exact run. Network loss never
+means the remote process exited and never creates a replacement run.
+
+Every TCP connection passes the selected stable peer's WhoIs check before HTTP
+bytes, including credentials, are written. Bootstrap verifies `serverId` before
+pair redemption or authenticated RPC. HTTP response and individual WebSocket
+payloads are capped at 256 KiB; native operations, event queues and sends have
+independent bounds. One asynchronous pull drains the native queue. Synchronous
+native calls perform bounded local admission only. `/terminal` and `/events`
+share raw transport support; their protocol owners validate their own schemas.
+
+Cancellation reports `not-sent` only while the native first-write guard proves
+that no request bytes could have been written. A bridge exception or possible
+write remains `unknown`; the UI never retries uncertain pairing, RPC or input.
+Backgrounding closes client transports but does not stop server-owned PTYs.
+
+The terminal document embeds the actual compiled xterm view and bridge code and
+CSS, without loading a network page. The server remains the sole terminal model
+and query responder. Acquiring control requires the explicit control button;
+the fixture does not send PTY query replies or create product UI workflows.

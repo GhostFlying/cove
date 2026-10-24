@@ -9,7 +9,11 @@
     "**/dist/**",
     ".cache/**",
     "coverage/**",
-    "docs/benchmarks/**"
+    "docs/benchmarks/**",
+    "apps/mobile/android/**",
+    "apps/mobile/ios/**",
+    "apps/mobile/modules/cove-tsnet/generated/**",
+    "apps/mobile/src/terminal-document.generated.ts"
   ],
   "rules": {
     "typescript/no-explicit-any": "error"
