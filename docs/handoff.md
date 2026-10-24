@@ -39,6 +39,7 @@
 - T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `29f1e825`；full/delta 结果见 PR，P3 #220 后续。
   fresh integration checkout `cove-worktrees/m3-196-desktop-main776` 从健康 main776 合并19个已评审提交；排除已合入的2个 packaging 提交。
   当前正在组合 root manifests/lock/inventory；真实 Desktop GUI 因 Mac 锁屏未执行，仍阻最终合入，不记 PASS。
+  原 PR219 已观察 Electron 窗口/Keychain 配对保存/repo-task-mount/run/VT 显示；首轮失败与修正保留，不能代替组合后验收。
 - Runtime packaging [#227](https://github.com/GhostFlying/cove/pull/227) 已合入上述 88e4，仅 runtime closure/CLI S1/S9 三文件。
   actual-main Engineering40093259061 全6 shards/2 Go/2 required aggregates 与 tend40093259092 成功，artifact 均88e4。T5 不修改这些文件。
 - T5 [#197 / PR #229](https://github.com/GhostFlying/cove/pull/229) 已 rebase 合入 d269；完整独立 review/同 context 窄 delta 完成，无 open P0/P1；P2 #230 后续。
