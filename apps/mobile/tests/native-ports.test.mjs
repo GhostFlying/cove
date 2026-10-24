@@ -295,7 +295,7 @@ function pairingFixture({ mismatch = false, failStore = false, loseReply = false
       read: async () => null,
       remove: async () => {},
       write: async (raw) => {
-        if (failStore) throw new Error("SecureStore write failed");
+        if (failStore) throw new Error("SecureStore write failed: " + token);
         writes.push(JSON.parse(raw));
       },
     },
@@ -310,6 +310,26 @@ it("verifies serverId before sending the invitation secret", async () => {
   expect(fixture.calls).toEqual(["/bootstrap"]);
   expect(fixture.writes).toHaveLength(0);
   expect(fixture.closed()).toBe(true);
+  await expect(
+    pairServer(fixture.ports, "invalid", "fixture", fixture.store),
+  ).rejects.toMatchObject({
+    code: "COVE_NATIVE_PAIRING_INVITATION",
+    stage: "invitation",
+    disposition: "not-sent",
+    redemptionDisposition: "not-sent",
+  });
+  const closedEntry = {
+    entry: () => {
+      throw new Error("bridge failure: " + token);
+    },
+  };
+  await expect(pairServer(closedEntry, invitation, "fixture", fixture.store)).rejects.toMatchObject(
+    {
+      stage: "entry",
+      redemptionDisposition: "not-sent",
+    },
+  );
+  expect(fixture.calls).toEqual(["/bootstrap"]);
 });
 
 it("reports pairing success only after secure token persistence", async () => {
@@ -323,9 +343,14 @@ it("reports pairing success only after secure token persistence", async () => {
 
 it("does not convert a secure-store failure into pairing success or retry", async () => {
   const fixture = pairingFixture({ failStore: true });
-  await expect(pairServer(fixture.ports, invitation, "fixture", fixture.store)).rejects.toThrow(
-    "SecureStore",
-  );
+  const failed = pairServer(fixture.ports, invitation, "fixture", fixture.store);
+  await expect(failed).rejects.toMatchObject({
+    code: "COVE_NATIVE_PAIRING_PERSIST",
+    stage: "persist",
+    disposition: "handed-off",
+    redemptionDisposition: "handed-off",
+  });
+  await expect(failed).rejects.not.toThrow(token);
   expect(fixture.calls.filter((path) => path === "/pair")).toHaveLength(1);
   expect(fixture.writes).toHaveLength(0);
 });
@@ -334,7 +359,11 @@ it("does not repeat a redemption whose response was lost", async () => {
   const fixture = pairingFixture({ loseReply: true });
   await expect(
     pairServer(fixture.ports, invitation, "fixture", fixture.store),
-  ).rejects.toMatchObject({ disposition: "unknown" });
+  ).rejects.toMatchObject({
+    stage: "redeem",
+    disposition: "unknown",
+    redemptionDisposition: "unknown",
+  });
   expect(fixture.calls.filter((path) => path === "/pair")).toHaveLength(1);
   expect(fixture.writes).toHaveLength(0);
 });
