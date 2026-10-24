@@ -12,6 +12,56 @@ specified in [PROTOCOL.md](PROTOCOL.md). M2 T4 and T5b wire the CLI and server t
   user-local Go, e.g. `~/.cache/cove-toolchain/go-1.27.3/bin/go`.
 - `tailscale.com` is pinned to v1.104.2; `go.sum` pins every module.
 
+## Embedded mobile library
+
+`mobile/` is the app-native library, separate from the server/CLI executables. It
+reuses the existing node login/identity-hold manager and exposes bounded HTTP and
+WebSocket handles to the native host. Each outbound connection resolves the pinned
+stable server node ID and checks WhoIs before writing HTTP bytes. The host must
+then verify Cove's pre-authentication serverId before releasing an invitation or
+device credential. There is no system Tailscale dependency or inbound listener.
+
+The private native adapter pulls one `NextEvent` result at a time and dispatches it
+before pulling again. Go queues at most 64 events / 4 MiB of serialized data;
+producers wait for space, while close wakes the outstanding pull and producers.
+Only one pull is permitted. At most 32 operations are retained, including completed
+handles until `Release`. IDs strictly increase across the Client lifetime, so an
+old asynchronous result cannot be mistaken for a newly opened handle. HTTP bodies
+are capped while reading (256 KiB maximum response, 64 KiB request); each socket
+message is at most 256 KiB, matching the client's transport read budget, with at
+most 1 MiB / 128 messages queued per writer. Native and host in-flight copies are
+bounded in addition to these queues. These limits are correctness bounds, not
+protection against the authenticated owner.
+
+`Post`, `OpenSocket`, `Send` and `Cancel` perform only bounded in-memory admission;
+network I/O runs on Go executors. A request remains `not-sent` until the first
+possible HTTP write; a later failure is `unknown`, and receipt of response headers
+proves `handed-off`. Socket send `handed-off` means admission to the native writer,
+never remote acceptance. Cancellation prevents a later first write if it returned
+`not-sent`. The host must not replay uncertain requests or terminal input.
+
+Native control methods and `NextEvent` belong on native background executors.
+Login/logout invalidate existing entry handles and cancel their traffic. `Close`
+stops traffic and the node, retaining enrollment; logout removes only this app's
+node state, and forgetting a Cove token is a separate host operation. The app must
+provide its own backup-excluded native state directory, keep device tokens in
+platform secure storage, and never persist/log native event bodies or login URLs.
+
+The mobile build uses exact gomobile/gobind tools from the module and the same
+feature omission list as server builds. Outputs and tool executables stay under
+`native/tailscale/dist/mobile/`, separate from server artifacts:
+
+```sh
+node scripts/tsnet-mobile-build.mjs android       # arm64 AAR, minSdk31
+node scripts/tsnet-mobile-build.mjs ios           # arm64 XCFramework, min iOS16.0
+node scripts/tsnet-mobile-build.mjs ios-simulator # arm64 simulator slice, same target
+```
+
+Set `COVE_GO` and platform toolchain variables (`JAVA_HOME`, Android SDK/NDK,
+`DEVELOPER_DIR`) per command. No global SDK/toolchain selection is changed.
+Library compilation alone does not prove an Expo application, login, real network
+transport, lifecycle recovery or physical-device acceptance.
+
 ## Build and test
 
 ```sh
