@@ -55,6 +55,49 @@ async function inviteStates(home) {
   return Object.fromEntries(invitations.map((row) => [row.inviteId, row.state]));
 }
 
+test("a local-only invitation pairs an independent device without remote entry configuration", async () => {
+  const home = fixture.home("local-server");
+  await fixture.startAuthServer(home, [], { sshTarget: null });
+  const { invitation } = await fixture.invite(home);
+  const payload = payloadOf(invitation);
+  expect(payload.entries).toEqual({});
+  expect(await connectable(payload.pairingPort)).toBe(true);
+
+  // Missing explicit entries and a wrong server identity are all refused before redemption.
+  // The same one-use invitation remains open afterwards, proving none consumed its secret.
+  for (const via of ["ssh", "tsnet"]) {
+    const result = await fixture.pair(fixture.home(`missing-${via}`), "local", invitation, [
+      "--via",
+      via,
+    ]);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("ENTRY_UNAVAILABLE");
+    expect(result.stdout + result.stderr).not.toContain(payload.secret);
+  }
+  const mismatch = await fixture.pair(
+    fixture.home("wrong-local-identity"),
+    "local",
+    alteredInvitation(invitation, { serverId: "another-server" }),
+  );
+  expect(mismatch.code).toBe(1);
+  expect(mismatch.stderr).toContain("SERVER_ID_MISMATCH");
+  expect(mismatch.stdout + mismatch.stderr).not.toContain(payload.secret);
+  expect((await inviteStates(home))[payload.inviteId]).toBe("open");
+
+  const client = fixture.home("local-desktop-client");
+  const paired = await fixture.pairOk(client, "local", invitation, ["--name", "Desktop"]);
+  expect(paired).toMatchObject({ serverId: payload.serverId, defaultEntry: "loopback" });
+  await waitUntilClosed(payload.pairingPort);
+  const devices = await fixture.coveJson(["--server", "local", "auth", "device", "list"], {
+    home: client,
+  });
+  expect(devices.currentDeviceId).toBe(paired.deviceId);
+  expect(devices.devices).toEqual([
+    expect.objectContaining({ deviceId: paired.deviceId, name: "Desktop", neverConnected: false }),
+  ]);
+  expect(await fixture.coveJson(["--server", "local", "status"], { home: client })).toBeTruthy();
+});
+
 test("a client pairs, calls business methods, and every unusable invitation gets the same refusal", async () => {
   const serverHome = fixture.home("server");
   const pairingPort = await freePort();

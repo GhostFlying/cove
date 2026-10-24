@@ -131,7 +131,10 @@ export async function createAuthFixture() {
       // startServerEntry waits for the rendezvous to exist; the one a killed server left would
       // be taken for the new server's, so it is removed first (it names no live server).
       await rm(join(home, "server", "run", "rendezvous.json"), { force: true });
-      base.env.COVE_TEST_SERVER_ARGS = JSON.stringify(["--ssh-target", sshTarget, ...args]);
+      base.env.COVE_TEST_SERVER_ARGS = JSON.stringify([
+        ...(sshTarget === null ? [] : ["--ssh-target", sshTarget]),
+        ...args,
+      ]);
       if (storeFaults) base.env.COVE_TEST_STORE_FAULTS = JSON.stringify(storeFaults);
       try {
         const server = await base.startServerEntry(SERVER_ENTRY, home);
