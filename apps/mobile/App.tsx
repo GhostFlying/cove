@@ -14,6 +14,27 @@ import { pairServer } from "./dist/pairing.js";
 import { ForegroundOwnership } from "./dist/lifecycle.js";
 import { TerminalHost } from "./src/terminal-host";
 
+// Only the native control boundary's fixed, bounded vocabulary is displayed.
+// Other failures keep their existing generic wording; none are logged/retried.
+function nativeFailureReason(error: unknown): string {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("code" in error) ||
+    typeof error.code !== "string" ||
+    !/^COVE_NATIVE_[A-Z_]{1,48}$/.test(error.code) ||
+    !("message" in error) ||
+    typeof error.message !== "string" ||
+    error.message.length > 192 ||
+    Array.from(error.message).some((character) => {
+      const value = character.charCodeAt(0);
+      return value < 32 || (value >= 127 && value <= 159);
+    })
+  )
+    return "";
+  return `：${error.code} ${error.message}`;
+}
+
 const tokenKey = "cove.native.fixture.server";
 const secureOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 const store: SecureTokenStore = {
@@ -126,8 +147,9 @@ export default function App() {
         const saved = await loadServer(store);
         if (saved && ownership.current(generation)) await connect(owned, saved, generation);
       }
-    } catch {
-      if (ownership.current(generation)) setStatus("节点或连接未核实；可显式重新连接");
+    } catch (error) {
+      if (ownership.current(generation))
+        setStatus("节点或连接未核实；可显式重新连接" + nativeFailureReason(error));
     } finally {
       if (ownership.current(generation)) setLoading(false);
     }
@@ -160,8 +182,9 @@ export default function App() {
     setBusy(true);
     const generation = ownership.begin();
     void work(() => ownership.current(generation))
-      .catch(() => {
-        if (ownership.current(generation)) setStatus("操作未完成或结果未知；不会自动重试");
+      .catch((error: unknown) => {
+        if (ownership.current(generation))
+          setStatus("操作未完成或结果未知；不会自动重试" + nativeFailureReason(error));
       })
       .finally(() => {
         actionActive.current = false;

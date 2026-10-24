@@ -56,7 +56,17 @@ public class CoveTsnetModule: Module {
   private func perform(_ promise: Promise, _ body: @escaping () throws -> Any?) {
     controlQueue.async {
       do { promise.resolve(try body()) }
-      catch { promise.reject("COVE_NATIVE", "Native node operation failed") }
+      catch {
+        // Return the shared fixed vocabulary, never the NSError/remote body.
+        let safe = CoveMobileControlFailureJSON(String(error.localizedDescription.prefix(4096)))
+        if let data = safe.data(using: .utf8),
+          let failure = (try? JSONSerialization.jsonObject(with: data)) as? [String: String],
+          let code = failure["code"], let reason = failure["reason"] {
+          promise.reject(code, reason)
+        } else {
+          promise.reject("COVE_NATIVE_CONTROL_FAILED", "Native node control failed; its effect is unverified.")
+        }
+      }
     }
   }
 
