@@ -44,6 +44,15 @@ public class CoveTsnetModule: Module {
     owned?.stop()
   }
 
+  // gomobile's NSError-only selectors are imported with an explicit pointer,
+  // unlike methods whose trailing error parameter becomes Swift `throws`.
+  private func goString(_ body: (NSErrorPointer) throws -> String) throws -> String {
+    var error: NSError?
+    let value = try body(&error)
+    if let error { throw error }
+    return value
+  }
+
   private func perform(_ promise: Promise, _ body: @escaping () throws -> Any?) {
     controlQueue.async {
       do { promise.resolve(try body()) }
@@ -100,12 +109,12 @@ public class CoveTsnetModule: Module {
           return true
         }
         guard accepted else { created.stop(); created.close(); throw self.nativeError() }
-        return ["generation": observed, "status": try created.statusJSON()] as [String: Any]
+        return ["generation": observed, "status": try self.goString { created.statusJSON($0) }] as [String: Any]
       }
     }
-    AsyncFunction("status") { (generation: UInt64, promise: Promise) in self.perform(promise) { try self.current(generation).statusJSON() } }
-    AsyncFunction("login") { (generation: UInt64, authKey: String, promise: Promise) in self.perform(promise) { try self.current(generation).login(authKey) } }
-    AsyncFunction("logout") { (generation: UInt64, promise: Promise) in self.perform(promise) { try self.current(generation).logout() } }
+    AsyncFunction("status") { (generation: UInt64, promise: Promise) in self.perform(promise) { try self.goString { try self.current(generation).statusJSON($0) } } }
+    AsyncFunction("login") { (generation: UInt64, authKey: String, promise: Promise) in self.perform(promise) { try self.goString { try self.current(generation).login(authKey, error: $0) } } }
+    AsyncFunction("logout") { (generation: UInt64, promise: Promise) in self.perform(promise) { try self.goString { try self.current(generation).logout($0) } } }
     AsyncFunction("close") { (generation: UInt64, promise: Promise) in
       let owned = self.locked { generation == self.clientGeneration ? self.client : nil }
       self.stopNative(generation)
@@ -118,7 +127,7 @@ public class CoveTsnetModule: Module {
     AsyncFunction("nextEvent") { (generation: UInt64, timeout: Int, promise: Promise) in
       let owned = try self.current(generation)
       self.eventQueue.async {
-        do { promise.resolve(try owned.nextEvent(timeout)) }
+        do { promise.resolve(try self.goString { owned.nextEvent(timeout, error: $0) }) }
         catch { promise.reject("COVE_NATIVE_CLOSED", "Native event stream closed") }
       }
     }
