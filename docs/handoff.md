@@ -20,7 +20,7 @@
 
 - T1 Node adapter #200、T0a bridge #203、T2 business snapshot/events #206、T3 ServerSession/mirror #209 已合入。
 - T6 #217 → `6b12c5df`，actual-main Engineering40072307667 attempt2 + tend40072307661 成功。
-  原 #211 保留失败/review 历史，P2 #215/P3 #216 后续；真实 agent/TUI 提交与吞吐不冒称通过。
+  原 #211 与 #217 attempt1 保留失败/UNKNOWN/review 历史，P2 #215/P3 #216 后续；真实 agent/TUI 提交与吞吐不冒称通过。
 - 服务卸载顺序 #225 → `169002fc`，actual-main Engineering40086300733 + tend40086300726 成功。
   先完成安全 preflight 再停止任务拥有的服务；原/rebased mapping 及风险证据在 PR。
 - Native replacement [#226](https://github.com/GhostFlying/cove/pull/226) 已合入；树 `531dda`，其已验证实际 main 为 `8b4f8be4`。
