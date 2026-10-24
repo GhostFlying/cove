@@ -212,6 +212,11 @@ recreates sessions for previously connected profiles and verifies identity anew;
 restoring a selected old run never acquires control or replays input. Process death
 returns to server navigation. WebView content-process loss creates a fresh bridge
 generation. Unknown remote execution remains unknown until observed by the server.
+Mobile opts into the xterm 6.0.0 committed-insertText adapter for native keydown229
+delivery. It accounts for or cancels the legacy delayed textarea diff, so committed
+characters enter the existing user-input origin path once. Composition and normal
+keyboard handling remain with xterm; Desktop does not enable this adapter. An
+unsupported private xterm shape fails explicitly instead of weakening reply filtering.
 Explicit Stop waits for native close and reports stopping/stopped/shutdown-unverified;
 a rejected close never becomes a successful stop. OS background fencing remains immediate.
 Task/history/device reads retain their actual session-object/instance provenance;

@@ -295,8 +295,8 @@ async function installStandalone(target: XtermTerminalView, geometry: Geometry):
 }
 
 const fixture = {
-  async reset(geometry?: Geometry) {
-    await initialize(geometry);
+  async reset(geometry?: Geometry, options?: XtermTerminalViewOptions) {
+    await initialize(geometry, options);
     return evidence();
   },
   async ready(bytes?: number[]) {
@@ -318,7 +318,49 @@ const fixture = {
     await view!.applyEvent(event, payload ? Uint8Array.from(payload) : undefined);
     return evidence();
   },
-  async queryCorpus(phase: "live" | "baseline" | "replay") {
+  async nativeCommittedTrace(order: "before-insertion" | "after-insertion" | "after-input") {
+    await initialize(undefined, { nativeCommittedInput: true });
+    await ready();
+    const terminal = capturedTerminal!;
+    const core = (
+      terminal as unknown as {
+        _core: { _keyDown(event: KeyboardEvent): void; _inputEvent(event: InputEvent): void };
+      }
+    )._core;
+    const textarea = terminal.textarea!;
+    const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+    for (const char of "cove-t5-diag") {
+      // Replay the captured ordering into actual xterm6. These supplied event
+      // records are a regression probe, not native keyboard acceptance.
+      core._keyDown(new KeyboardEvent("keydown", { keyCode: 229, key: "Process" }));
+      if (order === "before-insertion") await turn();
+      textarea.value += char;
+      if (order === "after-insertion") await turn();
+      core._inputEvent({
+        data: char,
+        inputType: "insertText",
+        isTrusted: true,
+        isComposing: false,
+        composed: true,
+      } as InputEvent);
+      textarea.dispatchEvent(new KeyboardEvent("keyup"));
+      await turn();
+    }
+    return evidence();
+  },
+  async nativeComposition() {
+    await initialize(undefined, { nativeCommittedInput: true });
+    await ready();
+    const textarea = capturedTerminal!.textarea!;
+    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
+    textarea.value = "色";
+    textarea.dispatchEvent(new CompositionEvent("compositionupdate", { data: "色" }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "色" }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    return evidence();
+  },
+  async queryCorpus(phase: "live" | "baseline" | "replay", nativeCommittedInput = false) {
     const supported = new Set(QUERY_SUPPORT.map((item) => item.fixture));
     const cases = queryCases.filter((item) => supported.has(item.caseId as never));
     const results = [];
@@ -331,7 +373,7 @@ const fixture = {
       await new Promise<void>((resolve) => reference.write(bytes, resolve));
       sink.dispose();
       reference.dispose();
-      await initialize();
+      await initialize(undefined, { nativeCommittedInput });
       if (phase === "live") {
         await ready();
         await output(bytes);

@@ -30,6 +30,7 @@ import {
 } from "./browser-input-intents.js";
 import { xtermTheme } from "./xterm-appearance.js";
 import { attachInputOrigin, type InputOriginAttachment } from "./xterm-input-origin.js";
+import { attachNativeCommittedInput, type NativeInputAttachment } from "./xterm-native-input.js";
 import { XtermParseOperation } from "./xterm-parse-operation.js";
 import { RendererFallback, type XtermRenderer } from "./xterm-renderer.js";
 import { measureTerminalGrid } from "./xterm-view-geometry.js";
@@ -40,6 +41,9 @@ export interface XtermTerminalViewOptions {
   // Defaults to "webgl" when the browser exposes WebGL2 and to "dom" otherwise. "webgl" is a
   // preference: a failed load or a repeated context loss still falls back to the DOM renderer.
   renderer?: XtermRenderer;
+  // Mobile WebViews can deliver keydown229 and committed insertText in separate
+  // native turns. Desktop keeps stock xterm input handling unless opted in.
+  nativeCommittedInput?: boolean;
 }
 
 // The renderer is a private drawing choice of this view. It is exposed read-only for diagnostics
@@ -163,6 +167,7 @@ type Listener<T> = (value: T) => void;
 interface Backend {
   terminal: Terminal;
   origin: InputOriginAttachment;
+  nativeInput: NativeInputAttachment | undefined;
   tracker: BrowserInputTracker;
   incarnation: number;
 }
@@ -431,6 +436,7 @@ export function createXtermTerminalView(
     if (!retired) return [];
     return cleanupAll([
       () => retired.tracker.dispose(),
+      () => retired.nativeInput?.dispose(),
       () => retired.origin.dispose(),
       () => renderers.detach(retired.terminal),
       () => retired.terminal.dispose(),
@@ -466,6 +472,7 @@ export function createXtermTerminalView(
     let terminal: Terminal | undefined;
     let tracker: BrowserInputTracker | undefined;
     let origin: InputOriginAttachment | undefined;
+    let nativeInput: NativeInputAttachment | undefined;
     let built: Backend;
     try {
       terminal = new Terminal({
@@ -492,6 +499,7 @@ export function createXtermTerminalView(
       } finally {
         if (!visible) container.style.visibility = previousHostVisibility;
       }
+      if (options.nativeCommittedInput) nativeInput = attachNativeCommittedInput(terminal);
       tracker = trackBrowserInput(container, terminal, () => {
         if (targetIncarnation === incarnation && effectivelyFocused) publishFocus(false);
       });
@@ -499,11 +507,12 @@ export function createXtermTerminalView(
       // Load the renderer last: it cannot fail construction, and a construction failure above
       // must not leave a GPU context behind.
       renderers.attach(terminal);
-      built = { terminal, origin, tracker, incarnation: targetIncarnation };
+      built = { terminal, origin, tracker, nativeInput, incarnation: targetIncarnation };
     } catch (error) {
       const primary = asDomainError(error);
       const cleanup = cleanupAll([
         () => tracker?.dispose(),
+        () => nativeInput?.dispose(),
         () => origin?.dispose(),
         () => terminal?.dispose(),
       ]);
@@ -516,6 +525,7 @@ export function createXtermTerminalView(
     if (state === "disposed" || targetIncarnation !== incarnation) {
       const cleanup = cleanupAll([
         () => built.tracker.dispose(),
+        () => built.nativeInput?.dispose(),
         () => built.origin.dispose(),
         () => renderers.detach(built.terminal),
         () => built.terminal.dispose(),
@@ -536,7 +546,10 @@ export function createXtermTerminalView(
   const requireBackend = (): Backend => {
     if (state === "disposed" || state === "failed" || !backend)
       throw domainError("RESYNC_REQUIRED");
-    if (!backend.origin.ownsSurface())
+    if (
+      !backend.origin.ownsSurface() ||
+      (backend.nativeInput && !backend.nativeInput.ownsSurface())
+    )
       failAndRetire(domainError("PROFILE_UNSUPPORTED"), backend.incarnation);
     return backend;
   };
