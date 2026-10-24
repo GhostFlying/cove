@@ -165,7 +165,9 @@ async function setup({ wrapStore, service = {} } = {}) {
     const receipts = new OperationReceipts(
       composition,
       encode,
-      new SqliteReceiptBackend(on, relayInstanceId, () => number),
+      // Receipt timestamps are wall-clock milliseconds, not the instance ordinal: restart
+      // starts retention, which would otherwise expire new receipts as if they ended in 1970.
+      new SqliteReceiptBackend(on, relayInstanceId),
     );
     const tasks = new WorkspaceService({
       store: on,
@@ -1047,15 +1049,15 @@ describe("restart, continue and abandon (S8)", () => {
     ).toHaveLength(2);
     const [ledger] = await env.rows("SELECT steps_json FROM worktree_attempts");
     expect(JSON.parse(ledger.steps_json)[0]).toEqual({ step: "branch", outcome: "verified" });
-    // The same continue answers with its record; a second one is refused (nothing to continue).
-    expect(
-      (
-        await next.tasks.worktrees.continueOperation("p", {
-          operationId: "k",
-          targetOperationId: "c",
-        })
-      ).operation,
-    ).toEqual(continued.operation);
+    // A retention pass must keep the newly completed continue. Explicitly finish a pass here
+    // so the initial restart pass's scheduling cannot hide a mismatched fixture clock.
+    await next.receipts.purgeExpired();
+    const repeated = await next.tasks.worktrees.continueOperation("p", {
+      operationId: "k",
+      targetOperationId: "c",
+    });
+    // The same continue answers with its whole record; a new one is refused (nothing to continue).
+    expect(repeated).toEqual({ operation: continued.operation });
     expect(
       (
         await next.tasks.worktrees.continueOperation("p", {
