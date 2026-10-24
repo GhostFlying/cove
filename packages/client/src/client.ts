@@ -1526,3 +1526,27 @@ export type {
   TransferDisposition,
   Utf8Codec,
 } from "./transport-ports.js";
+
+export { openBusinessEvents } from "./business-events.js";
+export type {
+  BusinessReader,
+  BusinessReaderOptions,
+  BusinessReaderOutcome,
+} from "./business-events.js";
+export { BusinessMirror, createBusinessMirror } from "./business-mirror.js";
+export type {
+  BusinessIdentity,
+  BusinessMirrorOptions,
+  BusinessMirrorResult,
+  BusinessMirrorSnapshot,
+  ReadonlyBusinessRecord,
+} from "./business-mirror.js";
+export { ServerSession, createServerSession } from "./server-session.js";
+export type {
+  ServerBindingRequest,
+  ServerSessionOptions,
+  ServerSessionOutcome,
+  ServerSessionSnapshot,
+  TrackedOperation,
+  VerifiedServerBinding,
+} from "./server-session.js";

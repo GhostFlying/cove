@@ -109,6 +109,32 @@ TEMP journal 溢出、提交后结果无法送回、投影/发布异常都会使
 快照过大明确失败，不截断后声称完整；慢消费者溢出 reset/关闭，客户端视图不再 current。
 取消、断开和撤销释放订阅、快照 lease 与队列。事件窗口仅存本实例内存，不提供审计历史或跨重启 cursor。
 
+### 3.2 共用客户端 session 与镜像
+
+`@cove/client` 的 `createServerSession` 由 Electron main／RN 宿主各自持有。宿主的 `bind`
+先核实所选入口、peer 与稳定 serverId，返回已核实 identity、现有 ClientOptions 和独立 `/events`
+TerminalPort；session 检查 serverId 后才创建固定 instance 的 Client、连接并读取凭据。
+宿主负责 Keychain/SecureStore、网络节点和入口选择，shared client 不导入 Node/native/server。
+每次显式 reconnect 都重新核实入口并替换客户端，不把旧 PTY/controller 改绑到新实例。
+
+`openBusinessEvents` 使用注入的 Scheduler/Utf8Codec 和既有 TerminalPort，返回 `done` 与 `dispose`；
+不自行重连或执行领域写入。输入队列、凭据/设置/帧消费进展和累计快照遵守 §3.1 的上限；
+CLI events 是该 reader 的薄包装，继续由 CLI 管信号、NDJSON 与退出码。
+
+`BusinessMirror` 的多页快照暂存在独立有界 map，合法 end 后原子替换，ready 才记 current。
+失败/断开保留旧记录并明确 stale；新完整快照会清除已不存在的记录。镜像只消费有序事件，
+HTTP 返回值不写入确认资源 map；过滤空批次也推进 cursor。runtime 与 durable run 分开保留，
+顺序比资源 revision 更精确：同 revision 的新存储观察仍可替换旧投影。已完成 operation 不累计在
+资源镜像中，run 仅保留最新/active 投影，历史继续用既有 RPC。超出 map 上限明确失效，不静默截断。
+
+session 在派发写入前保留不可变 operation ID、method、原 instance 与 intent；最多保留 256 条，
+intent 总字节不超过 RPC 请求上限，容量不足在派发前拒绝。not-sent、unknown、confirmed 分别呈现；
+快照缺少 ID 不清除本地待核实记录。每次 ready 后通过原 ID 只读查询 operation.get，not-found 或
+requires_attention 均保留，不重发写入、不分配替代 ID。已终结/未发送记录由调用方显式释放。
+迟到的绑定、凭据、事件与 RPC 结果按代际隔离；旧响应不能回写较新镜像。一次 reset 可在同一
+已核实入口取新快照，连续 reset 则停止并保留 stale。所有恢复/前后台动作均不选择页面、focus、
+resize、重放输入或创建 run；suspend/dispose 只撤销本 session 拥有的客户端资源。
+
 ## 4. Host 网络和内置 Tailscale
 
 所有入口指向同一个 serverId、数据库、relay 实例和终端集。Cove 不使用系统 Tailscale：server 与客户端都只用

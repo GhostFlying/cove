@@ -621,3 +621,22 @@ GitHub 的已知 mirror list，保存原始/有效配置后把 Ubuntu URIs 改�
 确实不影响 tend 时，在 PR 描述中单独一行写 `Shepherd-Doc: not-affected <理由>`，理由不能为空；以 `Shepherd-Doc:`
 开头但格式不符的行也会失败。修改描述会重新触发该检查；push 到 main 等非 PR 事件只报告“已跳过”，不算通过。
 输出的文件名来自 PR，控制字符一律转义，打印期间停用 workflow command；step summary 中以实体转义的 `<code>` 呈现。
+
+## M3 共用业务客户端
+
+`@cove/client` 公开 `openBusinessEvents`、`createBusinessMirror`、`createServerSession`，供宿主消费
+已经编译的 package exports。共享代码只依赖 protocol 与现有 ports，不读取 CLI 文件凭据或导入原生服务端。
+CLI `_events.ts` 仅将 AbortSignal、输出回调和退出码适配到公共 reader。
+
+宿主实现 `ServerSessionOptions.bind`：先核实入口/peer/serverId，再返回可取消请求的 result，结果包含
+identity、未固定 identity 的 ClientOptions、专属 events TerminalPort 和自有资源 dispose。session
+固定 identity 后才调用现有 createClient；入口核实失败前不得取凭据。宿主使用显式 reconnect 恢复前台，
+使用 suspend 撤销连接；这些调用不停止远端服务或 PTY，也不恢复 focus/input。
+
+状态通过 snapshot/onState 读取；业务 mirror 的 stale 不代表已退出。业务 call 与 operation.get 的观察
+不会当作有序资源事件，未决 operation ID 不因断线/新快照/查无记录而丢弃或重放。详见
+[Server 架构 §3.2](server-architecture.md#32-共用客户端-session-与镜像)。
+
+局部检查可先构建 `pnpm exec tsc -b packages/client apps/cli`，再执行 client project 和
+`apps/cli/tests/m3/business-events.test.mjs`。新增 reader/mirror/session 回归直接消费编译后的公共入口，
+公共类型 consumer 不依赖 DOM/Node 类型。真实服务场景使用独立测试资源，不能指向默认用户服务。

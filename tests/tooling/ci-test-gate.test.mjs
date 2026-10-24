@@ -220,6 +220,9 @@ test("client public-contract suites reject missing and short discovery", async (
   for (const [name, minimumTests] of [
     ["connection-rpc", 66],
     ["compiled-client", 4],
+    ["business-mirror", 7],
+    ["business-reader", 7],
+    ["server-session", 9],
     ["terminal-recovery", 46],
     ["terminal-state", 11],
     ["terminal-control-input", 62],
