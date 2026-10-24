@@ -32,14 +32,14 @@
   实际 main [Engineering40070045827](https://github.com/GhostFlying/cove/actions/runs/40070045827) 与 tend40070045803 全部成功，T4 已释放完整源码。
   T3 P2 #212–#214 保留为后续；完整独立 review 和原始失败见 PR。
 - T6 [#217](https://github.com/GhostFlying/cove/pull/217) 已经完整独立 review、integration delta 和候选必需 CI 后合入。
-  当前实际 main [Engineering40072307667](https://github.com/GhostFlying/cove/actions/runs/40072307667) 待核对终态，tend40072307661 成功；
-  不把候选 CI 代作集成后的证明。原 [#211](https://github.com/GhostFlying/cove/pull/211) 保留原始测试/review，P2 #215/P3 #216 后续处理。
+  实际 main [Engineering40072307667 attempt2](https://github.com/GhostFlying/cove/actions/runs/40072307667) 全部成功，tend40072307661 成功；
+  attempt1 的失败/UNKNOWN 保留在 #217，候选 CI 不代作集成后的证明。原 [#211](https://github.com/GhostFlying/cove/pull/211) 保留原始测试/review，P2 #215/P3 #216 后续处理。
 
 ## 正在推进
 
 - T6 #176：确切 run/实例/epoch 的 `tab send`、控制者观测、分离 text/CR 回执及 receipt-only abandon。
   不抢 focus、不 resize、不重放未知输入。原候选的编译/489 项受影响覆盖及自有 raw-mode Node TUI 验证见 #211；
-  integration 仅做轻量组合验证，结果写回 #217。真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
+  integration 验证及实际 main PASS 已写回 #217。真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
 - T0b [原生 #205 / PR #208](https://github.com/GhostFlying/cove/pull/208) 仍为 draft；当前 head/原生与设备结果以 PR 和 native owner 的交接为准。
   自有 Android AAR 与实际离线 `assembleRelease` APK 构建/打包通过；含 JS/Hermes、Kotlin/Java 与 Go JNI，minSdk31/target36、arm64。
   这是 development debug signing 构建，未发布；不等于设备启动或应用网络通过。
@@ -50,11 +50,11 @@
 - T4 [#196 / draft #219](https://github.com/GhostFlying/cove/pull/219)：own checkout `cove-worktrees/m3-196-desktop`，
   当前分支 `p/luchengxuan/m3-196-desktop-integrated`，base `6b12c5df`；原 #218/分支保留，映射见 #219。
   loopback-only 邀请、真实 Electron45/electron-vite6/React19.2 工作台、独立 Keychain 凭据、operation query ledger 与多 server UI 已发布。
-  combined root build/受影响96项通过；源码修正至 `bfb177b7` 后 strict Desktop TS/bundle、scoped lint/format 通过，最终 CI/review/验收未冻结。
+  combined root build/受影响96项通过；源码修正至 `dcaeac26` 后 strict Desktop TS/bundle、scoped lint/format 通过，最终 CI/review/验收未冻结。
   实际 Electron 窗口、首屏、Keychain 配对加密保存、GUI repo/task/mount/path、run 创建和 VT 显示已执行；
   启动 ESM ready、fixture HOME、tab recipe/cwd、foreground/visibility 集成缺口已据实际失败修正，完整原始记录见 #219。
   尚无成功终端键入；reload、app quit 后同 run 存活、Keychain 冷恢复、共享节点 logout/stop、远程 GUI 仍待实际验收。
-  五轮没有发送终端输入；自有进程/fixture 和核实匹配的唯一 Keychain 项已清理；新 GUI 段须由 root 与 Native 串行安排。
+  七轮没有发送终端输入；自有进程/fixture 和核实匹配的唯一 Keychain 项已清理；新 GUI 段须由 root 与 Native 串行安排。
   支持声明仍为 macOS14 arm64 候选；本机 macOS26.3 运行不能代替14实机验证。不做安装器、签名、公证、更新或M4。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 

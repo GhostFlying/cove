@@ -124,3 +124,21 @@ Explicit task-only environment settings `COVE_DESKTOP_PROFILE` and
 selects the shared network/bootstrap home, independently of Desktop credentials.
 Tests create fresh homes/processes/profiles and never operate on an active/default
 user server, node, terminal or existing credential entry.
+
+The manual native acceptance entrypoints run only on macOS with a GUI/Keychain
+session, after the compiled workspace build:
+
+```sh
+node apps/desktop/acceptance/electron.mjs
+node apps/desktop/acceptance/network.mjs
+```
+
+The first exercises the actual rendered workbench, PTY/control, reload/quit/cold
+restore and workspace/device lifecycle. The second compiles the helper with the
+Go version in `native/tailscale/go.mod` (`COVE_GO` may select that executable),
+then runs actual tsnet peers on an isolated loopback control plane, DERP and STUN.
+It checks independent Desktop/CLI devices sharing one fixture node, explicit CLI
+logout/stop disconnection and Desktop quit leaving the shared node alive. It does
+not join a production Tailnet. Coordinate native build and GUI resources before
+running these scripts. Both preserve failed results and write cleanup status;
+only exact, verified unique test-profile Keychain entries are removed.
