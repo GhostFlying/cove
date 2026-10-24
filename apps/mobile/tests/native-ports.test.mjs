@@ -157,6 +157,16 @@ it("observes controller loss and fences state/input listeners across retirement"
     inputs,
   );
   expect(states).toHaveBeenLastCalledWith({ status: "已取得控制", canControl: true });
+  stateListener({ phase: "ready", execution: { status: "unverifiable" }, inputReady: false });
+  expect(states).toHaveBeenLastCalledWith({
+    status: expect.stringContaining("终端已连接；执行状态未核实"),
+    canControl: true,
+  });
+  stateListener({ phase: "ready", execution: { status: "exited" }, inputReady: false });
+  expect(states).toHaveBeenLastCalledWith({
+    status: "服务端已确认所选 run 退出",
+    canControl: false,
+  });
   stateListener({ phase: "unavailable", execution: { status: "unverifiable" } });
   expect(states).toHaveBeenLastCalledWith({
     status: expect.stringContaining("未知"),
