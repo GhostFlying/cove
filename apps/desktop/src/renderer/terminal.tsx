@@ -19,6 +19,25 @@ export function Terminal({ serverId, run }: { serverId: string; run: RunRef }) {
     let resize: ResizeObserver | undefined;
     let canMeasure = false;
     const view = createXtermTerminalView(element);
+    // A pointer press is a separate deliberate control intent. DOM focus alone emits no
+    // xterm input, while mount/reload must never acquire control automatically.
+    const focus = (event: PointerEvent) => {
+      if (!event.isTrusted || event.button !== 0 || !descriptor || !canMeasure) return;
+      void window.cove
+        .focusView(descriptor, view.measureGrid())
+        .then((reply) => {
+          if (!disposed && !reply.ok) setInputNotice(reply.error);
+        })
+        .catch(() => {
+          if (!disposed) setInputNotice("Terminal control could not be verified");
+        });
+    };
+    const blur = (event: FocusEvent) => {
+      if (descriptor && !element.contains(event.relatedTarget as Node | null))
+        void window.cove.blurView(descriptor);
+    };
+    element.addEventListener("pointerdown", focus);
+    element.addEventListener("focusout", blur);
     const stopMessages = window.cove.onViewMessage((target, message) => {
       if (descriptor?.viewId === target.viewId && descriptor.generation === target.generation)
         endpoint?.receiveMessage(message);
@@ -79,6 +98,8 @@ export function Terminal({ serverId, run }: { serverId: string; run: RunRef }) {
     return () => {
       disposed = true;
       resize?.disconnect();
+      element.removeEventListener("pointerdown", focus);
+      element.removeEventListener("focusout", blur);
       stopMessages();
       stopState();
       stopInput();

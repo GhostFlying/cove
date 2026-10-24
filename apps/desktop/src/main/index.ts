@@ -87,6 +87,8 @@ void app
       openLink,
       openView: (serverId, run) => desktop.openView(serverId, run),
       closeView: (descriptor) => desktop.closeView(descriptor),
+      focusView: desktop.focusView,
+      blurView: desktop.blurView,
     };
     ipcMain.handle(IPC.command, async (event, command: string, args: unknown[]) => {
       if (

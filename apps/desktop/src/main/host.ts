@@ -31,7 +31,7 @@ import {
   type RpcMethod,
 } from "@cove/protocol/rpc";
 import { RunRefSchema, type RunRef } from "@cove/protocol/identity";
-import { DEFAULT_APPEARANCE } from "@cove/protocol/profile";
+import { DEFAULT_APPEARANCE, GeometrySchema } from "@cove/protocol/profile";
 import {
   createTerminalViewBridgeHost,
   type TerminalViewBridgeHost,
@@ -523,6 +523,30 @@ export class DesktopHost {
     if (view?.descriptor.generation === descriptor.generation && typeof message === "string")
       view.bridge.receiveMessage(message);
   }
+  focusView: DesktopApi["focusView"] = (descriptor, rawGeometry) =>
+    this.attempt(async () => {
+      const view = this.views.get(descriptor.viewId);
+      if (
+        view?.descriptor.generation !== descriptor.generation ||
+        !view.controller ||
+        !this.foreground ||
+        !this.windowVisible
+      )
+        throw new Error("This terminal view is not foreground and ready for control");
+      const geometry = GeometrySchema.parse(rawGeometry);
+      view.controller.setInputTarget(true, true);
+      const outcome = await view.controller.requestFocus(geometry);
+      if (!outcome.ok)
+        throw new Error("Terminal control was not verified; inspect current state before typing");
+      return { ok: true };
+    });
+  blurView: DesktopApi["blurView"] = (descriptor) =>
+    this.attempt(async () => {
+      const view = this.views.get(descriptor.viewId);
+      if (view?.descriptor.generation !== descriptor.generation || !view.controller) return;
+      view.controller.setInputTarget(this.foreground, false);
+      await view.controller.blur();
+    });
   closeView(descriptor: ViewDescriptor): void {
     const view = this.views.get(descriptor.viewId);
     if (!view || view.descriptor.generation !== descriptor.generation) return;
