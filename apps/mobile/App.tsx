@@ -149,7 +149,10 @@ export default function App() {
       const state = JSON.parse(node.status) as { state?: string; authURL?: string };
       setStatus(`原生节点：${state.state ?? "未知"}`);
       setAuthURL(state.authURL ?? "");
-      if (state.state === "Running") {
+      // Boot starts asynchronously. Its NoState/Starting snapshot must not
+      // strand a saved server: the existing native Running/WhoIs/bootstrap
+      // path waits within its budget and proves readiness before credentials.
+      if (["Running", "NoState", "Starting"].includes(state.state ?? "")) {
         const saved = await loadServer(store);
         if (saved && ownership.current(generation)) await connect(owned, saved, generation);
       }
