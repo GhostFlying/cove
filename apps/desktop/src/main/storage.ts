@@ -137,7 +137,11 @@ export class DesktopStorage {
       await this.writeOperations(next);
     });
   }
-  acknowledgeOperation(serverId: string, operationId: string): Promise<void> {
+  acknowledgeOperation(
+    serverId: string,
+    operationId: string,
+    beforeRemove?: () => Promise<void>,
+  ): Promise<void> {
     return this.serial(async () => {
       const found = this.operations.find(
         (value) => value.serverId === serverId && value.operationId === operationId,
@@ -153,6 +157,7 @@ export class DesktopStorage {
           ))
       )
         throw new Error("An operation still in progress must remain available for verification");
+      await beforeRemove?.();
       await this.writeOperations(this.operations.filter((value) => value !== found));
     });
   }
