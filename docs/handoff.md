@@ -20,54 +20,53 @@
 
 ## 实际 main 与集成门槛
 
-当前 main：`65f07e72c063b7627d27245e78feb76c78436326`（T3 PR #209）。
+当前 main：`6b12c5df0512b18a064c681b58f9d9111eb66526`（T6 PR #217）。
 
 - T1 [#200](https://github.com/GhostFlying/cove/pull/200) → `2c45bf44`；实际 main Engineering39992275645 attempt2 与 tend39992275355 成功。
-  共用 Node adapter、Session credentials/socketPort 已可供后续消费；原始失败和独立 review 保留在 PR。
 - T0a bridge [#203](https://github.com/GhostFlying/cove/pull/203) → `932f5261`；实际 main [Engineering40064147591](https://github.com/GhostFlying/cove/actions/runs/40064147591) 成功。
-- T2 业务 snapshot/events 与公共 CLI [#206](https://github.com/GhostFlying/cove/pull/206) 已合入；
-  实际 main `82486ef5` 的 [Engineering40065888728](https://github.com/GhostFlying/cove/actions/runs/40065888728) 与 tend40065888752 成功。
-  原 draft [#202](https://github.com/GhostFlying/cove/pull/202) 保留完整失败/修正历史；P2 后续为 #207。
-- T3 shared reader/mirror/ServerSession [#209](https://github.com/GhostFlying/cove/pull/209) 已合入上述当前 main；候选 CI 与完整独立 review 已满足合入条件。
-  **实际 main [Engineering40070045827](https://github.com/GhostFlying/cove/actions/runs/40070045827) 仍在运行**；tend40070045803 已成功。
-  在实际 main 通过前不放行 T4 产品编码；不把候选 CI 代作集成后的证明。T3 P2 后续为 #212–#214。
-- T6 [替代 draft #217](https://github.com/GhostFlying/cove/pull/217) 基于当前 main；原 [#211](https://github.com/GhostFlying/cove/pull/211) 暂保留，待协调者确认替代后关闭。
-  已评审原提交 `085c2d60` → integration cherry-pick `3d97a3cb`；原分支未改写。
-  仅 inventory/tooling fixture 自动合并，无人工冲突；其余 35 个 feature/docs blob 与原候选相同。
-  原完整 [review](https://github.com/GhostFlying/cove/pull/211#issuecomment-6380893516) 无 P0/P1；P2 #215、P3 #216 保留为后续，不夹带修复。
-  原候选 Engineering40069440835 与 tend40069440812 已成功，只证明旧 base 上的 `085c2d60`，不代替 #217 的证据。
-  替代 PR 的最终 head、所需 CI 与同 reviewer integration/delta 仍待核对；尚未合入，不代表实际 main 可用。
+- T2 snapshot/events 与公共 CLI [#206](https://github.com/GhostFlying/cove/pull/206) 已合入；
+  实际 main `82486ef5` 的 Engineering40065888728 与 tend40065888752 成功；原 #202 保留失败/修正历史，P2 #207 后续。
+- T3 shared reader/mirror/ServerSession [#209](https://github.com/GhostFlying/cove/pull/209) 已合入；完整 review 无 P0/P1，P2 #212–#214 后续。
+- T6 [#217](https://github.com/GhostFlying/cove/pull/217) 已合入上述当前 main；候选 Engineering40070737219 与完整/integration review 通过。
+  实际 main [Engineering40072307667 attempt2](https://github.com/GhostFlying/cove/actions/runs/40072307667) 与
+  [tend40072307661](https://github.com/GhostFlying/cove/actions/runs/40072307661) 均成功，T4 与 Native 组合实现依赖已放行。
+  原 #211 保留完整失败/review 历史；P2 #215、P3 #216 保留为后续。
 
 ## 正在推进
 
-- T6 #176：确切 run/实例/epoch 的 `tab send`、控制者观测、分离 text/CR 回执及 receipt-only abandon。
-  不抢 focus、不 resize、不重放未知输入。原候选的编译/489 项受影响覆盖及自有 raw-mode Node TUI 验证见 #211；
-  integration 仅做轻量组合验证，结果写回 #217。真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
-- T0b [原生 #205 / PR #208](https://github.com/GhostFlying/cove/pull/208) 当前 head `fc728567`，仍为 draft。
-  自有 Android AAR 与实际离线 `assembleRelease` APK 构建/打包通过；含 JS/Hermes、Kotlin/Java 与 Go JNI，minSdk31/target36、arm64。
-  这是 development debug signing 构建，未发布；不等于设备启动或应用网络通过。
-  Go mobile 与 compiled app ports 作者检查已通过；实际设备 login/WhoIs/pair/RPC/WS/cancel/前后台生命周期仍待验证。
-  fresh Dora 设备段正在执行，lease、安装、载入与网络结果待 native owner 核对；不能声明零占用或设备验证通过。
-  iOS 实际 unsigned app 编译/link 待做；已有 profile 不覆盖所查闲置物理设备，不自动注册设备或改签名。
-  旧 head CI 的 held-PID 夹具失败保留在 #210；新 head 的 review/CI/原生与设备证据需分别核对。
-- T4 [#196](https://github.com/GhostFlying/cove/issues/196#issuecomment-6380894007) 已完成新 owner 的只读准备与文件计划；
-  checkout `cove-worktrees/m3-196-desktop`，等待 T3 实际 main 门槛后开始产品编码。
-  方向为 Electron main 中 ServerSession/TerminalController、Keychain 独立设备凭据与 bundled view；不经 CLI 子进程做普通业务写入。
-  初次使用连接 CLI 安装的独立 server；退出 app 不停止 server/run。Electron/Playwright 真配对验证尚待执行。
-  现有 invite 至少含 SSH/tsnet 入口的限制阻挡首次 loopback 配对；T4 获准在后续 PR 窄修 auth 邀请路径，尚未实施，不混入 T6。
+- T0b [#205](https://github.com/GhostFlying/cove/issues/205)：旧 draft [#208](https://github.com/GhostFlying/cove/pull/208) 保留到 `d14c47b7`。
+  新 integration branch `p/luchengxuan/m3-205-native-integration` 基于 main `6b12c5df`，16 个原子 cherry-pick 的映射记入替代 PR；旧分支未改写。
+  组合 frozen install、全 workspace build、tooling 73 项及 compiled client/mobile 36 项作者检查通过；最终 CI/review 待新 head。
+  Android arm64 AAR、含离线 JS/Hermes/JNI 的实际 APK 构建通过；初始 minSdk31/target36 不变，development signing 非发布签名。
+  fresh 自有本地 Android14/API34 arm64 AVD 已实际 Login→Running、WhoIs/serverId、单次兑换与 SecureStore 保存通过。
+  随后 Reconnect 停在 Boot `NoState`，RPC/WS/cancel/lifecycle 未执行；private app 启动验证路径已修，待组合 APK 实际复验。
+  Dora 与本地 nc 辅助探针均未证明回程，不能据此归因云路由或 native 网络失败；旧失败/UNKNOWN 全保留。
+  iOS arm64/min16 unsigned 实际 app compile/link 通过；自有 iOS18.1 arm64 Simulator 的真实模块加载、Login/HTTP/WhoIs/兑换通过。
+  Simulator SecureStore persist 失败（redemption 已 handed-off，未重放）；同 API/options 的 synthetic write/read/delete probe 待实际运行。
+  当前 Simulator app 无 Keychain entitlement，具体失败类别仍待 probe；物理设备签名前提缺失，未申请注册或修改用户签名。
+  Android14 与 iOS Simulator 是中间功能证据，不代表 API31、物理机、真实 Tailnet 或 T7 完整通过。
+  原 CI held-PID 夹具失败见 #210；新候选须有自己的 CI、完整独立 review 与组合实际链证据。
+- T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `d1267afe`（product `833c06b8`），base `6b12c5df`。
+  完整 review/delta 的原 P1/P2 已关闭，P3 #220 后续；Engineering40079052218 与 tend40079052207/40079174469 成功。
+  实际 Electron45 profile 双进程、quit/reopen ledger 与 14 项 scoped tests、inventory60 通过。
+  用户明确保持本机锁屏，GUI input/reload/quit/cold/paste 未执行、不豁免；不绕过 foreground guard。
+  devbox fullcheck 仍在执行，已发现 S1/S9 测试环境假设失败，待 T4 批次修正；shared-node 非 GUI 编译链证明尚待执行。
+- T6 精确 run/实例/epoch 的 `tab send`、控制者观测、text/CR 分离回执及 receipt-only abandon 已交付当前 main。
+  不抢 focus、不 resize、不重放未知输入；真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 
 ## 单写者与本地资源
 
-- Native owner 管理 `native/tailscale` 与 `apps/mobile`；root manifests/workspace/lock 写权已由 root 移交 T4。
-  不采用别的 checkout 未提交文件。
-  T3 owns shared client 与 CLI `_events.ts`；T6 owns protocol/server/worker/tab CLI 闭包，handoff 本轮由 T6 受托更新。
-- inventory/tooling fixture 写权由 root 串行移交；保留 T3 mirror7/reader7/session10 与 T6 protocol4/server8/worker42/CLI suite3。
-  各 worktree 的 node_modules、dist、tsbuildinfo、端口与测试夹具独立。
-- 本机只做低并发局部检查，root 安排重资源自然交接；不跑 stress/load 或长时并行循环。Linux 使用 `ssh devbox`。
-  不操作既有用户服务、终端或共享 pool；中断不证明旧进程退出，恢复前确认 task-owned 进程/命令/资源归属。
-- 用 fresh native implementation owner、独立 reviewer 与原子 Conventional Commits；不得 agent/bot 身份或 co-author。
-  保护 main：只允许 GitHub rebase & merge，禁止 force push、删除、直接推送和 squash；逐次记录原→rebase 后 commit 映射。
+- Native owner 管理 `native/tailscale`、`apps/mobile`，当前持 root manifest/lock/TS/Vitest 与 mobile 所需 CI/tooling fixture 单写权，
+  以及本轮 handoff/development integration 文档；T4 只持其协调的单文件修正，不写这些共享文件。
+  保留当前 main 的 T2/T3/T6 行为、inventory 计数和依赖限制；不采用别的 checkout 未提交文件。
+- Native 当前本地 runtime 已清理：无自有活跃 AVD、Simulator、Dora lease、server/PTY/control 夹具；下一轮必须创建 fresh 自有资源。
+  历史一次 Dora reverse mapping 删除 UNKNOWN 独立保留；lease 已释放，禁止再操作旧 SID 或猜名清理。
+- 本机 heavy token 当前 Native，串行 2 CPU；其他作者重检查由 root 在安全终态安排交接，不打断在途命令。
+  各 worktree 的 node_modules、dist、tsbuildinfo、端口、测试夹具独立；Linux 使用 `ssh devbox`。
+  不操作既有用户服务、终端、AVD/Simulator 或共享 pool；中断不证明旧进程退出，恢复先确认资源归属。
+- fresh native implementation owner 与独立 reviewer；原子 Conventional Commits，不得 agent/bot 身份或 co-author。
+  main 只允许 GitHub rebase & merge，禁止 force push、删除、直接推送和 squash；保留原→集成→main commit 映射。
 
 ## 已建后续
 
