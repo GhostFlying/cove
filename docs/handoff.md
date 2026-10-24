@@ -20,17 +20,21 @@
 
 ## 实际 main 与集成门槛
 
-当前 main：`6b12c5df0512b18a064c681b58f9d9111eb66526`（T6 PR #217）。
+当前 main：`169002fca2e2b1fa40657c5a109995a01e29081e`（服务卸载顺序 PR #225 已合入）。
 
 - T1 [#200](https://github.com/GhostFlying/cove/pull/200) → `2c45bf44`；实际 main Engineering39992275645 attempt2 与 tend39992275355 成功。
 - T0a bridge [#203](https://github.com/GhostFlying/cove/pull/203) → `932f5261`；实际 main [Engineering40064147591](https://github.com/GhostFlying/cove/actions/runs/40064147591) 成功。
 - T2 snapshot/events 与公共 CLI [#206](https://github.com/GhostFlying/cove/pull/206) 已合入；
   实际 main `82486ef5` 的 Engineering40065888728 与 tend40065888752 成功；原 #202 保留失败/修正历史，P2 #207 后续。
 - T3 shared reader/mirror/ServerSession [#209](https://github.com/GhostFlying/cove/pull/209) 已合入；完整 review 无 P0/P1，P2 #212–#214 后续。
-- T6 [#217](https://github.com/GhostFlying/cove/pull/217) 已合入上述当前 main；候选 Engineering40070737219 与完整/integration review 通过。
+- T6 [#217](https://github.com/GhostFlying/cove/pull/217) 已合入 `6b12c5df`；候选 Engineering40070737219 与完整/integration review 通过。
   实际 main [Engineering40072307667 attempt2](https://github.com/GhostFlying/cove/actions/runs/40072307667) 与
   [tend40072307661](https://github.com/GhostFlying/cove/actions/runs/40072307661) 均成功，T4 与 Native 组合实现依赖已放行。
   原 #211 保留完整失败/review 历史；P2 #215、P3 #216 保留为后续。
+- [#225](https://github.com/GhostFlying/cove/pull/225) 在完整 review 与全部所需 CI 通过后已 rebase & merge；
+  `eab8f691`→`169002fc` 的作者、完整 message、stable patch 与 tree 映射全等，parent 为 `6b12c5df`。
+  实际 main [Engineering40086300733](https://github.com/GhostFlying/cove/actions/runs/40086300733) 在途，
+  [tend40086300726](https://github.com/GhostFlying/cove/actions/runs/40086300726) 成功；尚不能称 actual-main Engineering 通过。
 
 ## 正在推进
 
@@ -50,18 +54,22 @@
 - T4 [#196 / PR #219](https://github.com/GhostFlying/cove/pull/219) head `6d04294a`，base `6b12c5df`。
   独立 full/原 delta/新 delivery delta 无 open P0/P1/P2，P3 #220 后续；Engineering40082695647+tend40082695603 全成功。
   早期 profile 双进程/quit-reopen ledger 与局部检查保留；GUI/input/reload/quit/cold/paste 因用户保持 Mac 锁屏未执行，不豁免或称 Keychain/input 通过。
-  devbox corrected-env 第1 shard 62 files：795 PASS/1 service-uninstall FAIL/0 skip，后2 shard 未执行；shared-node 非 GUI proof 由 owner 推进，未先记成功。
-  独立 delivery [#223](https://github.com/GhostFlying/cove/pull/223) `e6192533` CI/full review 成功，但 pure-base external 4 PASS/1 S1 uninstall FAIL 保留，未合入。
-  同 #224 的 stop→disable linked-unit 顺序错误由 [#225](https://github.com/GhostFlying/cove/pull/225) 修正：fresh review 无 P0–P3，
-  自有 systemd backend6/router2/safety16 检查与8 units 清理通过；CI40085072249 在途，尚未合入或代称全部外部 S1 通过。
+  devbox corrected-env 第1 shard 62 files：795 PASS/1 service-uninstall FAIL/0 skip，后2 shard 未执行。
+  Linux shared-node 非 GUI proof `38147` 四项 PASS、own fixture 清理通过；使用 fixture cipher，
+  不代表 GUI/Keychain/foreground/input/真实 Tailnet 通过；前两次 fixture 遗漏 controlURL 的 FAIL 保留，未归为产品故障。
+  独立 delivery [#223](https://github.com/GhostFlying/cove/pull/223) `e6192533` CI/fresh full review 成功，尚未合入；
+  pure-base external 4 PASS/1 旧 S1 uninstall FAIL 原样保留，待与当前 `169002fc` 组合重验5 cases及新 base 影响。
+  #224 的 stop→disable linked-unit 顺序错误已由上述 #225 修正合入；fresh review 无 P0–P3，
+  自有 systemd backend6/router2/safety16 检查与8 units 清理通过，不代称 #223 或完整外部 serial 已通过。
 - T6 精确 run/实例/epoch 的 `tab send`、控制者观测、text/CR 分离回执及 receipt-only abandon 已交付当前 main。
   不抢 focus、不 resize、不重放未知输入；真实 Claude Code/Codex 提交行为与吞吐未执行，不冒充通过。
 - T5 Mobile 产品导航、T7 集成试用仍按真实依赖派发；尚无完整 Desktop/Mobile 产品交付或 M3 退出结论。
 
 ## 单写者与本地资源
 
-- Native owner 管理 `native/tailscale`、`apps/mobile`，本轮保留 root manifest/lock/TS/Vitest 与 mobile CI/tooling 单写权，
-  最后只集中更新 README/handoff；root 按实际需要移交。T4 的 `runtime-closure.mjs` 与 #225 的 service/tend 文档由各自 owner 独占，Native 不碰。
+- Native owner 管理 `native/tailscale`、`apps/mobile`；最终产品源码冻结 `9df608b5`，root manifest/lock/TS/Vitest、
+  mobile CI/tooling 与文档单写权已归还 root，本次仅获 `docs/handoff.md` 的集中 integration 更新权，提交后归还。
+  T4 的 `runtime-closure.mjs` 与 #225 的 service/tend 文档由各自 owner 独占，Native 不碰。
   保留 main 的 T2/T3/T6 行为/计数；各 checkout 的安装、dist、tsbuildinfo 与运行资源独立，不采用他人未提交文件。
 - Native 所有实际检查已终态，own AVD/Simulator/Dora lease/server/PTY/control/日志捕获均已清理，本地 heavy token 已归还 root。
   历史一次 Dora reverse 删除 UNKNOWN 与已核实 lease release 分开保留；不操作旧 SID 或猜名清理。
