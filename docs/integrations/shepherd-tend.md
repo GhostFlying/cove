@@ -396,6 +396,8 @@ M2 T3 安装、服务管理与重启影响（PR #162，合入于 `b146637`；ser
   server 持有数据目录却连不上（握手超时、容量拒绝、卡住）时状态未知：同样以 2 退出，输出
   `{ action, confirmed: false, state: "unknown", reason, impact: null }`；带 `--yes` 时照常执行（stderr 注明状态未知），
   成功输出中的 `impact` 为 null。只有证明已停止（没有进程持有实例锁）的 server 不需要确认。
+  **PENDING #224**：Linux `uninstall` 在服务定义仍可用时先停止已注册单元，再禁用注册、移除单元文件并重载管理器；
+  也适用于通过 `systemctl --user link` 注册且已经停止的单元。停止或禁用失败仍以 1 退出，不继续删除安装内容。
   `upgrade` 在安装并激活之后、重启之前再查一次 server：状态或实例变了（例如安装期间有 server 启动）就重新确认，
   这时的拒绝输出另带 `build`，新 build 已安装并激活但没有重启（stderr 注明）。
   `restart`/`upgrade` 成功时输出 `{ serverId, previousRelayInstanceId, relayInstanceId, previousBuild, buildVersion, service, impact }`
@@ -668,3 +670,4 @@ cove tab send <tabId> --operation-id <id> --run <runId> \
 | 2026-10-23 | PR #202 M3 T2（未合入）                                                         | 新增独立业务 snapshot/cursor/events 的 PENDING 契约与 cove events NDJSON/过滤/reset/退出码；公共 CLI 经已合入 T1 共用 Session 接入，未标 main AVAILABLE。当前资源快照明确历史选择，未决 operation ID 不能因 reset 遗忘，持久与 runtime 事实分离，未知结果不重放。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
 | 2026-10-24 | M3 T6 #176（未合入） | 新增 PENDING tab.send、tab.get.control、4 KiB/8 KiB 双重输入边界、确切 run/实例/epoch 绑定、前缀封闭与分离 submit 回执；CLI 保存 send 后仅查询，显式 abandon 不撤销未知副作用，不允许 continue。 |
+| 2026-10-24 | #224（未合入） | Linux uninstall 对已注册服务先 stop 再 disable，避免 linked unit 的定义被移除后 stop 报 not loaded；停止与禁用的错误继续保留，失败时不继续删除安装内容。 |

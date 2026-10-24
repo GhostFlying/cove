@@ -555,8 +555,12 @@ class SystemdUser implements ServiceBackend {
   }
 
   async unregister(): Promise<void> {
-    // `disable --now` stops the unit and removes every symlink to it, a `link` included.
-    if (this.status().registered) this.systemctl("disable", "--now", this.unit);
+    // Disabling also removes `link` registrations and reloads the manager. Stop first while
+    // its definition is still discoverable; `disable --now` can otherwise fail to find it.
+    if (this.status().registered) {
+      await this.stop();
+      this.systemctl("disable", this.unit);
+    }
     await rm(this.unitPath, { force: true });
     run("systemctl", ["--user", "daemon-reload"]);
     run("systemctl", ["--user", "reset-failed", this.unit]);
