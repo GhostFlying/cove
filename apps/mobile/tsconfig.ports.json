@@ -20,7 +20,8 @@
     "src/mobile-host.ts",
     "src/navigation.ts",
     "src/presentation.ts",
-    "src/action-error.ts"
+    "src/action-error.ts",
+    "src/read-observation.ts"
   ],
   "references": [
     {
