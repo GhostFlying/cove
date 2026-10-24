@@ -29,7 +29,7 @@
 - T0a 终端 view bridge #203 已合入；候选两提交到 main 的映射与最终 tree 已核对。
   实际 main Engineering40064147591 尚待确认；不把候选 CI 通过当作依赖组合后的 main 证明。
 - T2 业务事件原 draft [#202](https://github.com/GhostFlying/cove/pull/202) 保留全部失败/修正/CI，
-  当前在 fresh integration branch 上完成公共 CLI 收尾；替代 PR、最终 review/CI 与实际 main 是后续依赖门槛。
+  当前替代 [#206](https://github.com/GhostFlying/cove/pull/206) 已完成公共 CLI 与编译验收；最终 review/CI 与实际 main 是后续依赖门槛。
   M2 已接受退出；T0–T7、试用与原始失败/局限的历史在 [#185](https://github.com/GhostFlying/cove/issues/185)、[M2](milestones/m2.md) 与 Git。
 
 已实现的范围（设计写回见 [Server 架构 §§4、5、9](server-architecture.md#4-host-网络和内置-tailscale)、
@@ -50,7 +50,7 @@
 ## M3 实施与协调接管
 
 - 当前 root 为 M3 唯一协调者，维护阶段文档、派发与集成；Desktop/Mobile/shared 规划调查和 PR191 完整独立 review 已完成。
-  PR191 计划及授权已合入；T1 已过实际 main，T0a bridge 已合入待 main，T2 正在收尾公共事件 CLI。
+  PR191 计划及授权已合入；T1 已过实际 main，T0a bridge 已合入待 main，T2 #206 等待完整独立 review/CI。
   T3 等 T2 最终契约/实际 main 与桥依赖检查后派发；T0 mobile/Go 原生验证仍属 #192，不因桥合入而记双平台已通过。
 - 用户授权当前 Codex root 接续 Claude session `0433f23a-9e5f-4904-8d5f-d524dcaab09f`；旧会话只作历史参考。
   root 是唯一协调者，负责派发、review 路由、集成与交接，不实施运行时代码。

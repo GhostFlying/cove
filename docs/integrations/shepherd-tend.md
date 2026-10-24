@@ -519,9 +519,9 @@ M1 之后（方向已接受，未排期，见设计 §7.1“已决定”）：
 - 启动配方的有界环境变量与每 run 临时值（见 §5）。
 - 有版本的 CLI JSON 契约（见 §6）。
 
-### 3.1 业务事件（PENDING，PR #202）
+### 3.1 业务事件（PENDING，PR #206）
 
-PR #202 的替代 PR 实现业务事件与公共 CLI，尚未合入 main；它使用已合入 T1 的共用 Session 凭据与按路径 socket port。
+PR #206 替代 #202，实现业务事件与公共 CLI，尚未合入 main；它使用已合入 T1 的共用 Session 凭据与按路径 socket port。
 最终命令为 `cove events --json [--since CURSOR_JSON] [--kind KIND]...`，接受既有本机/配对 server 选择参数。
 这是与 GUI 相同领域的只读 NDJSON 流，不执行 shell、focus、resize 或任何输入，不自动重连或重放写操作。
 `--since` 接受完整 cursor JSON 对象；v1 仅按 kind 过滤，没有 task/archive 过滤。
