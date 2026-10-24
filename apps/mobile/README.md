@@ -103,6 +103,10 @@ safe reasons. Original Go errors, control-plane bodies, credentials and URLs are
 never reflected into these diagnostics or default logs. A failure remains an
 unverified outcome; its reason does not authorize automatically repeating login,
 logout, RPC or terminal input.
+Pairing failures additionally retain a fixed stage and the request/redemption
+delivery dispositions. An identity check may have reached the server while
+redemption is still `not-sent`; a persistence failure can follow a handed-off
+redemption. These diagnostics never authorize repeating a redemption.
 
 The fixture's optional control URL is an explicit local bootstrap setting. Edit
 it and reconnect before login; the field is not persisted. The native node root
