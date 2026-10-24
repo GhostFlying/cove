@@ -126,16 +126,28 @@ async function launch() {
     arch: process.arch,
   }));
   page = await electron.firstWindow();
-  // CDP clicks alone do not establish macOS foreground. Activate only this test window.
-  await electron.evaluate(({ app, BrowserWindow }) => {
-    app.focus({ steal: true });
-    BrowserWindow.getAllWindows()[0].focus();
-  });
+  await activateWindow();
   page.setDefaultTimeout(30_000);
   page.on("pageerror", (error) => errors.push(error.message));
   await page.waitForFunction(async () => (await window.cove.snapshot()).ready);
   assert.equal(await page.title(), "Cove");
   assert.match(page.url(), /^file:/);
+}
+async function activateWindow() {
+  // Keychain may have changed OS focus since launch; CDP clicks do not activate a Mac app.
+  await electron.evaluate(({ app, BrowserWindow }) => {
+    app.focus({ steal: true });
+    BrowserWindow.getAllWindows()[0].focus();
+  });
+  await waitFor(
+    "own Electron OS foreground",
+    () =>
+      electron.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        return window.isFocused() && window.isVisible();
+      }),
+    5_000,
+  );
 }
 async function dialog(name, action) {
   const modal = page.getByRole("dialog", { name, exact: true });
@@ -226,6 +238,8 @@ try {
       .getByRole("button", { name: "Trial shell", exact: true })
       .click();
     await page.locator(".terminal-surface .xterm-screen").waitFor();
+    await page.getByText("ready", { exact: true }).waitFor();
+    await activateWindow();
     await page.locator(".terminal-surface").click({ position: { x: 45, y: 35 } });
     await page.getByText("Input ready", { exact: false }).waitFor();
     const marker = join(fixture.root, "typed-once");
