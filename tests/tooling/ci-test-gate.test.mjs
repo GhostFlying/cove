@@ -222,7 +222,7 @@ test("client public-contract suites reject missing and short discovery", async (
     ["compiled-client", 4],
     ["business-mirror", 7],
     ["business-reader", 7],
-    ["server-session", 9],
+    ["server-session", 10],
     ["terminal-recovery", 46],
     ["terminal-state", 11],
     ["terminal-control-input", 62],

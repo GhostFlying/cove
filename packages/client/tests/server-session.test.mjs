@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import { createServerSession } from "@cove/client";
+import { bootstrapFailure } from "@cove/protocol/bootstrap";
 import {
   batch,
   bindingFixture,
@@ -74,6 +75,23 @@ test("wrong stable server identity is rejected before Client construction or cre
   expect(await value.connect()).toEqual({ ok: false, reason: "entry-identity" });
   expect(f.credentials).toBe(0);
   value.dispose();
+  const refused = bindingFixture();
+  refused.binding.client.http = {
+    post(request, callbacks) {
+      queueMicrotask(() =>
+        callbacks.onResponse({
+          status: 403,
+          headers: {},
+          body: codec.encode(JSON.stringify(bootstrapFailure("DEVICE_REVOKED"))),
+        }),
+      );
+      return { cancel: () => "not-sent" };
+    },
+  };
+  const rejected = session([refused]);
+  expect(await rejected.connect()).toEqual({ ok: false, reason: "DEVICE_REVOKED" });
+  expect(rejected.snapshot().lastError).toBe("DEVICE_REVOKED");
+  rejected.dispose();
 });
 
 test("unknown write survives reset, absent snapshot, not-found query and server restart without replay", async () => {
@@ -225,4 +243,25 @@ test("retirement of a pending write preserves unknown identity and cancels only 
   expect(f.calls).toHaveLength(1);
   expect(f.events.latest().cancelled).toBe(1);
   value.dispose();
+});
+
+test("cleanup re-entry cannot resurrect a superseded session or send cancelled writes", async () => {
+  const f = bindingFixture();
+  const value = session([f]);
+  await value.connect();
+  f.binding.dispose = () => value.dispose();
+  expect((await value.reconnect()).ok).toBe(false);
+  expect(value.snapshot().status).toBe("disposed");
+  const next = bindingFixture();
+  const other = session([next]);
+  await other.connect();
+  const writing = other.call("config.set", {
+    operationId: "unsent",
+    patch: { workspaceRoot: "/new" },
+  });
+  other.suspend();
+  expect((await writing).kind).toBe("operation-not-sent");
+  expect(other.snapshot().operations[0].delivery).toBe("not-sent");
+  expect(next.calls).toHaveLength(0);
+  other.dispose();
 });

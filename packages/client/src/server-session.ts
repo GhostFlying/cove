@@ -20,6 +20,7 @@ import {
   type CallOutcome,
   type Client,
   type ClientOptions,
+  type ClientError,
   type OperationReference,
   type TerminalOpenOptions,
   type TerminalOpenOutcome,
@@ -103,6 +104,12 @@ function safeDispose(value: Disposable | undefined): void {
     /* Own cleanup never prevents fencing and settlement. */
   }
 }
+const connectionFailure = (error: ClientError | undefined): string =>
+  error
+    ? error.category === "remote-bootstrap"
+      ? error.reason
+      : `${error.category}:${error.reason}`
+    : "client-disconnected";
 const failedCall = <T>(
   reason: "invalid-state" | "disposed" | "capacity" | "invalid-request" | "operation-conflict",
 ): CallOutcome<T> => ({ ok: false, kind: "local-error", error: { category: "local", reason } });
@@ -411,12 +418,12 @@ export class ServerSession implements Disposable {
         snapshot.status !== "connected" &&
         snapshot.status !== "connecting"
       )
-        this.fail(attempt, "client-disconnected");
+        this.fail(attempt, connectionFailure(snapshot.lastError));
     });
     const connected = await client.connect();
     if (!this.current(attempt)) return;
     if (!connected.ok) {
-      this.fail(attempt, "client-connect");
+      this.fail(attempt, connectionFailure(connected.error));
       return;
     }
     safeDispose(attempt.timer);
