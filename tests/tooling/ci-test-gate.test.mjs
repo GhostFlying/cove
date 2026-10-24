@@ -262,7 +262,7 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
   for (const name of ["view-input", "view-recovery", "view-lifecycle"]) {
     const file = `packages/terminal-web/tests/${name}.test.mjs`;
     const suite = requiredSuites.find((item) => item.file === file);
-    const minimumTests = { "view-input": 8, "view-recovery": 6, "view-lifecycle": 19 }[name];
+    const minimumTests = { "view-input": 9, "view-recovery": 6, "view-lifecycle": 19 }[name];
     expect(suite).toMatchObject({ project: "terminal-web", minimumTests });
     expect(files).toContain(file);
     expect(() => verifyDiscovery([], [file], [suite])).toThrow(
@@ -277,6 +277,29 @@ test("all three V1 browser suites reject missing and empty discovery", async () 
       `discovered ${minimumTests - 1} tests; needs ${minimumTests}`,
     );
   }
+});
+
+test("native input requires four declarations and the three exact timer expansions", async () => {
+  const file = "packages/terminal-web/tests/unit/native-input.test.mjs";
+  const suite = requiredSuites.find((item) => item.file === file);
+  expect(suite).toMatchObject({ project: "terminal-web-unit", minimumTests: 4 });
+  expect(await readVitestOwnedTestFiles()).toContain(file);
+  const discovery = Array.from({ length: 4 }, (_, index) => ({
+    projectName: "terminal-web-unit",
+    file: resolve(root, file),
+    name: `native trace ${index}`,
+  }));
+  expect(() => verifyDiscovery(discovery.slice(0, -1), [file], [suite])).toThrow(
+    "discovered 3 tests; needs 4",
+  );
+  expect(verifyDiscovery(discovery, [file], [suite]).found.get(`terminal-web-unit:${file}`)).toBe(
+    4,
+  );
+  expect(finiteRuntimeExpansions.find((item) => item.file === file)?.names).toEqual([
+    "native committed ASCII is emitted once with legacy timer before-insertion",
+    "native committed ASCII is emitted once with legacy timer after-insertion",
+    "native committed ASCII is emitted once with legacy timer after-input",
+  ]);
 });
 
 test("terminal-web package test runs its registered unit, probe and view projects", async () => {
@@ -1375,7 +1398,7 @@ test("rejects removal of a gate test below the required floor", () => {
       file: resolve(root, first),
       name: `project reference ${index}`,
     })),
-    ...Array.from({ length: 45 }, (_, index) => ({
+    ...Array.from({ length: 46 }, (_, index) => ({
       projectName: "tooling",
       file: resolve(root, second),
       name: `gate ${index}`,
@@ -1383,7 +1406,7 @@ test("rejects removal of a gate test below the required floor", () => {
   ];
   expect(() => verifyDiscovery(complete, [first, second], requiredGateSuites)).not.toThrow();
   expect(() => verifyDiscovery(complete.slice(0, -1), [first, second], requiredGateSuites)).toThrow(
-    /discovered 44 tests; needs 45/,
+    /discovered 45 tests; needs 46/,
   );
 });
 
