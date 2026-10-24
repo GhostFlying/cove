@@ -13,6 +13,8 @@
     "apps/mobile/android/**",
     "apps/mobile/ios/**",
     "apps/mobile/modules/cove-tsnet/generated/**",
+    "apps/mobile/modules/cove-tsnet/android/build/**",
+    "apps/mobile/modules/cove-tsnet/android/.gradle/**",
     "apps/mobile/src/terminal-document.generated.ts"
   ],
   "rules": {

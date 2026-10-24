@@ -101,7 +101,13 @@ export class NativePorts {
   dispose(): void {
     if (this.closed) return;
     this.closed = true;
-    this.driver.stop();
+    // A destroyed Expo bridge may reject even Stop. Local callers still need
+    // their uncertain operations settled; native lifecycle hooks own teardown.
+    try {
+      this.driver.stop();
+    } catch {
+      /* Native completion remains unverified. */
+    }
     const pending = [...this.handlers.values()];
     this.handlers.clear();
     for (const handler of pending) handler.failed();
@@ -229,14 +235,21 @@ export class NativePorts {
             opened = true;
             final = "handed-off";
             callbacks.onOpen(connection);
-          } else if (value.type === "socket-close") close();
-          else if (opened && (value.type === "socket-text" || value.type === "socket-binary")) {
+          } else if (value.type === "socket-close") {
+            // A failed upgrade can already have written HTTP bytes. Preserve
+            // native's boundary even when no onOpen callback was delivered.
+            final = value.disposition ?? "unknown";
+            close();
+          } else if (opened && (value.type === "socket-text" || value.type === "socket-binary")) {
             const body = decodeBase64(value.body ?? "", MAX_BYTES);
             if (value.type === "socket-text") callbacks.onText(body);
             else callbacks.onBinary(body);
           } else throw new Error("Invalid native socket event");
         },
-        failed: close,
+        failed: () => {
+          if (!settled) final = "unknown";
+          close();
+        },
       });
       if (!this.driver.openSocket(entry, id, path)) {
         this.handlers.delete(id);
