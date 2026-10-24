@@ -11,6 +11,7 @@ const protocol = join(root, "packages/protocol");
 const client = join(root, "packages/client");
 const worker = join(root, "packages/terminal-worker");
 const server = join(root, "apps/server");
+const mobile = join(root, "apps/mobile");
 const directories: string[] = [];
 
 afterEach(async () => {
@@ -94,6 +95,27 @@ test("real package manifests stay within their execution environments", async ()
   expect(await readFile(join(web, "dist/src/xterm-view.d.ts"), "utf8")).toContain(
     "createXtermTerminalView",
   );
+});
+
+test("mobile host consumes built client/view exports and isolates its Expo config compiler", async () => {
+  const manifest = JSON.parse(await readFile(join(mobile, "package.json"), "utf8"));
+  expect(manifest.dependencies["@cove/client"]).toBe("workspace:*");
+  expect(manifest.dependencies["@cove/protocol"]).toBe("workspace:*");
+  expect(manifest.dependencies["@cove/terminal-web"]).toBe("workspace:*");
+  expect(manifest.dependencies["@cove/server"]).toBeUndefined();
+  expect(manifest.dependencies["@cove/terminal-worker"]).toBeUndefined();
+  expect(manifest.dependencies["node-pty"]).toBeUndefined();
+  expect(manifest.devDependencies.typescript).toBe("5.9.3");
+  expect(manifest.scripts.typecheck).toContain("--dir ../.. exec tsc");
+  const rootManifest = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  expect(rootManifest.devDependencies.typescript).toBe("7.0.2");
+  const terminalEntry = await readFile(join(mobile, "terminal/main.ts"), "utf8");
+  expect(terminalEntry).toContain('from "@cove/terminal-web/view-bridge"');
+  expect(terminalEntry).toContain('from "@cove/terminal-web/xterm-view"');
+  expect(terminalEntry).not.toContain("/src/");
+  const nativeEntry = await readFile(join(mobile, "src/native-ports.ts"), "utf8");
+  expect(nativeEntry).toContain('from "@cove/client"');
+  expect(nativeEntry).not.toMatch(/from ["'](?:node:|@cove\/server|@cove\/terminal-worker)/);
 });
 
 function assertClientBoundary(manifest: {
