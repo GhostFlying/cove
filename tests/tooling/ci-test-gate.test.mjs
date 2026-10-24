@@ -1538,6 +1538,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   await writeFile(resolve(checkout, "tests/tooling/registered.test.ts"), "");
   await writeFile(resolve(checkout, "apps/cli/tests/scenarios.test.mjs"), "");
   await writeFile(resolve(checkout, "apps/mobile/tests/native-ports.test.mjs"), "");
+  await writeFile(resolve(checkout, "apps/mobile/tests/product.test.mjs"), "");
   await writeFile(resolve(checkout, "apps/server/tests/author/runtime.test.mjs"), "");
   await writeFile(resolve(checkout, "apps/server/tests/independent/contract.test.mjs"), "");
   await writeFile(resolve(checkout, "tests/tooling/excluded.spec.ts"), "");
@@ -1553,6 +1554,7 @@ test("scans Vitest-owned tooling tests without capturing browser specs", async (
   expect(await readVitestOwnedTestFiles(checkout)).toEqual([
     "apps/cli/tests/scenarios.test.mjs",
     "apps/mobile/tests/native-ports.test.mjs",
+    "apps/mobile/tests/product.test.mjs",
     "apps/server/tests/author/runtime.test.mjs",
     "apps/server/tests/independent/contract.test.mjs",
     "packages/client/tests/contract.test.mjs",

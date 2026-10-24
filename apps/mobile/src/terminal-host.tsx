@@ -14,15 +14,17 @@ export function TerminalHost({
   run,
   onInputNotice,
 }: {
-  client: Client;
+  client: Pick<Client, "openTerminal">;
   run: RunRef;
   onInputNotice: (message: string) => void;
 }) {
   const webview = useRef<WebView>(null);
+  const lastViewport = useRef("");
   const controller = useRef<TerminalController | null>(null);
   const [status, setStatus] = useState("等待终端视图");
   const [canControl, setCanControl] = useState(false);
-  const generation = useMemo(() => ++incarnation, []);
+  const [documentVersion, setDocumentVersion] = useState(0);
+  const generation = useMemo(() => ++incarnation, [documentVersion]);
   const bridge = useMemo(
     () =>
       createTerminalViewBridgeHost({
@@ -83,6 +85,7 @@ export function TerminalHost({
       active = false;
       stopWatching?.();
       controller.current?.setInputTarget(false, false);
+      void controller.current?.blur();
       controller.current?.dispose();
       controller.current = null;
       bridge.dispose();
@@ -113,14 +116,40 @@ export function TerminalHost({
         style={{ flex: 1 }}
         originWhitelist={["*"]}
         javaScriptEnabled
+        textZoom={100}
+        nestedScrollEnabled
         mixedContentMode="never"
         allowFileAccess={false}
         allowUniversalAccessFromFileURLs={false}
         onShouldStartLoadWithRequest={({ url }) =>
           url === "about:blank" || url === "https://cove.invalid/"
         }
-        onMessage={({ nativeEvent }) => bridge.receiveMessage(nativeEvent.data)}
+        onMessage={({ nativeEvent }) => {
+          bridge.receiveMessage(nativeEvent.data);
+          const owned = controller.current;
+          if (!owned) return;
+          try {
+            const geometry = bridge.measureGrid();
+            const key = JSON.stringify(geometry);
+            if (key === lastViewport.current) return;
+            lastViewport.current = key;
+            // Layout is a display fact, not a focus gesture. Only the verified controller
+            // may request a resize; observers keep the server grid.
+            if (owned.snapshot().inputReady) void owned.requestResize(geometry);
+          } catch {
+            /* Readiness or process loss requires a new verified baseline. */
+          }
+        }}
         onError={() => bridge.invalidate()}
+        onRenderProcessGone={() => {
+          bridge.invalidate();
+          setDocumentVersion((v) => v + 1);
+        }}
+        onContentProcessDidTerminate={() => {
+          bridge.invalidate();
+          setDocumentVersion((v) => v + 1);
+        }}
+        key={generation}
       />
     </View>
   );
