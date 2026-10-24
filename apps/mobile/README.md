@@ -63,6 +63,16 @@ between device and simulator artifacts. Return to `prepare-native.mjs ios` befor
 building for a device. A simulator run is intermediate functionality evidence;
 it does not validate physical-device input, background policy or performance.
 
+Simulator credential checks need an app with its normal local signing and
+application entitlement. A `CODE_SIGNING_ALLOWED=NO` compile/link result does
+not validate Keychain writes: the synthetic same-options probe returns
+`missing-entitlement` on that unsigned simulator app. For a local simulator
+build, use Xcode's ordinary ad-hoc identity (`CODE_SIGN_IDENTITY=-`,
+`CODE_SIGNING_ALLOWED=YES`) and inspect the resulting signature/entitlements
+before recording the probe result. This requires no Apple account, device
+registration or physical-device provisioning change. Keep SecureStore's
+`WHEN_UNLOCKED_THIS_DEVICE_ONLY` accessibility unchanged.
+
 For an ordinary development build, start Metro with `pnpm --filter @cove/mobile
 start` and use `pnpm --filter @cove/mobile android` or `ios`. The generated Android
 project also supports a serial arm64 build without launching or adopting a
