@@ -191,6 +191,8 @@ export function validDiagnosticBrowserProvenance(provenance, identity, runId, re
 
 // Adding a real suite requires registering its project and file here in the same PR.
 export const requiredSuites = [
+  { project: "desktop", file: "apps/desktop/tests/storage.test.mjs", minimumTests: 7 },
+  { project: "desktop", file: "apps/desktop/tests/host.test.mjs", minimumTests: 3 },
   { project: "cli", file: "apps/cli/tests/scenarios.test.mjs", minimumTests: 11 },
   { project: "cli", file: "apps/cli/tests/harness-page.test.mjs", minimumTests: 9 },
   { project: "cli", file: "apps/cli/tests/request-identity-cap.test.mjs", minimumTests: 1 },
@@ -373,7 +375,7 @@ export const requiredSuites = [
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 45 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 4 },
-  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 8 },
+  { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 9 },
   { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 11 },
   {
     project: "terminal-engine",
@@ -1588,6 +1590,7 @@ async function testFilesIn(directory, prefix) {
 export function readVitestOwnedTestFiles(checkoutRoot = root) {
   return Promise.all([
     testFilesIn(join(checkoutRoot, "apps/cli/tests"), "apps/cli/tests"),
+    testFilesIn(join(checkoutRoot, "apps/desktop/tests"), "apps/desktop/tests"),
     testFilesIn(join(checkoutRoot, "apps/server/tests"), "apps/server/tests"),
     testFilesIn(join(checkoutRoot, "packages/client/tests"), "packages/client/tests"),
     testFilesIn(join(checkoutRoot, "packages/protocol/tests"), "packages/protocol/tests"),

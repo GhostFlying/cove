@@ -5,6 +5,15 @@ export default defineConfig({
     projects: [
       {
         test: {
+          name: "desktop",
+          environment: "node",
+          include: ["apps/desktop/tests/**/*.test.mjs"],
+          testTimeout: 30_000,
+          maxWorkers: 1,
+        },
+      },
+      {
+        test: {
           name: "protocol",
           environment: "node",
           include: ["packages/protocol/tests/**/*.test.mjs"],
