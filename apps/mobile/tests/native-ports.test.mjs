@@ -5,6 +5,11 @@ import { utf8, encodeBase64, decodeBase64 } from "../dist/codec.js";
 import { NativePorts } from "../dist/native-ports.js";
 import { pairServer } from "../dist/pairing.js";
 import { probeSecureStore } from "../dist/credentials.js";
+import {
+  observeConnectedClient,
+  observeTerminal,
+  inputOutcomePresentation,
+} from "../dist/observation.js";
 
 const owned = [];
 afterEach(() => {
@@ -79,6 +84,126 @@ function runtime() {
   owned.push(ports);
   return { driver, ports, entry: ports.entry("serverNode", 8123) };
 }
+
+it("retires a lost exact Client once and ignores already retired callbacks", () => {
+  let snapshot = { status: "connected" };
+  let listener;
+  const disposed = vi.fn();
+  const lost = vi.fn();
+  const stop = observeConnectedClient(
+    {
+      snapshot: () => snapshot,
+      onState: (callback) => {
+        listener = callback;
+        return { dispose: disposed };
+      },
+    },
+    () => true,
+    lost,
+  );
+  expect(lost).not.toHaveBeenCalled();
+  snapshot = { status: "unverifiable" };
+  listener(snapshot);
+  listener({ status: "connected" });
+  listener({ status: "disposed" });
+  expect(lost).toHaveBeenCalledOnce();
+  expect(disposed).toHaveBeenCalledOnce();
+  stop();
+  expect(disposed).toHaveBeenCalledOnce();
+
+  let current = true;
+  const staleLost = vi.fn();
+  const staleStop = observeConnectedClient(
+    {
+      snapshot: () => ({ status: "connected" }),
+      onState: (callback) => {
+        listener = callback;
+        return { dispose() {} };
+      },
+    },
+    () => current,
+    staleLost,
+  );
+  current = false;
+  listener({ status: "unverifiable" });
+  staleStop();
+  current = true;
+  listener({ status: "unverifiable" });
+  expect(staleLost).not.toHaveBeenCalled();
+});
+
+it("observes controller loss and fences state/input listeners across retirement", () => {
+  let stateListener;
+  let inputListener;
+  const disposeState = vi.fn();
+  const disposeInput = vi.fn();
+  const states = vi.fn();
+  const inputs = vi.fn();
+  let current = true;
+  const stop = observeTerminal(
+    {
+      snapshot: () => ({ phase: "ready", execution: { status: "live" }, inputReady: true }),
+      onState: (callback) => {
+        stateListener = callback;
+        return { dispose: disposeState };
+      },
+      onInputOutcome: (callback) => {
+        inputListener = callback;
+        return { dispose: disposeInput };
+      },
+    },
+    () => current,
+    states,
+    inputs,
+  );
+  expect(states).toHaveBeenLastCalledWith({ status: "已取得控制", canControl: true });
+  stateListener({ phase: "unavailable", execution: { status: "unverifiable" } });
+  expect(states).toHaveBeenLastCalledWith({
+    status: expect.stringContaining("未知"),
+    canControl: false,
+  });
+  expect(states.mock.calls.at(-1)[0].status).not.toContain("退出");
+  inputListener({ kind: "input-rejections", count: 2, groups: [] });
+  expect(inputs).toHaveBeenLastCalledWith(expect.stringContaining("拒绝 2 次"));
+  const before = [states.mock.calls.length, inputs.mock.calls.length];
+  current = false;
+  stateListener({ phase: "ready", execution: { status: "live" }, inputReady: true });
+  inputListener({ kind: "input-rejections", count: 3, groups: [] });
+  stop();
+  current = true;
+  stateListener({ phase: "ready", execution: { status: "live" }, inputReady: true });
+  inputListener({ kind: "input-rejections", count: 4, groups: [] });
+  expect([states.mock.calls.length, inputs.mock.calls.length]).toEqual(before);
+  expect(disposeState).toHaveBeenCalledOnce();
+  expect(disposeInput).toHaveBeenCalledOnce();
+});
+
+it("displays bounded partial/uncertain input counts without reflecting input or errors", () => {
+  const privateText = "fixture-private-terminal-data";
+  const message = inputOutcomePresentation({
+    kind: "input",
+    outcome: {
+      ok: false,
+      value: { writtenBytes: 3, unknownBytes: 4, notSentBytes: 5, source: privateText },
+      error: { message: privateText },
+    },
+  });
+  expect(message).toContain("写入 3 B；未知 4 B；未发送 5 B");
+  expect(message).toContain("不会自动重试");
+  for (const notice of [
+    { kind: "input-rejections", count: Number.MAX_SAFE_INTEGER, groups: [{ error: privateText }] },
+    { kind: "renderer-rejection", error: { message: privateText } },
+    {
+      kind: "input",
+      outcome: { ok: true, value: { writtenBytes: Infinity, unknownBytes: -1, notSentBytes: NaN } },
+    },
+  ]) {
+    const text = inputOutcomePresentation(notice);
+    expect(text.length).toBeLessThanOrEqual(192);
+    expect(text).not.toContain(privateText);
+  }
+  expect(message).not.toContain(privateText);
+});
 
 const request = {
   path: "/rpc",

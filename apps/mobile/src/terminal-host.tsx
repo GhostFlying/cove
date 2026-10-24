@@ -5,13 +5,23 @@ import type { Client, TerminalController } from "@cove/client";
 import type { RunRef } from "@cove/protocol/identity";
 import { createTerminalViewBridgeHost } from "@cove/terminal-web/view-bridge";
 import { terminalDocument } from "./terminal-document.generated";
+import { observeTerminal, terminalPresentation } from "../dist/observation.js";
 
 let incarnation = 0;
 
-export function TerminalHost({ client, run }: { client: Client; run: RunRef }) {
+export function TerminalHost({
+  client,
+  run,
+  onInputNotice,
+}: {
+  client: Client;
+  run: RunRef;
+  onInputNotice: (message: string) => void;
+}) {
   const webview = useRef<WebView>(null);
   const controller = useRef<TerminalController | null>(null);
   const [status, setStatus] = useState("等待终端视图");
+  const [canControl, setCanControl] = useState(false);
   const generation = useMemo(() => ++incarnation, []);
   const bridge = useMemo(
     () =>
@@ -33,6 +43,7 @@ export function TerminalHost({ client, run }: { client: Client; run: RunRef }) {
 
   useEffect(() => {
     let active = true;
+    let stopWatching: (() => void) | undefined;
     void bridge.ready
       .then(async () => {
         if (!active) return;
@@ -47,34 +58,53 @@ export function TerminalHost({ client, run }: { client: Client; run: RunRef }) {
           return;
         }
         controller.current = result.value;
+        const owned = result.value;
+        stopWatching = observeTerminal(
+          owned,
+          () => active && controller.current === owned,
+          (state) => {
+            setStatus(state.status);
+            setCanControl(state.canControl);
+          },
+          onInputNotice,
+        );
         result.value.setInputTarget(true, false);
         const attached = await result.value.attach();
-        if (active) setStatus(attached.ok ? "终端已连接；控制后点击终端输入" : "终端当前不可核实");
+        if (active && controller.current === owned) {
+          const state = terminalPresentation(owned.snapshot());
+          setStatus(attached.ok ? state.status : "终端当前不可核实");
+          setCanControl(attached.ok && state.canControl);
+        }
       })
       .catch(() => {
         if (active) setStatus("终端视图加载失败");
       });
     return () => {
       active = false;
+      stopWatching?.();
       controller.current?.setInputTarget(false, false);
       controller.current?.dispose();
       controller.current = null;
       bridge.dispose();
     };
-  }, [client, run, bridge, generation]);
+  }, [client, run, bridge, generation, onInputNotice]);
 
   return (
     <View style={{ flex: 1, minHeight: 200 }}>
       <Text>{status}</Text>
       <Button
         title="控制（再点终端输入）"
+        disabled={!canControl}
         onPress={() => {
           const owned = controller.current;
           if (!owned) return;
           owned.setInputTarget(true, true);
-          void owned
-            .requestFocus()
-            .then((result) => setStatus(result.ok ? "已取得控制" : "控制结果未核实"));
+          void owned.requestFocus().then((result) => {
+            if (controller.current !== owned) return;
+            const state = terminalPresentation(owned.snapshot());
+            setStatus(result.ok ? state.status : "控制结果未核实");
+            setCanControl(state.canControl);
+          });
         }}
       />
       <WebView
