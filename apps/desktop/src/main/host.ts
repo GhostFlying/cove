@@ -97,6 +97,8 @@ export class DesktopHost {
   private ready = false;
   private error: string | null = null;
   private disposed = false;
+  private foreground = false;
+  private windowVisible = true;
   private readonly sessions = new Map<string, ServerSession>();
   private readonly listeners = new Map<string, { dispose(): void }>();
   private readonly views = new Map<string, OpenView>();
@@ -499,6 +501,10 @@ export class DesktopHost {
         });
         if (!opened.ok) throw new Error("Terminal attachment could not be verified");
         view.controller = opened.value;
+        // Host eligibility is separate from a deliberate view focus gesture. New views
+        // may observe while foreground; only their next user gesture requests control.
+        opened.value.setInputTarget(this.foreground, false);
+        opened.value.setVisibility(this.windowVisible);
         view.stateListener = opened.value.onState((state) =>
           this.emit("terminal", descriptor, state),
         );
@@ -507,6 +513,7 @@ export class DesktopHost {
         );
         const outcome = await opened.value.attach();
         if (!outcome.ok) bridge.invalidate();
+        else await session.call("terminal.get", { run });
       })
       .catch(() => bridge.invalidate());
     return descriptor;
@@ -529,13 +536,16 @@ export class DesktopHost {
     for (const view of [...this.views.values()]) this.closeView(view.descriptor);
   }
   setForeground(foreground: boolean): void {
+    this.foreground = foreground;
     for (const view of this.views.values()) {
-      view.controller?.setVisibility(foreground);
-      if (!foreground) {
-        view.controller?.setInputTarget(false, false);
-        void view.controller?.blur();
-      }
+      // Returning to foreground restores eligibility, never the old control intent.
+      view.controller?.setInputTarget(foreground, false);
+      if (!foreground) void view.controller?.blur();
     }
+  }
+  setWindowVisible(visible: boolean): void {
+    this.windowVisible = visible;
+    for (const view of this.views.values()) view.controller?.setVisibility(visible);
   }
   private closeServerViews(serverId: string): void {
     // All views in this single-window workbench belong to its selected server; close them
