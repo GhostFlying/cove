@@ -426,3 +426,57 @@ func TestFreshClientOwnershipSurvivesLogoutUntilActualClose(t *testing.T) {
 	}
 	other.Close()
 }
+
+func TestControlBindingPreservesEnrollmentAcrossNormalRestartAndSelection(t *testing.T) {
+	root := t.TempDir()
+	first := "http://127.0.0.1:8123"
+	second := "http://127.0.0.1:8124"
+	if err := bindControl(root, first); err != nil {
+		t.Fatal(err)
+	}
+	// With no enrollment there is nothing to migrate, and an explicit selection
+	// may be changed before Login. Once Login writes state it becomes fixed.
+	if err := bindControl(root, second); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(root, "state")
+	if err := os.Mkdir(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(state, "tailscaled.state")
+	enrollment := []byte("isolated enrollment fixture")
+	if err := os.WriteFile(stateFile, enrollment, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindControl(root, second); err != nil {
+		t.Fatalf("same selection could not restart: %v", err)
+	}
+	for _, changed := range []string{first, ""} {
+		if _, err := New(root, "fixture", changed); err == nil || !strings.Contains(err.Error(), "original control URL") {
+			t.Fatalf("changed control restored enrollment: %v", err)
+		}
+		// Failed construction must release its lock without touching node state.
+		if err := bindControl(root, second); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(stateFile)
+		if err != nil || string(got) != string(enrollment) {
+			t.Fatalf("rejected restore changed enrollment: %q, %v", got, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(root, "control.binding")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(root, "fixture", second); err == nil || !strings.Contains(err.Error(), "original control URL") {
+		t.Fatalf("missing binding restored enrollment: %v", err)
+	}
+	if err := os.RemoveAll(state); err != nil {
+		t.Fatal(err)
+	}
+	// Logout's completed local removal allows choosing a different test plane.
+	c, err := New(root, "after-logout", first)
+	if err != nil {
+		t.Fatalf("logout retained a control selection or failed-open lock: %v", err)
+	}
+	c.Close()
+}
