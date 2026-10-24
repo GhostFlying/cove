@@ -5,13 +5,16 @@ package mobile
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,11 +108,75 @@ func New(stateDirectory, hostname, controlURL string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	controlURL = strings.TrimSpace(controlURL)
+	if err := bindControl(stateDirectory, controlURL); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	mgr := node.NewManager(node.Config{StateDir: filepath.Join(stateDirectory, "state"), Hostname: hostname, ControlURL: controlURL}, node.StartTSNet)
 	c := newClient(mgr)
 	c.ownedLock = lock
 	mgr.Boot()
 	return c, nil
+}
+
+// bindControl runs under this root's lifetime lock and before Boot can restore
+// an enrollment. tsnet applies its configured ControlURL even when restoring
+// state; a nonpersistent fixture selection must therefore never silently send
+// that enrollment to the default (or another) control plane after app restart.
+// The marker records only a digest, not a URL that might contain private data.
+func bindControl(root, controlURL string) error {
+	if len(controlURL) > 2048 {
+		return errors.New("bounded native control URL required")
+	}
+	if controlURL != "" {
+		u, err := url.Parse(controlURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return errors.New("native control URL must be an HTTP(S) endpoint without credentials")
+		}
+	}
+	digest := sha256.Sum256([]byte(controlURL))
+	expected := fmt.Sprintf("v1:%x\n", digest)
+	marker := filepath.Join(root, "control.binding")
+	_, stateErr := os.Stat(filepath.Join(root, "state", "tailscaled.state"))
+	if stateErr == nil {
+		stored, err := os.ReadFile(marker)
+		if err != nil || string(stored) != expected {
+			return errors.New("enrolled native node requires its original control URL; no restore was started")
+		}
+		return nil
+	}
+	if !errors.Is(stateErr, os.ErrNotExist) {
+		return stateErr
+	}
+	// Publish and durably flush the binding before Manager can create any node
+	// state. A crash before this completes cannot leave a new enrollment; a
+	// crash afterwards retains the marker across process restart. Logout removes
+	// only state/, so with no enrollment a later explicit choice may replace it.
+	f, err := os.CreateTemp(root, ".control-binding-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.WriteString(expected); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(f.Name(), marker); err != nil {
+		return err
+	}
+	directory, err := os.Open(root)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }
 
 func newClient(mgr *node.Manager) *Client {
