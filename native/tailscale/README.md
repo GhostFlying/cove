@@ -47,6 +47,13 @@ node state, and forgetting a Cove token is a separate host operation. The app mu
 provide its own backup-excluded native state directory, keep device tokens in
 platform secure storage, and never persist/log native event bodies or login URLs.
 
+Before booting a mobile node, its private root binds the selected control URL
+with an atomically published, flushed digest marker. An enrolled state requires
+that same explicit selection on restart; a missing or different marker refuses
+restore before network activity. A fresh, unenrolled node or a completed local
+logout permits selecting another control plane. This is an app-owned bootstrap
+boundary, not an automatic migration or a rule for the CLI/shared node manager.
+
 The mobile build uses exact gomobile/gobind tools from the module and the same
 feature omission list as server builds. Outputs and tool executables stay under
 `native/tailscale/dist/mobile/`, separate from server artifacts:
