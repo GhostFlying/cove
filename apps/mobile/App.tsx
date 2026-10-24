@@ -195,7 +195,7 @@ export default function App() {
   return (
     <SafeAreaView style={{ flex: 1, padding: 12 }}>
       <Text style={{ fontSize: 22, fontWeight: "600" }}>Cove Native</Text>
-      <Text accessibilityLabel="connection-status">{status}</Text>
+      <Text testID="connection-status">{status}</Text>
       <TextInput
         accessibilityLabel="native-control-url"
         value={controlURL}
