@@ -271,3 +271,225 @@ it("late native node open after background is closed without creating entries", 
   expect(entries).toBe(0);
   expect(host.snapshot().foreground).toBe(false);
 });
+it("read provenance rejects replacement sessions with coincidentally equal counters", async () => {
+  const { stampRead, readIsCurrent } = await import("../dist/read-observation.js");
+  const first = session(() => missing);
+  const second = session(() => missing);
+  first.snapshot = () => ({
+    status: "current",
+    identity: { serverId: "server-test", relayInstanceId: "instance-test" },
+    generation: 1,
+    mirror: { version: 3 },
+  });
+  second.snapshot = first.snapshot;
+  const stamp = stampRead(first);
+  expect(readIsCurrent(stamp, first)).toBe(true);
+  expect(readIsCurrent(stamp, second)).toBe(false);
+  expect(readIsCurrent(stamp, undefined)).toBe(false);
+  first.snapshot = () => ({ status: "stale" });
+  expect(readIsCurrent(stamp, first)).toBe(false);
+});
+it("exact run facts expose runtime controller and qualify stale catalog", async () => {
+  const { runFacts } = await import("../dist/read-observation.js");
+  const run = { serverId: "server-test", relayInstanceId: "instance-test", runId: "run-test" };
+  const state = {
+    status: "current",
+    identity: { serverId: run.serverId, relayInstanceId: run.relayInstanceId },
+    mirror: {
+      status: "current",
+      records: [
+        { kind: "run", record: { run, lifecycle: "running", verification: "live" } },
+        {
+          kind: "runtime",
+          record: {
+            run,
+            status: "exited",
+            controlEpoch: 7,
+            controlHolder: { connection: { connectionId: "phone-other" } },
+          },
+        },
+      ],
+    },
+  };
+  expect(runFacts(state, run)).toContain("runtime exited");
+  expect(runFacts(state, run)).toContain("phone-other · epoch 7");
+  expect(runFacts({ ...state, status: "stale" }, run)).toContain("unverified");
+  expect(runFacts(state, { ...run, relayInstanceId: "old-instance" })).toContain("unverified");
+});
+it("explicit stop preserves native shutdown rejection and never retries logout", async () => {
+  const { store } = await storage();
+  let stops = 0;
+  let closes = 0;
+  let logouts = 0;
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: () => ({ read: async () => null }),
+    openNode: async () => ({
+      status: '{"state":"Running"}',
+      driver: {
+        nextEvent: () => new Promise(() => {}),
+        stop: () => {
+          stops++;
+          throw new Error("native private failure");
+        },
+      },
+      close: async () => {
+        closes++;
+        throw new Error("close private detail");
+      },
+      logout: async () => {
+        logouts++;
+      },
+    }),
+  });
+  await host.initialize();
+  await host.foreground();
+  await expect(host.stop()).rejects.toThrow("shutdown-unverified");
+  expect(host.snapshot()).toMatchObject({ foreground: false, nodeState: "shutdown-unverified" });
+  await expect(host.stop()).rejects.toThrow("shutdown-unverified");
+  expect({ stops, closes, logouts }).toEqual({ stops: 1, closes: 1, logouts: 0 });
+});
+it("explicit stop waits for an in-flight native open to close", async () => {
+  const { store } = await storage();
+  let release;
+  let closeRelease;
+  let closes = 0;
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: () => ({ read: async () => null }),
+    openNode: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  await host.initialize();
+  const opening = host.foreground();
+  await new Promise((r) => setTimeout(r, 0));
+  const stopped = host.stop();
+  expect(host.snapshot().nodeState).toBe("stopping");
+  release({
+    status: '{"state":"Running"}',
+    close: () => {
+      closes++;
+      return new Promise((resolve) => {
+        closeRelease = resolve;
+      });
+    },
+  });
+  await opening;
+  await new Promise((r) => setTimeout(r, 0));
+  expect(host.snapshot().nodeState).toBe("stopping");
+  closeRelease();
+  await stopped;
+  expect(closes).toBe(1);
+  expect(host.snapshot().nodeState).toBe("stopped");
+});
+it("bootstrap verification retains safe protocol/identity categories without raw response", async () => {
+  const { verifyServer } = await import("../dist/entry.js");
+  const { PROTOCOL_VERSION, BOOTSTRAP_VERSION } = await import("@cove/protocol/bootstrap");
+  const http = (status, value) => ({
+    post: (_request, callbacks) => {
+      queueMicrotask(() =>
+        callbacks.onResponse({ status, headers: {}, body: Buffer.from(JSON.stringify(value)) }),
+      );
+      return { cancel: () => "handed-off" };
+    },
+  });
+  await expect(
+    verifyServer(
+      http(200, {
+        type: "cove-bootstrap-identity",
+        bootstrapVersion: BOOTSTRAP_VERSION,
+        protocolVersion: PROTOCOL_VERSION,
+        buildVersion: "fixture",
+        serverId: "wrong-server",
+        relayInstanceId: "instance-test",
+      }),
+      "server-test",
+    ),
+  ).rejects.toMatchObject({ failure: { stage: "identity", category: "server-mismatch" } });
+  await expect(
+    verifyServer(
+      http(409, {
+        type: "cove-bootstrap-error",
+        kind: "PROTOCOL_MISMATCH",
+        message: "PROTOCOL MISMATCH",
+        supportedVersions: { bootstrap: [BOOTSTRAP_VERSION], protocol: [99] },
+      }),
+      "server-test",
+    ),
+  ).rejects.toMatchObject({ failure: { stage: "protocol", category: "protocol-mismatch" } });
+});
+it("credential store failures remain distinguishable from entry and auth failures", async () => {
+  const { connectionReason } = await import("../dist/action-error.js");
+  const { store } = await storage();
+  const p = profile();
+  await store.putProfile(p);
+  const host = new MobileHost({
+    store,
+    uuid: randomUUID,
+    digest,
+    secure: () => ({
+      read: async () => {
+        throw new Error("private credential body");
+      },
+    }),
+    openNode: async () => ({
+      status: '{"state":"Running"}',
+      driver: { nextEvent: () => new Promise(() => {}), stop: () => {} },
+      close: async () => {},
+    }),
+  });
+  await host.initialize();
+  await host.foreground();
+  await expect(host.connect(p.id)).rejects.toMatchObject({
+    failure: { stage: "credentials", category: "store-unavailable" },
+  });
+  expect(JSON.stringify(host.snapshot())).not.toContain("private credential body");
+  expect(connectionReason("DEVICE_REVOKED")).toEqual({
+    stage: "authentication",
+    category: "revoked",
+  });
+  await host.stop();
+});
+it("safe connection classification retains pairing identity request delivery", async () => {
+  const { pairServer } = await import("../dist/pairing.js");
+  const { encodeInvitation } = await import("@cove/protocol/auth");
+  const invitation = encodeInvitation({
+    version: 1,
+    serverId: "server-test",
+    inviteId: "invite-test",
+    secret: "a".repeat(43),
+    expiresAtMs: Date.now() + 60000,
+    pairingPort: 9550,
+    entries: { tsnet: { nodeId: "serverNode", name: "server.test" } },
+  });
+  const ports = {
+    entry: () => ({
+      http: {
+        post: (_request, callbacks) => {
+          queueMicrotask(() =>
+            callbacks.onFailure({ disposition: "not-sent", reason: "transport" }),
+          );
+          return { cancel: () => "not-sent" };
+        },
+      },
+      close: () => {},
+    }),
+  };
+  await expect(
+    pairServer(ports, invitation, "Fixture", {
+      write: async () => {
+        throw new Error("must not persist");
+      },
+    }),
+  ).rejects.toMatchObject({
+    stage: "identity",
+    disposition: "not-sent",
+    redemptionDisposition: "not-sent",
+  });
+});

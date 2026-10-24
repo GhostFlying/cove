@@ -1,3 +1,4 @@
+import { stampRead, readIsCurrent, runFacts, type ReadStamp } from "../dist/read-observation.js";
 import { ActionError } from "../dist/action-error.js";
 import { useEffect, useState } from "react";
 import { Alert, Button, FlatList, StyleSheet, Text, TextInput, View } from "react-native";
@@ -190,7 +191,7 @@ export function Servers({
         <Button
           title="Stop this phone's network"
           disabled={busy}
-          onPress={() => host.background()}
+          onPress={() => act(() => host.stop())}
         />
         <Confirm
           title="Log out this phone from Tailnet"
@@ -398,6 +399,11 @@ export function ServerScreen(props: ScreenProps) {
         title="Devices"
         onPress={() => navigate({ screen: "devices", profileId: profile.id })}
       />
+      {props.state.failures[profile.id] ? (
+        <Text style={styles.error}>
+          {props.state.failures[profile.id]!.stage}: {props.state.failures[profile.id]!.category}
+        </Text>
+      ) : null}
       <Card title="Connection entry">
         <Field label="Stable Tailnet peer ID" value={peer} onChange={setPeer} />
         <Field label="Server business port" value={port} onChange={setPort} />
@@ -509,8 +515,7 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
   const write = useWrite(props);
   const [detail, setDetail] = useState<{
     task: TaskRecord;
-    version: number;
-    generation: number;
+    stamp: ReadStamp;
   } | null>(null);
   const [readError, setReadError] = useState("");
   const [title, setTitle] = useState("");
@@ -521,39 +526,33 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
   const [branch, setBranch] = useState("");
   const [base, setBase] = useState("");
   const [history, setHistory] = useState<RunHistoryRecord[]>([]);
+  const [historyStamp, setHistoryStamp] = useState<ReadStamp | null>(null);
   const [historyTab, setHistoryTab] = useState("");
   const [next, setNext] = useState<string | undefined>();
   const version = snapshot?.mirror.version;
-  const generation = snapshot?.generation;
+  const owner = host.currentSession(profile.id);
   useEffect(() => {
     let current = true;
     setReadError("");
-    if (snapshot?.status !== "current") return;
-    const session = host.session(profile.id);
-    void session.call("task.get", { taskId }).then((result) => {
-      if (
-        !current ||
-        session.snapshot().generation !== generation ||
-        session.snapshot().mirror.version !== version
-      )
+    setDetail(null);
+    if (!owner) return;
+    const stamp = stampRead(owner);
+    if (!stamp) return;
+    void owner.call("task.get", { taskId }).then((result) => {
+      if (!current || host.currentSession(profile.id) !== owner || !readIsCurrent(stamp, owner))
         return;
-      if (result.ok)
-        setDetail({ task: result.value.task, version: version!, generation: generation! });
-      else
-        setReadError(
-          "Current server paths could not be checked. Last catalog facts remain unverified.",
-        );
+      if (result.ok) setDetail({ task: result.value.task, stamp });
+      else {
+        setDetail(null);
+        setReadError("Current server paths could not be checked. Catalog paths remain unverified.");
+      }
     });
     return () => {
       current = false;
     };
-  }, [host, profile.id, taskId, generation, version, snapshot?.status]);
+  }, [host, profile.id, taskId, owner, version]);
   const projected = snapshot?.mirror.records.find((v) => v.kind === "task" && v.id === taskId);
-  const checked =
-    detail !== null &&
-    detail.version === version &&
-    detail.generation === generation &&
-    snapshot?.status === "current";
+  const checked = readIsCurrent(detail?.stamp, owner);
   const task: ReadonlyTask | undefined =
     checked && detail ? detail.task : projected?.kind === "task" ? projected.record : undefined;
   const repos =
@@ -565,15 +564,22 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
       .filter((v) => v.taskId === taskId) ?? [];
   const overrides = { ...(branch ? { branch } : {}), ...(base ? { base } : {}) };
   function loadHistory(tabId: string, beforeRunId?: string) {
+    setHistoryStamp(null);
     act(async () => {
+      const session = host.session(profile.id);
+      const stamp = stampRead(session);
       const result = requireResult(
-        await host
-          .session(profile.id)
-          .call("tab.runs", { tabId, limit: 50, ...(beforeRunId ? { beforeRunId } : {}) }),
+        await session.call("tab.runs", {
+          tabId,
+          limit: 50,
+          ...(beforeRunId ? { beforeRunId } : {}),
+        }),
       );
+      if (host.currentSession(profile.id) !== session || !readIsCurrent(stamp, session)) return;
       setHistoryTab(tabId);
       setHistory(result.runs);
       setNext(result.nextBeforeRunId);
+      setHistoryStamp(stamp);
     });
   }
   return (
@@ -589,11 +595,15 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
         onPress={() =>
           act(async () => {
             const session = host.session(profile.id);
-            const v = session.snapshot().mirror.version;
-            const g = session.snapshot().generation;
+            setDetail(null);
+            const stamp = stampRead(session);
             const result = requireResult(await session.call("task.get", { taskId }));
-            if (session.snapshot().mirror.version === v && session.snapshot().generation === g)
-              setDetail({ task: result.task, version: v, generation: g });
+            if (
+              stamp &&
+              host.currentSession(profile.id) === session &&
+              readIsCurrent(stamp, session)
+            )
+              setDetail({ task: result.task, stamp });
           })
         }
       />
@@ -746,6 +756,7 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
             <Card title={tab.name}>
               <Text selectable>{tab.tabId}</Text>
               <Text>{tab.latestRun ? `run ${tab.latestRun.runId}` : "No run"}</Text>
+              <Text style={styles.note}>{runFacts(snapshot, tab.latestRun)}</Text>
               <Button
                 title="Open existing live run"
                 disabled={busy}
@@ -804,13 +815,25 @@ export function TaskScreen(props: ScreenProps & { taskId: string }) {
       </Card>
       {historyTab ? (
         <Card title={`History · ${historyTab}`}>
+          <Text style={styles.note}>
+            {readIsCurrent(historyStamp, owner)
+              ? "History read current"
+              : "Last observed history · stale / refresh required"}
+            {historyStamp ? ` · ${new Date(historyStamp.observedAt).toLocaleString()}` : ""}
+          </Text>
+          <Button
+            title="Refresh run history"
+            disabled={busy}
+            onPress={() => loadHistory(historyTab)}
+          />
           <Rows
             rows={history}
             render={(run) => (
               <View>
                 <Text>
-                  {run.run.runId}: {run.lifecycle} · {run.verification}
+                  {run.run.runId}: last observed {run.lifecycle} · {run.verification}
                 </Text>
+                <Text style={styles.note}>{runFacts(snapshot, run.run)}</Text>
                 <Text selectable>{run.cwd}</Text>
                 <Text style={styles.note}>
                   {new Date(run.startedAtMs).toLocaleString()} · exit {run.exitCode ?? "unknown"}
@@ -977,6 +1000,10 @@ export function DevicesScreen(props: ScreenProps) {
   const write = useWrite(props);
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [read, setRead] = useState(false);
+  const [deviceStamp, setDeviceStamp] = useState<ReadStamp | null>(null);
+  const [currentDevice, setCurrentDevice] = useState<string | null>(null);
+  const owner = host.currentSession(profile.id);
+  const deviceCurrent = readIsCurrent(deviceStamp, owner);
   return (
     <>
       <Text style={styles.heading}>Devices on {profile.label}</Text>
@@ -989,21 +1016,41 @@ export function DevicesScreen(props: ScreenProps) {
         disabled={busy}
         onPress={() =>
           act(async () => {
+            setDeviceStamp(null);
+            const session = host.session(profile.id);
+            const stamp = stampRead(session);
             const result = requireResult(
-              await host.session(profile.id).call("auth.device.list", { includeRevoked: true }),
+              await session.call("auth.device.list", { includeRevoked: true }),
             );
+            if (host.currentSession(profile.id) !== session || !readIsCurrent(stamp, session))
+              return;
             setDevices(result.devices);
+            setCurrentDevice(result.currentDeviceId);
             setRead(true);
+            setDeviceStamp(stamp);
           })
         }
       />
-      {!read ? <Text>Devices not queried yet.</Text> : null}
+      {!read ? (
+        <Text>Devices not queried yet.</Text>
+      ) : (
+        <Text style={styles.note}>
+          {deviceCurrent
+            ? "Device list current"
+            : "Last observed devices · stale / refresh required"}
+          {deviceStamp ? ` · ${new Date(deviceStamp.observedAt).toLocaleString()}` : ""}
+        </Text>
+      )}
       <Rows
         rows={devices}
         render={(device) => (
           <Card title={device.name}>
-            <Text selectable>{device.deviceId}</Text>
+            <Text selectable>
+              {device.deviceId}
+              {device.deviceId === currentDevice ? " · this phone" : ""}
+            </Text>
             <Text>
+              {!deviceCurrent ? "last observed: " : ""}
               {device.revokedAtMs ? "revoked" : "authorized"} ·{" "}
               {device.neverConnected
                 ? "never connected"
@@ -1012,10 +1059,11 @@ export function DevicesScreen(props: ScreenProps) {
             <Confirm
               title="Revoke device"
               detail="Closes this device's server connections and rejects its token. This may include the phone you are using."
-              disabled={busy || device.revokedAtMs !== null}
-              run={() =>
-                write("auth.device.revoke", { deviceId: device.deviceId }, "Revoke device")
-              }
+              disabled={busy || !deviceCurrent || device.revokedAtMs !== null}
+              run={() => {
+                setDeviceStamp(null);
+                write("auth.device.revoke", { deviceId: device.deviceId }, "Revoke device");
+              }}
             />
           </Card>
         )}

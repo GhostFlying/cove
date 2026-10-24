@@ -212,6 +212,13 @@ recreates sessions for previously connected profiles and verifies identity anew;
 restoring a selected old run never acquires control or replays input. Process death
 returns to server navigation. WebView content-process loss creates a fresh bridge
 generation. Unknown remote execution remains unknown until observed by the server.
+Explicit Stop waits for native close and reports stopping/stopped/shutdown-unverified;
+a rejected close never becomes a successful stop. OS background fencing remains immediate.
+Task/history/device reads retain their actual session-object/instance provenance;
+a replacement session cannot inherit a checked-path label through equal local counters.
+Retained reads are qualified as stale, and terminal rows consume exact-run lifecycle,
+verification and controller/epoch facts without extra PTY subscriptions. Safe failure
+categories distinguish credential storage, entry, identity, protocol and authentication.
 No background VPN/service or plaintext credential fallback is provided.
 
 ## Verification boundary
