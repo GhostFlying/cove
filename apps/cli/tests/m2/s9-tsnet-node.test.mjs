@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, rm, symlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "vitest";
 import { cli } from "../m1/fixtures.mjs";
@@ -67,25 +67,22 @@ afterEach(async () => {
   fixture = undefined;
 });
 
-// A server whose PATH is Git (which the server requires), Node's own directory (for its worker)
-// and the system directories, none of which holds a tailscale or tailscaled executable (checked),
-// so nothing of a system Tailscale can be found (the helper is started by absolute path). The CLI
-// and the fixture keep their PATH.
-const SYSTEM_PATH = [dirname(process.execPath), "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+// The server can discover only the fixture's Git and Node. This proves that its
+// absolute-path helper works without a system Tailscale on PATH, independently of
+// any Tailscale tools the operator has installed elsewhere. CLI/fixture PATH stays intact.
 async function startServer(home) {
-  const onlyGit = join(fixture.root, "only-git");
-  if (!existsSync(onlyGit)) {
-    await mkdir(onlyGit);
+  const tools = join(fixture.root, "server-tools");
+  if (!existsSync(tools)) {
+    await mkdir(tools);
     const git = execFileSync("/bin/sh", ["-c", "command -v git"], { env: fixture.env })
       .toString()
       .trim();
-    await symlink(git, join(onlyGit, "git"));
+    await symlink(git, join(tools, "git"));
+    await symlink(process.execPath, join(tools, "node"));
   }
-  for (const directory of [onlyGit, ...SYSTEM_PATH])
-    for (const name of ["tailscale", "tailscaled"])
-      expect(existsSync(join(directory, name))).toBe(false);
+  for (const name of ["tailscale", "tailscaled"]) expect(existsSync(join(tools, name))).toBe(false);
   const path = fixture.env.PATH;
-  fixture.env.PATH = [onlyGit, ...SYSTEM_PATH].join(":");
+  fixture.env.PATH = tools;
   try {
     return await fixture.startAuthServer(home);
   } finally {

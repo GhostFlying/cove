@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readdir, readFile, readlink, symlink, writeFile } from "node:fs/promises";
@@ -80,8 +80,11 @@ function nativeBinary(bytes) {
 async function pathWithoutNode() {
   const directory = join(fixture.root, "path-git-only");
   await mkdir(directory, { recursive: true });
-  const git = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"].find(existsSync);
-  if (!git) throw new Error("git was not found");
+  // Use the same Git selected for the fixture, including a supported task-local install.
+  const git = execFileSync("/bin/sh", ["-c", "command -v git"], { env: fixture.env })
+    .toString()
+    .trim();
+  if (!git) throw new Error("git was not found on the fixture PATH");
   if (!existsSync(join(directory, "git"))) await symlink(git, join(directory, "git"));
   return directory;
 }
