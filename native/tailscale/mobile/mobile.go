@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,11 +114,32 @@ func New(stateDirectory, hostname, controlURL string) (*Client, error) {
 		lock.Close()
 		return nil, err
 	}
+	if runtime.GOOS == "android" || runtime.GOOS == "ios" {
+		if err := configureMobileLogs(stateDirectory); err != nil {
+			lock.Close()
+			return nil, err
+		}
+	}
 	mgr := node.NewManager(node.Config{StateDir: filepath.Join(stateDirectory, "state"), Hostname: hostname, ControlURL: controlURL}, node.StartTSNet)
 	c := newClient(mgr)
 	c.ownedLock = lock
 	mgr.Boot()
 	return c, nil
+}
+
+// configureMobileLogs supplies Tailscale's logpolicy fallback explicitly. A
+// mobile sandbox has no usable system state directory, HOME/cache or /tmp; even
+// with backend logging disabled, tsnet constructs a socket-statistics logger and
+// LogsDir otherwise panics. This private library lives in the app process and its
+// native wrappers drain one fixed-root node before opening its successor. The
+// dependency exposes this directory only through its process environment; never
+// change the host's HOME or use a system Tailscale directory for this purpose.
+func configureMobileLogs(root string) error {
+	logs := filepath.Join(root, "logs")
+	if err := fsutil.EnsurePrivateDir(logs); err != nil {
+		return err
+	}
+	return os.Setenv("TS_LOGS_DIR", logs)
 }
 
 // bindControl runs under this root's lifetime lock and before Boot can restore
