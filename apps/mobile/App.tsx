@@ -8,7 +8,12 @@ import type { RunRef } from "@cove/protocol/identity";
 import { openNativeNode } from "./modules/cove-tsnet";
 import { NativePorts } from "./dist/native-ports.js";
 import { utf8 } from "./dist/codec.js";
-import { loadServer, type SavedServer, type SecureTokenStore } from "./dist/credentials.js";
+import {
+  loadServer,
+  probeSecureStore,
+  type SavedServer,
+  type SecureTokenStore,
+} from "./dist/credentials.js";
 import { verifyServer, MOBILE_BUILD_VERSION, bootstrapRequest } from "./dist/entry.js";
 import { pairServer } from "./dist/pairing.js";
 import { ForegroundOwnership } from "./dist/lifecycle.js";
@@ -37,11 +42,12 @@ function nativeFailureReason(error: unknown): string {
 
 const tokenKey = "cove.native.fixture.server";
 const secureOptions = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
-const store: SecureTokenStore = {
-  read: () => SecureStore.getItemAsync(tokenKey, secureOptions),
-  write: (raw) => SecureStore.setItemAsync(tokenKey, raw, secureOptions),
-  remove: () => SecureStore.deleteItemAsync(tokenKey, secureOptions),
-};
+const secureStoreForKey = (key: string): SecureTokenStore => ({
+  read: () => SecureStore.getItemAsync(key, secureOptions),
+  write: (raw) => SecureStore.setItemAsync(key, raw, secureOptions),
+  remove: () => SecureStore.deleteItemAsync(key, secureOptions),
+});
+const store = secureStoreForKey(tokenKey);
 type Host = {
   node: Awaited<ReturnType<typeof openNativeNode>>;
   ports: NativePorts;
@@ -196,6 +202,16 @@ export default function App() {
     <SafeAreaView style={{ flex: 1, padding: 12 }}>
       <Text style={{ fontSize: 22, fontWeight: "600" }}>Cove Native</Text>
       <Text testID="connection-status">{status}</Text>
+      <Button
+        title="验证安全存储"
+        disabled={busy || loading}
+        onPress={() =>
+          action(async (current) => {
+            await probeSecureStore(secureStoreForKey(`cove.native.fixture.probe.${randomUUID()}`));
+            if (current()) setStatus("安全存储已验证；合成记录已删除");
+          })
+        }
+      />
       <TextInput
         accessibilityLabel="native-control-url"
         value={controlURL}
