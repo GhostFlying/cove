@@ -35,16 +35,19 @@ export function terminalPresentation(state: TerminalSnapshot): {
   readonly status: string;
   readonly canControl: boolean;
 } {
-  if (state.phase === "disposed" || state.phase === "unavailable")
-    return { status: "终端连接未核实；远端运行状态未知，不会重放输入", canControl: false };
   if (state.execution.status === "exited")
     return { status: "服务端已确认所选 run 退出", canControl: false };
+  if (state.phase === "disposed" || state.phase === "unavailable")
+    return { status: "终端连接未核实；远端运行状态未知，不会重放输入", canControl: false };
   if (state.phase !== "ready")
     return { status: "终端正在连接或恢复；输入暂不可用", canControl: false };
-  if (state.execution.status !== "live")
-    return { status: "终端运行状态未核实；输入暂不可用", canControl: false };
+  // Execution is separate evidence from terminal.get/run events. A ready
+  // subscription can legitimately lack it; control still uses server grants.
+  const execution = state.execution.status === "live" ? "" : "；执行状态未核实";
   return {
-    status: state.inputReady ? "已取得控制" : "终端已连接；控制后点击终端输入",
+    status: state.inputReady
+      ? `已取得控制${execution}`
+      : `终端已连接${execution}；控制后点击终端输入`,
     canControl: true,
   };
 }
