@@ -1116,7 +1116,7 @@ export const fileRegisteredDirectories = [
   {
     project: "cli",
     directory: "apps/cli/tests/m3",
-    required: ["node-client"],
+    required: ["node-client", "business-events"],
   },
 ];
 

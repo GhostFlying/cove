@@ -1408,7 +1408,11 @@ test("M1 through M3 CLI suites are registered per file and join the required inv
       ],
     },
     { project: "cli", directory: "apps/cli/tests/m2", required: ["pending-secrets"] },
-    { project: "cli", directory: "apps/cli/tests/m3", required: ["node-client"] },
+    {
+      project: "cli",
+      directory: "apps/cli/tests/m3",
+      required: ["node-client", "business-events"],
+    },
   ]);
   const file = "apps/cli/tests/m1/s10-storage-identity.test.mjs";
   const registered = await readFileRegisteredSuites();
