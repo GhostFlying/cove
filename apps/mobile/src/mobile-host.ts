@@ -129,7 +129,9 @@ export class MobileHost {
   }
   background(): void {
     const generation = ++this.generation;
-    this.resumeProfiles = [...this.sessions.keys()];
+    // RN can send inactive and background for the same transition. The first notification
+    // retires sessions; later notifications must retain their read-only reconnect intent.
+    this.resumeProfiles = [...new Set([...this.resumeProfiles, ...this.sessions.keys()])];
     this.publish({ foreground: false, authURL: "", nodeState: "stopping" });
     // OS suspension fences immediately. Completion is still an observed receipt, not an
     // inference from loss of contact; delayed results cannot update a newer incarnation.
