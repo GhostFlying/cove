@@ -73,6 +73,17 @@ and node logout does not revoke an existing Cove pairing. SecureStore must
 successfully persist a pairing before the UI reports it saved; there is no
 plaintext fallback. Invitation secrets and auth keys are not logged.
 
+The fixture's optional control URL is an explicit local bootstrap setting. Edit
+it and reconnect before login; the field is not persisted. The native node root
+keeps a digest binding before enrollment can start, and checks it before any
+restore. An enrolled node requires the same selection after process restart;
+an empty/default or different value fails without starting it. Logout removes
+enrollment and permits a new explicit selection. There is no automatic control
+plane migration or adoption of another node's state. Isolated testcontrol plus
+a fresh cloud-device lease can validate real embedded-tsnet app payloads without
+creating a real Tailnet node; that result is recorded separately from real
+Tailnet and physical-device coverage.
+
 Each native call is bound to a node generation, so a delayed event pull, close,
 cancel or release cannot affect a newer foreground node. Native background hooks
 stop admission immediately. JS releases its connection and view; foreground

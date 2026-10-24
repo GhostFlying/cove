@@ -68,17 +68,20 @@ public class CoveTsnetModule: Module {
 
     AsyncFunction("open") { (hostname: String, controlURL: String, promise: Promise) in
       self.perform(promise) {
-        let observed: UInt64 = try self.locked {
+        let opening: (UInt64, CoveMobileClient?) = try self.locked {
           guard self.foreground else { throw self.nativeError() }
           self.epoch &+= 1
-          return self.epoch
-        }
-        let previous = self.locked { () -> CoveMobileClient? in
+          // Revoke the old generation before drain/construction, so a delayed
+          // JS Stop for that node cannot cancel this already pending open.
+          self.clientGeneration = self.epoch
+          self.stopped = true
           let owned = self.client
           self.client = nil
           self.entries.removeAll()
-          return owned
+          return (self.epoch, owned)
         }
+        let observed = opening.0
+        let previous = opening.1
         previous?.stop()
         previous?.close()
         var directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("cove-tsnet", isDirectory: true)

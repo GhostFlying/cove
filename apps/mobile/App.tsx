@@ -9,7 +9,7 @@ import { openNativeNode } from "./modules/cove-tsnet";
 import { NativePorts } from "./src/native-ports";
 import { utf8 } from "./src/codec";
 import { loadServer, type SavedServer, type SecureTokenStore } from "./src/credentials";
-import { verifyServer, MOBILE_BUILD_VERSION } from "./src/entry";
+import { verifyServer, MOBILE_BUILD_VERSION, bootstrapRequest } from "./src/entry";
 import { pairServer } from "./src/pairing";
 import { ForegroundOwnership } from "./src/lifecycle";
 import { TerminalHost } from "./src/terminal-host";
@@ -24,6 +24,7 @@ const store: SecureTokenStore = {
 type Host = {
   node: Awaited<ReturnType<typeof openNativeNode>>;
   ports: NativePorts;
+  controlURL: string;
   client?: Client;
 };
 
@@ -37,6 +38,8 @@ export default function App() {
   const [status, setStatus] = useState("正在加载原生节点");
   const [authURL, setAuthURL] = useState("");
   const [authKey, setAuthKey] = useState("");
+  const [controlURL, setControlURL] = useState("");
+  const requestedControl = useRef("");
   const [invitation, setInvitation] = useState("");
   const [tabID, setTabID] = useState("");
   const [connected, setConnected] = useState<Client | null>(null);
@@ -51,6 +54,7 @@ export default function App() {
     if (updateUI) {
       setConnected(null);
       setRun(null);
+      setAuthURL("");
     }
   }
 
@@ -102,13 +106,18 @@ export default function App() {
     setLoading(true);
     setStatus("正在恢复原生节点");
     try {
-      const node = await openNativeNode("cove-native-mobile");
+      const selectedControl = requestedControl.current;
+      const node = await openNativeNode("cove-native-mobile", selectedControl);
       if (!ownership.current(generation)) {
         node.driver.stop();
         await node.close();
         return;
       }
-      const owned: Host = { node, ports: new NativePorts(node.driver) };
+      const owned: Host = {
+        node,
+        ports: new NativePorts(node.driver),
+        controlURL: selectedControl,
+      };
       host.current = owned;
       const state = JSON.parse(node.status) as { state?: string; authURL?: string };
       setStatus(`原生节点：${state.state ?? "未知"}`);
@@ -165,6 +174,19 @@ export default function App() {
       <Text style={{ fontSize: 22, fontWeight: "600" }}>Cove Native</Text>
       <Text accessibilityLabel="connection-status">{status}</Text>
       <TextInput
+        accessibilityLabel="native-control-url"
+        value={controlURL}
+        onChangeText={(value) => {
+          requestedControl.current = value.trim();
+          setControlURL(value);
+        }}
+        placeholder="隔离 control URL（留空默认；修改后重新连接）"
+        editable={!busy && !loading}
+        autoCapitalize="none"
+        autoCorrect={false}
+        maxLength={2048}
+      />
+      <TextInput
         accessibilityLabel="tailnet-auth-key"
         value={authKey}
         onChangeText={setAuthKey}
@@ -178,7 +200,7 @@ export default function App() {
       <View style={{ flexDirection: "row" }}>
         <Button
           title="登录节点"
-          disabled={busy || loading}
+          disabled={busy || loading || host.current?.controlURL !== controlURL.trim()}
           onPress={() =>
             action(async (current) => {
               const owned = host.current;
@@ -228,6 +250,7 @@ export default function App() {
       {authURL.startsWith("https://") && (
         <Button
           title="打开 Tailnet 登录"
+          disabled={busy || loading || host.current?.controlURL !== controlURL.trim()}
           onPress={() => {
             void Linking.openURL(authURL);
           }}
@@ -282,7 +305,28 @@ export default function App() {
               const result = await connected.call("repo.list", { limit: 1 });
               if (!result.ok) throw new Error("RPC failed");
               if (!current()) return;
-              setStatus("RPC 已通过当前已验证入口应答");
+              const saved = await loadServer(store);
+              const owned = host.current;
+              if (!current() || !saved || !owned) return;
+              const entry = owned.ports.entry(saved.peerID, saved.port);
+              try {
+                // This fixture cancels a read-only bootstrap immediately on the
+                // real native path. It reports the boundary as returned, never
+                // infers that cancellation means the server saw no request.
+                const probe = entry.http.post(
+                  {
+                    path: "/bootstrap",
+                    headers: { "Content-Type": "application/json" },
+                    body: utf8.encode(JSON.stringify(bootstrapRequest())),
+                    maxResponseBytes: 8192,
+                  },
+                  { onDisposition: () => {}, onResponse: () => {}, onFailure: () => {} },
+                );
+                const cancelled = probe.cancel();
+                if (current()) setStatus(`RPC 已应答；原生取消边界：${cancelled}`);
+              } finally {
+                entry.close();
+              }
             })
           }
         />
