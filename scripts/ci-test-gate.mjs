@@ -379,7 +379,7 @@ export const requiredSuites = [
     minimumTests: 4,
   },
   { project: "tooling", file: "tests/tooling/project-references.test.ts", minimumTests: 4 },
-  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 45 },
+  { project: "tooling", file: "tests/tooling/ci-test-gate.test.mjs", minimumTests: 46 },
   { project: "tooling", file: "tests/tooling/ci-environment-setup.test.mjs", minimumTests: 4 },
   { project: "tooling", file: "tests/tooling/package-boundaries.test.ts", minimumTests: 9 },
   { project: "tooling", file: "tests/tooling/tend-doc-check.test.mjs", minimumTests: 11 },
@@ -629,9 +629,14 @@ export const requiredSuites = [
     minimumTests: 22,
   },
   {
+    project: "terminal-web-unit",
+    file: "packages/terminal-web/tests/unit/native-input.test.mjs",
+    minimumTests: 4,
+  },
+  {
     project: "terminal-web",
     file: "packages/terminal-web/tests/view-input.test.mjs",
-    minimumTests: 8,
+    minimumTests: 9,
   },
   {
     project: "terminal-web",
@@ -701,6 +706,16 @@ export const requiredSuites = [
 ];
 
 export const finiteRuntimeExpansions = [
+  {
+    project: "terminal-web-unit",
+    file: "packages/terminal-web/tests/unit/native-input.test.mjs",
+    template: "native committed ASCII is emitted once with legacy timer %s",
+    names: [
+      "native committed ASCII is emitted once with legacy timer before-insertion",
+      "native committed ASCII is emitted once with legacy timer after-insertion",
+      "native committed ASCII is emitted once with legacy timer after-input",
+    ],
+  },
   {
     project: "tooling",
     file: "tests/tooling/ci-environment-setup.test.mjs",
