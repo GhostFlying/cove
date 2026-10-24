@@ -52,7 +52,9 @@ Local Expo modules under `modules/cove-tsnet` are source; only their `generated`
 binding artifacts are ignored. Android compiles against the extracted AAR's
 Java classes and packages its arm64 JNI library. iOS links the generated arm64
 XCFramework. A simulator requires its own `ios-simulator` library build; a
-device-only framework is not simulator evidence.
+device-only framework is not simulator evidence. The Apple module config explicitly
+names the module-root podspec: Expo's implicit scan searches child directories,
+while the root podspec is needed so CocoaPods includes the generated framework.
 
 For an installed arm64 iOS Simulator runtime, build `ios-simulator` with the
 native build script and pass `ios-simulator` to `prepare-native.mjs`. This selects
