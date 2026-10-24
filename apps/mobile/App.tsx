@@ -292,6 +292,15 @@ export default function App() {
             action(async (current) => {
               const owned = host.current;
               if (!owned) throw new Error("No native host");
+              // Logout intentionally closes transport. Retire its observer
+              // first so that closure cannot revoke this action's receipt.
+              owned.stopWatching?.();
+              delete owned.stopWatching;
+              owned.client?.dispose();
+              delete owned.client;
+              setConnected(null);
+              setRun(null);
+              setStatus("正在登出节点；此前未决输入不会自动重试");
               const result = JSON.parse(await owned.node.logout()) as {
                 state?: string;
                 remoteLogoutConfirmed?: boolean;
