@@ -1,3 +1,4 @@
+import { tabSendTextByteLength, type TabSendParams } from "./workspace.js";
 import { z } from "zod";
 import { M0_LIMITS, validateEffectiveBudgets } from "./budgets.js";
 import { DomainErrorSchema, ERROR_CODES } from "./errors.js";
@@ -232,6 +233,21 @@ export function parseRpcResultForCall(
   if (isWriteRpcMethod(method) || method === "operation.get") {
     const input = call.params as { operationId: string };
     if ((response as { operation: OperationRecord }).operation.operationId !== input.operationId)
+      return null;
+  }
+  if (method === "tab.send") {
+    const input = call.params as TabSendParams;
+    const operation = (response as { operation: OperationRecord }).operation;
+    const receipt = operation.result?.input;
+    if (
+      !operation.run ||
+      !sameRunRef(operation.run, input.run) ||
+      !receipt ||
+      receipt.text.requestedBytes !== tabSendTextByteLength(input.text) ||
+      (receipt.submit !== null) !== input.submit ||
+      (operation.result?.resource &&
+        (operation.result.resource.kind !== "tab" || operation.result.resource.id !== input.tabId))
+    )
       return null;
   }
   if (method === "terminal.create" || method === "terminal.stop") {

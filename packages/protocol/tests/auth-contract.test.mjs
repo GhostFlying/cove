@@ -189,8 +189,8 @@ test("M2 error kinds are appended with their codes and next actions", () => {
     ["TSNET_IDENTITY_CHANGED", "none"],
     ["TSNET_LOGIN_UNCERTAIN", "none"],
   ];
-  expect(DOMAIN_ERROR_KINDS.slice(42)).toEqual(m2.map(([kind]) => kind));
-  expect(DOMAIN_ERROR_KINDS.at(-1)).toBe("TSNET_LOGIN_UNCERTAIN");
+  expect(DOMAIN_ERROR_KINDS.slice(42, 42 + m2.length)).toEqual(m2.map(([kind]) => kind));
+  expect(DOMAIN_ERROR_KINDS.at(-2)).toBe("TSNET_LOGIN_UNCERTAIN");
   m2.forEach(([kind, nextAction], index) => {
     const error = domainError(kind);
     expect(error).toMatchObject({ code: 1042 + index, nextAction, acceptance: "not-accepted" });

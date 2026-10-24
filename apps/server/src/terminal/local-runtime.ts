@@ -272,6 +272,12 @@ export class LocalRuntime implements RuntimeTerminalPort {
   ): Promise<RuntimeResult> {
     return this.request(input, bytes);
   }
+  writeProgrammatic(
+    input: Parameters<RuntimeTerminalPort["writeProgrammatic"]>[0],
+    bytes: Uint8Array,
+  ): Promise<RuntimeResult> {
+    return this.request(input, bytes);
+  }
   resize(input: Parameters<RuntimeTerminalPort["resize"]>[0]): Promise<RuntimeResult> {
     return this.request(input);
   }

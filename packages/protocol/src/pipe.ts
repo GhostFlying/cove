@@ -46,6 +46,13 @@ export function encodePipeFrame(
 function validPayload(value: PipeMetadata, payload: Uint8Array): boolean {
   if (value.type === "spawn") return payload.byteLength === value.spawnPayloadBytes;
   if (value.type === "input") return payload.byteLength >= 1;
+  if (value.type === "programmatic-input")
+    return payload.byteLength === value.textBytes && (value.textBytes > 0 || value.submit);
+  if (
+    value.type === "result" &&
+    (value.commandType === "programmatic-input") !== (value.input !== undefined)
+  )
+    return false;
   if (value.type === "terminal-event") {
     const type = value.terminal.type;
     return type === "output" || type === "baseline-chunk" || type === "preview-chunk"
@@ -210,6 +217,19 @@ export function validatePipeResultForCommand(
       result.outcome === "accepted" &&
       ((result.recoveryMode === "replay" && command.appliedSeq === undefined) ||
         (command.appliedSeq !== undefined && result.atSeq! < command.appliedSeq))
+    )
+      return false;
+  }
+  if (command.type === "programmatic-input" && result.type === "result") {
+    const input = result.input;
+    if (
+      !input ||
+      result.operationId !== command.operationId ||
+      input.text.requestedBytes !== command.textBytes ||
+      (input.submit !== null) !== command.submit ||
+      (result.outcome === "accepted") !==
+        (input.text.status === "written" &&
+          (input.submit === null || input.submit.status === "written"))
     )
       return false;
   }

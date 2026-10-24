@@ -333,11 +333,23 @@ class WorkerExecutionCore {
             : this.#ordinaryPendingCommands >= this.#budgets.pendingWorkerCommands
     )
       return correlatedError(command, "BUSY");
-    if (command.type !== "spawn" && command.type !== "input" && payload !== undefined)
+    if (
+      command.type !== "spawn" &&
+      command.type !== "input" &&
+      command.type !== "programmatic-input" &&
+      payload !== undefined
+    )
       return correlatedError(command, "INPUT_REJECTED");
     if (
       command.type === "input" &&
       (!(payload instanceof Uint8Array) || payload.length < 1 || payload.length > MAX_INPUT_BYTES)
+    )
+      return correlatedError(command, "INPUT_REJECTED");
+    if (
+      command.type === "programmatic-input" &&
+      (!(payload instanceof Uint8Array) ||
+        payload.byteLength !== command.textBytes ||
+        (command.textBytes === 0 && !command.submit))
     )
       return correlatedError(command, "INPUT_REJECTED");
     if (command.type === "spawn" && !(payload instanceof Uint8Array))
@@ -452,31 +464,55 @@ class WorkerExecutionCore {
             geometry: command.geometry,
             ...(command.appearance && { appearance: command.appearance }),
           }
-        : command.type === "input"
+        : command.type === "programmatic-input"
           ? {
-              type: "input",
-              subscription: command.subscription,
+              type: "programmatic-input",
               epoch: command.epoch,
-              inputSeq: command.inputSeq,
               bytes: payload!,
-              // The command copy is already charged; the ordered pump decides whether
-              // the two native copies and settlement ticket may reclaim best-effort replay.
-              beforeNativeInput: () => this.#reclaimReplay(2 * payload!.byteLength + 768),
+              submit: command.submit,
+              beforeNativeInput: () => this.#reclaimReplay(2 * (payload!.byteLength + 1) + 768),
             }
-          : command.type === "resize"
+          : command.type === "input"
             ? {
-                type: "resize",
+                type: "input",
                 subscription: command.subscription,
                 epoch: command.epoch,
-                geometry: command.geometry,
+                inputSeq: command.inputSeq,
+                bytes: payload!,
+                // The command copy is already charged; the ordered pump decides whether
+                // the two native copies and settlement ticket may reclaim best-effort replay.
+                beforeNativeInput: () => this.#reclaimReplay(2 * payload!.byteLength + 768),
               }
-            : {
-                type: "appearance",
-                subscription: command.subscription,
-                epoch: command.epoch,
-                appearance: command.appearance,
-              };
+            : command.type === "resize"
+              ? {
+                  type: "resize",
+                  subscription: command.subscription,
+                  epoch: command.epoch,
+                  geometry: command.geometry,
+                }
+              : {
+                  type: "appearance",
+                  subscription: command.subscription,
+                  epoch: command.epoch,
+                  appearance: command.appearance,
+                };
     const result = await record.capability.execute(operation);
+    if (result.kind === "programmatic") {
+      if (command.type !== "programmatic-input") return correlatedError(command, "INPUT_REJECTED");
+      const input = result.input;
+      const complete =
+        input.text.status === "written" &&
+        (input.submit === null || input.submit.status === "written");
+      return accepted(command, {
+        operationId: command.operationId,
+        outcome: complete
+          ? "accepted"
+          : input.text.unknownBytes > 0 || (input.submit?.unknownBytes ?? 0) > 0
+            ? "unknown"
+            : "rejected",
+        input,
+      });
+    }
     if (result.kind === "settled") {
       record.lastStatus = this.#runStatus(record, result);
       return accepted(command, { atSeq: result.atSeq });

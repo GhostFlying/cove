@@ -1,11 +1,18 @@
 import type { Client } from "@cove/client";
 import type { OperationRecord } from "@cove/protocol/rpc";
-import { M1_LIMITS, type RunHistoryRecord, type TabRecord } from "@cove/protocol/workspace";
+import {
+  TabSendParamsSchema,
+  TAB_SEND_TEXT_BYTES,
+  M1_LIMITS,
+  type RunHistoryRecord,
+  type TabRecord,
+} from "@cove/protocol/workspace";
 import type { Session } from "../session.js";
 import {
   describeFailure,
   flag,
   integerFlag,
+  optionalIntegerFlag,
   one,
   print,
   takeFlags,
@@ -24,6 +31,7 @@ export const usage = `  tab create <taskId> [--name NAME] [--cwd entry|mount:MOU
   tab reopen <tabId> [--cols N --rows N] [--operation-id ID]
   tab stop <tabId> [--run RUN_ID] [--operation-id ID]
   tab close <tabId> [--operation-id ID]
+  tab send <tabId> --operation-id ID --run RUN_ID --relay-instance INSTANCE_ID --if-control-epoch E [--submit] [--json] -- <text>
 
 A tab is a task's durable terminal: its name, launch recipe (the command after \`--\`, or the
 user's login shell when none is given) and cwd (the workspace entry by default, or a mount). Each
@@ -32,7 +40,16 @@ unless --start no; tab reopen starts a new run (a new run ID) with the recorded 
 refused while the tab has a run that has not ended; tab stop stops the latest run and waits for
 its exit; tab close deletes the tab record, refused while a run has not ended. A run of an earlier
 server instance is never live: it is stopped-with-server after an orderly stop, otherwise
-interrupted and unverifiable; nothing is restarted.`;
+interrupted and unverifiable; nothing is restarted.
+
+tab send never takes control or resizes. Pin the observed run, relay instance and control epoch
+from tab get; it only writes when no controller holds that exact live run. --submit sends a
+separate CR only after all text bytes are confirmed written. Receipts describe PTY bytes, not
+application task completion. Text is capped at 4 KiB UTF-8 and the complete canonical intent
+(including JSON escapes and identities) must also fit the existing 8 KiB budget; oversized input
+is refused before acceptance. Input is never implicitly split. A saved operation ID is query-only
+on reuse, even if the previous answer was lost: inspect the operation, never blindly resend or
+substitute a fresh ID. Partial and unknown results preserve their byte prefix and never resume.`;
 
 function geometry(args: Arguments): { geometry?: { cols: number; rows: number } } {
   const cols = flag(args, "--cols");
@@ -145,6 +162,52 @@ function runRef(session: Session, runId: string) {
 
 export async function run(args: Arguments): Promise<number> {
   const sub = args.words[1];
+  if (sub === "send") {
+    takeFlags(args, [
+      "--operation-id",
+      "--run",
+      "--relay-instance",
+      "--if-control-epoch",
+      "--submit",
+      "--json",
+    ]);
+    const tabId = args.words[2];
+    if (!tabId || args.words.length !== 3)
+      throw new UsageError("tab send requires exactly one tab id");
+    for (const required of ["--operation-id", "--run", "--relay-instance", "--if-control-epoch"])
+      if (flag(args, required) === undefined) throw new UsageError(`tab send requires ${required}`);
+    if (!args.command || args.command.length !== 1)
+      throw new UsageError(
+        "tab send requires exactly one text argument after -- (use an empty argument with --submit for submit only)",
+      );
+    const text = args.command[0]!;
+    const epoch = optionalIntegerFlag(args, "--if-control-epoch")!;
+    const operationId = operationIdFor(args);
+    const request = {
+      operationId,
+      tabId,
+      run: {
+        serverId: "pending",
+        runId: flag(args, "--run")!,
+        relayInstanceId: flag(args, "--relay-instance")!,
+      },
+      ifControlEpoch: epoch,
+      text,
+      submit: args.flags.has("--submit"),
+    };
+    if (!TabSendParamsSchema.safeParse(request).success)
+      throw new UsageError(
+        `tab send requires valid identities, a nonnegative epoch and well-formed UTF-8 text up to ${TAB_SEND_TEXT_BYTES} bytes (empty only with --submit)`,
+      );
+    return withSession(args, async (session) => {
+      const operation = await submitWrite(args, session, "tab.send", {
+        ...request,
+        run: { ...request.run, serverId: session.record.serverId },
+      });
+      print({ operation });
+      return operation.state === "succeeded" ? 0 : 1;
+    });
+  }
   if (sub === "create") {
     takeFlags(args, ["--name", "--cwd", "--start", "--cols", "--rows", "--operation-id"]);
     const [, , taskId] = args.words;

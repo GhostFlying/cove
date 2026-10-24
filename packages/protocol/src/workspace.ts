@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ControlHolderSchema } from "./terminal-events.js";
 import { M0_LIMITS } from "./budgets.js";
 import { DOMAIN_ERROR_KINDS, DomainErrorSchema } from "./errors.js";
 import { OpaqueIdSchema, RunRefSchema, SequenceSchema } from "./provisional/identity.js";
@@ -353,9 +354,110 @@ export const TabListResultSchema = z.object({
   nextAfterTabId: ResourceIdSchema.optional(),
 });
 export const TabGetParamsSchema = z.object({ tabId: ResourceIdSchema });
+// Model A programmatic input never acquires a controller. These receipts count the
+// confirmed prefix of the immutable UTF-8 request; the rest is either unknown or not sent.
+export const TAB_SEND_TEXT_BYTES = 4096;
+export const TAB_SEND_PENDING_PER_RUN = 32;
+export const InputPartReceiptSchema = z
+  .object({
+    status: z.enum(["written", "notSent", "partial", "unknown"]),
+    requestedBytes: z.number().int().min(0).max(TAB_SEND_TEXT_BYTES),
+    writtenBytes: z.number().int().min(0).max(TAB_SEND_TEXT_BYTES),
+    unknownBytes: z.number().int().min(0).max(TAB_SEND_TEXT_BYTES),
+    reason: z.string().min(1).max(128).optional(),
+  })
+  .refine(
+    (r) =>
+      r.writtenBytes + r.unknownBytes <= r.requestedBytes &&
+      (r.status === "written"
+        ? r.writtenBytes === r.requestedBytes && r.unknownBytes === 0
+        : r.status === "notSent"
+          ? r.writtenBytes === 0 && r.unknownBytes === 0
+          : r.status === "partial"
+            ? r.writtenBytes > 0 && r.writtenBytes < r.requestedBytes && r.unknownBytes === 0
+            : r.unknownBytes > 0),
+  );
+export type InputPartReceipt = z.infer<typeof InputPartReceiptSchema>;
+// Counts always describe one confirmed prefix; no caller may infer application execution.
+export function inputPartReceipt(
+  requestedBytes: number,
+  writtenBytes: number,
+  unknownBytes: number,
+  reason?: string,
+): InputPartReceipt {
+  const status =
+    unknownBytes > 0
+      ? "unknown"
+      : writtenBytes === requestedBytes
+        ? "written"
+        : writtenBytes > 0
+          ? "partial"
+          : "notSent";
+  return {
+    status,
+    requestedBytes,
+    writtenBytes,
+    unknownBytes,
+    ...(reason ? { reason: reason.slice(0, 128) } : {}),
+  };
+}
+export const TabInputReceiptSchema = z
+  .object({
+    text: InputPartReceiptSchema,
+    submit: InputPartReceiptSchema.nullable(),
+  })
+  .refine(
+    (r) =>
+      r.submit === null ||
+      (r.submit.requestedBytes === 1 &&
+        (r.text.status === "written" ||
+          r.submit.status === "notSent" ||
+          (r.text.status === "unknown" && r.submit.status === "unknown"))),
+  );
+export type TabInputReceipt = z.infer<typeof TabInputReceiptSchema>;
+export function tabSendTextByteLength(text: string): number {
+  let bytes = 0;
+  for (const scalar of text) {
+    const code = scalar.codePointAt(0)!;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+export const TabSendParamsSchema = z
+  .object({
+    operationId: OpaqueIdSchema,
+    tabId: ResourceIdSchema,
+    run: RunRefSchema,
+    ifControlEpoch: SequenceSchema,
+    text: z.string().max(TAB_SEND_TEXT_BYTES),
+    submit: z.boolean().default(false),
+  })
+  .refine(
+    (p) =>
+      (p.text.length > 0 || p.submit) &&
+      p.text.isWellFormed() &&
+      tabSendTextByteLength(p.text) <= TAB_SEND_TEXT_BYTES,
+  );
+export type TabSendParams = z.infer<typeof TabSendParamsSchema>;
+export const TabControlObservationSchema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("current"),
+    run: RunRefSchema,
+    epoch: SequenceSchema,
+    holder: ControlHolderSchema.nullable(),
+  }),
+  z.object({
+    state: z.literal("unknown"),
+    run: RunRefSchema.nullable(),
+    reason: z.string().max(128),
+  }),
+  z.object({ state: z.literal("not-live"), run: RunRefSchema.nullable() }),
+]);
+export type TabControlObservation = z.infer<typeof TabControlObservationSchema>;
 export const TabGetResultSchema = z.object({
   tab: TabRecordSchema,
   latestRun: RunHistoryRecordSchema.nullable(),
+  control: TabControlObservationSchema.optional(),
 });
 export const TabRunsParamsSchema = z.object({
   tabId: ResourceIdSchema,
@@ -529,6 +631,7 @@ export const OperationResultDataSchema = z
     exitCode: z.number().int().nullable().optional(),
     signal: z.string().max(64).nullable().optional(),
     resource: ResourceRefSchema.optional(),
+    input: TabInputReceiptSchema.optional(),
     workspaceRevision: SequenceSchema.optional(),
     mounts: z.array(MountOutcomeSchema).max(M1_LIMITS.mountsPerWorkspace).optional(),
     // Changes left in the source on conversion (D3), counted only.

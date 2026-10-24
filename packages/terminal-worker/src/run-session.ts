@@ -1,4 +1,9 @@
 import {
+  inputPartReceipt,
+  type InputPartReceipt,
+  type TabInputReceipt,
+} from "@cove/protocol/workspace";
+import {
   createTerminalModel,
   type EngineResult,
   type EngineState,
@@ -82,6 +87,13 @@ export type RunSessionOperation =
       readonly appearance: Appearance;
     }
   | {
+      readonly type: "programmatic-input";
+      readonly epoch: number;
+      readonly bytes: Uint8Array;
+      readonly submit: boolean;
+      readonly beforeNativeInput?: () => boolean;
+    }
+  | {
       readonly type: "input";
       readonly subscription: SubscriptionRef;
       readonly epoch: number;
@@ -90,6 +102,7 @@ export type RunSessionOperation =
       readonly beforeNativeInput?: () => boolean;
     };
 export type RunSessionOperationResult =
+  | { readonly kind: "programmatic"; readonly input: TabInputReceipt }
   | { readonly kind: "stopped"; readonly receipt: RunSessionDisposalReceipt }
   | {
       readonly kind: "settled";
@@ -942,6 +955,35 @@ class RunSessionCore {
     }
     if (this.#writableFenced || this.#exitApplied)
       return { kind: "rejected", reason: "writable-fenced" };
+    if (operation.type === "programmatic-input") {
+      // The same ordered pump that applies human focus/blur makes this final decision.
+      // Programmatic input has neither a subscription nor a geometry side effect.
+      const refuse = (reason: string): RunSessionOperationResult => ({
+        kind: "programmatic",
+        input: {
+          text: inputPartReceipt(operation.bytes.byteLength, 0, 0, reason),
+          submit: operation.submit ? inputPartReceipt(1, 0, 0, reason) : null,
+        },
+      });
+      if (operation.epoch !== this.#controlEpoch) return refuse("stale-control");
+      if (this.#controlHolder !== null) return refuse("controller-present");
+      try {
+        if (operation.beforeNativeInput && !operation.beforeNativeInput())
+          return refuse("worker-byte-limit");
+      } catch {
+        return refuse("worker-byte-limit");
+      }
+      const text =
+        operation.bytes.byteLength === 0
+          ? inputPartReceipt(0, 0, 0)
+          : await this.#writeProgrammaticPart(operation.bytes);
+      const submit = !operation.submit
+        ? null
+        : text.status !== "written"
+          ? inputPartReceipt(1, 0, 0, "text-not-complete")
+          : await this.#writeProgrammaticPart(new Uint8Array([13]));
+      return { kind: "programmatic", input: { text, submit } };
+    }
     if (operation.type === "control") {
       if (operation.expectedEpoch !== this.#controlEpoch)
         return { kind: "rejected", reason: "stale-control" };
@@ -1105,6 +1147,53 @@ class RunSessionCore {
       subscription.viewId,
       subscription.subscriptionId,
     ]);
+  }
+
+  async #writeProgrammaticPart(bytes: Uint8Array): Promise<InputPartReceipt> {
+    const size = bytes.byteLength;
+    let finish!: (value: InputPartReceipt) => void;
+    const completion = new Promise<InputPartReceipt>((resolve) => {
+      finish = resolve;
+    });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (receipt: InputPartReceipt): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (receipt.status !== "written") this.#writableFenced = true;
+      finish(receipt);
+    };
+    try {
+      const admission = this.#native!.submit(bytes, (result) => {
+        if (result.kind === "written") settle(inputPartReceipt(size, result.writtenBytes, 0));
+        else if (result.status === "error" || result.status === "closed")
+          // Native settled this task: its remaining bytes will never be written.
+          settle(inputPartReceipt(size, result.writtenBytes, 0, "native-" + result.status));
+        else if (result.status === "written")
+          settle(
+            inputPartReceipt(
+              size,
+              result.writtenBytes,
+              result.remainingBytes,
+              "native-settlement-unknown",
+            ),
+          );
+        else settle(inputPartReceipt(size, 0, size, "native-settlement-invalid"));
+      });
+      if (admission.kind === "rejected") settle(inputPartReceipt(size, 0, 0, admission.reason));
+      else if (admission.kind === "unknown")
+        settle(inputPartReceipt(size, 0, size, admission.reason));
+      else if (!settled)
+        timer = setTimeout(
+          () => settle(inputPartReceipt(size, 0, size, "input-settlement-deadline")),
+          3000,
+        );
+    } catch {
+      settle(inputPartReceipt(size, 0, size, "native-input-threw"));
+    }
+    // A late settlement releases its native ownership but cannot revise this uncertain receipt.
+    return completion;
   }
 
   async #writeInput(bytes: Uint8Array): Promise<RunSessionOperationResult> {
