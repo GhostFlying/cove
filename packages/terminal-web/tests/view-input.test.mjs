@@ -3,6 +3,37 @@ import { withViewPage } from "./view-browser-runner.mjs";
 
 const esc = (...values) => Array.from(new TextEncoder().encode(values.join("")));
 
+test("Mobile native committed trace survives both legacy timer orders on actual xterm6", async () => {
+  const result = await withViewPage(async (page) => {
+    const traces = [];
+    for (const order of ["before-insertion", "after-insertion", "after-input"])
+      traces.push(
+        await page.evaluate((value) => window.coveView.nativeCommittedTrace(value), order),
+      );
+    const composition = await page.evaluate(() => window.coveView.nativeComposition());
+    await page.evaluate(async () => {
+      await window.coveView.reset(undefined, { nativeCommittedInput: true });
+      await window.coveView.ready();
+      window.coveView.focus();
+    });
+    await page.keyboard.type("a");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Backspace");
+    const keyboard = await page.evaluate(() => window.coveView.evidence());
+    const queries = [];
+    for (const phase of ["live", "baseline", "replay"])
+      queries.push(await page.evaluate((value) => window.coveView.queryCorpus(value, true), phase));
+    return { traces, composition, keyboard, queries };
+  });
+  for (const trace of result.traces) {
+    expect(trace.inputs.flatMap((item) => item.bytes)).toEqual(esc("cove-t5-diag"));
+    expect(trace.failures).toEqual([]);
+  }
+  expect(result.composition.inputs.flatMap((item) => item.bytes)).toEqual(esc("色"));
+  expect(result.keyboard.inputs.flatMap((item) => item.bytes)).toEqual([97, 13, 127]);
+  for (const cases of result.queries) for (const item of cases) expect(item.adapted).toEqual([]);
+});
+
 test("V1-I1 suppresses every supported query in live, baseline, and replay", async () => {
   const result = await withViewPage(async (page) => {
     const phases = {};

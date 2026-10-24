@@ -10,7 +10,7 @@ declare global {
 }
 
 const container = document.querySelector<HTMLElement>("#terminal")!;
-const options = { renderer: "dom" as const };
+const options = { renderer: "dom" as const, nativeCommittedInput: true };
 const deadline = performance.now() + 5000;
 
 function start() {
