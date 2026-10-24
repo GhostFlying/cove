@@ -4,6 +4,7 @@ import { BOOTSTRAP_VERSION, PROTOCOL_VERSION } from "@cove/protocol/bootstrap";
 import { utf8, encodeBase64, decodeBase64 } from "../dist/codec.js";
 import { NativePorts } from "../dist/native-ports.js";
 import { pairServer } from "../dist/pairing.js";
+import { probeSecureStore } from "../dist/credentials.js";
 
 const owned = [];
 afterEach(() => {
@@ -339,6 +340,24 @@ it("reports pairing success only after secure token persistence", async () => {
   expect(fixture.writes).toEqual([saved]);
   expect(saved.token).toBe(token);
   expect(fixture.closed()).toBe(true);
+  let value = null;
+  const probeCalls = [];
+  await probeSecureStore({
+    write: async (raw) => {
+      probeCalls.push("write");
+      value = raw;
+    },
+    read: async () => {
+      probeCalls.push("read");
+      return value;
+    },
+    remove: async () => {
+      probeCalls.push("delete");
+      value = null;
+    },
+  });
+  expect(probeCalls).toEqual(["write", "read", "delete"]);
+  expect(value).toBeNull();
 });
 
 it("does not convert a secure-store failure into pairing success or retry", async () => {
@@ -353,6 +372,33 @@ it("does not convert a secure-store failure into pairing success or retry", asyn
   await expect(failed).rejects.not.toThrow(token);
   expect(fixture.calls.filter((path) => path === "/pair")).toHaveLength(1);
   expect(fixture.writes).toHaveLength(0);
+  let deleted = false;
+  const denied = probeSecureStore({
+    write: async () => {
+      throw new Error("A required entitlement isn't present. " + token);
+    },
+    read: async () => {
+      throw new Error("Must not read after failed write");
+    },
+    remove: async () => {
+      deleted = true;
+    },
+  });
+  await expect(denied).rejects.toMatchObject({ code: "COVE_NATIVE_STORE_MISSING_ENTITLEMENT" });
+  await expect(denied).rejects.toThrow("cleanup confirmed");
+  await expect(denied).rejects.not.toThrow(token);
+  expect(deleted).toBe(true);
+  const removalFailed = probeSecureStore({
+    write: async () => {},
+    read: async () => "cove-native-secure-store-probe-v1",
+    remove: async () => {
+      throw new Error("User interaction is not allowed.");
+    },
+  });
+  await expect(removalFailed).rejects.toMatchObject({
+    code: "COVE_NATIVE_STORE_INTERACTION_DISALLOWED",
+  });
+  await expect(removalFailed).rejects.toThrow("cleanup unverified");
 });
 
 it("does not repeat a redemption whose response was lost", async () => {
