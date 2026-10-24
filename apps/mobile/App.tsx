@@ -6,12 +6,12 @@ import { createClient, type Client } from "@cove/client";
 import { createDefaultScheduler } from "@cove/client/web-ports";
 import type { RunRef } from "@cove/protocol/identity";
 import { openNativeNode } from "./modules/cove-tsnet";
-import { NativePorts } from "./src/native-ports";
-import { utf8 } from "./src/codec";
-import { loadServer, type SavedServer, type SecureTokenStore } from "./src/credentials";
-import { verifyServer, MOBILE_BUILD_VERSION, bootstrapRequest } from "./src/entry";
-import { pairServer } from "./src/pairing";
-import { ForegroundOwnership } from "./src/lifecycle";
+import { NativePorts } from "./dist/native-ports.js";
+import { utf8 } from "./dist/codec.js";
+import { loadServer, type SavedServer, type SecureTokenStore } from "./dist/credentials.js";
+import { verifyServer, MOBILE_BUILD_VERSION, bootstrapRequest } from "./dist/entry.js";
+import { pairServer } from "./dist/pairing.js";
+import { ForegroundOwnership } from "./dist/lifecycle.js";
 import { TerminalHost } from "./src/terminal-host";
 
 const tokenKey = "cove.native.fixture.server";
