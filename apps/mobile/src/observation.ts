@@ -60,7 +60,8 @@ export function inputOutcomePresentation(notice: TerminalInputNotice): string {
   if (notice.kind === "input-rejections")
     return `输入未发送：拒绝 ${count(notice.count)} 次；不会自动重试`;
   const receipt = notice.outcome.value;
-  return `输入回执：写入 ${count(receipt.writtenBytes)} B；未知 ${count(receipt.unknownBytes)} B；未发送 ${count(receipt.notSentBytes)} B；不会自动重试`;
+  const label = notice.outcome.ok ? "输入回执" : "输入未完成";
+  return `${label}：写入 ${count(receipt.writtenBytes)} B；未知 ${count(receipt.unknownBytes)} B；未发送 ${count(receipt.notSentBytes)} B；不会自动重试`;
 }
 
 export function observeTerminal(
