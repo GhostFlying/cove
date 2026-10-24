@@ -1,5 +1,10 @@
 import type { CallOutcome, Client } from "@cove/client";
-import { AUTH_LIMITS, DeviceNameSchema, InviteIdSchema } from "@cove/protocol/auth";
+import {
+  AUTH_LIMITS,
+  DeviceNameSchema,
+  InviteIdSchema,
+  decodeInvitation,
+} from "@cove/protocol/auth";
 import { DeviceIdSchema } from "@cove/protocol/bootstrap";
 import type { OperationRecord, WriteRpcMethod } from "@cove/protocol/rpc";
 import { findServer, readServer, saveServer, withServerLock } from "../remote/credentials.js";
@@ -34,7 +39,8 @@ is shown once only (a resent request shows the record without it), expires after
 default (24 hours at most), and the pairing port is open only while an invitation is. auth device
 revoke closes the device's connections and fails when one did not close in time. auth device
 rotate replaces this client's own token for the paired server; the current token keeps working
-until the new one is first used.`;
+until the new one is first used. An invitation without an advertised SSH or tsnet entry is
+local-only: pair on this server's host without --via; configuring a remote entry is optional.`;
 
 // Wraps a client so that the output secrets of the one write sent through it are kept here, in
 // this process, rather than dropped: acceptWrite (shared with every write) saves the request and
@@ -116,7 +122,15 @@ async function invite(args: Arguments): Promise<number> {
       });
       const invitation = secrets?.invitation;
       print({ operation, ...(typeof invitation === "string" ? { invitation } : {}) });
-      if (typeof invitation === "string") return 0;
+      if (typeof invitation === "string") {
+        const payload = decodeInvitation(invitation);
+        if (payload && !payload.entries.ssh && !payload.entries.tsnet)
+          process.stderr.write(
+            "cove: this invitation is local-only; pair on this server's host without --via. " +
+              "A remote invitation needs an advertised SSH or tsnet entry.\n",
+          );
+        return 0;
+      }
       process.stderr.write(
         `cove: invitation ${String(operation.result?.inviteId)} exists, but its secret was shown ` +
           `only in the first answer to operation ${operationId}; cancel it (\`cove auth invite ` +

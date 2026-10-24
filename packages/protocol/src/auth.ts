@@ -77,20 +77,19 @@ export const InvitationStringSchema = z
   .regex(/^cove-invite:v1:[A-Za-z0-9_-]+$/);
 // The decoded payload. Everything but the secret tells the redeeming client where to go and
 // whom to expect: it verifies the channel peer (SSH host key, or the tsnet node's stable ID) and
-// the serverId before it submits the secret.
-export const InvitationPayloadSchema = z
-  .object({
-    serverId: OpaqueIdSchema,
-    inviteId: InviteIdSchema,
-    secret: InvitationSecretSchema,
-    expiresAtMs: TimestampMsSchema,
-    pairingPort: PortSchema,
-    entries: z.object({
-      ssh: z.object({ target: SshTargetSchema }).optional(),
-      tsnet: z.object({ nodeId: TsnetNodeIdSchema, name: TsnetNodeNameSchema }).optional(),
-    }),
-  })
-  .refine((value) => value.entries.ssh !== undefined || value.entries.tsnet !== undefined);
+// the serverId before it submits the secret. Empty entries explicitly mean same-host loopback
+// pairing only; creating a local device must not require advertising a remote entry.
+export const InvitationPayloadSchema = z.object({
+  serverId: OpaqueIdSchema,
+  inviteId: InviteIdSchema,
+  secret: InvitationSecretSchema,
+  expiresAtMs: TimestampMsSchema,
+  pairingPort: PortSchema,
+  entries: z.object({
+    ssh: z.object({ target: SshTargetSchema }).optional(),
+    tsnet: z.object({ nodeId: TsnetNodeIdSchema, name: TsnetNodeNameSchema }).optional(),
+  }),
+});
 export type InvitationPayload = z.infer<typeof InvitationPayloadSchema>;
 
 export const InvitationStateSchema = z.enum(["open", "redeemed", "cancelled", "expired"]);

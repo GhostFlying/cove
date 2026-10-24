@@ -232,13 +232,13 @@ export class AuthService {
     const recorded = await recordedWrite(this.context(), principal.principalId, method, params);
     if (recorded) return recorded;
     const target = SshTargetSchema.safeParse(this.options.sshTarget);
-    if (!target.success && !this.tsnetEntry) return { error: domainError("ENTRY_UNAVAILABLE") };
+    // A local Desktop also needs its own revocable device token. With no advertised remote
+    // entry, the invitation is loopback-only; this does not add or broaden any listener.
     this.creating++;
     try {
       const pairingPort = await this.ensureListener();
       if (pairingPort === null) return { error: domainError("ENTRY_UNAVAILABLE") };
       const tsnet = this.tsnetEntry?.(pairingPort) ?? null;
-      if (!target.success && !tsnet) return { error: domainError("ENTRY_UNAVAILABLE") };
       const inviteId = newResourceId();
       const secret = newSecret();
       const at = this.now();
